@@ -1,0 +1,103 @@
+[project]
+name = "clawsomeflow"
+version = "0.1.6b4"
+description = "Vertical agent workflow orchestration platform on top of ClawTeam and OpenClaw"
+readme = "../readme.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "ClawsomeFlow Contributors"},
+]
+keywords = ["ai", "agent", "workflow", "orchestration", "clawteam", "openclaw"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "fastapi>=0.110.0,<1.0.0",
+    "uvicorn[standard]>=0.27.0,<1.0.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "sqlmodel>=0.0.16,<1.0.0",
+    "structlog>=24.0.0,<26.0.0",
+    "typer>=0.12.0,<1.0.0",
+    "rich>=13.0.0,<15.0.0",
+    "questionary>=2.0.1,<3.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "watchfiles>=0.21.0,<2.0.0",
+    "anyio>=4.0.0,<5.0.0",
+    "clawteam>=0.2.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+server = [
+    "asyncpg>=0.29.0,<1.0.0",
+    "redis>=5.0.0,<6.0.0",
+    "gunicorn>=21.0.0,<23.0.0",
+]
+dev = [
+    "pytest>=7.0.0,<9.0.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",
+    "pytest-cov>=4.0.0,<6.0.0",
+    "ruff>=0.4.0",
+    "httpx>=0.27.0",
+]
+release = [
+    # Tools used by `scripts/release.sh`. Install with:
+    #   pip install -e ./backend[release]
+    "build>=1.2.0",
+    "twine>=5.0.0",
+]
+
+[project.scripts]
+csflow = "app.cli:app"
+clawsomeflow = "app.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/clawsomeflow/clawsomeflow"
+Repository = "https://github.com/clawsomeflow/clawsomeflow"
+Issues = "https://github.com/clawsomeflow/clawsomeflow/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+# Pull the prebuilt React SPA into app/_static so `app.static.mount_frontend`
+# finds it without an env var. Build the frontend (`cd ../frontend && npm
+# run build`) before `pip install` / `hatch build`.
+[tool.hatch.build.targets.wheel.force-include]
+"../frontend/dist" = "app/_static"
+"../openclaw-agent-source" = "clawsomeflow_openclaw_agent_source"
+"clawsomeflow_openclaw_agent_source/__init__.py" = "clawsomeflow_openclaw_agent_source/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "app/",
+    "clawsomeflow_openclaw_agent_source/",
+    "tests/",
+]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../frontend/dist" = "../frontend/dist"
+"../openclaw-agent-source" = "../openclaw-agent-source"
+"../readme.md" = "../readme.md"
+"../DEV.md" = "../DEV.md"
+"../API.md" = "../API.md"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B"]
+ignore = ["E501", "B008"]
+

@@ -1,0 +1,37 @@
+name: ci-runtime-nightly
+
+on:
+  schedule:
+    # 03:30 Asia/Shanghai daily (19:30 UTC previous day)
+    - cron: "30 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clawsomeflow-runtime-nightly
+  cancel-in-progress: false
+
+jobs:
+  runtime-gate:
+    runs-on:
+      - self-hosted
+      - linux
+    timeout-minutes: 90
+    env:
+      CSFLOW_PROD_SERVICE_NAME: csflow
+      CSFLOW_PROD_HEALTH_URL: http://127.0.0.1:17017/
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run runtime gate
+        run: |
+          chmod +x scripts/test-runtime.sh
+          ./scripts/test-runtime.sh

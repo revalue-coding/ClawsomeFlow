@@ -1,0 +1,39 @@
+name: ci-perf-weekly
+
+on:
+  schedule:
+    # 04:30 Asia/Shanghai every Sunday (20:30 UTC Saturday)
+    - cron: "30 20 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clawsomeflow-perf-weekly
+  cancel-in-progress: false
+
+jobs:
+  perf-gate:
+    runs-on:
+      - self-hosted
+      - linux
+    timeout-minutes: 120
+    env:
+      CSFLOW_PROD_SERVICE_NAME: csflow
+      CSFLOW_PROD_HEALTH_URL: http://127.0.0.1:17017/
+      CSFLOW_PERF_SAMPLE_COUNT: "40"
+      CSFLOW_PERF_MAX_P95_MS: "1200"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run perf gate
+        run: |
+          chmod +x scripts/test-perf.sh
+          ./scripts/test-perf.sh

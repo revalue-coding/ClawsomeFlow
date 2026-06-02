@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Install this checkout into ~/.clawsomeflow/.venv (editable mode).
+#
+# Usage:
+#   scripts/clawsomeflow_local_install
+#   scripts/clawsomeflow_local_install --dev
+
+set -euo pipefail
+
+WITH_DEV=0
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+VENV_DIR="${CSFLOW_VENV_DIR:-$HOME/.clawsomeflow/.venv}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BACKEND_DIR="${REPO_ROOT}/backend"
+
+for arg in "$@"; do
+  case "$arg" in
+    --dev) WITH_DEV=1 ;;
+    -h|--help)
+      cat <<'USAGE'
+Install this ClawsomeFlow checkout into an isolated user virtualenv.
+
+Usage:
+  scripts/clawsomeflow_local_install [--dev]
+
+Options:
+  --dev    Install backend editable with [dev] extras.
+
+Environment overrides:
+  PYTHON_BIN        Python interpreter (default: python3.11)
+  CSFLOW_VENV_DIR   Target virtualenv path (default: ~/.clawsomeflow/.venv)
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Missing ${PYTHON_BIN}. Install Python 3.11+ first." >&2
+  exit 1
+fi
+if [[ ! -f "${BACKEND_DIR}/pyproject.toml" ]]; then
+  echo "Backend source not found: ${BACKEND_DIR}" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$VENV_DIR")"
+"$PYTHON_BIN" -m venv "$VENV_DIR"
+"$VENV_DIR/bin/python" -m pip install --upgrade pip
+
+if [[ "$WITH_DEV" == "1" ]]; then
+  "$VENV_DIR/bin/pip" install --upgrade -e "${BACKEND_DIR}[dev]"
+else
+  "$VENV_DIR/bin/pip" install --upgrade -e "${BACKEND_DIR}"
+fi
+
+echo "Installed local checkout into: $VENV_DIR"
+echo "Start command:"
+echo "  $VENV_DIR/bin/csflow start"

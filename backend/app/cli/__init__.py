@@ -1,0 +1,79 @@
+"""``csflow`` command-line interface (entry point in pyproject.toml).
+
+Sub-commands (Phase 9 + post-MVP):
+
+Lifecycle:
+* ``csflow start``      — dep check + init/upgrade if needed + restart user service
+* ``csflow stop``       — kill the running uvicorn (PID file based)
+* ``csflow status``     — runtime + on-disk snapshot
+* ``csflow init``       — install-or-upgrade entry (unified upgrade pipeline)
+* ``csflow install``    — alias of ``csflow init``
+* ``csflow serve``      — boot uvicorn (skip init / dep-check)
+* ``csflow doctor``     — dependency + configuration audit
+* ``csflow upgrade``    — user-facing stable package upgrade + reconcile
+* ``csflow uninstall``  — remove OpenClaw integration (keep local data)
+* ``csflow purge-data`` — delete ``~/.clawsomeflow/`` (strong confirmation)
+* ``csflow version``    — print the package version
+
+Ops:
+* ``csflow flows``      — list / show
+* ``csflow runs``       — list / start / show / abort / merge
+* ``csflow agents``     — list / chat / reinstall-skills
+* ``csflow logs``       — tail logs (incl. ``verify-anti-loop``)
+"""
+
+from __future__ import annotations
+
+import sys
+
+import typer
+
+from app import __version__, logging_setup
+
+app = typer.Typer(
+    name="csflow",
+    help="ClawsomeFlow — vertical agent workflow orchestration platform.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+def _cli_logs_to_stderr() -> bool:
+    """Only `csflow serve` should mirror structured logs to stderr."""
+    return len(sys.argv) >= 2 and sys.argv[1] == "serve"
+
+
+logging_setup.configure_logging(to_file=True, to_stderr=_cli_logs_to_stderr())
+
+
+@app.command()
+def version() -> None:
+    """Print the ClawsomeFlow version."""
+    typer.echo(__version__)
+
+
+# ── lifecycle commands ────────────────────────────────────────────────
+
+# Importing these registers their @app.command decorators on `app`.
+from app.cli import (  # noqa: E402,F401  (side-effect imports)
+    init as _init_mod,
+    serve as _serve_mod,
+    start as _start_mod,
+    stop as _stop_mod,
+    status as _status_mod,
+    doctor as _doctor_mod,
+    upgrade as _upgrade_mod,
+    uninstall as _uninstall_mod,
+    purge as _purge_mod,
+    logs as _logs_mod,
+)
+
+# ── ops sub-apps ──────────────────────────────────────────────────────
+
+from app.cli.ops import flows as _flows_mod  # noqa: E402
+from app.cli.ops import runs as _runs_mod  # noqa: E402
+from app.cli.ops import agents as _agents_mod  # noqa: E402
+
+app.add_typer(_flows_mod.app, name="flows", help="Flow CRUD shortcuts.")
+app.add_typer(_runs_mod.app, name="runs", help="Run trigger / inspect / abort.")
+app.add_typer(_agents_mod.app, name="agents", help="OpenClaw agent management.")

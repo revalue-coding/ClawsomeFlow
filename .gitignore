@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.venv-dev/
+.venv-release/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Local data
+*.sqlite
+*.sqlite-journal
+*.log
+*.lock
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend (future phases)
+node_modules/
+.next/
+.vite/
+dist/
+
+# ClawsomeFlow runtime data (not committed; lives in ~/.clawsomeflow/)
+
+# Local AI docs (user-private)
+CLAUDE.md
+DEV.md
+API.md
+CHANGELOG.md
+OPEN_SOURCE_DOC_EXPOSURE_CHECKLIST.md
+SERVER_MODE_MULTIUSER_AUDIT.md
+readme-copy.md
+.docs-vcs.git/
+.Harness Engineering/
+
+# Developer/maintainer-only scripts (not shipped in the public repo)
+/deploy.sh
+/deploy-server.sh
+/deploy/
+scripts/release.sh
+scripts/deploy-release.sh
+scripts/run-dev-bg.sh
+scripts/publish-install-endpoint.sh
+scripts/publish-site-repo.sh
+scripts/_bump_version.py
+scripts/_cut_changelog.py
+scripts/docs-local-vcs.sh

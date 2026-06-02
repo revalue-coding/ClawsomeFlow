@@ -1,0 +1,139 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* OpenClaw-style typographic baseline. */
+:root {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  /* Faint dotted grid + warm radial vignettes — gives the canvas a "tech"
+     feel without competing with the lobster-red brand chips & focus rings. */
+  background:
+    radial-gradient(1200px 600px at 12% -10%, rgba(221, 63, 48, 0.06), transparent 60%),
+    radial-gradient(900px 600px at 110% 0%, rgba(245, 158, 11, 0.05), transparent 65%),
+    radial-gradient(circle at 1px 1px, rgba(15, 23, 42, 0.045) 1px, transparent 0) 0 0 / 22px 22px,
+    theme("colors.ink.50");
+  background-attachment: fixed;
+  color: theme("colors.ink.900");
+}
+
+/* Helpers --------------------------------------------------------- */
+
+@layer components {
+  .card {
+    @apply rounded-lg border border-ink-200 bg-white shadow-card transition-shadow;
+  }
+  .card:hover {
+    @apply shadow-glow-sm;
+  }
+
+  .input,
+  .select,
+  .textarea {
+    @apply w-full rounded-md border border-ink-200 bg-white px-3 py-2 text-sm
+      placeholder:text-ink-400 focus:border-brand-500
+      focus:outline-none focus:ring-1 focus:ring-brand-500;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2
+      text-sm font-medium transition-all disabled:cursor-not-allowed
+      disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-brand-500 text-white hover:bg-brand-600
+      active:bg-brand-700 shadow-glow-sm hover:shadow-glow;
+  }
+
+  .btn-ghost {
+    @apply btn text-ink-700 hover:bg-ink-100;
+  }
+
+  .btn-outline {
+    @apply btn border border-ink-200 bg-white text-ink-700 hover:bg-ink-50;
+  }
+
+  .btn-danger {
+    @apply btn bg-white text-brand-600 border border-brand-200 hover:bg-brand-50;
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs
+      font-medium;
+  }
+
+  .pill-default {
+    @apply pill bg-ink-100 text-ink-700;
+  }
+
+  .pill-brand {
+    @apply pill bg-brand-100 text-brand-700;
+  }
+
+  .pill-success {
+    @apply pill bg-green-100 text-green-700;
+  }
+
+  .pill-warning {
+    @apply pill bg-amber-100 text-amber-800;
+  }
+
+  .pill-danger {
+    @apply pill bg-rose-100 text-rose-700;
+  }
+
+  .pill-info {
+    @apply pill bg-sky-100 text-sky-700;
+  }
+
+  .table-row {
+    @apply border-t border-ink-100 hover:bg-ink-50;
+  }
+
+  .label {
+    @apply mb-1 block text-xs font-semibold uppercase tracking-wide
+      text-ink-500;
+  }
+}
+
+@keyframes dep-edge-dash {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+.dep-edge-flow {
+  stroke-dasharray: 8 6;
+  animation: dep-edge-dash 1.2s linear infinite;
+  filter: drop-shadow(0 0 3px rgba(122, 164, 255, 0.55));
+}
+
+@keyframes dep-node-pulse {
+  0% {
+    opacity: 0.9;
+    stroke-width: 1.6;
+  }
+  100% {
+    opacity: 0;
+    stroke-width: 0.6;
+  }
+}
+
+.dep-node-pulse {
+  animation: dep-node-pulse 1.15s ease-out infinite;
+}
