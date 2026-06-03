@@ -2,7 +2,9 @@
 
 <h1>⚡ ClawsomeFlow ⚡</h1>
 
-<h3>Make your multi-agent workflow <em>Clawsome!</em></h3>
+<p>
+  <img src="./docs/assets/readme-hero.svg" alt="Make your Multi-agent Workflow Clawsome" width="960" />
+</p>
 
 <p>
   <b>English</b> ·
@@ -22,12 +24,10 @@
 </p>
 
 <p>
+  <a href="#-quick-start">Quick Start</a> ·
   <a href="#-news">News</a> ·
   <a href="#-core-features">Core Features</a> ·
-  <a href="#-supported-agents">Supported Agents</a> ·
   <a href="#-why-clawsomeflow">Why ClawsomeFlow</a> ·
-  <a href="#-relationship-with-clawteam">Relationship with ClawTeam</a> ·
-  <a href="#-quick-start">Quick Start</a> ·
   <a href="#-contributor-local-deploy-and-test">Contributor Local Deploy</a> ·
   <a href="#-roadmap">Roadmap</a>
 </p>

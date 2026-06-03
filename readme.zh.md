@@ -2,7 +2,9 @@
 
 <h1>⚡ ClawsomeFlow ⚡</h1>
 
-<h3>Make your multi-agent workflow <em>Clawsome!</em></h3>
+<p>
+  <img src="./docs/assets/readme-hero.svg" alt="Make your Multi-agent Workflow Clawsome" width="960" />
+</p>
 
 <p>
   <a href="./readme.md">English</a> ·
@@ -21,12 +23,10 @@
 </p>
 
 <p>
+  <a href="#-快速开始">快速开始</a> ·
   <a href="#-news">News</a> ·
   <a href="#-核心特性">核心特性</a> ·
-  <a href="#-支持的-agent-平台">支持的 Agent 平台</a> ·
   <a href="#-为什么是-clawsomeflow">为什么是 ClawsomeFlow</a> ·
-  <a href="#-与-clawteam-的关系">与 ClawTeam 的关系</a> ·
-  <a href="#-快速开始">快速开始</a> ·
   <a href="#-贡献者本地部署与测试">贡献者开发</a> ·
   <a href="#-路线图">路线图</a>
 </p>

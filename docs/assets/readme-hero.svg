@@ -1,0 +1,52 @@
+<svg width="1600" height="720" viewBox="0 0 1600 720" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Make your Multi-agent Workflow Clawsome</title>
+  <desc id="desc">A dark tech hero banner with pink and cyan glow and centered title text.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="720" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0D0F2A"/>
+      <stop offset="0.55" stop-color="#091329"/>
+      <stop offset="1" stop-color="#071124"/>
+    </linearGradient>
+
+    <radialGradient id="leftGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(180 170) rotate(17) scale(490 330)">
+      <stop offset="0" stop-color="#FF4F9E" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#FF4F9E" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="rightGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1460 95) rotate(159) scale(560 350)">
+      <stop offset="0" stop-color="#56D2FF" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#56D2FF" stop-opacity="0"/>
+    </radialGradient>
+
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" stroke="#233054" stroke-opacity="0.5" stroke-width="1"/>
+    </pattern>
+
+    <linearGradient id="titleGradient" x1="510" y1="352" x2="1120" y2="352" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF6D9F"/>
+      <stop offset="0.54" stop-color="#C0A6FF"/>
+      <stop offset="1" stop-color="#7FD9FF"/>
+    </linearGradient>
+
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="720" fill="url(#bg)"/>
+  <rect width="1600" height="720" fill="url(#leftGlow)"/>
+  <rect width="1600" height="720" fill="url(#rightGlow)"/>
+  <rect width="1600" height="720" fill="url(#grid)" opacity="0.7"/>
+  <rect width="1600" height="720" fill="black" opacity="0.08"/>
+
+  <g filter="url(#softGlow)" text-anchor="middle" font-family="Inter, Segoe UI, Arial, Helvetica, sans-serif">
+    <text x="800" y="242" fill="#F7FAFF" font-size="94" font-weight="700" letter-spacing="0.2">Make your</text>
+    <text x="800" y="372" fill="url(#titleGradient)" font-size="90" font-weight="800" letter-spacing="0.2">Multi-agent Workflow</text>
+    <text x="800" y="500" fill="#F7FAFF" font-size="90" font-weight="800" letter-spacing="0.2">Clawsome!</text>
+  </g>
+</svg>
