@@ -27,6 +27,7 @@
   <a href="#-为什么是-clawsomeflow">为什么是 ClawsomeFlow</a> ·
   <a href="#-与-clawteam-的关系">与 ClawTeam 的关系</a> ·
   <a href="#-快速开始">快速开始</a> ·
+  <a href="#-贡献者本地部署与测试">贡献者开发</a> ·
   <a href="#-路线图">路线图</a>
 </p>
 
@@ -157,6 +158,33 @@ csflow runs abort <run-id>
 csflow agents list
 csflow agents create "用自然语言描述你要的 Agent"
 csflow agents chat <agent-id> "继续完善该 Agent 的能力"
+```
+
+---
+
+## 👩‍💻 贡献者本地部署与测试
+
+如果你是贡献者，需要在改源码后做本地部署验证，推荐使用隔离入口：
+
+```bash
+bash scripts/deploy-contributor.sh
+```
+
+`deploy-contributor.sh` 脚本默认行为：
+
+- 使用隔离数据目录和运行时：`~/.clawsomeflow-dev`（不复用 `~/.clawsomeflow`）。
+- 后端端口默认为 `17117`，Vite 端口默认为 `5174`。
+- 默认将 ClawTeam 运行时隔离到 `~/.clawsomeflow-dev/.clawteam-data`。
+
+日常贡献开发建议优先 `bash scripts/deploy-contributor.sh`，将测试环境与常规服务状态隔离。
+
+自定义 profile / 端口示例：
+
+```bash
+CSFLOW_DEV_HOME=~/.clawsomeflow-dev-alice \
+CSFLOW_DEV_BACKEND_PORT=18117 \
+CSFLOW_DEV_FRONTEND_PORT=5184 \
+bash scripts/deploy-contributor.sh
 ```
 
 ---

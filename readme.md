@@ -28,6 +28,7 @@
   <a href="#-why-clawsomeflow">Why ClawsomeFlow</a> ·
   <a href="#-relationship-with-clawteam">Relationship with ClawTeam</a> ·
   <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-contributor-local-deploy-and-test">Contributor Local Deploy</a> ·
   <a href="#-roadmap">Roadmap</a>
 </p>
 
@@ -158,6 +159,33 @@ csflow runs abort <run-id>
 csflow agents list
 csflow agents create "Describe the Agent you want in natural language"
 csflow agents chat <agent-id> "Keep improving this Agent's capabilities"
+```
+
+---
+
+## 👩‍💻 Contributor Local Deploy and Test
+
+For contributors iterating on source code, use the isolated developer entrypoint:
+
+```bash
+bash scripts/deploy-contributor.sh
+```
+
+Default behavior of `deploy-contributor.sh`:
+
+- Uses isolated data/runtime under `~/.clawsomeflow-dev` (does not reuse `~/.clawsomeflow`).
+- Starts backend on `17117` and Vite on `5174`.
+- Keeps ClawTeam runtime isolated via `~/.clawsomeflow-dev/.clawteam-data`.
+
+`bash scripts/deploy-contributor.sh` is recommended for day-to-day source testing because it keeps regular user service state isolated.
+
+Example with custom profile/ports:
+
+```bash
+CSFLOW_DEV_HOME=~/.clawsomeflow-dev-alice \
+CSFLOW_DEV_BACKEND_PORT=18117 \
+CSFLOW_DEV_FRONTEND_PORT=5184 \
+bash scripts/deploy-contributor.sh
 ```
 
 ---
