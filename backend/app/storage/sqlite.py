@@ -179,6 +179,19 @@ class SqliteStorage:
             flow = s.get(Flow, flow_id)
             if flow is None:
                 return False
+            # FlowRun.flow_id and RunEvent.run_id are foreign-key linked.
+            # Purge terminal run history before deleting Flow so old completed
+            # runs don't block the delete request on FK constraints.
+            run_ids = list(
+                s.exec(
+                    select(FlowRun.id)
+                    .where(FlowRun.flow_id == flow_id)
+                    .where(FlowRun.status.in_([st.value for st in _TERMINAL_STATUSES]))
+                ).all()
+            )
+            if run_ids:
+                s.exec(delete(RunEvent).where(RunEvent.run_id.in_(run_ids)))
+                s.exec(delete(FlowRun).where(FlowRun.id.in_(run_ids)))
             s.delete(flow)
             s.commit()
             return True

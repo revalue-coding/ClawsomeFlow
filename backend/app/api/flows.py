@@ -18,6 +18,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
+from sqlalchemy.exc import IntegrityError
 
 from app.api._auth import current_user
 from app.api.errors import ApiError
@@ -325,4 +326,13 @@ def delete_flow(
             f"flow {flow_id!r} has active runs; cannot delete",
             status_code=409,
         )
-    storage.flow_delete(flow_id)
+    try:
+        storage.flow_delete(flow_id)
+    except IntegrityError as exc:
+        # Defensive race guard: a run may become active between pre-check and
+        # the actual delete transaction.
+        raise ApiError(
+            "RUNS_IN_PROGRESS",
+            f"flow {flow_id!r} has active runs; cannot delete",
+            status_code=409,
+        ) from exc

@@ -13,6 +13,8 @@ from app import paths
 from app.config import load_config, save_config
 from app.integrations import openclaw_json as oj
 from app.main import create_app
+from app.models import FlowRun, RunEvent, RunStatus
+from app.storage import get_storage
 
 
 @pytest.fixture
@@ -238,6 +240,32 @@ def test_delete(client: TestClient, repo: str) -> None:
     resp = client.delete(f"/api/flows/{flow_id}")
     assert resp.status_code == 204
     assert client.get(f"/api/flows/{flow_id}").status_code == 404
+
+
+def test_delete_with_terminal_run_history(client: TestClient, repo: str) -> None:
+    flow_id = client.post("/api/flows", json=_flow_payload(repo)).json()["id"]
+    storage = get_storage()
+    run = storage.run_create(
+        FlowRun(
+            flow_id=flow_id,
+            flow_version=1,
+            team_name=f"csflow-{flow_id[-8:]}",
+            status=RunStatus.completed,
+            user="alice",
+        )
+    )
+    storage.event_append(
+        RunEvent(
+            run_id=run.id,
+            type="run_started",
+            payload={},
+        )
+    )
+
+    resp = client.delete(f"/api/flows/{flow_id}")
+    assert resp.status_code == 204
+    assert client.get(f"/api/flows/{flow_id}").status_code == 404
+    assert storage.run_get(run.id) is None
 
 
 def test_get_other_user_forbidden(
