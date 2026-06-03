@@ -24,6 +24,7 @@
 <p>
   <a href="#-news">News</a> ·
   <a href="#-core-features">Core Features</a> ·
+  <a href="#-supported-agents">Supported Agents</a> ·
   <a href="#-why-clawsomeflow">Why ClawsomeFlow</a> ·
   <a href="#-relationship-with-clawteam">Relationship with ClawTeam</a> ·
   <a href="#-quick-start">Quick Start</a> ·
@@ -69,6 +70,23 @@ ClawsomeFlow stands on the shoulders of [ClawTeam](https://github.com/HKUDS/Claw
 - **Inter-Agent messaging**: point-to-point inbox and broadcast, so team members share progress in real time.
 
 > On top of this, ClawsomeFlow layers in **deep OpenClaw adaptation, DAG orchestration scheduling, failure convergence, human guardrails, Web productization and multi-user governance**.
+
+---
+
+## 🤖 Supported Agents
+
+| Agent | Kind | Runtime | Status |
+|---|---|---|---|
+| **OpenClaw** | `openclaw` | TUI | ⭐ Deeply adapted |
+| **Claude Code** | `claude` | TUI | ✅ Full support |
+| **Codex** | `codex` | TUI | ✅ Full support |
+| **Gemini CLI** | `gemini` | TUI | Testing|
+| **Cursor** | `cursor` | TUI | ✅ Full support |
+| **Hermes** | `hermes` | TUI | ✅ Full support |
+| **Kimi CLI** | `kimi` | TUI | Testing |
+| **Qwen Code** | `qwen` | TUI | Testing |
+| **OpenCode** | `opencode` | TUI | Testing |
+| **nanobot** | `nanobot` | TUI | Testing |
 
 ---
 
@@ -148,10 +166,10 @@ csflow agents chat <agent-id> "Keep improving this Agent's capabilities"
 
 | Phase | Content | Status |
 |---|---|---|
-| **P0** |  | 🚧 In progress |
-| **P1** |  | 📅 Planned |
-| **P2** |  | 📅 Planned |
-| **P3** |  | 💡 Exploring |
+| **P0** | **Agent Store** — a shareable marketplace for ready-made Agents, Teams and Flow templates: install, reuse, and contribute domain experts in one click. | 🚧 In progress |
+| **P1** | **Broader Agent platform support** — onboard more CLI Agent runtimes and keep pace with emerging ecosystems, so any Agent can join the same graph. | 📅 Planned |
+| **P2** | **Mobile & server mode** — a mobile-friendly console plus multi-user server deployment, to monitor and intervene in Runs anywhere. | 💡 Exploring |
+| **P3** | **Cloud & SSH Agents** — drive Agents on remote / cloud hosts over SSH, scaling collaboration beyond a single machine. | 💡 Exploring |
 
 ---
 
