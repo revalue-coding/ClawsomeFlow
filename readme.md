@@ -205,10 +205,8 @@ bash scripts/deploy-contributor.sh
 
 ## 🙏 Acknowledgements
 
-ClawsomeFlow stands on the shoulders of giants.
-
-- **[ClawTeam](https://github.com/)** — the spark that inspired this project. Its multi-agent protocol (team / task / mailbox / workspace) is the foundation ClawsomeFlow orchestrates on top of. Thank you for showing what agent self-organization can be.
-- **Our Agent platform teammates** — the real "team members" that do the work inside every Flow: **Claude**, **OpenClaw**, **Codex**, **Gemini**, and the growing roster of CLI Agents. ClawsomeFlow is only as clawsome as the agents it coordinates.
+- **[ClawTeam]** — the spark that inspired this project. Thank you for showing what Agent self-organization can be.
+- **Our Agent platform teammates** — the real "team members" that do the actual work inside every Flow: **Claude**, **OpenClaw**, **Codex**, **Gemini**, and the growing roster of CLI Agents. ClawsomeFlow is only as clawsome as the Agents it coordinates.
 
 ---
 
