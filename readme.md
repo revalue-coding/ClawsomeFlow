@@ -62,8 +62,6 @@ ClawsomeFlow turns scattered AI agents into a controllable engineering system �
 |---|---|---|
 | Every agent runs in its own isolated workspace and branch — parallel work without cross-talk or accidental writes, with checkpoint / merge / cleanup built in. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
 
-### 🦞 The Swarm-Intelligence Foundation Inherited from ClawTeam
-
 ClawsomeFlow inherits the following capabilities from ClawTeam:
 
 - **Git Worktree workspace isolation**: each Agent has an independent branch and directory, running in parallel without interference, with checkpoint / merge / cleanup support.
