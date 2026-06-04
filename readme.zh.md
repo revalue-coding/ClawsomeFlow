@@ -3,6 +3,10 @@
 <h1>⚡ ClawsomeFlow ⚡</h1>
 
 <p>
+  🌐 <a href="https://clawsomeflow.com"><b>clawsomeflow.com</b></a>
+</p>
+
+<p>
   <img src="./docs/assets/readme-hero.svg" alt="Make your Multi-agent Workflow Clawsome" width="960" />
 </p>
 
@@ -11,12 +15,7 @@
   <b>简体中文</b>
 </p>
 
-<p><b>用自然语言描述目标，把多 Agent 协作变成可控、可观测、可收敛的工程系统。</b></p>
-
-<p>
-  ClawsomeFlow 是一个面向垂直领域的 <b>Agent 工作流编排平台</b>：以 DAG Flow 定义任务，
-  由异步调度器主动驱动多个 Agent 并行协作，并内建 <b>隔离 / 回滚 / 投诉闭环 / 熵管理</b> 等工程化护栏。
-</p>
+<p><b>把目标编排成一张任务流程图，由调度器主动驱动一支 AI Agent 团队去执行——并行推进、彼此隔离、全程可观测、稳定收敛地交付。你负责编排，掌控交给 ClawsomeFlow。</b></p>
 
 <p>
   <b>Full compatibility with</b> OpenClaw、Claude Code、Codex、Cursor、Hermes等 CLI Agent。
@@ -26,6 +25,7 @@
   <a href="#-快速开始">快速开始</a> ·
   <a href="#-news">News</a> ·
   <a href="#-核心特性">核心特性</a> ·
+  <a href="#%EF%B8%8F-工作原理">工作原理</a> ·
   <a href="#-为什么是-clawsomeflow">为什么是 ClawsomeFlow</a> ·
   <a href="#-贡献者本地部署与测试">贡献者开发</a> ·
   <a href="#-路线图">路线图</a> ·
@@ -52,25 +52,35 @@
 
 ## ✨ 核心特性
 
-ClawsomeFlow 在沿用 ClawTeam 群体智能能力的基础上，补齐了「编排 + 产品」两层工程能力：
+ClawsomeFlow 把零散的 AI Agent 变成一套可控的工程系统——从第一条指令，到最终可审阅的交付结果。
 
-| 🌳 OpenClaw 深度适配 | 🧠 AI + 精确编排 | 🗣️ 自然语言完成所有工作 | 🔄 投诉闭环机制 |
-|---|---|---|---|
-| 针对 OpenClaw 多任务并行的会话边界模糊与 workspace 并发冲突，做了会话与目录双隔离，并将恢复路径纳入标准状态机。 | 把控制流从 Prompt 拿回代码：调度器决定派发、重试、超时与收敛，行为可控，显著减少无效 token。 | Flow 定义、Agent 创建、任务编排、运行干预，都可用自然语言在 Web UI / CLI 完成。 | Run 支持「用户投诉 → 反思处理 → 回写经验」的闭环，让系统持续自增长。 |
+| 🗣️ 用自然语言搞定一切 | 🧠 精准编排，而非碰运气 | 🚀 众多 Agent，同一张图 |
+|---|---|---|
+| 定义 Flow、创建 Agent、编排任务、运行中实时干预——只需描述你想要什么。无需胶水代码，也无需折腾 SDK。 | 控制流写在代码里，而不是塞进 Prompt。调度器负责派发、重试、超时与收敛——行为可预测，Token 不浪费。 | 把工作编排成 DAG，让多个 Agent 并行协作；由 Leader 汇总并将结果收敛为一份交付物。 |
 
-| 🚀 多 Agent 协同 | 📊 企业级可观测性 | 🔐 隔离与治理并重 | 🧩 与现有生态兼容 |
-|---|---|---|---|
-| 支持 OpenClaw / Claude / Codex / Cursor / Hermes  同图协同。 | 每个 dispatch / completion / failure 都记录为 RunEvent，可审计、可回放、可计费。 | team / session / worktree 三层隔离，避免串扰与误写。 | 不重造协议层，沿用 ClawTeam CLI + MCP，复用其群体协作与监控能力。 |
+| 🔐 默认隔离与回滚 | 📊 可审计的可观测性 | 🔄 会自我进化的系统 |
+|---|---|---|
+| 每个 Agent 都在独立的工作区与分支中运行——并行而不串扰、不误写，内置 checkpoint / merge / cleanup。 | 每一次 dispatch / completion / failure 都记录为 RunEvent——每次运行都可追溯、可回放、可审阅，绝不是黑盒。 | 对结果不满意？发起一次「投诉」，系统会反思、返工，并把经验写回——让下一次比上一次更好。 |
 
 ### 🦞 沿用自 ClawTeam 的群体智能基座
 
-ClawsomeFlow 站在 [ClawTeam](https://github.com/HKUDS/ClawTeam) 的肩膀上，原汁原味继承了它的群体协作内核：
+ClawsomeFlow继承了Clawteam如下特色：
 
-- **Agent 自组织协作**：Leader 派发、Worker 自报告状态与结果， CLI Agent 即插即用，无需自定义 SDK。
 - **Git Worktree 工作区隔离**：每个 Agent 拥有独立分支与目录，并行互不干扰，支持 checkpoint / merge / cleanup。
 - **Agent 间消息**：点对点 inbox 与广播，团队成员实时共享进展。
 
-> ClawsomeFlow 在此之上，叠加了 **Openclaw深度适配、DAG 编排调度、失败收敛、人工护栏、Web 产品化与多用户治理** 等能力。
+> ClawsomeFlow 在此之上，增加了 **AI与精确编排结合、Openclaw深度适配、失败收敛、人工护栏、Web 产品化** 等能力。
+
+---
+
+## 🛠️ 工作原理
+
+从一句话，到交付成果。目标始终由你掌控；协作、并行，以及出错时的恢复，都交给 ClawsomeFlow。
+
+1. **描述你的目标** —— 用自然语言告诉 ClawsomeFlow 你想要什么，或在画布上把 Flow 编排成任务与依赖关系图。
+2. **Agent 并行执行** —— 调度器主动把就绪任务派发给合适的 Agent，每个 Agent 在独立工作区中运行，并被驱动至完成。
+3. **观察、干预、恢复** —— 实时跟踪每一步。以清晰的策略重试、跳过或中止，并在人工检查点确认结果后再落地。
+4. **收敛并交付** —— 由 Leader 将并行的工作合并为一份经过审阅的交付物，运行记录全程可审计。
 
 ---
 
@@ -136,6 +146,7 @@ ClawsomeFlow 构建在 **ClawTeam**  之上
 
 ### 安装
 
+Linux/macOS
 ```bash
 curl -fsSL https://clawsomeflow.com/install.sh | bash
 
