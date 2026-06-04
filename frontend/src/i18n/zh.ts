@@ -367,6 +367,7 @@ const zh = {
       cancelDecompose: "取消拆解",
       cancelling: "取消中…",
       confirmCancelClose: "是否确定取消拆解？",
+      confirmCancel: "确定",
       cancelFailed: "取消拆解失败：{{message}}",
       cancel: "取消",
     },

@@ -715,6 +715,90 @@ async def test_terminal_tail_cleanup_preserves_worktree_dirs_when_requested(
 
 
 @pytest.mark.asyncio
+async def test_terminal_tail_cleanup_completed_with_conflicts_preserves_worktree_dirs(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, flow, spec = _make_run_and_spec(agents_kw=[
+        {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": False, "merge_strategy": MergeStrategy.skip,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+        {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": True, "merge_strategy": MergeStrategy.skip,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+    ], cleanup_team=True)
+    run.status = RunStatus.completed_with_conflicts
+    get_storage().run_update(run)
+
+    clawteam_data = tmp_path / "clawteam-data"
+    team_dir = clawteam_data / "workspaces" / run.team_name
+    (team_dir / "alice").mkdir(parents=True, exist_ok=True)
+    (team_dir / "alice" / "note.txt").write_text("x", encoding="utf-8")
+    cfg = load_config().model_copy(update={"clawteam_data_dir": str(clawteam_data)})
+    monkeypatch.setattr(fin, "load_config", lambda: cfg)
+
+    cli = _StubCli()
+    out = await fin.run_terminal_tail_cleanup(
+        run=run,
+        flow=flow,
+        agents=spec.agents,
+        storage=get_storage(),
+        cli=cli,
+        worktree_lookup=_StubLookup(items=[]),
+    )
+    assert out.team_cleaned is False
+    assert cli.team_cleanup_calls == []
+    assert team_dir.exists()
+    events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
+    skipped = [e for e in events if e.type == "team_cleanup_skipped"]
+    assert skipped
+    assert skipped[-1].payload.get("reason") == "completed_with_conflicts"
+    assert not any(e.type == "team_workspace_dir_removed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_terminal_tail_cleanup_completed_with_conflicts_only_preserves_failed_agents() -> None:
+    run, flow, spec = _make_run_and_spec(agents_kw=[
+        {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": False, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+        {"id": "bob", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": False, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+        {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": True, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+    ], cleanup_team=True)
+    run.status = RunStatus.completed_with_conflicts
+    run.inputs = {
+        "_csflow_preserve_worktree_agent_ids": ["alice"],
+    }
+    get_storage().run_update(run)
+
+    cli = _StubCli(workspace_rows=[
+        {"team_name": run.team_name, "agent_name": "alice"},
+        {"team_name": run.team_name, "agent_name": "bob"},
+        {"team_name": run.team_name, "agent_name": "leader"},
+    ])
+    out = await fin.run_terminal_tail_cleanup(
+        run=run,
+        flow=flow,
+        agents=spec.agents,
+        storage=get_storage(),
+        cli=cli,
+        worktree_lookup=_StubLookup(items=[]),
+    )
+    assert out.team_cleaned is False
+    assert cli.team_cleanup_calls == []
+    assert {c["agent"] for c in cli.cleanup_calls} == {"bob", "leader"}
+    events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
+    skipped = [e for e in events if e.type == "team_cleanup_skipped"]
+    assert skipped
+    assert skipped[-1].payload.get("reason") == "completed_with_conflicts"
+    assert skipped[-1].payload.get("preserved_agents") == ["alice"]
+
+
+@pytest.mark.asyncio
 async def test_cleanup_team_on_finish_skips_invalid_team_name() -> None:
     run, flow, spec = _make_run_and_spec(agents_kw=[
         {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
@@ -826,7 +910,7 @@ async def test_perform_manual_merge_conflict_marks_completed_with_conflicts() ->
         {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
          "is_leader": True, "merge_strategy": MergeStrategy.manual,
          "on_failure": OnFailure.retry, "max_retries": 2},
-    ])
+    ], cleanup_team=True)
     run.pending_merges = [{"agent_id": "alice", "branch": "x", "diff_summary": {}}]
     run.status = RunStatus.awaiting_user_review
     get_storage().run_update(run)
@@ -840,6 +924,7 @@ async def test_perform_manual_merge_conflict_marks_completed_with_conflicts() ->
     assert refreshed.status == RunStatus.completed_with_conflicts
     # Conflict path keeps worktree for manual user resolution.
     assert cli.cleanup_calls == []
+    assert cli.team_cleanup_calls == []
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
     merge_ev = next((e for e in events if e.type == "merge_conflict"), None)
     assert merge_ev is not None
@@ -857,7 +942,7 @@ async def test_perform_manual_merge_environment_error_emits_merge_error() -> Non
         {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
          "is_leader": True, "merge_strategy": MergeStrategy.manual,
          "on_failure": OnFailure.retry, "max_retries": 2},
-    ])
+    ], cleanup_team=True)
     run.pending_merges = [{"agent_id": "alice", "branch": "x", "diff_summary": {}}]
     run.status = RunStatus.awaiting_user_review
     get_storage().run_update(run)
@@ -873,6 +958,7 @@ async def test_perform_manual_merge_environment_error_emits_merge_error() -> Non
     payload = merge_ev.payload or {}
     assert payload.get("source_branch") == "x"
     assert payload.get("target_branch") == "master"
+    assert cli.team_cleanup_calls == []
 
 
 @pytest.mark.asyncio

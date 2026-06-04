@@ -28,7 +28,8 @@
   <a href="#-核心特性">核心特性</a> ·
   <a href="#-为什么是-clawsomeflow">为什么是 ClawsomeFlow</a> ·
   <a href="#-贡献者本地部署与测试">贡献者开发</a> ·
-  <a href="#-路线图">路线图</a>
+  <a href="#-路线图">路线图</a> ·
+  <a href="#-微信交流群">微信交流群</a>
 </p>
 
 <p>
@@ -126,6 +127,7 @@ ClawsomeFlow 构建在 **ClawTeam**  之上
 | **任务模型** | 看板 + 依赖链 | DAG Flow 编译，Leader 汇总收敛 |
 | **OpenClaw 适配** | 作为可选 CLI Agent 支持 | 深度适配，解决会话与 workspace 并发冲突 |
 | **失败与护栏** | 基础生命周期协议 | 人工检查点 / 回滚 / 投诉闭环 / 熵管理 |
+| **Skill 配置** | 需要在 Agent 平台额外配置 skills | 无需额外配置 skills，开箱即用 |
 | **使用形态** | CLI + MCP + 监控面板 | Web UI + CLI，自然语言全流程治理 |
 
 ---
@@ -197,6 +199,25 @@ bash scripts/deploy-contributor.sh
 | **P1** | **支持更多 Agent 平台**——接入更多 CLI Agent 运行时，持续兼容新兴生态，让任意 Agent 同图协作。 | 📅 规划 |
 | **P2** | **手机端 & Server 模式**——移动端控制台 + 多用户服务端部署，随时随地监控与干预 Run。 | 💡 探索 |
 | **P3** | **云端 Agent & SSH Agent**——通过 SSH 驱动远程 / 云端主机上的 Agent，把协作扩展到单机之外。 | 💡 探索 |
+
+---
+
+## 🙏 致谢
+
+- **[ClawTeam]** —— 给了我们灵感的火花。感谢它展示了 Agent 自组织的可能。
+- **各个 Agent 平台「团队成员」** —— 它们才是每个 Flow 里真正干活的「队员」：**Claude**、**OpenClaw**、**Codex**、**Gemini** 以及不断壮大的 CLI Agent 阵容。ClawsomeFlow 的精彩，源自它所协调的这些 Agent。
+
+---
+
+## 💬 微信交流群
+
+如果 ClawsomeFlow 帮你协调好了 Agent 团队的工作，**请给我们一个 ⭐ Star** —— 这是支撑我们继续走下去的动力。
+
+对 ClawsomeFlow 的使用有疑问，或者对成立 **OPC（一人公司）** 感兴趣？欢迎来和我们一起交流 —— 扫描下方二维码加入微信讨论社群：
+
+<p align="center">
+  <img src="./docs/assets/wechat-group-qr.png" alt="ClawsomeFlow 微信交流群" width="240" />
+</p>
 
 ---
 

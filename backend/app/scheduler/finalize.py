@@ -15,7 +15,8 @@ Cleanup policy:
   workspace.
 * **Merge conflict** keeps the worktree intact for manual conflict resolution.
 * Team-level cleanup follows `Flow.cleanup_team_on_finish` for normal terminal
-  runs once no pending merge decisions remain.
+  runs once no pending merge decisions remain, except
+  `completed_with_conflicts` runs which preserve worktrees for follow-up.
 * Abnormal terminal runs (`failed` / `aborted`) force `team_cleanup(force=true)`
   and skip all merge decision branches.
 * After team cleanup, ClawsomeFlow runs a direct `rm -rf` fallback on
@@ -72,6 +73,7 @@ _TERMINAL_STATUSES: frozenset[RunStatus] = frozenset({
 _CSFLOW_TEAM_PREFIX = "csflow-"
 _POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
 _POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"
+_PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -844,6 +846,18 @@ def _is_openclaw_agent(
     return False
 
 
+def _read_preserved_worktree_agent_ids(run: FlowRun) -> set[str]:
+    raw = (run.inputs or {}).get(_PRESERVE_WORKTREE_AGENT_IDS_KEY)
+    if not isinstance(raw, list):
+        return set()
+    out: set[str] = set()
+    for item in raw:
+        aid = str(item or "").strip()
+        if aid:
+            out.add(aid)
+    return out
+
+
 def _emit(
     storage: StorageBackend, run_id: str, event_type: str, *,
     agent_id: str | None = None,
@@ -908,12 +922,29 @@ async def _maybe_cleanup_team_after_terminal(
             },
         )
         return False
-    if preserve_worktree_dirs:
+    preserved_agent_ids = _read_preserved_worktree_agent_ids(run)
+    preserve_due_to_conflicts = run.status == RunStatus.completed_with_conflicts
+    if preserve_worktree_dirs or preserve_due_to_conflicts:
+        if preserve_due_to_conflicts and preserved_agent_ids:
+            await _cleanup_non_openclaw_worktrees_except_preserved(
+                run=run,
+                flow=flow,
+                storage=storage,
+                cli=cli,
+                preserved_agent_ids=preserved_agent_ids,
+            )
+        reason = (
+            "preserve_worktree_dirs"
+            if preserve_worktree_dirs
+            else "completed_with_conflicts"
+        )
         logger.info(
             "team_cleanup_skipped_preserve_worktree",
             run_id=run.id,
             team=run.team_name,
             forced=abnormal_terminal,
+            reason=reason,
+            preserved_agents=sorted(preserved_agent_ids),
         )
         _emit(
             storage,
@@ -921,8 +952,9 @@ async def _maybe_cleanup_team_after_terminal(
             "team_cleanup_skipped",
             payload={
                 "team": run.team_name,
-                "reason": "preserve_worktree_dirs",
+                "reason": reason,
                 "forced": abnormal_terminal,
+                "preserved_agents": sorted(preserved_agent_ids),
             },
         )
         return False
@@ -973,6 +1005,52 @@ async def _maybe_cleanup_team_after_terminal(
         )
         return True
     return False
+
+
+async def _cleanup_non_openclaw_worktrees_except_preserved(
+    *,
+    run: FlowRun,
+    flow: Flow,
+    storage: StorageBackend,
+    cli: ClawTeamCli,
+    preserved_agent_ids: set[str],
+) -> None:
+    try:
+        spec = FlowSpec.model_validate(flow.spec)
+    except Exception:
+        return
+    existing_agents: set[str] | None = None
+    try:
+        rows = await cli.workspace_list(team=run.team_name)
+    except Exception as exc:
+        logger.warning(
+            "workspace_list_failed_before_preserve_cleanup",
+            run_id=run.id,
+            team=run.team_name,
+            error=str(exc),
+        )
+    else:
+        existing_agents = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("agent_name") or "").strip()
+            if name:
+                existing_agents.add(name)
+    for agent in spec.agents:
+        if agent.kind == AgentKind.openclaw:
+            continue
+        agent_id = str(agent.id or "").strip()
+        if not agent_id or agent_id in preserved_agent_ids:
+            continue
+        if existing_agents is not None and agent_id not in existing_agents:
+            continue
+        await cleanup_non_openclaw_workspace_after_review_decision(
+            run=run,
+            agent_id=agent_id,
+            storage=storage,
+            cli=cli,
+        )
 
 
 async def _cleanup_team_workspace_dir_fallback(

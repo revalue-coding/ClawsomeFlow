@@ -36,19 +36,60 @@ from app.scheduler.sessions.tmux_ready import tmux_capture_pane, wait_tui_ready
 logger = get_logger("scheduler.sessions.tmux_live")
 
 
+# Per-process `-c` config overrides applied to every codex spawn so the
+# unattended TUI behaves. We override at spawn time rather than editing the
+# user's ~/.codex/config.toml (which lives outside ClawsomeFlow's data home, and
+# which codex may rewrite). The configured model is unchanged. Three fixes:
+#
+#  1/2. notice.model_migrations / tui.model_availability_nux → empty TOML tables.
+#       Otherwise codex blocks on startup onboarding ("Choose how you'd like
+#       Codex to proceed: 1. Try new model  2. Use existing model" / a model-
+#       availability tip). Nobody answers the menu, the composer never appears,
+#       and `wait_tui_ready` times out → session_prewarm_failed.
+#
+#  3.   disable_paste_burst=true. ClawTeam dispatches by pasting the prompt into
+#       the pane (`tmux paste-buffer`) then sending a bare Enter (`send-keys
+#       Enter`). With codex's default paste-burst heuristic ON, that trailing
+#       `\r` is treated as part of the just-pasted burst (a literal newline) and
+#       NOT as submit — so the prompt sits unsent in the composer and re-dispatch
+#       ticks pile up as multiple "[Pasted Content N chars]" chips, stalling the
+#       run. Disabling paste-burst makes the injected Enter submit. The pasted
+#       prompt's own embedded newlines stay intact (bracketed paste keeps the
+#       block atomic), so multi-line dispatch prompts are NOT submitted early.
+#       Verified empirically against codex 0.136 (a 2s Enter delay does NOT help;
+#       only disabling paste-burst does).
+_CODEX_TUI_OVERRIDES: tuple[str, ...] = (
+    "-c", "notice.model_migrations={}",
+    "-c", "tui.model_availability_nux={}",
+    "-c", "disable_paste_burst=true",
+)
+
+
 # Map AgentKind → (binary command, native --resume command).
 # Adjust as new TUI-CLI agents land in ClawTeam's NativeCliAdapter coverage.
+#
+# IMPORTANT — do NOT hardcode the per-CLI "skip permissions / bypass sandbox"
+# flag here for any CLI that ClawTeam's DirectCliAdapter already injects under
+# ``--skip-permissions`` (which our spawn path always passes). ClawTeam appends:
+#   claude → --dangerously-skip-permissions (only when NOT root)
+#   codex  → --dangerously-bypass-approvals-and-sandbox
+#   gemini/kimi/qwen/opencode → --yolo
+# Repeating those produces a duplicate argv. codex is parsed by clap, which
+# hard-errors ("the argument '--dangerously-bypass-approvals-and-sandbox'
+# cannot be used multiple times"); claude's parser merely tolerates the dupe.
+# We therefore only carry flags ClawTeam does NOT inject:
+#   claude → --permission-mode bypassPermissions (root-safe; ClawTeam adds the
+#            dangerous flag for us on non-root, and skips it on root where
+#            claude would reject it)
+#   cursor (`agent`) / hermes → their own bypass flags (ClawTeam injects none)
 _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
     AgentKind.claude:   (
-        ["claude", "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions"],
-        [
-            "claude", "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions", "--continue",
-        ],
+        ["claude", "--permission-mode", "bypassPermissions"],
+        ["claude", "--permission-mode", "bypassPermissions", "--continue"],
     ),
     AgentKind.codex:    (
-        ["codex", "--dangerously-bypass-approvals-and-sandbox"],
-        ["codex", "--dangerously-bypass-approvals-and-sandbox", "resume", "--last"],
+        ["codex", *_CODEX_TUI_OVERRIDES],
+        ["codex", *_CODEX_TUI_OVERRIDES, "resume", "--last"],
     ),
     AgentKind.cursor:   (
         ["agent", "--force", "--approve-mcps", "--sandbox", "disabled"],

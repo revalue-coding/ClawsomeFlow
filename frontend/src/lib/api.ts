@@ -1037,7 +1037,12 @@ export const api = {
       payload,
     ),
   decomposeStatus: (requestId: string) =>
-    request<DecomposeStatus>("GET", `/api/flows/decompose/${requestId}`),
+    request<DecomposeStatus>(
+      "GET",
+      `/api/flows/decompose/${requestId}`,
+      undefined,
+      { cache: "no-store" },
+    ),
   cancelDecompose: (requestId: string) =>
     request<void>("POST", `/api/flows/decompose/${requestId}/cancel`),
 

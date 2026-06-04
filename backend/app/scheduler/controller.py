@@ -2849,6 +2849,12 @@ class RunController:
         targets: list[FlowAgent],
     ) -> str:
         targets_txt = ", ".join(f"`{a.id}`" for a in targets) or "(none)"
+        # NOTE — unlike the leader-SUMMARY dispatch (which must NOT pre-merge,
+        # because the scheduler still runs `clawteam workspace merge` after the
+        # user review stage), the complaint phase is the FINAL stage: there is no
+        # further user-review/merge step afterwards. So EVERY leader (OpenClaw or
+        # TUI) MUST self-merge into the baseline within this task — otherwise its
+        # complaint fixes would never reach the baseline.
         return (
             "## ClawsomeFlow Complaint Handling Task (Leader)\n"
             f"- team: `{self.team_name}`\n"

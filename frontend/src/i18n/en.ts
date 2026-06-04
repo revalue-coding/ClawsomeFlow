@@ -372,6 +372,7 @@ const en = {
       cancelDecompose: "Cancel decomposition",
       cancelling: "Cancelling…",
       confirmCancelClose: "Are you sure you want to cancel decomposition?",
+      confirmCancel: "Confirm",
       cancelFailed: "Cancel decomposition failed: {{message}}",
       cancel: "Cancel",
     },

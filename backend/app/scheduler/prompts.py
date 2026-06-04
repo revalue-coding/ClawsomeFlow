@@ -427,9 +427,13 @@ def _flow_goal_block(ctx: DispatchContext) -> str:
 def _worker_worktrees_block(ctx: DispatchContext) -> str:
     if not ctx.worker_worktrees:
         return "## Worker Worktrees and Branches\n_(no worker worktree found in this run)_"
+    # Only surface each worker's worktree path + branch — that's what the leader
+    # needs to read their outputs. We deliberately do NOT list the baseline
+    # workspace: the leader has no business reading or writing there (the merge
+    # is ClawsomeFlow's job), and naming it only tempts the leader to reference /
+    # copy into baseline paths (see run-40aaf5dde2c5).
     lines = [
-        f"- **{w.agent_name}** → worktree `{w.worktree_path}` (branch `{w.branch_name}`), "
-        f"baseline workspace `{w.repo_root}`"
+        f"- **{w.agent_name}** → worktree `{w.worktree_path}` (branch `{w.branch_name}`)"
         for w in ctx.worker_worktrees
     ]
     return "## Worker Worktrees and Branches\n" + "\n".join(lines)
@@ -463,18 +467,43 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     ct_task_id = ctx.clawteam_task_id or ctx.task.id
     wt = ctx.worktree.worktree_path if ctx.worktree else "<your-worktree>"
 
+    # Step 2 — produce + place the deliverable. The ONLY kind-specific difference
+    # is the `my-desktop/` convention: it is an OpenClaw-workspace thing. A TUI
+    # agent works directly inside the Flow's repo worktree, where dumping a
+    # `my-desktop/` folder would be wrong — it just writes a fitting structure.
+    #
+    # For BOTH kinds the deliverable stays in the worktree and ClawsomeFlow merges
+    # it into the project later (manual review for TUI, satisfaction stage for
+    # OpenClaw — neither merges during this task). The agent must therefore NEVER
+    # copy/move files out of the worktree: a stray file in the project working
+    # tree aborts `clawteam workspace merge` ("untracked working tree files would
+    # be overwritten by merge") and the run ends completed_with_conflicts. We do
+    # NOT name the baseline workspace at all — mentioning it is what drove the
+    # leader to pre-copy its report there (run-40aaf5dde2c5).
+    if ctx.agent.kind == AgentKind.openclaw:
+        deliverable_step = (
+            f"1. In `{wt}`, **produce the final deliverable**:\n"
+            f"   - If this task involves work-document output, place it under `{wt}/my-desktop/` using a "
+            f"fitting folder; if it involves modifications to existing documents under `{wt}/my-desktop/`, "
+            "edit them directly. Do not leave deliverable docs at the worktree root.\n"
+            "   - When reporting reference paths, keep worker files under each worker's own "
+            "path; never rewrite worker files as leader workspace paths."
+        )
+    else:
+        deliverable_step = (
+            f"1. In `{wt}`, **produce the final deliverable**:\n"
+            f"   - Write every output inside your worktree (`{wt}`) using a structure that fits the repo. "
+            "Use absolute worktree paths so nothing lands outside the worktree.\n"
+            "   - When reporting reference paths, keep worker files under each worker's own "
+            "path; never rewrite worker files as leader workspace paths."
+        )
+
     steps: list[str] = [
-        "1. Review all worker reports and worktree states above.",
-        f"2. In `{wt}`, **produce the final deliverable** (report / integrated code / "
-        "deployment plan). Focus on solution outcome, risks, and verification evidence:\n"
-        "   - If this task involves work-document output, place it under `my-desktop/` using a fitting folder; "
-        "if it involves modifications to existing documents under `my-desktop/`, edit them directly.\n"
-        "   - When reporting reference paths, keep worker files under each worker's own "
-        "path; never rewrite worker files as leader workspace paths.",
-        f"3. `cd {wt} && git add -A && "
+        deliverable_step,
+        f"2. `cd {wt} && git add -A && "
         f"git commit -m 'task {task_id}: leader summary'`.",
     ]
-    next_no = 4
+    next_no = 3
 
     steps.append(
         f"{next_no}. Verify every absolute path you plan to mention in final reply actually "
@@ -485,10 +514,7 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     steps.append(
         f"{next_no}. `clawteam inbox send {team} {ctx.agent.id} "
         "\"leader final reply: <concise summary + absolute paths>\"` "
-        "(required — keep the literal prefix `leader final reply:` so "
-        "ClawsomeFlow can surface it in Run detail. Reference only verified "
-        "absolute paths in the corresponding baseline workspace. Put long "
-        "prose in deliverable files and reference them by absolute path here.)"
+        "(required — keep the literal prefix `leader final reply:`.)"
     )
     next_no += 1
 

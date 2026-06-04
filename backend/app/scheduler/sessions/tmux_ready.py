@@ -4,8 +4,9 @@ Why this exists:
 
 * After ``clawteam spawn tmux <cli>`` the tmux pane is created and the CLI
   binary is launched, but the CLI itself takes 1–10s to display its prompt
-  (claude shows ``╭❯>``, codex shows ``codex>``, Cursor Agent often shows
-  ``agent>`` / ``>``, bash shows ``$``).
+  (claude shows ``╭❯>``, modern codex shows a ``>_ OpenAI Codex`` banner and a
+  ``›`` composer, Cursor Agent often shows ``agent>`` / ``>``, bash shows
+  ``$``).
 * If we ``runtime inject`` (paste-buffer + Enter) before the prompt is up,
   the dispatch text is dropped on the floor — the CLI is still in startup.
 * For OpenClaw we ``tmux send-keys`` into a bare bash; we still need to
@@ -35,7 +36,11 @@ logger = get_logger("scheduler.tmux_ready")
 # to *know it's at a prompt*, not parse the prompt details.
 _AGENT_PROMPT_PATTERNS = [
     re.compile(r"╭❯>"),                 # claude
-    re.compile(r"^codex>", re.M),       # codex
+    re.compile(r"^codex>", re.M),       # codex (legacy prompt)
+    # Modern codex TUI (>=0.x) shows no `codex>`; it renders a boxed banner
+    # ("│ >_ OpenAI Codex (vX.Y.Z)") and a `›` (U+203A) composer prompt.
+    # Match either so wait_tui_ready doesn't time out → session_prewarm_failed.
+    re.compile(r"OpenAI Codex \(v"),    # codex (modern banner)
     re.compile(r"^agent>", re.M),       # cursor agent
     re.compile(r"^>\s*$", re.M),        # cursor agent (minimal prompt)
     re.compile(r"gemini>"),             # gemini
@@ -45,7 +50,7 @@ _AGENT_PROMPT_PATTERNS = [
     re.compile(r"opencode\s*>"),        # opencode
     re.compile(r"^\? "),                # nanobot
     re.compile(r"⚕"),                   # hermes (medical-staff icon in status line)
-    re.compile(r"⏵|❯|⟫"),               # generic fancy prompts (also covers hermes input)
+    re.compile(r"⏵|❯|⟫|›"),             # generic fancy prompts (› = codex/modern composer)
 ]
 _AGENT_FATAL_PATTERNS = [
     # Typical resume failure when a TUI runtime has no persisted conversation.

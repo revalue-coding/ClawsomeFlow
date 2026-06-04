@@ -45,9 +45,19 @@ export function useSessionBackedState<T>(
 ): [T, Dispatch<SetStateAction<T>>] {
   const storageKey = useMemo(() => `${SESSION_KEY_PREFIX}${key}`, [key]);
   const isClosed = options?.isClosed;
+  // Callers almost always pass an inline `isClosed` arrow, so its identity
+  // changes every render. Keep it behind a ref so the returned setter can be
+  // referentially stable — otherwise any effect that lists the setter in its
+  // dependency array re-runs on every render. See the decompose modal, where
+  // that churn cancelled the in-flight request before its id was ever stored.
+  const isClosedRef = useRef(isClosed);
   const initialRef = useRef(initialValue);
   const [value, setValue] = useState<T>(() => readSessionValue(storageKey, initialValue));
   const valueRef = useRef(value);
+
+  useEffect(() => {
+    isClosedRef.current = isClosed;
+  }, [isClosed]);
 
   useEffect(() => {
     valueRef.current = value;
@@ -67,10 +77,10 @@ export function useSessionBackedState<T>(
           ? (nextAction as (prevState: T) => T)(prev)
           : nextAction;
       valueRef.current = next;
-      persistSessionValue(storageKey, next, isClosed);
+      persistSessionValue(storageKey, next, isClosedRef.current);
       setValue(next);
     },
-    [isClosed, storageKey],
+    [storageKey],
   );
 
   return [value, setSessionValue];

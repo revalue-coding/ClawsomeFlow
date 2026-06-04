@@ -29,7 +29,8 @@
   <a href="#-core-features">Core Features</a> ·
   <a href="#-why-clawsomeflow">Why ClawsomeFlow</a> ·
   <a href="#-contributor-local-deploy-and-test">Contributor Local Deploy</a> ·
-  <a href="#-roadmap">Roadmap</a>
+  <a href="#-roadmap">Roadmap</a> ·
+  <a href="#-wechat-community">WeChat Community</a>
 </p>
 
 <p>
@@ -127,6 +128,7 @@ ClawsomeFlow is built on top of **ClawTeam**.
 | **Task model** | Kanban + dependency chain | DAG Flow compilation, Leader summarizes and converges |
 | **OpenClaw adaptation** | Supported as an optional CLI Agent | Deeply adapted, resolving session and workspace concurrency conflicts |
 | **Failure & guardrails** | Basic lifecycle protocol | Human checkpoints / rollback / complaint-loop / entropy management |
+| **Skill configuration** | Requires extra skill setup on the Agent platform | No extra skill configuration needed, works out of the box |
 | **Usage form** | CLI + MCP + monitoring dashboard | Web UI + CLI, full-flow governance in natural language |
 
 ---
@@ -198,6 +200,27 @@ bash scripts/deploy-contributor.sh
 | **P1** | **Broader Agent platform support** — onboard more CLI Agent runtimes and keep pace with emerging ecosystems, so any Agent can join the same graph. | 📅 Planned |
 | **P2** | **Mobile & server mode** — a mobile-friendly console plus multi-user server deployment, to monitor and intervene in Runs anywhere. | 💡 Exploring |
 | **P3** | **Cloud & SSH Agents** — drive Agents on remote / cloud hosts over SSH, scaling collaboration beyond a single machine. | 💡 Exploring |
+
+---
+
+## 🙏 Acknowledgements
+
+ClawsomeFlow stands on the shoulders of giants.
+
+- **[ClawTeam](https://github.com/)** — the spark that inspired this project. Its multi-agent protocol (team / task / mailbox / workspace) is the foundation ClawsomeFlow orchestrates on top of. Thank you for showing what agent self-organization can be.
+- **Our Agent platform teammates** — the real "team members" that do the work inside every Flow: **Claude**, **OpenClaw**, **Codex**, **Gemini**, and the growing roster of CLI Agents. ClawsomeFlow is only as clawsome as the agents it coordinates.
+
+---
+
+## 💬 WeChat Community
+
+If ClawsomeFlow helps you coordinate your Agent team, **please give us a ⭐ Star** — it genuinely keeps us going.
+
+Got questions about using ClawsomeFlow, or curious about building an **OPC (One-Person Company)**? Come hang out with us — scan the QR code below to join our WeChat discussion group:
+
+<p align="center">
+  <img src="./docs/assets/wechat-group-qr.png" alt="ClawsomeFlow WeChat Group" width="240" />
+</p>
 
 ---
 

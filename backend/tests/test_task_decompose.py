@@ -480,6 +480,86 @@ async def test_start_dispatches_cursor_leader_with_force_flags(
 
 
 @pytest.mark.asyncio
+async def test_start_dispatches_codex_leader_with_exec_flags(
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = Path("/tmp/leader-codex-repo")
+    repo_path.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, Any] = {}
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            payload = {
+                "agents": [{
+                    "id": "leader-codex",
+                    "kind": "codex",
+                    "repo": str(repo_path),
+                    "targetBranch": "main",
+                    "isLeader": True,
+                }],
+                "tasks": [{
+                    "id": "summary",
+                    "ownerAgentId": "leader-codex",
+                    "subject": "Summary",
+                    "description": "Produce final summary.",
+                    "dependsOn": [],
+                    "isLeaderSummary": True,
+                }],
+            }
+            return json.dumps(payload).encode("utf-8"), b""
+
+        def kill(self):
+            return None
+
+    async def _fake_spawn(*argv, **kwargs):
+        seen["argv"] = argv
+        seen["cwd"] = kwargs.get("cwd")
+        return _Proc()
+
+    monkeypatch.setattr(svc.asyncio, "create_subprocess_exec", _fake_spawn)
+
+    res = await svc.start_decompose_request(
+        goal="Build a QA review flow.",
+        leader_agent_id="leader-codex",
+        leader_kind="codex",
+        leader_repo=str(repo_path),
+        leader_target_branch="main",
+        user="alice",
+        api_base="http://127.0.0.1:17017",
+        existing_agents=[{
+            "id": "leader-codex",
+            "kind": "codex",
+            "repo": str(repo_path),
+            "targetBranch": "main",
+            "isLeader": True,
+        }],
+        bridge_factory=lambda cfg: _FailingBridge(),
+        background=False,
+    )
+    row = svc.get_request(res.request_id)
+    assert row is not None
+    assert row.status == TaskDecomposeStatus.succeeded
+    assert row.result_tasks is not None
+    assert row.result_tasks[0]["ownerAgentId"] == "leader-codex"
+
+    argv = list(seen["argv"])
+    assert argv[:3] == [
+        "codex",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "exec",
+    ]
+    assert "claude" not in argv[0]
+    msg = str(argv[-1])
+    assert "non-OpenClaw leader runtime" in msg
+    assert "Respond with exactly one JSON object" in msg
+    assert "leader-codex" in msg
+    assert seen["cwd"] == str(repo_path)
+
+
+@pytest.mark.asyncio
 async def test_start_non_openclaw_marks_failed_on_invalid_proposal_output(
     fake_openclaw_home: Path,
     monkeypatch: pytest.MonkeyPatch,

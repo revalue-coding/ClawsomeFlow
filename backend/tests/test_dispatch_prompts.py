@@ -153,24 +153,62 @@ def test_worker_dispatch_openclaw_skip_does_not_merge() -> None:
 
 
 def test_leader_completion_steps_focus_on_deliverable_without_merge_guidance() -> None:
-    """Leader prompt should focus on deliverable content, not merge guidance."""
+    """Non-OpenClaw (TUI) leader: deliverable in worktree, NO my-desktop convention,
+    and NO baseline-workspace wording anywhere (that drove the pre-copy bug)."""
     msg = prompts.build_leader_dispatch(_ctx(
-        agent=_agent(id="leader", leader=True),
+        agent=_agent(id="leader", leader=True),  # default kind=claude (TUI)
         task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
     ))
     assert "## Merge Suggestions" not in msg
     assert "merge suggestion" not in msg.lower()
-    assert "place it under `my-desktop/` using a fitting folder" in msg
+    # TUI agents work directly in the repo worktree — no my-desktop/ dumping.
+    assert "my-desktop/" not in msg
+    assert "Write every output inside your worktree (`/tmp/wt/alice`)" in msg
     assert "keep worker files under each worker's own path" in msg
     assert "exists before sending (e.g. `test -f <absolute-path>`)." in msg
     assert "git commit" in msg
     assert "clawteam inbox send" in msg
     assert "leader final reply:" in msg
     assert "VERY IMPORTANT: you MUST execute" in msg
-    assert "Put long prose in deliverable files" in msg
+    assert "1. Review all worker reports and worktree states above." not in msg
+    assert "Focus on solution outcome, risks, and verification evidence" not in msg
+    assert "Do NOT copy, move, or write any file outside it" not in msg
+    assert "Those paths MUST be inside your worktree" not in msg
+    assert "ClawsomeFlow can surface it in Run detail" not in msg
+    assert "1. In `/tmp/wt/alice`, **produce the final deliverable**:" in msg
+    assert "2. `cd /tmp/wt/alice && git add -A && git commit -m 'task ts: leader summary'`." in msg
+    assert "(required — keep the literal prefix `leader final reply:`.)" in msg
+    # No baseline-workspace wording at all for a TUI leader (worker_worktrees empty
+    # here, so the only possible source would be the completion steps we fixed).
+    assert "in the corresponding baseline workspace" not in msg
+    assert "baseline" not in msg.lower()
     assert "machine-safe" not in msg
     assert "ASCII punctuation as separators" not in msg
     assert msg.find("clawteam inbox send") < msg.find("clawteam task update")
+
+
+def test_leader_completion_steps_openclaw_has_my_desktop_and_no_baseline_ref() -> None:
+    """OpenClaw leader: keeps the my-desktop/ convention, but the final-reply step
+    must NOT tell it to reference baseline-workspace paths (OpenClaw also merges
+    only at the satisfaction stage)."""
+    msg = prompts.build_leader_dispatch(_ctx(
+        agent=_agent(
+            id="leader", leader=True, kind=AgentKind.openclaw,
+            merge=MergeStrategy.agent_self,
+        ),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+    ))
+    # my-desktop/ is the OpenClaw-only distinction.
+    assert "`/tmp/wt/alice/my-desktop/`" in msg
+    assert "1. Review all worker reports and worktree states above." not in msg
+    assert "Focus on solution outcome, risks, and verification evidence" not in msg
+    assert "Do NOT copy, move, or write any file outside it" not in msg
+    assert "Those paths MUST be inside your worktree" not in msg
+    assert "ClawsomeFlow can surface it in Run detail" not in msg
+    assert "1. In `/tmp/wt/alice`, **produce the final deliverable**:" in msg
+    assert "(required — keep the literal prefix `leader final reply:`.)" in msg
+    # The harmful "reference baseline workspace paths" wording must be gone.
+    assert "in the corresponding baseline workspace" not in msg
 
 
 def test_worker_dispatch_includes_task_completion_steps() -> None:

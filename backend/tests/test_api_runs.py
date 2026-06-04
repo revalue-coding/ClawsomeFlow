@@ -872,6 +872,34 @@ def test_dismiss_pending_merge(
     assert {p["agent_id"] for p in refreshed.pending_merges} == {"bob"}
 
 
+def test_dismiss_pending_merge_clears_preserve_worktree_flag(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id, status=RunStatus.awaiting_user_review,
+        pending=[{"agent_id": "alice", "branch": "b1", "diff_summary": {}}],
+        inputs={"_csflow_preserve_worktree_agent_ids": ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    async def fake_cleanup(**_kw):
+        return True
+
+    monkeypatch.setattr(
+        runs_mod,
+        "cleanup_non_openclaw_workspace_after_review_decision",
+        fake_cleanup,
+    )
+    r = app_client.post(
+        f"/api/runs/{run.id}/dismiss-merge", json={"agentId": "alice"},
+    )
+    assert r.status_code == 200, r.text
+    refreshed = get_storage().run_get(run.id)
+    assert refreshed is not None
+    assert "_csflow_preserve_worktree_agent_ids" not in (refreshed.inputs or {})
+
+
 def test_dismiss_pending_merge_unknown_agent_404(app_client: TestClient) -> None:
     flow = _make_flow()
     run = _make_run(
@@ -941,8 +969,19 @@ def test_merge_calls_perform_manual_merge(
         captured["terminalize"] = kw.get("terminalize_when_resolved")
         return True, "merged ok"
 
+    async def fake_cleanup(*, run, agent_id, storage, **kw):
+        del storage, kw
+        captured["cleanup_run_id"] = run.id
+        captured["cleanup_agent_id"] = agent_id
+        return True
+
     from app.api import runs as runs_mod
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
+    monkeypatch.setattr(
+        runs_mod,
+        "cleanup_non_openclaw_workspace_after_review_decision",
+        fake_cleanup,
+    )
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
     assert r.status_code == 200, r.text
     assert r.json() == {
@@ -950,6 +989,11 @@ def test_merge_calls_perform_manual_merge(
     }
     assert captured["agent_id"] == "alice"
     assert captured["terminalize"] is False
+    assert captured["cleanup_run_id"] == run.id
+    assert captured["cleanup_agent_id"] == "alice"
+    refreshed = get_storage().run_get(run.id)
+    assert refreshed is not None
+    assert "_csflow_preserve_worktree_agent_ids" not in (refreshed.inputs or {})
 
 
 def test_merge_conflict_returns_reason_and_manual_resolution_guidance(
@@ -967,8 +1011,19 @@ def test_merge_conflict_returns_reason_and_manual_resolution_guidance(
         storage.run_update(run)
         return False, "CONFLICT: content conflict in README.md"
 
+    cleanup_called = {"value": False}
+
+    async def fake_cleanup(**_kw):
+        cleanup_called["value"] = True
+        return True
+
     from app.api import runs as runs_mod
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
+    monkeypatch.setattr(
+        runs_mod,
+        "cleanup_non_openclaw_workspace_after_review_decision",
+        fake_cleanup,
+    )
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -980,6 +1035,8 @@ def test_merge_conflict_returns_reason_and_manual_resolution_guidance(
     assert refreshed is not None
     assert refreshed.status == RunStatus.awaiting_user_complaint
     assert refreshed.inputs.get("_csflow_post_complaint_final_status") == "completed_with_conflicts"
+    assert refreshed.inputs.get("_csflow_preserve_worktree_agent_ids") == ["alice"]
+    assert cleanup_called["value"] is False
 
 
 def test_merge_environment_error_returns_repo_guidance(
@@ -997,8 +1054,19 @@ def test_merge_environment_error_returns_repo_guidance(
         storage.run_update(run)
         return False, "workspace metadata missing repo_root for team='x', agent='alice'"
 
+    cleanup_called = {"value": False}
+
+    async def fake_cleanup(**_kw):
+        cleanup_called["value"] = True
+        return True
+
     from app.api import runs as runs_mod
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
+    monkeypatch.setattr(
+        runs_mod,
+        "cleanup_non_openclaw_workspace_after_review_decision",
+        fake_cleanup,
+    )
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -1010,6 +1078,8 @@ def test_merge_environment_error_returns_repo_guidance(
     assert refreshed is not None
     assert refreshed.status == RunStatus.awaiting_user_complaint
     assert refreshed.inputs.get("_csflow_post_complaint_final_status") == "completed_with_conflicts"
+    assert refreshed.inputs.get("_csflow_preserve_worktree_agent_ids") == ["alice"]
+    assert cleanup_called["value"] is False
 
 
 def test_merge_failed_run_pending_resolved_keeps_terminal_and_triggers_cleanup(
@@ -1033,14 +1103,23 @@ def test_merge_failed_run_pending_resolved_keeps_terminal_and_triggers_cleanup(
         captured["run_id"] = run.id
 
     from app.api import runs as runs_mod
+    async def fake_review_cleanup(**_kw):
+        return True
+
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
     monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_cleanup)
+    monkeypatch.setattr(
+        runs_mod,
+        "cleanup_non_openclaw_workspace_after_review_decision",
+        fake_review_cleanup,
+    )
 
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
     assert r.status_code == 200, r.text
     refreshed = get_storage().run_get(run.id)
     assert refreshed.status == RunStatus.failed
     assert refreshed.pending_merges is None
+    assert "_csflow_preserve_worktree_agent_ids" not in (refreshed.inputs or {})
     assert captured["run_id"] == run.id
 
 
@@ -1067,8 +1146,16 @@ def test_merge_review_with_failed_terminal_hint_resolves_to_failed(
         captured["run_id"] = run.id
 
     from app.api import runs as runs_mod
+    async def fake_review_cleanup(**_kw):
+        return True
+
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
     monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_cleanup)
+    monkeypatch.setattr(
+        runs_mod,
+        "cleanup_non_openclaw_workspace_after_review_decision",
+        fake_review_cleanup,
+    )
 
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
     assert r.status_code == 200, r.text
@@ -1076,6 +1163,7 @@ def test_merge_review_with_failed_terminal_hint_resolves_to_failed(
     assert refreshed.status == RunStatus.failed
     assert refreshed.pending_merges is None
     assert (refreshed.inputs or {}).get("_csflow_post_review_terminal_status") is None
+    assert "_csflow_preserve_worktree_agent_ids" not in (refreshed.inputs or {})
     assert captured["run_id"] == run.id
 
 

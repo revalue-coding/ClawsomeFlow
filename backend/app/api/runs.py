@@ -120,6 +120,7 @@ _MERGE_DECISION_ALLOWED = {
 
 _POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
 _POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"
+_PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -525,6 +526,33 @@ def _consume_post_review_terminal_status(run: FlowRun) -> RunStatus | None:
     if parsed in {RunStatus.complaint_failed, RunStatus.failed, RunStatus.aborted}:
         return parsed
     return None
+
+
+def _read_preserved_worktree_agent_ids(run: FlowRun) -> set[str]:
+    raw = (run.inputs or {}).get(_PRESERVE_WORKTREE_AGENT_IDS_KEY)
+    if not isinstance(raw, list):
+        return set()
+    out: set[str] = set()
+    for item in raw:
+        aid = str(item or "").strip()
+        if aid:
+            out.add(aid)
+    return out
+
+
+def _write_preserved_worktree_agent_ids(
+    *,
+    run: FlowRun,
+    storage: StorageBackend,
+    agent_ids: set[str],
+) -> None:
+    merged_inputs = dict(run.inputs or {})
+    if agent_ids:
+        merged_inputs[_PRESERVE_WORKTREE_AGENT_IDS_KEY] = sorted(agent_ids)
+    else:
+        merged_inputs.pop(_PRESERVE_WORKTREE_AGENT_IDS_KEY, None)
+    run.inputs = merged_inputs
+    storage.run_update(run)
 
 
 def _controller_for_run(
@@ -1042,6 +1070,24 @@ async def merge_pending(
         storage=storage,
         terminalize_when_resolved=False,
     )
+    preserved_agents = _read_preserved_worktree_agent_ids(run)
+    if ok:
+        preserved_agents.discard(payload.agent_id)
+        # Keep only failed manual-merge worktrees. Successful decisions can be
+        # cleaned immediately per-agent, instead of waiting for terminal tail
+        # cleanup (which may intentionally preserve failed worktrees).
+        await cleanup_non_openclaw_workspace_after_review_decision(
+            run=run,
+            agent_id=payload.agent_id,
+            storage=storage,
+        )
+    else:
+        preserved_agents.add(payload.agent_id)
+    _write_preserved_worktree_agent_ids(
+        run=run,
+        storage=storage,
+        agent_ids=preserved_agents,
+    )
     if run.pending_merges is None:
         post_review_terminal = _consume_post_review_terminal_status(run)
         if post_review_terminal is not None:
@@ -1123,6 +1169,13 @@ async def dismiss_pending_merge(
             status_code=404,
         )
     run.pending_merges = new_pending or None
+    preserved_agents = _read_preserved_worktree_agent_ids(run)
+    preserved_agents.discard(payload.agent_id)
+    _write_preserved_worktree_agent_ids(
+        run=run,
+        storage=storage,
+        agent_ids=preserved_agents,
+    )
     await cleanup_non_openclaw_workspace_after_review_decision(
         run=run,
         agent_id=payload.agent_id,

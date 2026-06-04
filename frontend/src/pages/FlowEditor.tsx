@@ -3552,6 +3552,7 @@ function DecomposeModal({
     setCancelling(false);
     setDispatchStarted(true);
     setElapsedSec(0);
+    const resultLanguage = i18n.resolvedLanguage?.startsWith("zh") ? "zh" : "en";
     let cancelled = false;
     (async () => {
       try {
@@ -3565,7 +3566,7 @@ function DecomposeModal({
             : null,
           existingAgents: rowsToHintAgents(existingRows),
           existingTasks: rowsToHintTasks(existingRows),
-          resultLanguage: i18n.resolvedLanguage?.startsWith("zh") ? "zh" : "en",
+          resultLanguage,
         });
         if (cancelled) return;
         setRequestId(r.requestId);
@@ -3585,8 +3586,6 @@ function DecomposeModal({
     leaderId,
     leaderRepo,
     leaderTargetBranch,
-    existingRows,
-    i18n.resolvedLanguage,
     requestId,
     retrySeq,
     setRequestId,
@@ -3677,10 +3676,9 @@ function DecomposeModal({
   }
 
   const badgeStatus = timedOutLocally ? "timed_out" : status?.status ?? null;
-  const shouldConfirmClose =
-    (dispatchStarted || Boolean(requestId)) && status?.status !== "succeeded";
-  const cancelActionVisible = Boolean(requestId) && (timedOutLocally || !statusTerminal);
-  const cancelActionEnabled = cancelActionVisible && !cancelling;
+  const cancelActionVisible = (dispatchStarted || Boolean(requestId)) && !statusTerminal;
+  const cancelActionEnabled = cancelActionVisible && Boolean(requestId) && !cancelling;
+  const shouldConfirmClose = cancelActionVisible;
 
   function requestModalClose() {
     if (!shouldConfirmClose) {
@@ -3823,9 +3821,7 @@ function DecomposeModal({
                   void confirmModalClose();
                 }}
               >
-                {cancelActionEnabled
-                  ? t("flowEditor.decompose.cancelDecompose")
-                  : t("common.close")}
+                {t("flowEditor.decompose.confirmCancel")}
               </button>
             </div>
           </div>
@@ -3836,7 +3832,7 @@ function DecomposeModal({
             <button
               type="button"
               className="btn-outline"
-              onClick={() => void cancelDecompose()}
+              onClick={() => setConfirmCloseOpen(true)}
               disabled={!cancelActionEnabled}
             >
               {cancelling ? t("flowEditor.decompose.cancelling") : t("flowEditor.decompose.cancelDecompose")}

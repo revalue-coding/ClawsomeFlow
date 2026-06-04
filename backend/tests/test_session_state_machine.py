@@ -190,16 +190,18 @@ def test_tmux_live_session_registers_claude_with_bypass_permissions_flags() -> N
     session = TmuxLiveSession(
         agent=claude_agent, team_name="csflow-x", run_id="run-x",
     )
+    # NOTE: --dangerously-skip-permissions is injected by ClawTeam's
+    # DirectCliAdapter under --skip-permissions (non-root); we must NOT repeat
+    # it here or it appears twice in the spawned argv.
     assert session._spawn_cmd == [
-        "claude", "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions",
+        "claude", "--permission-mode", "bypassPermissions",
     ]
     assert session._resume_cmd == [
-        "claude", "--permission-mode", "bypassPermissions",
-        "--dangerously-skip-permissions", "--continue",
+        "claude", "--permission-mode", "bypassPermissions", "--continue",
     ]
 
 
-def test_tmux_live_session_registers_codex_with_yolo_equivalent_flag() -> None:
+def test_tmux_live_session_registers_codex_without_duplicate_bypass_flag() -> None:
     from app.scheduler.sessions.tmux_live import TmuxLiveSession
 
     codex_agent = FlowAgent(
@@ -210,10 +212,25 @@ def test_tmux_live_session_registers_codex_with_yolo_equivalent_flag() -> None:
     session = TmuxLiveSession(
         agent=codex_agent, team_name="csflow-x", run_id="run-x",
     )
-    assert session._spawn_cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
-    assert session._resume_cmd == [
-        "codex", "--dangerously-bypass-approvals-and-sandbox", "resume", "--last",
+    # --dangerously-bypass-approvals-and-sandbox is injected by ClawTeam's
+    # DirectCliAdapter under --skip-permissions. Repeating it here made codex's
+    # clap parser reject the spawn ("cannot be used multiple times"), so the
+    # command map must NOT carry it.
+    #
+    # The `-c` overrides (a) silence codex's startup model-migration / NUX
+    # prompts so the unattended TUI reaches the composer instead of blocking on
+    # an interactive menu (session_prewarm_failed), and (b) disable paste-burst
+    # so ClawTeam's "paste-buffer + Enter" dispatch actually submits the prompt
+    # instead of leaving it unsent in the composer.
+    ov = [
+        "-c", "notice.model_migrations={}",
+        "-c", "tui.model_availability_nux={}",
+        "-c", "disable_paste_burst=true",
     ]
+    assert session._spawn_cmd == ["codex", *ov]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in session._spawn_cmd
+    assert session._resume_cmd == ["codex", *ov, "resume", "--last"]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in session._resume_cmd
 
 
 def test_tmux_live_session_registers_cursor_with_force_flags() -> None:
