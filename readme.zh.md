@@ -62,8 +62,6 @@ ClawsomeFlow 把零散的 AI Agent 变成一套可控的工程系统——从第
 |---|---|---|
 | 每个 Agent 都在独立的工作区与分支中运行——并行而不串扰、不误写，内置 checkpoint / merge / cleanup。 | 每一次 dispatch / completion / failure 都记录为 RunEvent——每次运行都可追溯、可回放、可审阅，绝不是黑盒。 | 对结果不满意？发起一次「投诉」，系统会反思、返工，并把经验写回——让下一次比上一次更好。 |
 
-### 🦞 沿用自 ClawTeam 的群体智能基座
-
 ClawsomeFlow继承了Clawteam如下特色：
 
 - **Git Worktree 工作区隔离**：每个 Agent 拥有独立分支与目录，并行互不干扰，支持 checkpoint / merge / cleanup。
