@@ -3,6 +3,10 @@
 <h1>⚡ ClawsomeFlow ⚡</h1>
 
 <p>
+  🌐 <a href="https://clawsomeflow.com"><b>clawsomeflow.com</b></a>
+</p>
+
+<p>
   <img src="./docs/assets/readme-hero.svg" alt="Make your Multi-agent Workflow Clawsome" width="960" />
 </p>
 
@@ -11,13 +15,7 @@
   <a href="./readme.zh.md">简体中文</a>
 </p>
 
-<p>Describe your goal in natural language, and turn multi-agent collaboration into a controllable, observable, convergent engineering system.</p>
-
-<p>
-  ClawsomeFlow is a vertical-domain <b>Agent workflow orchestration platform</b>: define tasks as a DAG Flow,
-  and let an async scheduler actively drive multiple Agents to collaborate in parallel, with built-in engineering
-  guardrails such as <b>isolation / rollback / complaint-loop / entropy management</b>.
-</p>
+<p><b>Turn your goal into a task flow, and let an active scheduler drive a team of AI agents to execute it — parallel, isolated, observable, and convergent. You orchestrate the work; ClawsomeFlow keeps it under control.</b></p>
 
 <p>
   <b>Full compatibility with</b> OpenClaw, Claude Code, Codex, Cursor, Hermes and other CLI Agents.
@@ -27,6 +25,7 @@
   <a href="#-quick-start">Quick Start</a> ·
   <a href="#-news">News</a> ·
   <a href="#-core-features">Core Features</a> ·
+  <a href="#%EF%B8%8F-how-it-works">How It Works</a> ·
   <a href="#-why-clawsomeflow">Why ClawsomeFlow</a> ·
   <a href="#-contributor-local-deploy-and-test">Contributor Local Deploy</a> ·
   <a href="#-roadmap">Roadmap</a> ·
@@ -53,25 +52,35 @@
 
 ## ✨ Core Features
 
-Building on top of ClawTeam's swarm-intelligence capabilities, ClawsomeFlow adds the two missing engineering layers — **orchestration + product**:
+ClawsomeFlow turns scattered AI agents into a controllable engineering system — from the first instruction to the final, reviewable result.
 
-| 🌳 Deep OpenClaw Adaptation | 🧠 AI + Precise Orchestration | 🗣️ Get Everything Done in Natural Language | 🔄 Complaint-Loop Mechanism |
-|---|---|---|---|
-| For OpenClaw's blurry session boundaries and workspace concurrency conflicts under multi-task parallelism, we apply dual session-and-directory isolation and fold recovery paths into a standard state machine. | Take control flow back from the Prompt into code: the scheduler decides dispatch, retry, timeout and convergence — behavior is controllable, with significantly fewer wasted tokens. | Flow definition, Agent creation, task orchestration, and runtime intervention can all be done in natural language via the Web UI / CLI. | A Run supports the "user complaint → reflective processing → write back experience" loop, so the system keeps self-improving. |
+| 🗣️ Get it done in natural language | 🧠 Precise orchestration, not guesswork | 🚀 Many agents, one graph |
+|---|---|---|
+| Define flows, create agents, orchestrate tasks, and step in at runtime — all by describing what you want. No glue code, no SDK wrangling. | Control flow lives in code, not in a prompt. The scheduler decides dispatch, retry, timeout and convergence — so behavior is predictable and tokens aren't wasted. | Lay out your work as a DAG and let multiple agents collaborate in parallel; a leader summarizes and converges the results into one deliverable. |
 
-| 🚀 Multi-Agent Collaboration | 📊 Enterprise-Grade Observability | 🔐 Isolation & Governance Together | 🧩 Compatible with Existing Ecosystems |
-|---|---|---|---|
-| Supports OpenClaw / Claude / Codex / Cursor / Hermes collaborating in the same graph. | Every dispatch / completion / failure is recorded as a RunEvent — auditable, replayable, billable. | Three-layer isolation across team / session / worktree, avoiding cross-talk and accidental writes. | We don't reinvent the protocol layer; we reuse ClawTeam CLI + MCP and its swarm collaboration and monitoring. |
+| 🔐 Isolation & rollback by default | 📊 Observability you can audit | 🔄 A system that improves itself |
+|---|---|---|
+| Every agent runs in its own isolated workspace and branch — parallel work without cross-talk or accidental writes, with checkpoint / merge / cleanup built in. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
 
 ### 🦞 The Swarm-Intelligence Foundation Inherited from ClawTeam
 
-ClawsomeFlow stands on the shoulders of [ClawTeam](https://github.com/HKUDS/ClawTeam), faithfully inheriting its swarm-collaboration core:
+ClawsomeFlow inherits the following capabilities from ClawTeam:
 
-- **Self-organizing Agent collaboration**: the Leader dispatches, Workers self-report status and results, CLI Agents are plug-and-play with no custom SDK required.
 - **Git Worktree workspace isolation**: each Agent has an independent branch and directory, running in parallel without interference, with checkpoint / merge / cleanup support.
 - **Inter-Agent messaging**: point-to-point inbox and broadcast, so team members share progress in real time.
 
-> On top of this, ClawsomeFlow layers in **deep OpenClaw adaptation, DAG orchestration scheduling, failure convergence, human guardrails, Web productization and multi-user governance**.
+> On top of this, ClawsomeFlow adds **AI combined with precise orchestration, deep OpenClaw adaptation, failure convergence, human guardrails and Web productization**.
+
+---
+
+## 🛠️ How It Works
+
+From a sentence to a shipped result. You stay in charge of the goal; ClawsomeFlow handles the coordination, the parallelism, and the recovery when things go wrong.
+
+1. **Describe your goal** — Tell ClawsomeFlow what you want in plain language, or compose a Flow visually as a graph of tasks and dependencies.
+2. **Agents run in parallel** — The scheduler actively dispatches ready tasks to the right agents, each in its own isolated workspace, and drives them to completion.
+3. **Watch, steer, recover** — Follow every step live. Retry, skip or abort with clear strategies, and approve results at human checkpoints before anything lands.
+4. **Converge & deliver** — A leader merges the parallel work into one reviewed deliverable — and the run history stays fully auditable.
 
 ---
 
@@ -137,6 +146,7 @@ ClawsomeFlow is built on top of **ClawTeam**.
 
 ### Install
 
+Linux/macOS
 ```bash
 curl -fsSL https://clawsomeflow.com/install.sh | bash
 
