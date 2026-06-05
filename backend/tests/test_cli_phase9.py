@@ -852,11 +852,36 @@ def test_status_runs_and_includes_pid_state(runner: CliRunner) -> None:
 # ── stop with no PID file ---------------------------------------------
 
 
-def test_stop_no_pid_returns_zero(runner: CliRunner) -> None:
+def test_stop_no_pid_returns_zero(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.cli import stop as stop_mod
+
+    # Keep the port-reclaim fallback from probing the real host port.
+    monkeypatch.setattr(stop_mod, "reclaim_stale_port_listeners", lambda _port: [])
     result = runner.invoke(app, ["stop"])
     assert result.exit_code == 0
     out = result.stdout.lower()
     assert "nothing to stop" in out or "stopped managed user service" in out
+
+
+def test_stop_reclaims_orphaned_dev_listener_without_pid(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No managed service + no PID file, but an orphaned dev uvicorn on the port
+    (left by `deploy.sh source`) is reclaimed as a final safety net."""
+    from app.cli import stop as stop_mod
+
+    monkeypatch.setattr(stop_mod, "stop_if_running", lambda: False)
+    monkeypatch.setattr(stop_mod, "read_pid", lambda: None)
+    monkeypatch.setattr(stop_mod, "reclaim_stale_port_listeners", lambda _port: [12345])
+
+    result = runner.invoke(app, ["stop"])
+    assert result.exit_code == 0
+    out = result.stdout.lower()
+    assert "reclaimed" in out
+    assert "12345" in result.stdout
+    assert "nothing to stop" not in out
 
 
 # ── doctor (does not require a running backend) -----------------------

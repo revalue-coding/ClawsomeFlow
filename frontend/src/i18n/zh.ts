@@ -85,7 +85,8 @@ const zh = {
     updateInProgress: "升级中…",
     updateRestartHint: "服务将在约 1 分钟后重启，升级完成后本页面会自动刷新。",
     updateDone: "已升级到 v{{version}}，正在刷新…",
-    updateFailed: "升级启动失败，请尝试手动执行升级命令。",
+    updateFailed: "升级启动失败，请手动执行以下升级命令：",
+    updateFailedCommand: "csflow upgrade",
     updateReload: "立即刷新",
   },
   flowList: {
