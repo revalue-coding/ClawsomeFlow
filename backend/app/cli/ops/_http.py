@@ -28,7 +28,13 @@ def _base() -> str:
 def _headers() -> dict[str, str]:
     cfg = cfg_mod.load_config()
     user = os.environ.get("CSFLOW_USER") or cfg.default_user
-    return {"X-CSFLOW-User": user}
+    headers = {"X-CSFLOW-User": user}
+    # Same-host CLI: present the api_token so we pass the /api guard when one is
+    # configured (env override wins for tunneled / non-default setups).
+    token = os.environ.get("CSFLOW_API_TOKEN") or getattr(cfg, "api_token", None)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _client() -> httpx.Client:

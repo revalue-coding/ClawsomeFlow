@@ -84,6 +84,18 @@ def ensure_secret_initialised(config: Config) -> Config:
     return new_cfg
 
 
+def ensure_api_token_initialised(config: Config) -> Config:
+    """Ensure the config has a strong random ``api_token`` for the public /api
+    guard (OpenClaw gateway paradigm: loopback bind + bearer token).
+
+    Mutates a copy and returns it; callers should ``save_config(new_cfg)``.
+    Idempotent: returns the same object untouched if already set.
+    """
+    if getattr(config, "api_token", None):
+        return config
+    return config.model_copy(update={"api_token": secrets.token_urlsafe(32)})
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Encoding helpers
 # ──────────────────────────────────────────────────────────────────────
@@ -171,6 +183,7 @@ def verify_token(token: str, *, config: Config | None = None) -> TokenClaims:
 __all__ = [
     "InvalidToken",
     "TokenClaims",
+    "ensure_api_token_initialised",
     "ensure_secret_initialised",
     "mint_token",
     "verify_token",

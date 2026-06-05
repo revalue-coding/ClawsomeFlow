@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Callable
 
 from app import __version__, paths
-from app.config import Config, load_config
+from app.config import Config, load_config, save_config
 from app.logging_setup import get_logger
 
 logger = get_logger("upgrade")
@@ -244,6 +244,28 @@ def run_upgrade(
         from_version=marker, to_version=target,
         is_first_install=report.is_first_install,
     )
+
+    # 0a. Private secrets: ensure the config has both the internal HMAC secret
+    # and the public-API ``api_token``. Done here, unconditionally and early, so
+    # upgrade-only users (who may have a pre-token config.json) end up identical
+    # to fresh deploys — the /api guard works for them too. Idempotent: a no-op
+    # when both are already present. Secrets live only in the private
+    # ~/.clawsomeflow/config.json (gitignored), never committed.
+    try:
+        from app.integrations.internal_token import (
+            ensure_api_token_initialised,
+            ensure_secret_initialised,
+        )
+
+        cfg_with_secrets = ensure_secret_initialised(cfg)
+        cfg_with_secrets = ensure_api_token_initialised(cfg_with_secrets)
+        if cfg_with_secrets is not cfg:
+            save_config(cfg_with_secrets)
+            cfg = cfg_with_secrets
+            logger.info("upgrade_secrets_initialised")
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.errors.append(f"secrets init: {exc}")
+        logger.exception("upgrade_secrets_init_failed", error=str(exc))
 
     # 0. Editable-source frontend build (optional).
     if include_frontend_build:

@@ -413,3 +413,39 @@ def fake_config(tmp_clawsomeflow_home: Path) -> Config:
     """Minimal valid Config — no on-disk side effects beyond what tests opt into."""
     cfg = Config()
     return cfg
+
+
+def test_run_upgrade_generates_api_token_for_pretoken_config(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """Upgrade-only users (pre-token config) must end up with an api_token,
+    independent of the OpenClaw step (here disabled + stubbed)."""
+    from app.config import load_config
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+    assert fake_config.api_token is None
+
+    report = upgrade.run_upgrade(
+        config=fake_config,
+        target_version="1.0.0",
+        include_openclaw=False,            # prove independence from openclaw step
+        include_user_agent_skill_refresh=False,
+    )
+    assert report.ok is True
+
+    # Persisted to the private config.json and visible via load_config.
+    token1 = load_config(force_reload=True).api_token
+    assert token1 and isinstance(token1, str)
+    # Also got the internal HMAC secret (same step).
+    assert load_config(force_reload=True).internal_token_secret
+
+    # Idempotent: a second upgrade (loading the now-persisted config) keeps it.
+    upgrade.run_upgrade(
+        target_version="1.0.0",
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+    assert load_config(force_reload=True).api_token == token1

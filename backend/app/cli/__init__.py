@@ -52,6 +52,32 @@ def version() -> None:
     typer.echo(__version__)
 
 
+@app.command(name="api-token")
+def api_token(
+    rotate: bool = typer.Option(
+        False, "--rotate", help="Generate a new token (invalidates the old one)."
+    ),
+) -> None:
+    """Show (or rotate) the bearer token guarding the local /api surface.
+
+    External services on this host call the API with this token:
+    ``Authorization: Bearer <token>`` against ``http://127.0.0.1:<port>/api``.
+    The token lives only in the private ``~/.clawsomeflow/config.json``.
+    """
+    from app import config as cfg_mod
+    from app.integrations.internal_token import ensure_api_token_initialised
+
+    cfg = cfg_mod.load_config()
+    if rotate:
+        cfg = cfg.model_copy(update={"api_token": None})
+    new_cfg = ensure_api_token_initialised(cfg)
+    if new_cfg is not cfg or rotate:
+        cfg_mod.save_config(new_cfg)
+        if rotate:
+            typer.echo("✓ Rotated api_token (run `csflow restart` to apply).", err=True)
+    typer.echo(new_cfg.api_token)
+
+
 # ── lifecycle commands ────────────────────────────────────────────────
 
 # Importing these registers their @app.command decorators on `app`.

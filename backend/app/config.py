@@ -91,6 +91,18 @@ class Config(BaseModel):
         ),
     )
 
+    api_token: str | None = Field(
+        default=None,
+        description=(
+            "Long-lived bearer token guarding the public /api surface "
+            "(OpenClaw gateway paradigm: loopback bind + token). Auto-generated "
+            "at init and stored only in the private ~/.clawsomeflow/config.json "
+            "(never committed). When None the API guard is a full no-op, so dev "
+            "and tests are unaffected. See app.api._api_guard and "
+            "app.integrations.internal_token.ensure_api_token_initialised."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_mode(self) -> "Config":
         if self.deployment_mode == "local":

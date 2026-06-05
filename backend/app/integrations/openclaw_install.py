@@ -23,7 +23,10 @@ from typing import Any
 
 from app import paths
 from app.config import Config, load_config, save_config
-from app.integrations.internal_token import ensure_secret_initialised
+from app.integrations.internal_token import (
+    ensure_api_token_initialised,
+    ensure_secret_initialised,
+)
 from app.integrations.openclaw_agent_source import (
     deploy_agent_tools_bundle,
     deploy_common_agent_source,
@@ -389,6 +392,7 @@ async def install_into_openclaw(
     cfg = config or load_config()
 
     cfg_with_secret = ensure_secret_initialised(cfg)
+    cfg_with_secret = ensure_api_token_initialised(cfg_with_secret)
     if cfg_with_secret is not cfg:
         save_config(cfg_with_secret)
         cfg = cfg_with_secret
