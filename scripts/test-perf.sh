@@ -91,6 +91,7 @@ cleanup() {
   if [[ "${TEST_SERVICE_NAME}" == "${PROD_SERVICE_NAME}" ]]; then
     return
   fi
+  test_isolation_verify_prod_untouched "${PROD_HEALTH_URL}" "${PROD_PORT}" || true
   systemctl --user stop "${TEST_SERVICE_NAME}" >/dev/null 2>&1 || true
   systemctl --user disable "${TEST_SERVICE_NAME}" >/dev/null 2>&1 || true
   rm -f "${TEST_UNIT_DIR}/${TEST_SERVICE_NAME}.service"
@@ -118,14 +119,18 @@ require_cmd systemctl
 require_cmd curl
 require_cmd flock
 
-[[ "${TEST_SERVICE_NAME}" != "${PROD_SERVICE_NAME}" ]] || fail "test service name must differ from production"
-[[ "${TEST_PORT}" != "${PROD_PORT}" ]] || fail "test port must differ from production port"
-[[ "${TEST_BOARD_PORT}" != "${PROD_BOARD_PORT}" ]] || fail "test board port must differ from production board port"
-[[ "${TEST_HOME}" == "${HOME}/.clawsomeflow-test/"* ]] || fail "test home must be under ~/.clawsomeflow-test/"
-[[ "${TEST_CLAWTEAM_DATA_DIR}" != "${HOME}/.clawteam" ]] || fail "test clawteam dir must not equal ~/.clawteam"
-[[ "${TEST_OPENCLAW_HOME}" != "${HOME}/.openclaw" ]] || fail "test openclaw home must not equal ~/.openclaw"
-[[ "${TEST_CLAWTEAM_DATA_DIR}" == "${HOME}/.clawsomeflow-test/"* ]] || fail "test clawteam dir must be under ~/.clawsomeflow-test/"
-[[ "${TEST_OPENCLAW_HOME}" == "${HOME}/.clawsomeflow-test/"* ]] || fail "test openclaw home must be under ~/.clawsomeflow-test/"
+# shellcheck source=scripts/_test_isolation_guards.sh
+source "${ROOT_DIR}/scripts/_test_isolation_guards.sh"
+test_isolation_assert_namespace \
+  "${PROD_SERVICE_NAME}" \
+  "${PROD_PORT}" \
+  "${PROD_BOARD_PORT}" \
+  "${TEST_SERVICE_NAME}" \
+  "${TEST_HOME}" \
+  "${TEST_PORT}" \
+  "${TEST_BOARD_PORT}" \
+  "${TEST_CLAWTEAM_DATA_DIR}" \
+  "${TEST_OPENCLAW_HOME}"
 
 mkdir -p "$(dirname "${LOCK_FILE}")"
 exec 9>"${LOCK_FILE}"
@@ -208,6 +213,9 @@ check_prod_health "after_test_boot"
 
 say "[perf] run tests/perf"
 "${TEST_PYTHON}" -m pytest -q "${ROOT_DIR}/tests/perf" -m perf
+
+say "[perf] verify production service (${PROD_PORT}) has no e2e artifacts"
+test_isolation_verify_prod_untouched "${PROD_HEALTH_URL}" "${PROD_PORT}"
 
 check_prod_health "after_perf_tests"
 say "[perf] gate passed"

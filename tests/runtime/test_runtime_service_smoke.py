@@ -46,3 +46,19 @@ def test_runtime_systemd_service_is_active() -> None:
 def test_runtime_healthcheck_ok() -> None:
     health_url = require_env("CSFLOW_RUNTIME_HEALTH_URL")
     assert_http_ok(health_url, retries=10, retry_interval_sec=0.5)
+
+
+def test_production_service_stays_active_during_runtime_gate() -> None:
+    prod_service_name = os.environ.get("CSFLOW_PROD_SERVICE_NAME", "csflow")
+    test_service_name = require_env("CSFLOW_RUNTIME_SERVICE_NAME")
+    assert prod_service_name != test_service_name
+
+    proc = subprocess.run(
+        ["systemctl", "--user", "is-active", prod_service_name],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.returncode == 0, proc.stderr.strip()
+    assert proc.stdout.strip() == "active"

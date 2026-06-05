@@ -60,12 +60,29 @@ ensure_test_clawteam_runtime() {
     fail "clawteam runtime command unavailable in test venv"
 }
 
+prod_service_main_pid() {
+  systemctl --user show "${PROD_SERVICE_NAME}" --property MainPID --value 2>/dev/null \
+    | tr -d '[:space:]'
+}
+
 check_prod_health() {
   local stage="$1"
   if [[ "$(systemctl --user is-active "${PROD_SERVICE_NAME}" 2>/dev/null || true)" != "active" ]]; then
     fail "production service '${PROD_SERVICE_NAME}' is not active (${stage})"
   fi
   curl -fsS "${PROD_HEALTH_URL}" >/dev/null || fail "production healthcheck failed (${stage})"
+}
+
+check_prod_service_unchanged() {
+  local stage="$1"
+  local expected_pid="${2:-}"
+  local current_pid
+  current_pid="$(prod_service_main_pid)"
+  [[ -n "${current_pid}" && "${current_pid}" != "0" ]] \
+    || fail "production service '${PROD_SERVICE_NAME}' has no MainPID (${stage})"
+  if [[ -n "${expected_pid}" && "${current_pid}" != "${expected_pid}" ]]; then
+    fail "production service '${PROD_SERVICE_NAME}' was restarted during tests (${stage}: ${expected_pid} -> ${current_pid})"
+  fi
 }
 
 check_test_health() {
@@ -91,6 +108,8 @@ cleanup() {
   if [[ "${TEST_SERVICE_NAME}" == "${PROD_SERVICE_NAME}" ]]; then
     return
   fi
+  test_isolation_sweep_test_namespace "${TEST_HEALTH_URL%/}" || true
+  test_isolation_verify_prod_untouched "${PROD_HEALTH_URL}" "${PROD_PORT}" || true
   systemctl --user stop "${TEST_SERVICE_NAME}" >/dev/null 2>&1 || true
   systemctl --user disable "${TEST_SERVICE_NAME}" >/dev/null 2>&1 || true
   rm -f "${TEST_UNIT_DIR}/${TEST_SERVICE_NAME}.service"
@@ -118,15 +137,18 @@ require_cmd systemctl
 require_cmd curl
 require_cmd flock
 
-[[ "${TEST_SERVICE_NAME}" != "${PROD_SERVICE_NAME}" ]] || fail "test service name must differ from production"
-[[ "${TEST_PORT}" != "${PROD_PORT}" ]] || fail "test port must differ from production port"
-[[ "${TEST_BOARD_PORT}" != "${PROD_BOARD_PORT}" ]] || fail "test board port must differ from production board port"
-[[ "${TEST_HOME}" != "${HOME}/.clawsomeflow" ]] || fail "test home must not equal production home"
-[[ "${TEST_HOME}" == "${HOME}/.clawsomeflow-test/"* ]] || fail "test home must be under ~/.clawsomeflow-test/"
-[[ "${TEST_CLAWTEAM_DATA_DIR}" != "${HOME}/.clawteam" ]] || fail "test clawteam dir must not equal ~/.clawteam"
-[[ "${TEST_OPENCLAW_HOME}" != "${HOME}/.openclaw" ]] || fail "test openclaw home must not equal ~/.openclaw"
-[[ "${TEST_CLAWTEAM_DATA_DIR}" == "${HOME}/.clawsomeflow-test/"* ]] || fail "test clawteam dir must be under ~/.clawsomeflow-test/"
-[[ "${TEST_OPENCLAW_HOME}" == "${HOME}/.clawsomeflow-test/"* ]] || fail "test openclaw home must be under ~/.clawsomeflow-test/"
+# shellcheck source=scripts/_test_isolation_guards.sh
+source "${ROOT_DIR}/scripts/_test_isolation_guards.sh"
+test_isolation_assert_namespace \
+  "${PROD_SERVICE_NAME}" \
+  "${PROD_PORT}" \
+  "${PROD_BOARD_PORT}" \
+  "${TEST_SERVICE_NAME}" \
+  "${TEST_HOME}" \
+  "${TEST_PORT}" \
+  "${TEST_BOARD_PORT}" \
+  "${TEST_CLAWTEAM_DATA_DIR}" \
+  "${TEST_OPENCLAW_HOME}"
 
 mkdir -p "$(dirname "${LOCK_FILE}")"
 exec 9>"${LOCK_FILE}"
@@ -137,6 +159,7 @@ fi
 trap cleanup EXIT INT TERM
 
 check_prod_health "before_runtime_tests"
+PROD_MAIN_PID_BEFORE="$(prod_service_main_pid)"
 
 say "[runtime] install backend test dependencies"
 mkdir -p "${TEST_HOME}"
@@ -217,5 +240,12 @@ say "[runtime] run tests/runtime"
 say "[runtime] run tests/e2e"
 "${TEST_PYTHON}" -m pytest -q "${ROOT_DIR}/tests/e2e" -m e2e
 
+say "[runtime] sweep leftover test artifacts in isolated namespace"
+test_isolation_sweep_test_namespace "${TEST_HEALTH_URL%/}"
+
+say "[runtime] verify production service (${PROD_PORT}) has no e2e artifacts"
+test_isolation_verify_prod_untouched "${PROD_HEALTH_URL}" "${PROD_PORT}"
+
 check_prod_health "after_runtime_tests"
+check_prod_service_unchanged "after_runtime_tests" "${PROD_MAIN_PID_BEFORE}"
 say "[runtime] gate passed"

@@ -24,6 +24,13 @@ def _set_token(token: str | None) -> None:
     save_config(cfg.model_copy(update={"api_token": token}))
 
 
+@pytest.fixture(autouse=True)
+def _restore_api_token_after_guard_tests() -> Iterator[None]:
+    original = load_config(force_reload=True).api_token
+    yield
+    _set_token(original)
+
+
 def _client(base_url: str = "http://127.0.0.1:17017") -> Iterator[TestClient]:
     with TestClient(create_app(), base_url=base_url) as c:
         yield c

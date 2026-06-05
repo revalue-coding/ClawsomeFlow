@@ -14,6 +14,7 @@ import websockets
 
 from app.config import Config
 from app.integrations import internal_token
+from tests.common.e2e_resources import E2EResourceTracker
 from tests.common.runtime_helpers import require_env
 
 pytestmark = pytest.mark.e2e
@@ -121,81 +122,68 @@ def _ensure_openclaw_json(path: Path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def test_flow_run_and_events_chain() -> None:
+def test_flow_run_and_events_chain(e2e_resources: E2EResourceTracker) -> None:
     base_url = _api_base()
     flow_payload = _flow_payload()
 
-    flow_id: str | None = None
-    run_id: str | None = None
     with httpx.Client(base_url=base_url, timeout=20.0) as client:
         create_resp = client.post("/api/flows", json=flow_payload)
         assert create_resp.status_code == 201, create_resp.text
-        flow_id = create_resp.json()["id"]
+        flow_id = e2e_resources.track_flow(create_resp.json()["id"])
 
-        try:
-            trigger_resp = client.post(f"/api/flows/{flow_id}/runs", json={"inputs": {"e2e": "1"}})
-            assert trigger_resp.status_code == 202, trigger_resp.text
-            run_id = trigger_resp.json()["id"]
+        trigger_resp = client.post(f"/api/flows/{flow_id}/runs", json={"inputs": {"e2e": "1"}})
+        assert trigger_resp.status_code == 202, trigger_resp.text
+        run_id = e2e_resources.track_run(trigger_resp.json()["id"])
 
-            detail_resp = client.get(f"/api/runs/{run_id}")
-            assert detail_resp.status_code == 200, detail_resp.text
-            detail = detail_resp.json()
-            assert detail["flowId"] == flow_id
-            assert isinstance(detail.get("teamName"), str) and detail["teamName"]
+        detail_resp = client.get(f"/api/runs/{run_id}")
+        assert detail_resp.status_code == 200, detail_resp.text
+        detail = detail_resp.json()
+        assert detail["flowId"] == flow_id
+        assert isinstance(detail.get("teamName"), str) and detail["teamName"]
 
-            events = _wait_for_events(client, run_id, timeout_sec=45.0)
-            assert isinstance(events[0].get("id"), int)
-            assert isinstance(events[0].get("type"), str)
-        finally:
-            if run_id:
-                client.post(f"/api/runs/{run_id}/abort")
-            if flow_id:
-                client.delete(f"/api/flows/{flow_id}")
+        events = _wait_for_events(client, run_id, timeout_sec=45.0)
+        assert isinstance(events[0].get("id"), int)
+        assert isinstance(events[0].get("type"), str)
 
 
 @pytest.mark.asyncio
-async def test_run_ws_ping_and_backfill() -> None:
+async def test_run_ws_ping_and_backfill(e2e_resources_async: E2EResourceTracker) -> None:
     base_url = _api_base()
     flow_payload = _flow_payload()
 
-    flow_id: str | None = None
-    run_id: str | None = None
     async with httpx.AsyncClient(base_url=base_url, timeout=20.0) as client:
         create_resp = await client.post("/api/flows", json=flow_payload)
         assert create_resp.status_code == 201, create_resp.text
-        flow_id = create_resp.json()["id"]
+        flow_id = e2e_resources_async.track_flow(create_resp.json()["id"])
 
-        try:
-            trigger_resp = await client.post(f"/api/flows/{flow_id}/runs", json={"inputs": {"e2e": "ws"}})
-            assert trigger_resp.status_code == 202, trigger_resp.text
-            run_id = trigger_resp.json()["id"]
+        trigger_resp = await client.post(
+            f"/api/flows/{flow_id}/runs",
+            json={"inputs": {"e2e": "ws"}},
+        )
+        assert trigger_resp.status_code == 202, trigger_resp.text
+        run_id = e2e_resources_async.track_run(trigger_resp.json()["id"])
 
-            events = await _wait_for_events_async(client, run_id, timeout_sec=45.0)
-            since_id = max(0, int(events[-1]["id"]) - 1)
-            ws_url = _ws_url(base_url, run_id, since_id)
+        events = await _wait_for_events_async(client, run_id, timeout_sec=45.0)
+        since_id = max(0, int(events[-1]["id"]) - 1)
+        ws_url = _ws_url(base_url, run_id, since_id)
 
-            async with websockets.connect(ws_url, open_timeout=10, close_timeout=5) as ws:
-                await ws.send(json.dumps({"type": "ping"}))
-                got_pong = False
-                got_backfill = False
-                deadline = time.monotonic() + 10.0
-                while time.monotonic() < deadline and not (got_pong and got_backfill):
-                    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                    msg = json.loads(raw)
-                    if msg.get("type") == "pong":
-                        got_pong = True
-                    if isinstance(msg.get("id"), int):
-                        got_backfill = True
-                assert got_pong, "ws ping/pong failed"
-                assert got_backfill, "ws backfill did not deliver prior event"
-        finally:
-            if run_id:
-                await client.post(f"/api/runs/{run_id}/abort")
-            if flow_id:
-                await client.delete(f"/api/flows/{flow_id}")
+        async with websockets.connect(ws_url, open_timeout=10, close_timeout=5) as ws:
+            await ws.send(json.dumps({"type": "ping"}))
+            got_pong = False
+            got_backfill = False
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not (got_pong and got_backfill):
+                raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                msg = json.loads(raw)
+                if msg.get("type") == "pong":
+                    got_pong = True
+                if isinstance(msg.get("id"), int):
+                    got_backfill = True
+            assert got_pong, "ws ping/pong failed"
+            assert got_backfill, "ws backfill did not deliver prior event"
 
 
-def test_openclaw_internal_commit_callback_path() -> None:
+def test_openclaw_internal_commit_callback_path(e2e_resources: E2EResourceTracker) -> None:
     base_url = _api_base()
     openclaw_home = Path(require_env("CSFLOW_RUNTIME_OPENCLAW_HOME"))
     _ensure_openclaw_json(openclaw_home / "openclaw.json")
@@ -203,48 +191,43 @@ def test_openclaw_internal_commit_callback_path() -> None:
     cfg_path = Path(require_env("CSFLOW_HOME")) / "config.json"
     cfg = Config.model_validate(json.loads(cfg_path.read_text(encoding="utf-8")))
     user = cfg.default_user
-    request_id: str | None = None
-    agent_id = f"e2e-openclaw-{uuid.uuid4().hex[:8]}"
+    agent_id = e2e_resources.track_agent(f"e2e-openclaw-{uuid.uuid4().hex[:8]}")
 
     with httpx.Client(base_url=base_url, timeout=20.0) as client:
-        try:
-            start_resp = client.post(
-                "/api/openclaw/agents/nl-create",
-                json={"prompt": "Create a temporary e2e validation agent."},
-            )
-            assert start_resp.status_code == 202, start_resp.text
-            request_id = start_resp.json()["requestId"]
+        start_resp = client.post(
+            "/api/openclaw/agents/nl-create",
+            json={"prompt": "Create a temporary e2e validation agent."},
+        )
+        assert start_resp.status_code == 202, start_resp.text
+        request_id = start_resp.json()["requestId"]
 
-            token = internal_token.mint_token(
-                request_id=request_id,
-                user=user,
-                purpose="openclaw_agent_mgmt",
-                ttl_seconds=300,
-                config=cfg,
-            )
-            commit_resp = client.post(
-                "/api/internal/openclaw/agents/commit",
-                headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "requestId": request_id,
-                    "id": agent_id,
-                    "name": f"E2E Agent {agent_id}",
-                    "description": "Temporary agent for internal callback smoke test.",
-                    "identity": {"theme": "e2e-smoke"},
-                },
-            )
-            assert commit_resp.status_code == 201, commit_resp.text
-            assert commit_resp.json()["agentId"] == agent_id
+        token = internal_token.mint_token(
+            request_id=request_id,
+            user=user,
+            purpose="openclaw_agent_mgmt",
+            ttl_seconds=300,
+            config=cfg,
+        )
+        commit_resp = client.post(
+            "/api/internal/openclaw/agents/commit",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "requestId": request_id,
+                "id": agent_id,
+                "name": f"E2E Agent {agent_id}",
+                "description": "Temporary agent for internal callback smoke test.",
+                "identity": {"theme": "e2e-smoke"},
+            },
+        )
+        assert commit_resp.status_code == 201, commit_resp.text
+        assert commit_resp.json()["agentId"] == agent_id
 
-            status_resp = client.get(f"/api/openclaw/agents/nl-create/{request_id}")
-            assert status_resp.status_code == 200, status_resp.text
-            status_payload = status_resp.json()
-            assert status_payload["status"] == "succeeded"
-            assert status_payload["requestedAgentId"] == agent_id
+        status_resp = client.get(f"/api/openclaw/agents/nl-create/{request_id}")
+        assert status_resp.status_code == 200, status_resp.text
+        status_payload = status_resp.json()
+        assert status_payload["status"] == "succeeded"
+        assert status_payload["requestedAgentId"] == agent_id
 
-            detail_resp = client.get(f"/api/openclaw/agents/{agent_id}")
-            assert detail_resp.status_code == 200, detail_resp.text
-            assert detail_resp.json()["id"] == agent_id
-        finally:
-            # Best-effort cleanup to keep the isolated namespace tidy.
-            client.delete(f"/api/openclaw/agents/{agent_id}")
+        detail_resp = client.get(f"/api/openclaw/agents/{agent_id}")
+        assert detail_resp.status_code == 200, detail_resp.text
+        assert detail_resp.json()["id"] == agent_id
