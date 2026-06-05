@@ -1100,9 +1100,28 @@ async def test_skip_policy_escalates_to_failed_and_aborts(
 
 
 @pytest.mark.asyncio
-async def test_run_loop_terminates_when_all_tasks_done(fake_lookup) -> None:
+async def test_run_loop_terminates_when_all_tasks_done(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     spec = _make_spec()
     run = _persist_flow_and_run(spec)
+
+    # finalize_run obtains a ClawTeam MCP client to snapshot worktree diffs.
+    # Without this stub it spawns the real `clawteam-mcp` binary, which is not
+    # present on CI runners / contributor clones (FileNotFoundError -> finalize
+    # fails -> run ends 'completed' instead of 'awaiting_user_complaint'). The
+    # diff is read through _safe_diff, so returning None == "no changes".
+    class _FakeMcp:
+        async def workspace_agent_diff(self, *args, **kwargs):
+            return None
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.scheduler.finalize.get_mcp_client", _fake_get_mcp_client
+    )
 
     sessions: dict[str, _RecordingSession] = {}
 
