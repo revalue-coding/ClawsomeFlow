@@ -1324,6 +1324,19 @@ class RunController:
         for book in self._tasks.values():
             if book.state != _TaskState.pending:
                 continue
+            # Leader-summary gate: the summary must be the LAST thing dispatched.
+            # It waits until every non-summary task is completed, even tasks it
+            # does not explicitly depend on. ``depends_on`` on the summary now
+            # only selects which worker outputs feed its review/report (see
+            # ``_compose_dispatch_context``); it no longer governs *when* the
+            # summary runs. This restores the "summary runs after everyone"
+            # scheduling guarantee independent of the (possibly partial) dep set.
+            if (
+                self._leader_summary_task_id is not None
+                and book.task.id == self._leader_summary_task_id
+                and not self._all_non_summary_tasks_completed()
+            ):
+                continue
             owner = book.task.owner_agent_id
             if owner in owners_with_active_task:
                 continue
@@ -1335,6 +1348,21 @@ class RunController:
             ready.append(book)
             owners_already_dispatched.add(owner)
         return ready
+
+    def _all_non_summary_tasks_completed(self) -> bool:
+        """True when every non-summary task has reached ``completed``.
+
+        Used to gate leader-summary dispatch: the summary must not run until all
+        worker tasks are done. Workers mark their ClawTeam task ``completed``
+        even on failure (see the failure block in the dispatch prompt), so this
+        becomes true on the natural-completion path and the summary can report
+        on failures too. Vacuously true when there are no non-summary tasks.
+        """
+        return all(
+            book.state == _TaskState.completed
+            for task_id, book in self._tasks.items()
+            if task_id != self._leader_summary_task_id
+        )
 
     def _partition_ready_tasks_for_checkpoint(
         self,
@@ -3117,14 +3145,55 @@ class RunController:
         upstream_outputs: list[UpstreamOutput] = []
 
         if agent.is_leader and task.is_leader_summary:
-            for a in self._agents.values():
-                if a.is_leader:
+            # Summary input must follow the task's explicit first-level
+            # dependencies; do not inject reports/worktrees from unrelated tasks.
+            inbox = await self._fetch_leader_inbox_structured()
+            seen_dep_ids: set[str] = set()
+            seen_owner_ids: set[str] = set()
+            for dep_raw in task.depends_on:
+                dep_id = str(dep_raw).strip()
+                if not dep_id or dep_id in seen_dep_ids:
                     continue
-                ssess = self._sessions.get(a.id)
-                if ssess and ssess.worktree:
-                    worker_worktrees.append(ssess.worktree)
-            # Use the structured inbox so leader sees who said what about which task.
-            worker_reports = await self._fetch_leader_inbox_structured()
+                seen_dep_ids.add(dep_id)
+                dep_book = self._tasks.get(dep_id)
+                if dep_book is None:
+                    continue
+                dep_task = dep_book.task
+                dep_owner = self._agents.get(dep_task.owner_agent_id)
+                dep_owner_id = dep_owner.id if dep_owner else dep_task.owner_agent_id
+
+                dep_sess = self._sessions.get(dep_task.owner_agent_id)
+                if (
+                    dep_sess
+                    and dep_sess.worktree
+                    and dep_owner_id not in seen_owner_ids
+                ):
+                    worker_worktrees.append(dep_sess.worktree)
+                    seen_owner_ids.add(dep_owner_id)
+
+                if (
+                    self._task_requires_manual_checkpoint(dep_task)
+                    and dep_id in self._checkpoint_approved_summaries
+                ):
+                    approved_summary = (
+                        self._checkpoint_approved_summaries.get(dep_id) or ""
+                    ).strip()
+                    if approved_summary:
+                        worker_reports.append(WorkerReport(
+                            from_agent=dep_owner_id,
+                            summary=approved_summary,
+                            task_id=dep_id,
+                            timestamp=None,
+                        ))
+                    continue
+
+                matched = self._collect_upstream_task_report_entry(
+                    inbox,
+                    owner_agent_id=dep_owner_id,
+                    task_id=dep_id,
+                )
+                if matched is not None:
+                    worker_reports.append(matched)
         elif task.depends_on:
             # Worker (or leader for non-summary): pass first-level upstream
             # outputs only — never transitively. For each depended task, match
@@ -3499,8 +3568,10 @@ class RunController:
     # ── terminal check + outcome ─────────────────────────────────────
 
     def _terminal_check(self) -> bool:
-        # Natural completion path: once leader summary task is completed,
-        # enter finalize phase (even if some non-leader tasks are not completed).
+        # Natural completion path: once the leader summary task is completed,
+        # enter the finalize phase. The summary is dispatched only after every
+        # non-summary task has completed (see ``_ready_tasks`` summary gate), so
+        # a completed summary reliably means the whole DAG has run.
         if self._leader_summary_task_id:
             leader_book = self._tasks.get(self._leader_summary_task_id)
             if leader_book is not None and leader_book.state == _TaskState.completed:

@@ -87,6 +87,7 @@ interface ValidationMessages {
   claudeRepoRequired: string;
   claudeTargetBranchRequired: string;
   leaderCannotOwnNonSummary: string;
+  summaryNeedsDependency: string;
   ownerRepoBranchMismatch: (agentId: string) => string;
   cycleDetected: (cyclePath: string) => string;
   /** Per-task: description (instruction body) must be non-empty so the
@@ -438,11 +439,9 @@ export function FlowEditor() {
         ownerId: normalizedLeaderId,
         ownerRepo: normalizedLeaderRepo,
         ownerTargetBranch: normalizedLeaderTargetBranch,
-        // Rebuild case: inherit all current non-summary dependencies immediately.
-        dependsOn: rows
-          .filter((r) => !r.isLeaderSummary)
-          .map((r) => r.id.trim())
-          .filter(Boolean),
+        // New summary rows start with empty dependencies and require explicit
+        // user selection of upstream tasks.
+        dependsOn: [],
         isLeaderSummary: true,
         requiresHumanCheckpoint: false,
       };
@@ -503,43 +502,6 @@ export function FlowEditor() {
     };
   }, [leaderKind, leaderRepo]);
 
-  /**
-   * Summary task must depend on every other task. Recompute whenever the
-   * set of non-summary task IDs changes (add / remove / rename). The early-
-   * return inside ``setTasks`` prevents the effect from looping.
-   */
-  const nonSummaryIdsSig = useMemo(
-    () =>
-      tasks
-        .filter((r) => !r.isLeaderSummary)
-        .map((r) => r.id.trim())
-        .filter(Boolean)
-        .sort()
-        .join("|"),
-    [tasks],
-  );
-  const summaryRowSig = useMemo(() => {
-    const summary = tasks.find((r) => r.isLeaderSummary);
-    return summary ? `${summary.rowKey}:${summary.id.trim()}` : "";
-  }, [tasks]);
-  useEffect(() => {
-    setTasks((rows) => {
-      const idx = rows.findIndex((r) => r.isLeaderSummary);
-      if (idx === -1) return rows;
-      const ids = rows
-        .filter((r) => !r.isLeaderSummary)
-        .map((r) => r.id.trim())
-        .filter(Boolean);
-      const cur = rows[idx].dependsOn;
-      const same =
-        cur.length === ids.length && ids.every((d) => cur.includes(d));
-      if (same) return rows;
-      const next = rows.slice();
-      next[idx] = { ...next[idx], dependsOn: ids };
-      return next;
-    });
-  }, [nonSummaryIdsSig, summaryRowSig]);
-
   // ── derived state -------------------------------------------------
 
   const summaryTask = tasks.find((r) => r.isLeaderSummary);
@@ -562,6 +524,7 @@ export function FlowEditor() {
       leaderCannotOwnNonSummary: t(
         "flowEditor.validation.leaderCannotOwnNonSummary",
       ),
+      summaryNeedsDependency: t("flowEditor.validation.summaryNeedsDependency"),
       ownerRepoBranchMismatch: (agentId: string) =>
         t("flowEditor.validation.ownerRepoBranchMismatch", { agentId }),
       cycleDetected: (cyclePath: string) =>
@@ -772,6 +735,9 @@ export function FlowEditor() {
   function applyEditedRow(rowKey: string, replacement: TaskRow) {
     setTasks((rows) => {
       const prev = rows.find((r) => r.rowKey === rowKey);
+      const prevId = prev?.id.trim() || "";
+      const nextId = replacement.id.trim();
+      const renamed = prevId.length > 0 && nextId.length > 0 && prevId !== nextId;
       const changedExistingNonOpenclaw = Boolean(
         prev &&
         isNonOpenclawKind(prev.ownerKind) &&
@@ -785,6 +751,7 @@ export function FlowEditor() {
         ),
       );
       return rows.map((r) => {
+        let nextRow = r;
         if (r.rowKey === rowKey) {
           return { ...replacement, rowKey };
         }
@@ -793,13 +760,20 @@ export function FlowEditor() {
           && r.ownerKind === replacement.ownerKind
           && r.ownerId.trim() === replacement.ownerId.trim()
         ) {
-          return {
-            ...r,
+          nextRow = {
+            ...nextRow,
             ownerRepo: replacement.ownerRepo,
             ownerTargetBranch: replacement.ownerTargetBranch,
           };
         }
-        return r;
+        if (!renamed) return nextRow;
+        const mapped = nextRow.dependsOn.map((dep) => (dep === prevId ? nextId : dep));
+        const deduped = Array.from(new Set(mapped));
+        const same =
+          deduped.length === nextRow.dependsOn.length
+          && deduped.every((dep, idx) => dep === nextRow.dependsOn[idx]);
+        if (same) return nextRow;
+        return { ...nextRow, dependsOn: deduped };
       });
     });
   }
@@ -1494,6 +1468,8 @@ export function FlowEditor() {
                   leaderKey !== null &&
                   ownerKey(row) === leaderKey &&
                   !row.isLeaderSummary;
+                const summaryMissingDeps =
+                  row.isLeaderSummary && row.dependsOn.length === 0;
                 const nonSummaryIdx = orderedTasks
                   .filter((r) => !r.isLeaderSummary)
                   .findIndex((r) => r.rowKey === row.rowKey);
@@ -1507,6 +1483,7 @@ export function FlowEditor() {
                     allTasks={tasks}
                     issue={issue}
                     violatesLeader={violatesLeader}
+                    summaryMissingDeps={summaryMissingDeps}
                     canMoveUp={!row.isLeaderSummary && nonSummaryIdx > 0}
                     canMoveDown={
                       !row.isLeaderSummary && nonSummaryIdx < nonSummaryTotal - 1
@@ -1665,6 +1642,7 @@ function TaskListRow({
   allTasks,
   issue,
   violatesLeader,
+  summaryMissingDeps,
   canMoveUp,
   canMoveDown,
   onDetail,
@@ -1677,6 +1655,7 @@ function TaskListRow({
   allTasks: TaskRow[];
   issue?: string;
   violatesLeader: boolean;
+  summaryMissingDeps: boolean;
   canMoveUp: boolean;
   canMoveDown: boolean;
   onDetail: () => void;
@@ -1687,7 +1666,7 @@ function TaskListRow({
 }) {
   const { t } = useTranslation();
   const isSummary = row.isLeaderSummary;
-  const hasIssue = !!issue || violatesLeader;
+  const hasIssue = !!issue || violatesLeader || summaryMissingDeps;
   // Auto-generated task ids look like `task-abc12345` and mean nothing to
   // the user — render the dependent task's subject instead.
   const subjectForId = (id: string) => {
@@ -1778,6 +1757,11 @@ function TaskListRow({
             {isSummary && (
               <div className="text-xs text-ink-500 whitespace-nowrap">
                 {t("flowEditor.summaryTaskLocked")}
+              </div>
+            )}
+            {summaryMissingDeps && (
+              <div className="text-xs text-rose-700 whitespace-nowrap">
+                {t("flowEditor.summaryNoDepsWarning")}
               </div>
             )}
             {(issue || violatesLeader) && (
@@ -2275,8 +2259,8 @@ function TaskFormBody({
 
   const remoteBrowser = isRemoteBrowser();
 
-  // Dependable list = every other task except the summary (summary auto-
-  // depends on all non-summary tasks, so listing it would create a cycle).
+  // Dependable list = every other non-summary task. Keeping summary tasks
+  // out avoids summary↔summary/self dependency cycles.
   const dependableTasks = tasks
     .filter((r) => r.rowKey !== row.rowKey && !r.isLeaderSummary && r.id.trim())
     .map((r) => r.id);
@@ -2569,39 +2553,56 @@ function TaskFormBody({
         </div>
       )}
 
-      {!isSummary && (
-        <div className="md:col-span-2">
-          {showCheckpointField && (
-            <>
-              <label className="inline-flex items-center gap-2 text-sm text-ink-700 mb-2">
-                <input
-                  type="checkbox"
-                  checked={row.requiresHumanCheckpoint}
-                  disabled={readOnly}
-                  onChange={(e) =>
-                    onChange({ requiresHumanCheckpoint: e.target.checked })}
-                />
-                <span>{t("flowEditor.taskFields.requiresHumanCheckpoint")}</span>
-              </label>
-              <div className="text-xs text-ink-500 mb-2">
-                {t("flowEditor.taskFields.requiresHumanCheckpointHint")}
-              </div>
-            </>
+      <div className="md:col-span-2">
+        {!isSummary && showCheckpointField && (
+          <>
+            <label className="inline-flex items-center gap-2 text-sm text-ink-700 mb-2">
+              <input
+                type="checkbox"
+                checked={row.requiresHumanCheckpoint}
+                disabled={readOnly}
+                onChange={(e) =>
+                  onChange({ requiresHumanCheckpoint: e.target.checked })}
+              />
+              <span>{t("flowEditor.taskFields.requiresHumanCheckpoint")}</span>
+            </label>
+            <div className="text-xs text-ink-500 mb-2">
+              {t("flowEditor.taskFields.requiresHumanCheckpointHint")}
+            </div>
+          </>
+        )}
+        <label
+          className={cn(
+            "label",
+            isSummary && row.dependsOn.length === 0 && "text-rose-700",
           )}
-          <label className="label text-rose-700">{t("flowEditor.taskFields.dependsOn")}</label>
-          <MultiSelect
-            options={dependableTasks}
-            selected={row.dependsOn}
-            disabled={readOnly}
-            onChange={(v) => onChange({ dependsOn: v })}
-            placeholder={t("common.none")}
-            renderLabel={(id) => {
-              const dep = tasks.find((r) => r.id === id);
-              return dep?.subject.trim() || dep?.id || id;
-            }}
-          />
+        >
+          {t("flowEditor.taskFields.dependsOn")}
+        </label>
+        <MultiSelect
+          options={dependableTasks}
+          selected={row.dependsOn}
+          disabled={readOnly}
+          onChange={(v) => onChange({ dependsOn: v })}
+          placeholder={t("common.none")}
+          renderLabel={(id) => {
+            const dep = tasks.find((r) => r.id === id);
+            return dep?.subject.trim() || dep?.id || id;
+          }}
+        />
+        <div
+          className={cn(
+            "text-xs mt-1",
+            isSummary && row.dependsOn.length === 0
+              ? "text-rose-700"
+              : "text-ink-500",
+          )}
+        >
+          {isSummary && row.dependsOn.length === 0
+            ? t("flowEditor.summaryNoDepsWarning")
+            : t("flowEditor.taskFields.dependsOnHint")}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -3248,6 +3249,13 @@ function validate(
   }
   if (summary.length > 1) {
     issues.push({ message: messages.onlyOneSummary });
+  }
+  // The summary must depend on at least one upstream task (it reviews and
+  // reports on them). Global (not per-row) so it blocks save without
+  // duplicating the row-level summaryNoDepsWarning hint. Backend enforces this
+  // too (SUMMARY_NO_DEPENDENCY).
+  if (summary.length === 1 && summary[0].dependsOn.length === 0) {
+    issues.push({ message: messages.summaryNeedsDependency });
   }
   const leaderKey = summary[0] ? ownerKey(summary[0]) : null;
   // Only flag stale OpenClaw refs once we've actually loaded the list —

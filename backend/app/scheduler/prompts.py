@@ -147,8 +147,8 @@ def build_leader_dispatch(ctx: DispatchContext) -> str:
 
     Same as worker, plus:
       5. ``## Flow Goal``
-      6. ``## Worker Worktrees and Branches``
-      7. ``## Worker Reports``
+      6. ``## Worker Worktrees and Branches`` (only summary dependencies)
+      7. ``## Worker Reports`` (only summary dependencies)
     """
     blocks = [
         _scheduling_context_block(ctx),
@@ -331,7 +331,9 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
 
     if ctx.agent.kind == AgentKind.openclaw:
         steps.append(
-            f"{next_no}. Complete all file writes inside the worktree (`{wt}`) using absolute paths."
+            f"{next_no}. If this task requires changes to workspace content, make those changes in the "
+            f"worktree (`{wt}`), not in the baseline-branch workspace. Use absolute paths for paths under "
+            "the worktree."
         )
         next_no += 1
         steps.append(
@@ -351,8 +353,7 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
             f"{next_no}. `clawteam inbox send {team} {leader} "
             f"\"task {task_id} done: <completion-summary>\"` "
             "(send to leader; this is the standard message header and MUST start "
-            f"with the exact literal prefix `task {task_id} done:` so scheduler "
-            "can strict-match by task id. The `<completion-summary>` MUST include "
+            f"with the exact literal prefix `task {task_id} done:`. The `<completion-summary>` MUST include "
             "a concise summary of your work and absolute paths of important changed "
             "docs/files (one line is fine). If task "
             "\"Output summary requirement\" defines a format, apply it after this "
@@ -401,7 +402,7 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
             "in `pending`/`in_progress`. Instead:\n"
             f"1. `clawteam inbox send {team} {leader} "
             f"\"task {task_id} done: FAILED — <one-line reason + what you tried>\"`"
-            " (keep the same exact header prefix for strict task-id matching).\n"
+            " (keep the same exact header prefix).\n"
             f"2. **VERY IMPORTANT: you MUST execute** "
             f"`clawteam task update {team} {ct_task_id} --status completed` "
             "(so scheduler can continue downstream/finalize).\n"
@@ -426,7 +427,15 @@ def _flow_goal_block(ctx: DispatchContext) -> str:
 
 def _worker_worktrees_block(ctx: DispatchContext) -> str:
     if not ctx.worker_worktrees:
-        return "## Worker Worktrees and Branches\n_(no worker worktree found in this run)_"
+        if ctx.task.depends_on:
+            return (
+                "## Worker Worktrees and Branches\n"
+                "_(no dependency worker worktree found; check summary dependencies/session state)_"
+            )
+        return (
+            "## Worker Worktrees and Branches\n"
+            "_(summary task has no dependencies configured)_"
+        )
     # Only surface each worker's worktree path + branch — that's what the leader
     # needs to read their outputs. We deliberately do NOT list the baseline
     # workspace: the leader has no business reading or writing there (the merge
@@ -441,7 +450,12 @@ def _worker_worktrees_block(ctx: DispatchContext) -> str:
 
 def _worker_reports_block(ctx: DispatchContext) -> str:
     if not ctx.worker_reports:
-        return "## Worker Reports\n_(no worker report in this run)_"
+        if ctx.task.depends_on:
+            return (
+                "## Worker Reports\n"
+                "_(no report matched the configured summary dependencies yet)_"
+            )
+        return "## Worker Reports\n_(summary task has no dependencies configured)_"
     lines = []
     for r in ctx.worker_reports:
         prefix = f"`{r.task_id}` " if r.task_id else ""

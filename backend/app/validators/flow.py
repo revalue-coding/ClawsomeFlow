@@ -36,6 +36,7 @@ ERROR_DUPLICATE_AGENT_ID = "DUPLICATE_AGENT_ID"
 ERROR_DUPLICATE_TASK_ID = "DUPLICATE_TASK_ID"
 ERROR_TASK_OWNS_NOTHING = "TASK_OWNS_NOTHING"
 ERROR_LEADER_OWNS_WORKER_TASK = "LEADER_OWNS_WORKER_TASK"
+ERROR_SUMMARY_NO_DEPENDENCY = "SUMMARY_NO_DEPENDENCY"
 
 
 @dataclass(slots=True)
@@ -137,13 +138,18 @@ def _check_task_references(spec: FlowSpec) -> None:
 def _check_leader_summary(spec: FlowSpec) -> None:
     """Validate leader-summary contract + leader-only-does-summary constraint.
 
-    Two rules:
+    Three rules:
     1. ≥1 ``is_leader_summary=true`` task exists and is owned by the leader.
     2. **The leader owns ONLY leader-summary tasks** — no other (worker) task
        may have the leader as owner. This keeps semantics clean (workers
        inbox-send the leader; if the leader were also a worker we'd have
        self-send-self) and matches plan §8.6 which spawns the leader only at
        the end (so the leader cannot be running an earlier worker task).
+    3. **Each summary task has ≥1 dependency.** The summary's job is to review
+       and report on upstream worker outputs, so it must point at the tasks it
+       reviews; a dependency-less summary would have nothing to summarise. (The
+       scheduler additionally waits for *all* tasks before dispatching the
+       summary, but the configured deps still select which outputs feed it.)
     """
     leader = next(a for a in spec.agents if a.is_leader)
     summary_tasks = [t for t in spec.tasks if t.is_leader_summary]
@@ -160,6 +166,15 @@ def _check_leader_summary(spec: FlowSpec) -> None:
                 f"leader_summary task {t.id!r} must be owned by the leader "
                 f"{leader.id!r} (got owner={t.owner_agent_id!r})",
                 {"task_id": t.id, "expected_owner": leader.id, "actual_owner": t.owner_agent_id},
+            )
+    # Rule 3: a summary must depend on at least one upstream task to review.
+    for t in summary_tasks:
+        if not [d for d in t.depends_on if str(d).strip()]:
+            raise FlowValidationError(
+                ERROR_SUMMARY_NO_DEPENDENCY,
+                f"leader_summary task {t.id!r} must have at least one dependency "
+                "(the upstream task(s) it reviews and reports on)",
+                {"task_id": t.id},
             )
     # Rule 2: leader cannot also be a worker.
     leader_worker_tasks = [

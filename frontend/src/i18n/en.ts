@@ -233,6 +233,8 @@ const en = {
     summaryTaskDefaultSubject: "Summary",
     summaryTaskBadge: "Summary task",
     summaryTaskLocked: "Auto-generated for the selected leader; changing the leader reassigns it. Cannot be deleted.",
+    summaryNoDepsWarning:
+      "Summary currently has no dependencies; pick the upstream tasks to review and report on in \"Depends on\".",
     graphTitle: "Task dependency graph",
     graphLegendTask: "Task",
     graphLegendRoot: "Root task",
@@ -279,6 +281,8 @@ const en = {
       ownerRepoBranchMismatch:
         "Agent \"{{agentId}}\" has inconsistent workspace repo/target branch across tasks. Keep one repo+branch per Agent, or create a new Agent.",
       leaderCannotOwnNonSummary: "Leader cannot own a non-summary task.",
+      summaryNeedsDependency:
+        "The summary task must depend on at least one upstream task to review and report on.",
       cycleDetected: "Task dependencies cannot contain cycles: {{cyclePath}}",
       descriptionRequired: "Description for \"{{subject}}\" cannot be empty.",
       openclawAgentMissing: "\"{{subject}}\" references OpenClaw agent \"{{agentId}}\" which no longer exists — pick another.",

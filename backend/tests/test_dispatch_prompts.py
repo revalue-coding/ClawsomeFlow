@@ -106,7 +106,7 @@ def test_worker_dispatch_for_openclaw_includes_worktree_guardrails() -> None:
     ))
     assert "OpenClaw agent" in msg
     assert "never write in the baseline-branch workspace" in msg
-    assert "Complete all file writes inside the worktree" in msg
+    assert "If this task requires changes to workspace content" in msg
     assert "my-desktop/" in msg
 
 
@@ -138,7 +138,7 @@ def test_worker_dispatch_hermes_uses_generic_tui_shape() -> None:
     # No OpenClaw-only blocks.
     assert "OpenClaw agent" not in msg
     assert "never write in the baseline-branch workspace" not in msg
-    assert "Complete all file writes inside the worktree" not in msg
+    assert "If this task requires changes to workspace content" not in msg
     assert "my-desktop/" not in msg
     # No merge steps in the worker prompt (manual strategy owns merge at finalize).
     assert "git merge --no-ff" not in msg
@@ -218,7 +218,7 @@ def test_worker_dispatch_includes_task_completion_steps() -> None:
     assert "clawteam inbox send" in msg
     assert "End this turn" in msg
     assert "**End this turn** — stay idle and wait for the next dispatch message." not in msg
-    assert "Complete all file writes inside the worktree" not in msg
+    assert "If this task requires changes to workspace content" not in msg
     assert "my-desktop/" not in msg
 
 
@@ -256,7 +256,8 @@ def test_worker_dispatch_requires_standard_task_id_header_for_inbox_output() -> 
     msg = prompts.build_worker_dispatch(_ctx())
     assert '"task t1 done: <completion-summary>"' in msg
     assert "MUST start with the exact literal prefix `task t1 done:`" in msg
-    assert "strict-match by task id" in msg
+    assert "strict-match by task id" not in msg
+    assert "strict task-id matching" not in msg
     assert "ASCII punctuation as separators" not in msg
     assert "not `/abs/path/file.md。`" not in msg
     assert "concise summary of your work" in msg
@@ -301,8 +302,7 @@ def test_leader_dispatch_handles_no_workers() -> None:
         agent=_agent(id="leader", leader=True),
         task=_task(id="ts", subject="Solo", owner="leader", is_summary=True),
     ))
-    assert "no worker worktree found in this run" in msg
-    assert "no worker report in this run" in msg
+    assert "summary task has no dependencies configured" in msg
 
 
 # ── self-merge ---------------------------------------------------------
