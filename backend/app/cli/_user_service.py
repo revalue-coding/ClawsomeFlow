@@ -157,19 +157,81 @@ def _terminate_pid(pid: int, *, grace_seconds: float = 8.0) -> bool:
     return not _pid_exists(pid)
 
 
+def _build_child_map() -> dict[int, list[int]]:
+    """Map ppid -> [child pids] for all current-user-visible processes."""
+    mapping: dict[int, list[int]] = {}
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                data = (entry / "stat").read_bytes()
+                # comm (field 2) may contain spaces/parens; ppid is the second
+                # whitespace field after the closing ')'.
+                rparen = data.rindex(b")")
+                ppid = int(data[rparen + 2:].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            mapping.setdefault(ppid, []).append(int(entry.name))
+        return mapping
+
+    # Fallback for hosts without procfs (e.g. macOS).
+    res = _run(["ps", "-ax", "-o", "pid=,ppid="], check=False)
+    if res.returncode == 0:
+        for line in (res.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                mapping.setdefault(int(parts[1]), []).append(int(parts[0]))
+    return mapping
+
+
+def _descendant_pids(root: int) -> list[int]:
+    """Return all descendant pids of *root* (children, grandchildren, …)."""
+    children = _build_child_map()
+    out: list[int] = []
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        for child in children.get(cur, ()):
+            out.append(child)
+            stack.append(child)
+    return out
+
+
 def _cleanup_stale_port_conflicts(port: int) -> list[int]:
-    """Kill stale manual uvicorn listeners left by older ClawsomeFlow runs."""
+    """Kill stale manual uvicorn listeners left by older ClawsomeFlow runs.
+
+    When a stale ``uvicorn app.main:app`` listener is found, its whole
+    descendant tree is reaped as well — the ``--reload`` worker, the
+    multiprocessing resource tracker, and any detached child that inherited the
+    listening-socket fd (notably the ``clawteam-mcp`` board subprocess, which is
+    spawned in its own session). Without this, killing only the supervisor can
+    leave such a child holding the socket, so the port never frees and the
+    managed service cannot rebind. Descendants are enumerated *before* the
+    parent is killed, since children reparent to init once it dies.
+    """
     reclaimed: list[int] = []
+    seen: set[int] = set()
+    self_pid = os.getpid()
     for pid in _listening_pids_for_port(port):
-        if pid == os.getpid():
+        if pid == self_pid or pid in seen:
             continue
         if not _pid_owned_by_current_user(pid):
             continue
-        cmdline = _pid_cmdline(pid)
-        if not _looks_like_stale_clawsomeflow_listener(cmdline):
+        if not _looks_like_stale_clawsomeflow_listener(_pid_cmdline(pid)):
             continue
-        if _terminate_pid(pid):
-            reclaimed.append(pid)
+        descendants = [
+            d for d in _descendant_pids(pid)
+            if d != self_pid and _pid_owned_by_current_user(d)
+        ]
+        # Supervisor first (so it stops respawning), then any surviving children.
+        for victim in [pid, *descendants]:
+            if victim in seen:
+                continue
+            seen.add(victim)
+            if _terminate_pid(victim):
+                reclaimed.append(victim)
     return reclaimed
 
 
@@ -551,6 +613,18 @@ def stop_disable_and_release_port(
 def describe_port_listeners(port: int) -> list[str]:
     """Public wrapper to inspect active listeners on ``port``."""
     return _describe_port_listeners(port)
+
+
+def reclaim_stale_port_listeners(port: int) -> list[int]:
+    """Public wrapper: terminate orphaned dev uvicorn listeners on ``port``.
+
+    Targets only current-user processes whose command line looks like a stale
+    manual ``uvicorn app.main:app`` listener (e.g. left behind by
+    ``deploy.sh source`` / ``run-dev-bg.sh``). The managed service and the
+    contributor profile both run ``csflow serve`` (no ``app.main:app`` literal),
+    so neither is matched. Returns the reclaimed pids.
+    """
+    return _cleanup_stale_port_conflicts(port)
 
 
 def restart_and_enable(*, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, non_interactive: bool = False) -> None:

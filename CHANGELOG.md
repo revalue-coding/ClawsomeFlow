@@ -30,6 +30,7 @@
 
 
 
+
 # Changelog
 
 All notable changes to **ClawsomeFlow** are documented here.
@@ -42,6 +43,38 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 "Pre-release channel" section if you want to track them.
 
 ## [Unreleased]
+
+### Added
+- Added `scripts/stop-contributor.sh` — an isolated stop command for the
+  contributor profile started by `scripts/deploy-contributor.sh`. It only acts
+  on the contributor dev ports (`17117` / `5174` / `17118`) and refuses to run
+  if any dev port collides with the end-user port, so it can never affect the
+  managed user service (`17017` / `~/.clawsomeflow`). Documented in the
+  contributor section of `readme.md` / `readme.zh.md`.
+- Added `reclaim_stale_port_listeners()` (public wrapper around
+  `_cleanup_stale_port_conflicts`) in `app.cli._user_service`.
+### Changed
+- Changed `csflow stop` to also reclaim an orphaned manual `uvicorn app.main:app`
+  listener on the configured port as a final fallback (no managed service / no
+  PID file), so the official install path can rebind the port cleanly.
+- Changed stale-port reclaim to reap the whole descendant tree of a stale dev
+  uvicorn (reload worker, multiprocessing resource tracker, and detached
+  children such as the `clawteam-mcp` board subprocess that inherited the
+  listening-socket fd). Without this, a detached child could keep the socket
+  bound and block the managed service from rebinding.
+- Changed the Web UI upgrade-failed notice to show the manual upgrade command
+  (`csflow upgrade`) so users can recover when self-upgrade can't start.
+### Fixed
+- Fixed end-user service recovery after a developer runs `deploy.sh source`
+  (which leaves an editable install plus a raw uvicorn on `17017`): the official
+  install/upgrade CLI now fully reclaims the orphaned dev backend and restores
+  the managed systemd/launchd service on `17017`.
+### Removed
+### Deprecated
+### Security
+
+## [0.1.9] — 2026-06-05
+
 
 ### Added
 - Added `SUMMARY_NO_DEPENDENCY` flow validation so leader summary tasks must
@@ -66,9 +99,6 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 - Fixed summary prompt context leakage where unrelated worker reports/worktrees
   could be injected into leader summary dispatch when not listed in summary
   dependencies.
-### Removed
-### Deprecated
-### Security
 
 ## [0.1.8] — 2026-06-04
 
@@ -700,7 +730,7 @@ Initial alpha release. Brings the full MVP architecture online:
   OpenClaw workspace; `POST /api/flows/decompose` async pipeline.
 - 379 backend tests, frontend tsc + vite build clean.
 
-[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.9...HEAD
 [0.1.0]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.0
 [0.1.1b1]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.1b1
 [0.1.1b2]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.1b2
@@ -733,3 +763,4 @@ Initial alpha release. Brings the full MVP architecture online:
 [0.1.6]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.6
 [0.1.7]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.7
 [0.1.8]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.8
+[0.1.9]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.9

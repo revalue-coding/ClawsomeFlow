@@ -191,7 +191,12 @@ export function UpgradeModal({
           </p>
         )}
         {phase === "failed" && (
-          <p className="text-rose-700">{t("shell.updateFailed")}</p>
+          <div className="space-y-2">
+            <p className="text-rose-700">{t("shell.updateFailed")}</p>
+            <pre className="overflow-x-auto rounded-md bg-ink-900 px-3 py-2 font-mono text-xs text-ink-50">
+              {t("shell.updateFailedCommand")}
+            </pre>
+          </div>
         )}
 
         <div className="flex justify-end gap-2 pt-2">

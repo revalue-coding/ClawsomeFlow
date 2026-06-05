@@ -198,6 +198,21 @@ CSFLOW_DEV_FRONTEND_PORT=5184 \
 bash scripts/deploy-contributor.sh
 ```
 
+### 停止贡献者服务
+
+停止 `deploy-contributor.sh` 启动的贡献者环境，请使用专用停止脚本：
+
+```bash
+bash scripts/stop-contributor.sh
+```
+请**不要**用 `csflow stop` 停止贡献者环境——那是用来停止正式用户服务的。
+若你使用了自定义 profile，请传入相同的环境变量：
+
+```bash
+CSFLOW_DEV_BACKEND_PORT=18117 CSFLOW_DEV_FRONTEND_PORT=5184 \
+bash scripts/stop-contributor.sh
+```
+
 ---
 
 ## 🗺️ 路线图

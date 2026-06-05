@@ -198,6 +198,23 @@ CSFLOW_DEV_FRONTEND_PORT=5184 \
 bash scripts/deploy-contributor.sh
 ```
 
+### Stop the contributor service
+
+To stop the contributor profile started by `deploy-contributor.sh`, use the
+dedicated stop script:
+
+```bash
+bash scripts/stop-contributor.sh
+```
+
+Do **not** use `csflow stop` for the contributor profile — that targets
+the end-user service. If you used a custom profile, pass the same env overrides:
+
+```bash
+CSFLOW_DEV_BACKEND_PORT=18117 CSFLOW_DEV_FRONTEND_PORT=5184 \
+bash scripts/stop-contributor.sh
+```
+
 ---
 
 ## 🗺️ Roadmap

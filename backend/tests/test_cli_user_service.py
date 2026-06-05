@@ -235,6 +235,7 @@ def test_cleanup_stale_port_conflicts_kills_only_matching_user_owned_pids(
             303: "python3 -m uvicorn app.main:app --reload --port 17017",
         }[pid],
     )
+    monkeypatch.setattr(svc, "_descendant_pids", lambda _pid: [])
     killed: list[int] = []
     monkeypatch.setattr(
         svc,
@@ -245,6 +246,48 @@ def test_cleanup_stale_port_conflicts_kills_only_matching_user_owned_pids(
     reclaimed = svc._cleanup_stale_port_conflicts(17017)
     assert reclaimed == [101]
     assert killed == [101]
+
+
+def test_cleanup_stale_port_conflicts_reaps_descendant_tree(monkeypatch) -> None:
+    """A stale uvicorn supervisor and its detached children (reload worker,
+    clawteam-mcp that inherited the socket) are all reclaimed."""
+    monkeypatch.setattr(svc, "_listening_pids_for_port", lambda _port: [100, 130])
+    monkeypatch.setattr(svc, "_pid_owned_by_current_user", lambda _pid: True)
+    monkeypatch.setattr(
+        svc,
+        "_pid_cmdline",
+        lambda pid: (
+            "python3 -m uvicorn app.main:app --reload --port 17017"
+            if pid == 100
+            else "python3 .../clawteam-mcp"
+        ),
+    )
+    # pid 100 (supervisor) → worker 110 → clawteam-mcp 130 (also a listener).
+    descendants = {100: [110, 130], 110: [130]}
+    monkeypatch.setattr(svc, "_descendant_pids", lambda pid: descendants.get(pid, []))
+    killed: list[int] = []
+    monkeypatch.setattr(
+        svc,
+        "_terminate_pid",
+        lambda pid, grace_seconds=8.0: (killed.append(pid), True)[1],
+    )
+
+    reclaimed = svc._cleanup_stale_port_conflicts(17017)
+    # Supervisor first, then its descendants; pid 130 reaped once (deduped).
+    assert killed == [100, 110, 130]
+    assert reclaimed == [100, 110, 130]
+
+
+def test_reclaim_stale_port_listeners_delegates_to_cleanup(monkeypatch) -> None:
+    seen: list[int] = []
+
+    def _fake_cleanup(port: int) -> list[int]:
+        seen.append(port)
+        return [4242]
+
+    monkeypatch.setattr(svc, "_cleanup_stale_port_conflicts", _fake_cleanup)
+    assert svc.reclaim_stale_port_listeners(17017) == [4242]
+    assert seen == [17017]
 
 
 def test_restart_and_enable_retries_after_reclaiming_conflicted_port(

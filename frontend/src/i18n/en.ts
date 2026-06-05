@@ -82,7 +82,8 @@ const en = {
     updateRestartHint:
       "The service will restart in about a minute. This page will reload automatically when the new version is live.",
     updateDone: "Upgraded to v{{version}}. Reloading…",
-    updateFailed: "Failed to start the upgrade. Please try the command manually.",
+    updateFailed: "Failed to start the upgrade. Please run the upgrade command manually:",
+    updateFailedCommand: "csflow upgrade",
     updateReload: "Reload now",
   },
   flowList: {
