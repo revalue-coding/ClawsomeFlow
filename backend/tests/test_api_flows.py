@@ -437,3 +437,209 @@ def test_pydantic_field_error_returns_422(client: TestClient, repo: str) -> None
     payload["spec"]["tasks"][0]["timeoutSeconds"] = -1
     resp = client.post("/api/flows", json=payload)
     assert resp.status_code == 422
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Template export / import
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_export_single_flow(client: TestClient, repo: str) -> None:
+    created = client.post("/api/flows", json=_flow_payload(repo, name="exp")).json()
+    flow_id = created["id"]
+
+    resp = client.get(f"/api/flows/{flow_id}/export")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["clawsomeflowTemplate"] == "1"
+    assert body["kind"] == "flow"
+    entry = body["flow"]
+    # Template keeps id + version (write-back contract) and stays camelCase.
+    assert entry["id"] == flow_id
+    assert entry["version"] == 1
+    assert entry["name"] == "exp"
+    assert entry["spec"]["agents"][0]["id"] == "alice"
+    assert "isLeader" in entry["spec"]["agents"][0]
+    # Instance-only bookkeeping is stripped.
+    assert "ownerUser" not in entry
+    assert "createdAt" not in entry
+
+
+def test_export_route_not_shadowed_by_flow_id(client: TestClient, repo: str) -> None:
+    """`/api/flows/export` must hit the bulk export, not `/{flow_id}`."""
+    client.post("/api/flows", json=_flow_payload(repo, name="A"))
+    client.post("/api/flows", json=_flow_payload(repo, name="B"))
+    resp = client.get("/api/flows/export")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["kind"] == "flowCollection"
+    assert {f["name"] for f in body["flows"]} == {"A", "B"}
+
+
+def test_export_bulk_ids_filter(client: TestClient, repo: str) -> None:
+    a = client.post("/api/flows", json=_flow_payload(repo, name="A")).json()["id"]
+    client.post("/api/flows", json=_flow_payload(repo, name="B"))
+    resp = client.get(f"/api/flows/export?ids={a}")
+    assert resp.status_code == 200, resp.text
+    flows = resp.json()["flows"]
+    assert len(flows) == 1 and flows[0]["id"] == a
+
+
+def test_export_bulk_ids_missing_is_404(client: TestClient, repo: str) -> None:
+    resp = client.get("/api/flows/export?ids=flow_does_not_exist")
+    assert resp.status_code == 404
+
+
+def test_export_unknown_single_is_404(client: TestClient) -> None:
+    assert client.get("/api/flows/flow_missing/export").status_code == 404
+
+
+def test_import_create_new_without_id(client: TestClient, repo: str) -> None:
+    template = {
+        "clawsomeflowTemplate": "1",
+        "flow": {
+            "name": "imported",
+            "description": "demo",
+            "spec": _flow_payload(repo)["spec"],
+        },
+    }
+    resp = client.post("/api/flows/import", json=template)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["created"] == 1 and body["updated"] == 0 and body["failed"] == 0
+    new_id = body["results"][0]["id"]
+    assert body["results"][0]["action"] == "created"
+    # The new flow is fetchable.
+    assert client.get(f"/api/flows/{new_id}").json()["name"] == "imported"
+
+
+def test_import_roundtrip_writeback(client: TestClient, repo: str) -> None:
+    """Export → edit → import writes back to the SAME flow (upsert by id)."""
+    flow_id = client.post("/api/flows", json=_flow_payload(repo, name="orig")).json()["id"]
+    template = client.get(f"/api/flows/{flow_id}/export").json()
+
+    # External service edits the name, keeps id + version.
+    template["flow"]["name"] = "edited-by-external"
+    resp = client.post("/api/flows/import", json=template)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["updated"] == 1 and body["created"] == 0
+    item = body["results"][0]
+    assert item["id"] == flow_id
+    assert item["action"] == "updated"
+    assert item["version"] == 2  # bumped by optimistic-locked update
+
+    detail = client.get(f"/api/flows/{flow_id}").json()
+    assert detail["name"] == "edited-by-external"
+    assert detail["version"] == 2
+
+
+def test_import_version_conflict(client: TestClient, repo: str) -> None:
+    flow_id = client.post("/api/flows", json=_flow_payload(repo, name="orig")).json()["id"]
+    template = client.get(f"/api/flows/{flow_id}/export").json()
+    # Bump the real flow so the template's version goes stale.
+    put = _flow_payload(repo, name="server-side-change")
+    put["version"] = 1
+    assert client.put(f"/api/flows/{flow_id}", json=put).status_code == 200
+
+    # Stale write-back (version=1) is reported per-item, not a hard 409.
+    resp = client.post("/api/flows/import", json=template)
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["results"][0]
+    assert item["action"] == "error"
+    assert item["errorCode"] == "VERSION_CONFLICT"
+
+
+def test_import_overwrite_forces_writeback(client: TestClient, repo: str) -> None:
+    flow_id = client.post("/api/flows", json=_flow_payload(repo, name="orig")).json()["id"]
+    template = client.get(f"/api/flows/{flow_id}/export").json()
+    put = _flow_payload(repo, name="server-side-change")
+    put["version"] = 1
+    assert client.put(f"/api/flows/{flow_id}", json=put).status_code == 200
+
+    template["flow"]["name"] = "force-win"
+    resp = client.post("/api/flows/import?overwrite=true", json=template)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["results"][0]["action"] == "updated"
+    assert client.get(f"/api/flows/{flow_id}").json()["name"] == "force-win"
+
+
+def test_import_recreates_deleted_id(client: TestClient, repo: str) -> None:
+    flow_id = client.post("/api/flows", json=_flow_payload(repo, name="orig")).json()["id"]
+    template = client.get(f"/api/flows/{flow_id}/export").json()
+    assert client.delete(f"/api/flows/{flow_id}").status_code == 204
+
+    resp = client.post("/api/flows/import", json=template)
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["results"][0]
+    assert item["action"] == "created"
+    assert item["id"] == flow_id  # original id preserved
+
+
+def test_import_bulk_roundtrip(client: TestClient, repo: str) -> None:
+    a = client.post("/api/flows", json=_flow_payload(repo, name="A")).json()["id"]
+    coll = client.get("/api/flows/export").json()
+    # Edit one, add a brand-new one without id.
+    for f in coll["flows"]:
+        if f["id"] == a:
+            f["name"] = "A2"
+    coll["flows"].append({
+        "name": "C-new",
+        "description": "demo",
+        "spec": _flow_payload(repo)["spec"],
+    })
+    resp = client.post("/api/flows/import", json={"clawsomeflowTemplate": "1", "flows": coll["flows"]})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["updated"] == 1 and body["created"] == 1
+    assert client.get(f"/api/flows/{a}").json()["name"] == "A2"
+
+
+def test_import_rejects_both_flow_and_flows(client: TestClient, repo: str) -> None:
+    spec = _flow_payload(repo)["spec"]
+    resp = client.post("/api/flows/import", json={
+        "flow": {"name": "x", "description": "d", "spec": spec},
+        "flows": [{"name": "y", "description": "d", "spec": spec}],
+    })
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "INVALID_IMPORT_PAYLOAD"
+
+
+def test_import_rejects_neither_flow_nor_flows(client: TestClient) -> None:
+    resp = client.post("/api/flows/import", json={"clawsomeflowTemplate": "1"})
+    assert resp.status_code == 400
+
+
+def test_import_empty_description_is_per_item_error(client: TestClient, repo: str) -> None:
+    template = {
+        "flow": {
+            "name": "no-desc",
+            "description": "   ",
+            "spec": _flow_payload(repo)["spec"],
+        },
+    }
+    resp = client.post("/api/flows/import", json=template)
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["results"][0]
+    assert item["action"] == "error"
+    assert item["errorCode"] == "INVALID_FLOW_DESCRIPTION"
+
+
+def test_import_bad_spec_is_per_item_not_batch_abort(client: TestClient, repo: str) -> None:
+    """A business-invalid spec (FlowValidationError) in one bulk entry must be
+    reported per-item, not 400 the whole batch."""
+    good = _flow_payload(repo, name="good")["spec"]
+    # Two leaders → _check_leader fails inside validate_flow_against_db.
+    bad = _flow_payload(repo, name="bad")["spec"]
+    bad["agents"][0]["isLeader"] = True  # now both agents are leaders
+    resp = client.post("/api/flows/import", json={"flows": [
+        {"name": "good", "description": "d", "spec": good},
+        {"name": "bad", "description": "d", "spec": bad},
+    ]})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["created"] == 1 and body["failed"] == 1
+    actions = {r["name"]: r["action"] for r in body["results"]}
+    assert actions == {"good": "created", "bad": "error"}
+    bad_item = next(r for r in body["results"] if r["name"] == "bad")
+    assert bad_item["errorCode"]  # carries the FlowValidationError code

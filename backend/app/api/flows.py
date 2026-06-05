@@ -24,8 +24,8 @@ from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.logging_setup import get_logger
 from app.models import AgentKind, Flow, FlowSpec, iso_utc
-from app.storage import StorageBackend, get_storage
-from app.validators import validate_flow_against_db
+from app.storage import StorageBackend, StorageVersionConflict, get_storage
+from app.validators import FlowValidationError, validate_flow_against_db
 
 router = APIRouter(prefix="/flows", tags=["flows"])
 logger = get_logger("api.flows")
@@ -109,6 +109,76 @@ class FlowSaveWarning(_CamelModel):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Template import/export models (portable Flow definitions)
+#
+# A "template" is a Flow stripped of instance-only bookkeeping (owner,
+# timestamps) but — by design — KEEPS ``id`` + ``version`` so an external
+# service can pull a Flow, edit it, and write it back to the *same* Flow
+# (upsert by id, optimistic-locked by version). See API.md "Flows" section.
+# ──────────────────────────────────────────────────────────────────────
+
+# Bump only on breaking changes to the envelope shape.
+TEMPLATE_SCHEMA_VERSION = "1"
+
+
+class FlowTemplateEntry(_CamelModel):
+    """One Flow inside an export/import envelope."""
+
+    # ``id`` is optional on import: present → upsert by id; absent → create new.
+    id: str | None = None
+    name: str
+    description: str = ""
+    cleanup_team_on_finish: bool = True
+    # ``version`` drives optimistic locking on write-back. Optional on import
+    # (missing version falls back to force-overwrite of the current row).
+    version: int | None = None
+    spec: FlowSpec
+
+
+class FlowTemplate(_CamelModel):
+    """Single-Flow export envelope."""
+
+    clawsomeflow_template: str = TEMPLATE_SCHEMA_VERSION
+    kind: str = "flow"
+    flow: FlowTemplateEntry
+
+
+class FlowCollectionTemplate(_CamelModel):
+    """Multi-Flow (bulk) export envelope."""
+
+    clawsomeflow_template: str = TEMPLATE_SCHEMA_VERSION
+    kind: str = "flowCollection"
+    flows: list[FlowTemplateEntry]
+
+
+class FlowImportPayload(_CamelModel):
+    """Import body: accepts either a single ``flow`` or a ``flows`` array."""
+
+    clawsomeflow_template: str | None = None
+    flow: FlowTemplateEntry | None = None
+    flows: list[FlowTemplateEntry] | None = None
+
+
+class FlowImportItemResult(_CamelModel):
+    """Per-Flow outcome of an import (bulk-friendly: never raises mid-batch)."""
+
+    id: str | None = None
+    name: str = ""
+    action: str  # "created" | "updated" | "error"
+    version: int | None = None
+    warnings: list[FlowSaveWarning] = Field(default_factory=list)
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class FlowImportResponse(_CamelModel):
+    results: list[FlowImportItemResult]
+    created: int = 0
+    updated: int = 0
+    failed: int = 0
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Mappers (DB row → response model)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -157,10 +227,7 @@ def _to_summary(flow: Flow) -> FlowSummary:
 
 def _to_detail(flow: Flow) -> FlowDetail:
     # Always re-serialize through FlowSpec so nested keys stay camelCase on wire.
-    spec_payload = FlowSpec.model_validate(flow.spec).model_dump(
-        mode="json",
-        by_alias=True,
-    )
+    spec_payload = _serialize_spec(flow)
     return FlowDetail(
         id=flow.id,
         name=flow.name,
@@ -171,6 +238,24 @@ def _to_detail(flow: Flow) -> FlowDetail:
         owner_user=flow.owner_user,
         created_at=iso_utc(flow.created_at),
         updated_at=iso_utc(flow.updated_at),
+    )
+
+
+def _serialize_spec(flow: Flow) -> dict[str, Any]:
+    """Re-serialize the stored spec through FlowSpec so nested keys stay
+    camelCase on the wire. Shared by detail + template responses."""
+    return FlowSpec.model_validate(flow.spec).model_dump(mode="json", by_alias=True)
+
+
+def _to_template_entry(flow: Flow) -> FlowTemplateEntry:
+    """DB row → portable template entry (keeps id + version for write-back)."""
+    return FlowTemplateEntry(
+        id=flow.id,
+        name=flow.name,
+        description=flow.description,
+        cleanup_team_on_finish=flow.cleanup_team_on_finish,
+        version=flow.version,
+        spec=_serialize_spec(flow),
     )
 
 
@@ -271,6 +356,187 @@ def create_flow(
     saved = storage.flow_create(flow)
     warnings = _collect_flow_save_warnings(payload.spec)
     return FlowCreateResponse(id=saved.id, version=saved.version, warnings=warnings)
+
+
+# NB: ``/export`` and ``/import`` are static segments and MUST be declared
+# before the dynamic ``/{flow_id}`` route below, otherwise FastAPI would match
+# them as a flow_id == "export" / "import".
+@router.get("/export", response_model=FlowCollectionTemplate)
+def export_flows(
+    user: UserDep,
+    storage: StorageDep,
+    ids: Annotated[str | None, Query(description="Comma-separated flow ids; omit for all")] = None,
+) -> FlowCollectionTemplate:
+    """Bulk export. With ``?ids=a,b`` export that subset (strict: any missing or
+    non-owned id → 404); without ``ids`` export all of the caller's Flows."""
+    if ids is not None:
+        wanted = [s.strip() for s in ids.split(",") if s.strip()]
+        entries: list[FlowTemplateEntry] = []
+        for fid in wanted:
+            flow = storage.flow_get(fid)
+            if flow is None:
+                raise ApiError("NOT_FOUND", f"flow {fid!r} not found", status_code=404)
+            _ensure_owner(flow, user)
+            entries.append(_to_template_entry(flow))
+        return FlowCollectionTemplate(flows=entries)
+
+    # No filter → page through all of the user's flows.
+    collected: list[Flow] = []
+    offset = 0
+    page = 200
+    while True:
+        flows, total = storage.flow_list(owner_user=user, q=None, limit=page, offset=offset)
+        collected.extend(flows)
+        offset += len(flows)
+        if not flows or offset >= total:
+            break
+    return FlowCollectionTemplate(flows=[_to_template_entry(f) for f in collected])
+
+
+@router.get("/{flow_id}/export", response_model=FlowTemplate)
+def export_flow(
+    flow_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> FlowTemplate:
+    """Export a single Flow as a portable template (keeps id + version)."""
+    flow = storage.flow_get(flow_id)
+    if flow is None:
+        raise ApiError("NOT_FOUND", f"flow {flow_id!r} not found", status_code=404)
+    _ensure_owner(flow, user)
+    return FlowTemplate(flow=_to_template_entry(flow))
+
+
+def _import_one(
+    entry: FlowTemplateEntry,
+    *,
+    user: str,
+    storage: StorageBackend,
+    overwrite: bool,
+) -> FlowImportItemResult:
+    """Upsert a single template entry. Never raises for per-Flow business
+    errors — returns an ``action="error"`` result instead, so a bulk import
+    completes every entry independently."""
+    try:
+        _validate_flow_meta(description=entry.description)
+        validate_flow_against_db(entry.spec, storage)
+    except ApiError as exc:
+        # _validate_flow_meta → ApiError (e.g. INVALID_FLOW_DESCRIPTION).
+        return FlowImportItemResult(
+            id=entry.id, name=entry.name, action="error",
+            error_code=exc.code, error_message=exc.message,
+        )
+    except FlowValidationError as exc:
+        # validate_flow_against_db → FlowValidationError (e.g. INVALID_DAG,
+        # missing leader, bad refs). Keep it per-item so one bad entry doesn't
+        # abort a bulk import (the global handler would otherwise 400 the batch).
+        return FlowImportItemResult(
+            id=entry.id, name=entry.name, action="error",
+            error_code=exc.code, error_message=exc.message,
+        )
+
+    warnings = _collect_flow_save_warnings(entry.spec)
+
+    # ── Upsert by id ───────────────────────────────────────────────────
+    if entry.id:
+        existing = storage.flow_get(entry.id)
+        if existing is not None:
+            if existing.owner_user != user:
+                return FlowImportItemResult(
+                    id=entry.id, name=entry.name, action="error",
+                    error_code="FORBIDDEN",
+                    error_message="flow belongs to a different user",
+                )
+            # overwrite=True OR no version supplied → force using current
+            # version (last-write-wins). Otherwise honour optimistic locking.
+            if overwrite or entry.version is None:
+                expected = existing.version
+            else:
+                expected = entry.version
+            existing.name = entry.name
+            existing.description = entry.description
+            # Product decision (mirrors create/update): always enable cleanup.
+            existing.cleanup_team_on_finish = True
+            existing.with_spec(entry.spec)
+            try:
+                updated = storage.flow_update(existing, expected_version=expected)
+            except StorageVersionConflict as exc:
+                return FlowImportItemResult(
+                    id=entry.id, name=entry.name, action="error",
+                    error_code="VERSION_CONFLICT",
+                    error_message=(
+                        f"version conflict (sent {expected}, current "
+                        f"{exc.actual}); re-export and retry or set overwrite=true"
+                    ),
+                )
+            return FlowImportItemResult(
+                id=updated.id, name=updated.name, action="updated",
+                version=updated.version, warnings=warnings,
+            )
+
+        # id supplied but row gone → recreate with the original id so any
+        # external references stay valid.
+        flow = Flow(
+            id=entry.id,
+            name=entry.name,
+            description=entry.description,
+            cleanup_team_on_finish=True,
+            owner_user=user,
+        ).with_spec(entry.spec)
+    else:
+        # No id → brand-new Flow with a freshly generated id.
+        flow = Flow(
+            name=entry.name,
+            description=entry.description,
+            cleanup_team_on_finish=True,
+            owner_user=user,
+        ).with_spec(entry.spec)
+
+    try:
+        saved = storage.flow_create(flow)
+    except IntegrityError:
+        return FlowImportItemResult(
+            id=entry.id, name=entry.name, action="error",
+            error_code="DUPLICATE",
+            error_message="flow id already exists",
+        )
+    return FlowImportItemResult(
+        id=saved.id, name=saved.name, action="created",
+        version=saved.version, warnings=warnings,
+    )
+
+
+@router.post("/import", response_model=FlowImportResponse)
+def import_flows(
+    payload: FlowImportPayload,
+    user: UserDep,
+    storage: StorageDep,
+    overwrite: Annotated[
+        bool, Query(description="Force write-back ignoring version (last-write-wins)")
+    ] = False,
+) -> FlowImportResponse:
+    """Import (upsert) one or many Flow templates.
+
+    Body must carry exactly one of ``flow`` (single) or ``flows`` (bulk).
+    Per-Flow failures are reported in ``results`` rather than aborting the
+    whole batch; only a malformed envelope returns ``400``.
+    """
+    if (payload.flow is None) == (payload.flows is None):
+        raise ApiError(
+            "INVALID_IMPORT_PAYLOAD",
+            "exactly one of 'flow' or 'flows' must be provided",
+            status_code=400,
+        )
+    entries = [payload.flow] if payload.flow is not None else list(payload.flows or [])
+    results = [
+        _import_one(e, user=user, storage=storage, overwrite=overwrite) for e in entries
+    ]
+    return FlowImportResponse(
+        results=results,
+        created=sum(1 for r in results if r.action == "created"),
+        updated=sum(1 for r in results if r.action == "updated"),
+        failed=sum(1 for r in results if r.action == "error"),
+    )
 
 
 @router.get("/{flow_id}", response_model=FlowDetail)
