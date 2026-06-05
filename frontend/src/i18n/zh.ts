@@ -233,6 +233,8 @@ const zh = {
     summaryTaskDefaultSubject: "Summary",
     summaryTaskBadge: "Summary 任务",
     summaryTaskLocked: "由所选 leader 自动生成；切换 leader 即更新归属，不能删除。",
+    summaryNoDepsWarning:
+      "Summary 任务当前没有依赖任务，请在“依赖任务”中选择需要审查和汇总上报的上游任务。",
     graphTitle: "任务依赖图",
     graphLegendTask: "任务",
     graphLegendRoot: "起始任务",
@@ -279,6 +281,8 @@ const zh = {
       ownerRepoBranchMismatch:
         "Agent「{{agentId}}」在不同子任务中的仓库/分支配置不一致。每个 Agent 只能绑定一套仓库+分支，如需其他配置请新建 Agent。",
       leaderCannotOwnNonSummary: "Leader 不能拥有非 summary 任务。",
+      summaryNeedsDependency:
+        "Summary 任务必须至少依赖一个需要审查和汇总上报的上游任务。",
       cycleDetected: "任务依赖不能包含环路：{{cyclePath}}",
       descriptionRequired: "「{{subject}}」的详细说明不能为空。",
       openclawAgentMissing: "「{{subject}}」选择的 OpenClaw 智能体「{{agentId}}」不存在，请重新选择。",

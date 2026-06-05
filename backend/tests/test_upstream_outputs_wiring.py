@@ -9,8 +9,8 @@ These verify that:
    (b) the upstream owner agent, (c) the upstream session's worktree
    info if the session exists, (d) the strict-match upstream completion
    message for that depended task id (agent + task_id must both match).
-4. Leader summary tasks DO NOT get the upstream block (their special
-   ``## 各 Worker 给你的汇报`` block already covers it).
+4. Leader summary tasks DO NOT get the upstream block; they use dedicated
+   leader report/worktree inputs filtered by summary ``depends_on``.
 """
 
 from __future__ import annotations
@@ -470,6 +470,95 @@ async def test_leader_summary_task_does_not_get_upstream_block(fake_lookup) -> N
     assert ctx.upstream_outputs == []
     assert len(ctx.worker_reports) == 1
     assert ctx.worker_reports[0].task_id == "t-c"
+
+
+@pytest.mark.asyncio
+async def test_leader_summary_only_injects_configured_dependency_reports(fake_lookup) -> None:
+    spec = FlowSpec(
+        agents=[_agent("a"), _agent("b"), _agent("leader", leader=True)],
+        tasks=[
+            FlowTask(id="t-a", owner_agent_id="a", subject="A", description=""),
+            FlowTask(id="t-b", owner_agent_id="b", subject="B", description=""),
+            FlowTask(
+                id="ts",
+                owner_agent_id="leader",
+                subject="S",
+                description="",
+                depends_on=["t-a"],
+                is_leader_summary=True,
+            ),
+        ],
+    )
+    run = _persist_run(spec)
+
+    async def inbox_provider():
+        return [
+            {"from_agent": "a", "task_id": "t-a", "content": "A done."},
+            {"from_agent": "b", "task_id": "t-b", "content": "B done."},
+        ]
+
+    rc = RunController(
+        run=run,
+        spec=spec,
+        flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=lambda: _empty(),
+        leader_inbox_provider=inbox_provider,
+    )
+    await rc._ensure_session_idle(rc._agents["leader"])
+    await rc._ensure_session_idle(rc._agents["a"])
+    await rc._ensure_session_idle(rc._agents["b"])
+
+    ctx = await rc._compose_dispatch_context(rc._agents["leader"], rc._tasks["ts"].task)
+    assert ctx.upstream_outputs == []
+    assert [r.task_id for r in ctx.worker_reports] == ["t-a"]
+    assert ctx.worker_reports[0].from_agent == "a"
+    assert len(ctx.worker_worktrees) == 1
+    assert ctx.worker_worktrees[0].agent_name == "a"
+
+
+@pytest.mark.asyncio
+async def test_leader_summary_with_no_dependencies_injects_no_worker_inputs(fake_lookup) -> None:
+    spec = FlowSpec(
+        agents=[_agent("a"), _agent("leader", leader=True)],
+        tasks=[
+            FlowTask(id="t-a", owner_agent_id="a", subject="A", description=""),
+            FlowTask(
+                id="ts",
+                owner_agent_id="leader",
+                subject="S",
+                description="",
+                depends_on=[],
+                is_leader_summary=True,
+            ),
+        ],
+    )
+    run = _persist_run(spec)
+
+    async def inbox_provider():
+        return [{"from_agent": "a", "task_id": "t-a", "content": "A done."}]
+
+    rc = RunController(
+        run=run,
+        spec=spec,
+        flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=lambda: _empty(),
+        leader_inbox_provider=inbox_provider,
+    )
+    await rc._ensure_session_idle(rc._agents["leader"])
+    await rc._ensure_session_idle(rc._agents["a"])
+
+    ctx = await rc._compose_dispatch_context(rc._agents["leader"], rc._tasks["ts"].task)
+    assert ctx.upstream_outputs == []
+    assert ctx.worker_reports == []
+    assert ctx.worker_worktrees == []
 
 
 # helpers

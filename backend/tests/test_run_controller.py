@@ -418,6 +418,49 @@ async def test_initial_dispatch_then_completion(fake_lookup) -> None:
     assert rc._terminal_check() is True
 
 
+def test_summary_dispatch_gated_until_all_tasks_completed(fake_lookup) -> None:
+    """The leader summary waits for ALL non-summary tasks, even ones it does
+    not depend on (depends_on now only selects which outputs feed the summary)."""
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(id="alice", kind=AgentKind.claude, repo="/tmp/main", is_leader=False),
+            FlowAgent(id="bob", kind=AgentKind.claude, repo="/tmp/main", is_leader=False),
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/main", is_leader=True),
+        ],
+        tasks=[
+            FlowTask(id="t1", owner_agent_id="alice", subject="a", description="d"),
+            FlowTask(id="t2", owner_agent_id="bob", subject="b", description="d"),
+            FlowTask(id="ts", owner_agent_id="leader", subject="s", description="d",
+                     depends_on=["t1"], is_leader_summary=True),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    rc = RunController(
+        run=run,
+        spec=spec,
+        flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=None,
+    )
+
+    # ts depends only on t1, but unrelated t2 is still pending → summary held
+    # back even though its own dependency (t1) is done.
+    rc._tasks["t1"].state = _TaskState.completed
+    rc._tasks["t2"].state = _TaskState.pending
+    rc._tasks["ts"].state = _TaskState.pending
+    ready_ids = {b.task.id for b in rc._ready_tasks()}
+    assert "ts" not in ready_ids
+    assert "t2" in ready_ids
+
+    # Once every non-summary task is completed, the summary becomes dispatchable.
+    rc._tasks["t2"].state = _TaskState.completed
+    ready_ids = {b.task.id for b in rc._ready_tasks()}
+    assert ready_ids == {"ts"}
+
+
 def test_terminal_check_uses_leader_summary_completion(fake_lookup) -> None:
     spec = _make_spec()
     run = _persist_flow_and_run(spec)
@@ -821,6 +864,24 @@ async def test_pending_snapshot_dispatches_without_local_dependency_recheck(
     assert [tid for tid, _ in sessions["alice"].dispatched] == ["t1"]
     assert not sessions.get("leader") or not sessions["leader"].dispatched
 
+    # Even though ClawTeam reports the summary as pending, the summary gate
+    # holds it until every non-summary task has completed.
+    await rc.tick()
+    assert not sessions.get("leader") or not sessions["leader"].dispatched
+
+    # Mark the worker task completed → summary becomes dispatchable. We still
+    # trust the snapshot's pending flag for the summary (no local depends_on
+    # graph recheck); only the all-tasks-complete gate applies.
+    snapshots[:] = [
+        TaskSnapshot(
+            task_id="t1", owner_agent_id="alice", status="completed",
+            locked_by_agent="alice", metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="ts", owner_agent_id="leader", status="pending",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+    ]
     await rc.tick()
     assert [tid for tid, _ in sessions["leader"].dispatched] == ["ts"]
     assert rc._tasks["ts"].state == _TaskState.in_progress

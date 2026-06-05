@@ -21,17 +21,23 @@ from app.validators.flow import (
     ERROR_MISSING_AGENT_REPO,
     ERROR_MISSING_LEADER_SUMMARY,
     ERROR_OPENCLAW_AGENT_NOT_FOUND,
+    ERROR_SUMMARY_NO_DEPENDENCY,
 )
 
 
 def _make_spec(*, leader: bool = True, summary: bool = True) -> FlowSpec:
+    # A summary task now requires ≥1 dependency, so the minimal valid spec is a
+    # worker task + a leader summary that depends on it.
     return FlowSpec(
         agents=[
             FlowAgent(id="alice", kind=AgentKind.claude, repo="/tmp/r", is_leader=leader),
+            FlowAgent(id="worker", kind=AgentKind.claude, repo="/tmp/r", is_leader=False),
         ],
         tasks=[
+            FlowTask(id="t0", owner_agent_id="worker", subject="w"),
             FlowTask(
-                id="t1", owner_agent_id="alice", subject="x", is_leader_summary=summary
+                id="t1", owner_agent_id="alice", subject="x",
+                depends_on=["t0"], is_leader_summary=summary,
             ),
         ],
     )
@@ -150,14 +156,39 @@ class TestPureValidation:
             validate_flow_spec(spec)
         assert exc.value.code == ERROR_INVALID_AGENT_REF
 
+    def test_summary_without_dependency_rejected(self) -> None:
+        """A leader summary must depend on at least one upstream task."""
+        spec = FlowSpec(
+            agents=[
+                FlowAgent(id="leader", kind=AgentKind.claude, repo="/r", is_leader=True),
+                FlowAgent(id="worker", kind=AgentKind.claude, repo="/r", is_leader=False),
+            ],
+            tasks=[
+                FlowTask(id="t1", owner_agent_id="worker", subject="x"),
+                FlowTask(id="ts", owner_agent_id="leader", subject="summary",
+                         depends_on=[], is_leader_summary=True),
+            ],
+        )
+        with pytest.raises(FlowValidationError) as exc:
+            validate_flow_spec(spec)
+        assert exc.value.code == ERROR_SUMMARY_NO_DEPENDENCY
+        assert exc.value.details["task_id"] == "ts"
+
 
 class TestStorageAwareValidation:
     def test_repo_must_be_git_repo(self, tmp_path: Path) -> None:
         not_a_repo = tmp_path / "plain"
         not_a_repo.mkdir()
         spec = FlowSpec(
-            agents=[FlowAgent(id="a", kind=AgentKind.claude, repo=str(not_a_repo), is_leader=True)],
-            tasks=[FlowTask(id="t1", owner_agent_id="a", subject="x", is_leader_summary=True)],
+            agents=[
+                FlowAgent(id="a", kind=AgentKind.claude, repo=str(not_a_repo), is_leader=True),
+                FlowAgent(id="w", kind=AgentKind.claude, repo=str(not_a_repo), is_leader=False),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="w", subject="w"),
+                FlowTask(id="t1", owner_agent_id="a", subject="x",
+                         depends_on=["t0"], is_leader_summary=True),
+            ],
         )
         with pytest.raises(FlowValidationError) as exc:
             validate_flow_against_db(spec, get_storage())
@@ -168,8 +199,15 @@ class TestStorageAwareValidation:
         repo.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
         spec = FlowSpec(
-            agents=[FlowAgent(id="a", kind=AgentKind.claude, repo=str(repo), is_leader=True)],
-            tasks=[FlowTask(id="t1", owner_agent_id="a", subject="x", is_leader_summary=True)],
+            agents=[
+                FlowAgent(id="a", kind=AgentKind.claude, repo=str(repo), is_leader=True),
+                FlowAgent(id="w", kind=AgentKind.claude, repo=str(repo), is_leader=False),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="w", subject="w"),
+                FlowTask(id="t1", owner_agent_id="a", subject="x",
+                         depends_on=["t0"], is_leader_summary=True),
+            ],
         )
         with pytest.raises(FlowValidationError) as exc:
             validate_flow_against_db(spec, get_storage())
@@ -197,8 +235,15 @@ class TestStorageAwareValidation:
             check=True,
         )
         spec = FlowSpec(
-            agents=[FlowAgent(id="a", kind=AgentKind.claude, repo=str(repo), is_leader=True)],
-            tasks=[FlowTask(id="t1", owner_agent_id="a", subject="x", is_leader_summary=True)],
+            agents=[
+                FlowAgent(id="a", kind=AgentKind.claude, repo=str(repo), is_leader=True),
+                FlowAgent(id="w", kind=AgentKind.claude, repo=str(repo), is_leader=False),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="w", subject="w"),
+                FlowTask(id="t1", owner_agent_id="a", subject="x",
+                         depends_on=["t0"], is_leader_summary=True),
+            ],
         )
         validate_flow_against_db(spec, get_storage())
 
@@ -206,8 +251,13 @@ class TestStorageAwareValidation:
         spec = FlowSpec(
             agents=[
                 FlowAgent(id="missing-oc", kind=AgentKind.openclaw, is_leader=True),
+                FlowAgent(id="missing-oc-w", kind=AgentKind.openclaw, is_leader=False),
             ],
-            tasks=[FlowTask(id="t1", owner_agent_id="missing-oc", subject="x", is_leader_summary=True)],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="missing-oc-w", subject="w"),
+                FlowTask(id="t1", owner_agent_id="missing-oc", subject="x",
+                         depends_on=["t0"], is_leader_summary=True),
+            ],
         )
         with pytest.raises(FlowValidationError) as exc:
             validate_flow_against_db(spec, get_storage())
@@ -221,9 +271,22 @@ class TestStorageAwareValidation:
             workspace_path="/tmp/oc-real/workspace",
             created_by_user="alice",
         ))
+        storage.openclaw_create(OpenclawAgent(
+            id="oc-worker",
+            name="Worker agent",
+            workspace_path="/tmp/oc-worker/workspace",
+            created_by_user="alice",
+        ))
         spec = FlowSpec(
-            agents=[FlowAgent(id="oc-real", kind=AgentKind.openclaw, is_leader=True)],
-            tasks=[FlowTask(id="t1", owner_agent_id="oc-real", subject="x", is_leader_summary=True)],
+            agents=[
+                FlowAgent(id="oc-real", kind=AgentKind.openclaw, is_leader=True),
+                FlowAgent(id="oc-worker", kind=AgentKind.openclaw, is_leader=False),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="oc-worker", subject="w"),
+                FlowTask(id="t1", owner_agent_id="oc-real", subject="x",
+                         depends_on=["t0"], is_leader_summary=True),
+            ],
         )
         validate_flow_against_db(spec, storage)
 

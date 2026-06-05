@@ -323,6 +323,14 @@ def test_create_invalid_dag(client: TestClient, repo: str) -> None:
     assert resp.json()["error"] == "INVALID_DAG"
 
 
+def test_create_summary_without_dependency_rejected(client: TestClient, repo: str) -> None:
+    payload = _flow_payload(repo)
+    payload["spec"]["tasks"][1]["dependsOn"] = []
+    resp = client.post("/api/flows", json=payload)
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "SUMMARY_NO_DEPENDENCY"
+
+
 def test_create_empty_overall_goal_rejected(client: TestClient, repo: str) -> None:
     payload = _flow_payload(repo)
     payload["description"] = "   "
