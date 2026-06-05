@@ -17,6 +17,15 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "_bump_version.py"
 
+# ``_bump_version.py`` is private release tooling (gitignored). Skip this whole
+# module wherever the script is absent — CI runners and contributor clones — so
+# collection never crashes. It still runs locally for maintainers who have it.
+if not SCRIPT.exists():
+    pytest.skip(
+        "scripts/_bump_version.py not present (private release tooling)",
+        allow_module_level=True,
+    )
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("bump_version", SCRIPT)
