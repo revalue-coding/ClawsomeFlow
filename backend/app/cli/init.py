@@ -134,6 +134,17 @@ def init(
             broker=broker_cfg,
             **({"default_user": user} if user else {}),
         )
+    # Auto-provision the private secrets (HMAC secret for the internal-API
+    # loopback + long-lived api_token guarding the public /api). Generated here
+    # so they exist before the backend serves; stored only in the private
+    # config.json (gitignored, never committed).
+    from app.integrations.internal_token import (
+        ensure_api_token_initialised,
+        ensure_secret_initialised,
+    )
+
+    cfg = ensure_secret_initialised(cfg)
+    cfg = ensure_api_token_initialised(cfg)
     cfg_mod.save_config(cfg)
     console.print(f"[green]✓[/green] Wrote config: [dim]{cfg_path}[/dim]")
     console.print(

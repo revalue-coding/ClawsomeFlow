@@ -111,6 +111,75 @@ def _pid_cmdline(pid: int) -> str:
     return ""
 
 
+def _ppid(pid: int) -> int | None:
+    try:
+        data = (Path(f"/proc/{pid}") / "stat").read_bytes()
+        rparen = data.rindex(b")")
+        return int(data[rparen + 2:].split()[1])
+    except (OSError, ValueError, IndexError):
+        proc = _run(["ps", "-o", "ppid=", "-p", str(pid)], check=False)
+        if proc.returncode != 0:
+            return None
+        text = (proc.stdout or "").strip()
+        return int(text) if text.isdigit() else None
+
+
+def _ancestor_pids(pid: int, *, max_depth: int = 32) -> list[int]:
+    chain = [pid]
+    current = pid
+    for _ in range(max_depth):
+        parent = _ppid(current)
+        if parent is None or parent <= 1 or parent in chain:
+            break
+        chain.append(parent)
+        current = parent
+    return chain
+
+
+def _is_managed_csflow_listener(pid: int) -> bool:
+    """True when *pid* belongs to ``csflow serve`` (directly or as a child)."""
+    for anc in _ancestor_pids(pid):
+        cmdline = _pid_cmdline(anc).lower()
+        if "csflow" in cmdline and "serve" in cmdline:
+            return True
+    return False
+
+
+def _resolved_csflow_home() -> Path | None:
+    raw = os.environ.get("CSFLOW_HOME")
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
+def _is_isolated_test_home(home: Path) -> bool:
+    test_root = (Path.home() / ".clawsomeflow-test").resolve()
+    try:
+        home.relative_to(test_root)
+        return True
+    except ValueError:
+        return False
+
+
+def _guard_service_namespace(*, op: str) -> None:
+    """Block test-home runs from touching the production ``csflow`` unit."""
+    home = _resolved_csflow_home()
+    name = service_name()
+    if home is not None and _is_isolated_test_home(home):
+        if name == DEFAULT_SERVICE_NAME or not name.startswith("csflow-test-"):
+            raise ServiceError(
+                f"Refusing to {op} production-managed service {name!r} while "
+                f"CSFLOW_HOME points at isolated test data ({home}). "
+                "Set CSFLOW_SERVICE_NAME=csflow-test-<run-id> before runtime tests."
+            )
+    if name.startswith("csflow-test-"):
+        if home is None or not _is_isolated_test_home(home):
+            raise ServiceError(
+                f"Refusing to {op} test service {name!r} without isolated "
+                f"CSFLOW_HOME under ~/.clawsomeflow-test/ (got {home!r})."
+            )
+
+
 def _pid_owned_by_current_user(pid: int) -> bool:
     try:
         return Path(f"/proc/{pid}").stat().st_uid == os.getuid()
@@ -218,6 +287,8 @@ def _cleanup_stale_port_conflicts(port: int) -> list[int]:
         if pid == self_pid or pid in seen:
             continue
         if not _pid_owned_by_current_user(pid):
+            continue
+        if _is_managed_csflow_listener(pid):
             continue
         if not _looks_like_stale_clawsomeflow_listener(_pid_cmdline(pid)):
             continue
@@ -566,6 +637,7 @@ def stop_if_running() -> bool:
             f"{(bootout_error or unload.stderr or unload.stdout or '').strip()}"
         )
 
+    _guard_service_namespace(op="stop")
     _require_command("systemctl")
     svc_name = service_name()
     active = _run(
@@ -603,6 +675,7 @@ def stop_disable_and_release_port(
     port: int,
 ) -> tuple[bool, bool, list[int], list[str]]:
     """Stop service, disable auto-start, reclaim stale listeners on ``port``."""
+    _guard_service_namespace(op="stop/disable")
     stopped = stop_if_running()
     disabled = disable_if_enabled()
     reclaimed = _cleanup_stale_port_conflicts(port)
@@ -629,6 +702,7 @@ def reclaim_stale_port_listeners(port: int) -> list[int]:
 
 def restart_and_enable(*, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, non_interactive: bool = False) -> None:
     """Ensure service file, then restart and enable auto-start."""
+    _guard_service_namespace(op="restart")
     if _service_manager() == "launchd":
         _require_command("launchctl")
         path = ensure_user_service_file(host=host, port=port)

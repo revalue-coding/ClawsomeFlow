@@ -181,6 +181,13 @@ def create_app() -> FastAPI:
     async def version() -> dict[str, str]:
         return {"version": __version__}
 
+    # Loopback + bearer-token guard for the public /api surface (OpenClaw
+    # gateway paradigm). No-op unless Config.api_token is set (auto-generated at
+    # init), so dev/tests are unaffected. Added before routers are exercised;
+    # middleware wraps the whole app regardless of registration order.
+    from app.api._api_guard import ApiTokenGuardMiddleware
+    app.add_middleware(ApiTokenGuardMiddleware)
+
     # Phase 1: flows CRUD; future phases register more routers here.
     from app.api import register_routers
     register_routers(app)

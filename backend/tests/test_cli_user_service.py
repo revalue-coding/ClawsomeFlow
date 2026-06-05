@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import plistlib
+import shutil
 import subprocess
 from pathlib import Path
 
 from app.cli import _user_service as svc
+
+
+def _isolated_test_home(name: str) -> Path:
+    home = Path.home() / ".clawsomeflow-test" / name
+    home.mkdir(parents=True, exist_ok=True)
+    return home
 
 
 def test_ensure_user_service_file_writes_unit(
@@ -78,6 +85,8 @@ def test_stop_if_running_stops_active_service(monkeypatch) -> None:
 
 def test_service_name_override_is_used_in_systemctl_commands(monkeypatch) -> None:
     calls: list[list[str]] = []
+    test_home = _isolated_test_home("pytest-service-override-123")
+    monkeypatch.setenv("CSFLOW_HOME", str(test_home))
     monkeypatch.setenv("CSFLOW_SERVICE_NAME", "csflow-test-123")
     monkeypatch.setattr(
         svc, "ensure_user_service_file", lambda **_kw: Path("/tmp/csflow-test.service")
@@ -92,13 +101,16 @@ def test_service_name_override_is_used_in_systemctl_commands(monkeypatch) -> Non
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(svc, "_run", _fake_run)
-    svc.restart_and_enable(host="127.0.0.1", port=17017, non_interactive=True)
-    assert calls == [
-        ["systemctl", "--user", "daemon-reload"],
-        ["systemctl", "--user", "enable", "csflow-test-123"],
-        ["systemctl", "--user", "restart", "csflow-test-123"],
-        ["systemctl", "--user", "is-active", "csflow-test-123"],
-    ]
+    try:
+        svc.restart_and_enable(host="127.0.0.1", port=17017, non_interactive=True)
+        assert calls == [
+            ["systemctl", "--user", "daemon-reload"],
+            ["systemctl", "--user", "enable", "csflow-test-123"],
+            ["systemctl", "--user", "restart", "csflow-test-123"],
+            ["systemctl", "--user", "is-active", "csflow-test-123"],
+        ]
+    finally:
+        shutil.rmtree(test_home, ignore_errors=True)
 
 
 def test_unit_text_includes_resource_directives_from_env(monkeypatch) -> None:
@@ -217,9 +229,56 @@ def test_stop_if_running_stops_active_launchd_service(monkeypatch) -> None:
     ]
 
 
+def test_cleanup_stale_port_conflicts_skips_managed_csflow_serve_listeners(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(svc, "_listening_pids_for_port", lambda _port: [501, 502])
+    monkeypatch.setattr(svc, "_pid_owned_by_current_user", lambda _pid: True)
+    monkeypatch.setattr(
+        svc,
+        "_pid_cmdline",
+        lambda pid: (
+            "python3 -m uvicorn app.main:app --port 17017"
+            if pid == 501
+            else "python3 -m uvicorn app.main:app --reload --port 17017"
+        ),
+    )
+    monkeypatch.setattr(svc, "_is_managed_csflow_listener", lambda pid: pid == 501)
+    monkeypatch.setattr(svc, "_descendant_pids", lambda _pid: [])
+    killed: list[int] = []
+    monkeypatch.setattr(
+        svc,
+        "_terminate_pid",
+        lambda pid, grace_seconds=8.0: (killed.append(pid), True)[1],
+    )
+
+    reclaimed = svc._cleanup_stale_port_conflicts(17017)
+    assert reclaimed == [502]
+    assert killed == [502]
+
+
+def test_restart_and_enable_rejects_prod_service_with_isolated_home(
+    monkeypatch,
+) -> None:
+    test_home = _isolated_test_home("pytest-reject-prod-restart")
+    monkeypatch.setenv("CSFLOW_HOME", str(test_home))
+    monkeypatch.delenv("CSFLOW_SERVICE_NAME", raising=False)
+
+    try:
+        try:
+            svc.restart_and_enable(host="127.0.0.1", port=27117, non_interactive=True)
+        except svc.ServiceError as exc:
+            assert "Refusing to restart production-managed service" in str(exc)
+        else:
+            raise AssertionError("expected ServiceError")
+    finally:
+        shutil.rmtree(test_home, ignore_errors=True)
+
+
 def test_cleanup_stale_port_conflicts_kills_only_matching_user_owned_pids(
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr(svc, "_is_managed_csflow_listener", lambda _pid: False)
     monkeypatch.setattr(svc, "_listening_pids_for_port", lambda _port: [101, 202, 303])
     monkeypatch.setattr(
         svc,
@@ -251,6 +310,7 @@ def test_cleanup_stale_port_conflicts_kills_only_matching_user_owned_pids(
 def test_cleanup_stale_port_conflicts_reaps_descendant_tree(monkeypatch) -> None:
     """A stale uvicorn supervisor and its detached children (reload worker,
     clawteam-mcp that inherited the socket) are all reclaimed."""
+    monkeypatch.setattr(svc, "_is_managed_csflow_listener", lambda _pid: False)
     monkeypatch.setattr(svc, "_listening_pids_for_port", lambda _port: [100, 130])
     monkeypatch.setattr(svc, "_pid_owned_by_current_user", lambda _pid: True)
     monkeypatch.setattr(
