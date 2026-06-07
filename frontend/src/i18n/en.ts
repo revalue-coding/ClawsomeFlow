@@ -61,6 +61,8 @@ const en = {
     clawsomeAssistant: "ClawsomeFlow Assistant",
     chat: "OpenClaw Agent",
     profiles: "Profile",
+    groupResources: "Resources",
+    docs: "Docs",
   },
   shell: {
     brandTagline: "ClawsomeFlow",
@@ -341,7 +343,7 @@ const en = {
       isLeaderSummary: "Leader summary task",
       isLeaderSummaryHint: "When checked, this is the leader's single owned summary task.",
       timeoutSeconds: "Timeout (seconds)",
-      timeoutHint: "Default 1800 (30 min)",
+      timeoutHint: "Default 3600 (60 min)",
       requiresHumanCheckpoint: "Require post-task checkpoint",
       requiresHumanCheckpointHint:
         "After this task completes, execution pauses for your review. Downstream tasks dispatch only after approval.",

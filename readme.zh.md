@@ -3,7 +3,8 @@
 <h1>⚡ ClawsomeFlow ⚡</h1>
 
 <p>
-  🌐 <a href="https://clawsomeflow.com"><b>clawsomeflow.com</b></a>
+  🌐 <a href="https://clawsomeflow.com"><b>clawsomeflow.com</b></a> ·
+  📖 <a href="https://clawsomeflow.com/docs/"><b>Docs</b></a>
 </p>
 
 <p>
@@ -23,6 +24,7 @@
 
 <p>
   <a href="#-快速开始">快速开始</a> ·
+  <a href="https://clawsomeflow.com/docs/">Docs</a> ·
   <a href="#-news">News</a> ·
   <a href="#-核心特性">核心特性</a> ·
   <a href="#%EF%B8%8F-工作原理">工作原理</a> ·

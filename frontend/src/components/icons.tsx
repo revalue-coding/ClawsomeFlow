@@ -114,6 +114,17 @@ export function SettingsIcon(props: IconProps) {
   );
 }
 
+export function DocsIcon(props: IconProps) {
+  // Open book / manual glyph — reads as "documentation".
+  return (
+    <IconBase {...props}>
+      <path d="M12 6.5C10.5 5.3 8.7 4.7 6.5 4.7c-.9 0-1.7.1-2.5.3v12.4c.8-.2 1.6-.3 2.5-.3 2.2 0 4 .6 5.5 1.8" />
+      <path d="M12 6.5c1.5-1.2 3.3-1.8 5.5-1.8.9 0 1.7.1 2.5.3v12.4c-.8-.2-1.6-.3-2.5-.3-2.2 0-4 .6-5.5 1.8" />
+      <path d="M12 6.5v12.4" />
+    </IconBase>
+  );
+}
+
 export function ExternalLinkIcon(props: IconProps) {
   return (
     <IconBase {...props}>

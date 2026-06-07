@@ -63,7 +63,7 @@ class TestFlowAgent:
 class TestFlowTask:
     def test_minimal(self) -> None:
         t = FlowTask(id="t1", owner_agent_id="alice", subject="do x")
-        assert t.timeout_seconds == 1800
+        assert t.timeout_seconds == 3600
         assert t.depends_on == []
 
     def test_invalid_id(self) -> None:
