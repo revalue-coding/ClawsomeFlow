@@ -15,7 +15,7 @@
  *    (`is_leader_summary=true`).
  *  - cleanupTeamOnFinish is always true (the previous UI checkbox
  *    expressed product policy; users no longer see or change it).
- *  - Task timeouts default to 1800s; users no longer set this.
+ *  - Task timeouts default to 3600s; users no longer set this.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -124,7 +124,7 @@ interface RepoIssue {
   reason: RepoIssueReason;
 }
 
-const DEFAULT_TIMEOUT_SECONDS = 1800;
+const DEFAULT_TIMEOUT_SECONDS = 3600;
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 const newRowKey = () => Math.random().toString(36).slice(2, 10);

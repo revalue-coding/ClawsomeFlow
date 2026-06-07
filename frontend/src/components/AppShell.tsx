@@ -6,6 +6,8 @@ import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import {
   AlarmIcon,
   BrandIcon,
+  DocsIcon,
+  ExternalLinkIcon,
   FlowIcon,
   LobsterIcon,
   RunIcon,
@@ -32,6 +34,9 @@ interface NavGroup {
   titleKey: string;
   items: NavItem[];
 }
+
+// Public documentation site (opens in a new tab — it is not part of this SPA).
+const DOCS_URL = "https://clawsomeflow.com/docs/";
 
 const LAST_MODULE_ROUTE_KEY_PREFIX = "csflow:last-module-route:";
 
@@ -258,6 +263,33 @@ function Sidebar({
             })}
           </div>
         ))}
+
+        {/* Resources — external links open in a new tab (not SPA routes). */}
+        <div className="mb-6">
+          <div className="px-5 py-1 text-sm font-semibold uppercase tracking-wider text-ink-400">
+            {t("nav.groupResources")}
+          </div>
+          <a
+            href={DOCS_URL}
+            target="_blank"
+            rel="noreferrer"
+            className={cn(
+              "group mx-2 my-1 flex w-[calc(100%-1rem)] appearance-none items-center gap-3 rounded-md border-0 bg-transparent px-3 py-2 text-left text-sm font-medium transition-all",
+              "text-ink-700 hover:bg-ink-100 hover:text-brand-700",
+            )}
+          >
+            <span
+              className={cn(
+                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-white text-brand-500 transition-all",
+                "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
+              )}
+            >
+              <DocsIcon className="h-8 w-8" />
+            </span>
+            <span className="flex-1">{t("nav.docs")}</span>
+            <ExternalLinkIcon className="h-4 w-4 text-ink-400" />
+          </a>
+        </div>
       </nav>
       <div className="flex items-center justify-between gap-2 border-t border-ink-100 px-4 py-3 text-left">
         <div className="shrink-0 text-xs font-medium text-ink-500">

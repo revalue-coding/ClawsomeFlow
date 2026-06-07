@@ -373,7 +373,7 @@ class FlowTask(_ApiBase):
     depends_on: list[str] = Field(default_factory=list)
     is_leader_summary: bool = False
     requires_human_checkpoint: bool = False
-    timeout_seconds: int = 1800  # 30 min default
+    timeout_seconds: int = 3600  # 60 min default
 
     @field_validator("id")
     @classmethod

@@ -70,11 +70,11 @@ def test_timeout_detected() -> None:
         team_name="csflow-x",
         flow_tasks={"t1": _ftask(timeout=10)}, snapshots=snaps,
         leader_agent_id="leader",
-        now=2200.0,  # runtime lower bound is 1800s
+        now=3800.0,  # runtime lower bound is 3600s
     )
     assert len(failures) == 1
     assert failures[0].reason == F.FailureReason.timeout
-    assert "min=1800s" in failures[0].detail
+    assert "min=3600s" in failures[0].detail
 
 
 def test_timeout_not_triggered_within_limit() -> None:
