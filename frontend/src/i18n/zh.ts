@@ -341,7 +341,7 @@ const zh = {
       isLeaderSummary: "leader 总结任务",
       isLeaderSummaryHint: "勾选后该任务会作为 leader 唯一持有的 summary task",
       timeoutSeconds: "超时秒数",
-      timeoutHint: "默认 3600（60 分钟）",
+      timeoutHint: "默认 7200（120 分钟）",
       requiresHumanCheckpoint: "完成后人工检查点",
       requiresHumanCheckpointHint: "该任务完成后会进入人工检查，只有通过后其下游任务才可继续派发。",
       requiresHumanCheckpointEnabled: "已启用后置人工检查点",

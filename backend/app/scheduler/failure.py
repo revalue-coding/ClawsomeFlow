@@ -11,7 +11,7 @@ The active signals:
    by the worker (the dispatch template tells workers to do this when a step
    genuinely can't be completed).
 2. **timeout** — wall-clock since dispatch exceeded effective timeout:
-   ``max(FlowTask.timeout_seconds, 3600)``.
+   ``max(FlowTask.timeout_seconds, 7200)``.
 3. **leader_inbox_failed** — leader received an inbox message starting with
    ``FAILED:`` (a final-resort signal we honour even if the worker forgot to
    set the metadata key).
@@ -29,9 +29,9 @@ from app.models import FlowAgent, FlowTask, OnFailure
 
 logger = get_logger("scheduler.failure")
 
-# Runtime safety floor: timeout less than 60 minutes is treated as too
+# Runtime safety floor: timeout less than 120 minutes is treated as too
 # aggressive for Flow-level scheduling.
-_MIN_TASK_TIMEOUT_SECONDS = 3600
+_MIN_TASK_TIMEOUT_SECONDS = 7200
 
 
 class FailureReason(str, Enum):
