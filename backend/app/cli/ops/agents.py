@@ -37,37 +37,26 @@ def list_agents(
 
 @app.command("create")
 def create_agent(
-    agent_id: str = typer.Option(..., "--id", help="OpenClaw agent id."),
-    name: str = typer.Option(..., "--name", help="OpenClaw agent display name."),
-    responsibility: str = typer.Option(
+    agent_id: str = typer.Option(
+        ..., "--id", help="Agent ID — unique, no spaces (e.g. backend-dev)."
+    ),
+    name: str = typer.Option(
+        ..., "--name", help="Agent name — display name, spaces allowed."
+    ),
+    responsibilities: str = typer.Option(
         ...,
-        "--responsibility",
-        help="Core responsibility for this agent.",
-    ),
-    extra: str = typer.Option(
-        "",
-        "--extra",
-        help="Optional additional requirements for role definition.",
-    ),
-    team_id: str | None = typer.Option(
-        None,
-        "--team-id",
-        help="Optional team id.",
+        "--responsibilities",
+        help="Responsibilities — what this agent is responsible for.",
     ),
 ) -> None:
-    """Create one OpenClaw agent and complete bootstrap synchronously."""
-    description = responsibility.strip()
-    extra_text = extra.strip()
-    if extra_text:
-        description = f"{description}\n\nAdditional requirements: {extra_text}"
+    """Create one OpenClaw agent (ID, name, responsibilities) and bootstrap it."""
+    description = responsibilities.strip()
     payload: dict[str, object] = {
         "id": agent_id,
         "name": name,
         "description": description,
         "nlPrompt": description,
     }
-    if team_id:
-        payload["teamId"] = team_id
     created = post("/api/openclaw/agents", payload)
     console.print(
         "[green]✓[/green] created and bootstrapped "

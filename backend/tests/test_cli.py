@@ -6,6 +6,48 @@ from typer.testing import CliRunner
 
 from app import __version__
 from app.cli import app
+from app.cli.ops.runs import _extract_param_fields
+
+
+def test_extract_param_fields_json_array() -> None:
+    spec = {"variables": {"csflow.runtime.param_fields": '["target", "branch"]'}}
+    assert _extract_param_fields(spec) == ["target", "branch"]
+
+
+def test_extract_param_fields_comma_fallback_and_dedupe() -> None:
+    spec = {"variables": {"csflow.runtime.param_fields": "a, b\nb,  c "}}
+    assert _extract_param_fields(spec) == ["a", "b", "c"]
+
+
+def test_extract_param_fields_legacy_requirement() -> None:
+    spec = {"variables": {"csflow.runtime.requirement": "target project"}}
+    assert _extract_param_fields(spec) == ["target project"]
+
+
+def test_extract_param_fields_none() -> None:
+    assert _extract_param_fields({}) == []
+    assert _extract_param_fields({"variables": {}}) == []
+
+
+def test_runs_start_no_prompt_errors_on_missing_field(monkeypatch) -> None:
+    import app.cli.ops.runs as runs_mod
+
+    monkeypatch.setattr(
+        runs_mod, "get",
+        lambda path, **kw: {
+            "name": "demo",
+            "spec": {"variables": {"csflow.runtime.param_fields": '["target"]'}},
+        },
+    )
+    # post must never be reached when a required field is missing.
+    monkeypatch.setattr(
+        runs_mod, "post",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not POST")),
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["runs", "start", "flow1", "--no-prompt"])
+    assert result.exit_code != 0
+    assert "target" in result.output
 
 
 def test_version_command() -> None:
