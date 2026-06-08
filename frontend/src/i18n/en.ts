@@ -343,7 +343,7 @@ const en = {
       isLeaderSummary: "Leader summary task",
       isLeaderSummaryHint: "When checked, this is the leader's single owned summary task.",
       timeoutSeconds: "Timeout (seconds)",
-      timeoutHint: "Default 3600 (60 min)",
+      timeoutHint: "Default 7200 (120 min)",
       requiresHumanCheckpoint: "Require post-task checkpoint",
       requiresHumanCheckpointHint:
         "After this task completes, execution pauses for your review. Downstream tasks dispatch only after approval.",

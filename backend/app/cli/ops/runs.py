@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 import json as jsonlib
 
@@ -17,6 +19,10 @@ from app.storage import get_storage
 app = typer.Typer(no_args_is_help=True)
 console = Console()
 
+# Stored alongside the flow spec; mirrors frontend ``lib/flowRuntime.ts``.
+_PARAM_FIELDS_KEY = "csflow.runtime.param_fields"
+_LEGACY_REQUIREMENT_KEY = "csflow.runtime.requirement"
+
 
 def _parse_kv(values: list[str]) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -25,6 +31,37 @@ def _parse_kv(values: list[str]) -> dict[str, str]:
             raise typer.BadParameter(f"--input must be key=value, got {v!r}")
         k, val = v.split("=", 1)
         out[k.strip()] = val.strip()
+    return out
+
+
+def _extract_param_fields(spec: dict) -> list[str]:
+    """Return the flow's user-defined run parameter field names.
+
+    Mirrors the WebUI run dialog (``getRunInputFields``): a JSON array stored in
+    ``spec.variables[csflow.runtime.param_fields]``, with comma/newline and
+    legacy single-requirement fallbacks. De-duplicated, order preserved.
+    """
+    variables = (spec or {}).get("variables") or {}
+    raw = variables.get(_PARAM_FIELDS_KEY)
+    fields: list[str] = []
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = jsonlib.loads(raw)
+            if isinstance(parsed, list):
+                fields = [str(x) for x in parsed]
+        except Exception:
+            fields = [p for p in re.split(r"[\r\n,]+", raw)]
+    if not fields:
+        legacy = variables.get(_LEGACY_REQUIREMENT_KEY)
+        if isinstance(legacy, str) and legacy.strip():
+            fields = [legacy]
+    seen: set[str] = set()
+    out: list[str] = []
+    for f in fields:
+        c = (f or "").strip()
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
     return out
 
 
@@ -58,12 +95,42 @@ def list_runs(
 def start_run(
     flow_id: str = typer.Argument(...),
     inputs: list[str] = typer.Option(
-        [], "--input", "-i", help="key=value (repeatable).",
+        [], "--input", "-i",
+        help="Parameter field value as key=value (repeatable).",
+    ),
+    no_prompt: bool = typer.Option(
+        False, "--no-prompt",
+        help="Don't prompt for missing parameter fields; error instead.",
     ),
 ) -> None:
-    """Trigger a Run for a flow."""
-    parsed = _parse_kv(inputs)
-    data = post(f"/api/flows/{flow_id}/runs", {"inputs": parsed})
+    """Trigger a Run for a flow, supplying its user-defined parameter fields.
+
+    If the flow declares parameter fields (set in the Flow editor), their values
+    are taken from ``--input name=value``. Any field still missing is prompted
+    for interactively; with ``--no-prompt`` (or no terminal) a missing required
+    field is an error instead.
+    """
+    values = _parse_kv(inputs)
+    flow = get(f"/api/flows/{flow_id}")
+    fields = _extract_param_fields(flow.get("spec") or {})
+
+    missing = [f for f in fields if not (values.get(f) or "").strip()]
+    if missing:
+        if sys.stdin.isatty() and not no_prompt:
+            console.print(
+                f"[dim]Flow '{flow.get('name', flow_id)}' needs "
+                f"{len(fields)} parameter field(s).[/dim]"
+            )
+            for f in missing:
+                values[f] = typer.prompt(f"  {f}").strip()
+            missing = [f for f in fields if not (values.get(f) or "").strip()]
+        if missing:
+            raise typer.BadParameter(
+                "missing required parameter field(s): "
+                f"{', '.join(missing)}. Provide via --input name=value."
+            )
+
+    data = post(f"/api/flows/{flow_id}/runs", {"inputs": values})
     console.print(
         f"[green]✓[/green] run [bold]{data['id']}[/bold] "
         f"team=[dim]{data['teamName']}[/dim] status={data['status']}"
