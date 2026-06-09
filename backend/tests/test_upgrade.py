@@ -449,3 +449,271 @@ def test_run_upgrade_generates_api_token_for_pretoken_config(
         include_user_agent_skill_refresh=False,
     )
     assert load_config(force_reload=True).api_token == token1
+
+
+def test_run_upgrade_creates_hermes_agent_table(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upgrade-parity: the HermesAgent table is created on the upgrade path so an
+    upgrade-only user reaches the same schema as a fresh deploy."""
+    from app.models import HermesAgent, ManagedAgent
+    from app.storage import get_storage
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    upgrade.run_upgrade(
+        target_version="1.0.0",
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+    storage = get_storage()
+    # Tables are queryable (empty) and accept a row → schema was created.
+    assert storage.hermes_list() == []
+    storage.hermes_create(
+        HermesAgent(id="probe", name="P", profile_root="x", created_by_user="alice")
+    )
+    assert storage.hermes_get("probe") is not None
+    assert storage.managed_list() == []
+    storage.managed_create(ManagedAgent(
+        id="mprobe", kind="claude", name="M", config_home="x",
+        clawteam_profile="csflow-claude-mprobe", created_by_user="alice",
+    ))
+    assert storage.managed_get("mprobe") is not None
+
+
+def test_migration_provisions_managed_agents_for_existing_flows(
+    tmp_clawsomeflow_home: Path,
+    fake_config: Config,
+) -> None:
+    """Back-compat migration: existing Flows referencing Hermes/Claude/Codex
+    agents get managed records (+ runtime profiles) created idempotently."""
+    import shutil
+    import subprocess
+
+    from app.models import AgentKind, Flow, FlowAgent, FlowSpec, FlowTask
+    from app.scheduler import managed_runtime
+    from app.storage import get_storage
+
+    storage = get_storage(fake_config)
+    storage.flow_create(
+        Flow(name="legacy", description="g", owner_user="alice").with_spec(
+            FlowSpec(
+                agents=[
+                    FlowAgent(id="oldhermes", kind=AgentKind.hermes, repo="/tmp/r", is_leader=True),
+                    FlowAgent(id="oldclaude", kind=AgentKind.claude, repo="/tmp/r", is_leader=False),
+                ],
+                tasks=[
+                    FlowTask(id="t0", owner_agent_id="oldclaude", subject="w"),
+                    FlowTask(id="t1", owner_agent_id="oldhermes", subject="x",
+                             depends_on=["t0"], is_leader_summary=True),
+                ],
+            )
+        )
+    )
+    try:
+        upgrade._provision_managed_agents_for_existing_flows(fake_config)
+        # Claude managed row is always created (ensure_profile is best-effort).
+        claude_row = storage.managed_get("oldclaude")
+        assert claude_row is not None and claude_row.kind == "claude"
+        assert "CLAUDE_CONFIG_DIR" in subprocess.run(
+            ["clawteam", "profile", "show", "csflow-claude-oldclaude"],
+            capture_output=True, text=True,
+        ).stdout
+        # Hermes row requires the hermes CLI.
+        if shutil.which("hermes"):
+            assert storage.hermes_get("oldhermes") is not None
+        # Idempotent: a second run is a safe no-op.
+        upgrade._provision_managed_agents_for_existing_flows(fake_config)
+        assert len(storage.managed_list(kind="claude")) == 1
+    finally:
+        managed_runtime.remove_profile("claude", "oldclaude")
+        if shutil.which("hermes"):
+            subprocess.run(["hermes", "profile", "delete", "oldhermes", "-y"],
+                           capture_output=True, text=True)
+
+
+# ── stable ↔ beta switching: ledger gate + high-watermark marker ──────
+
+
+def _counting_migration(version: str, counter: dict) -> "upgrade.Migration":
+    def _apply(_cfg):  # noqa: ANN001
+        counter[version] = counter.get(version, 0) + 1
+    return upgrade.Migration(version, f"count {version}", apply=_apply)
+
+
+def _run(target: str, fake_config: Config):
+    return upgrade.run_upgrade(
+        target_version=target,
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+
+
+def test_seed_applied_from_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [
+        upgrade.Migration("0.1.5", "a", apply=lambda c: None),
+        upgrade.Migration("0.1.12", "b", apply=lambda c: None),
+    ])
+    assert upgrade._seed_applied_from_marker("0.1.11") == {"0.1.5"}
+    assert upgrade._seed_applied_from_marker(None) == set()
+    assert upgrade._seed_applied_from_marker("0.1.12") == {"0.1.5", "0.1.12"}
+
+
+def test_duplicate_migration_ids_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [
+        upgrade.Migration("0.1.12", "a", apply=lambda c: None),
+        upgrade.Migration("0.1.12", "b", apply=lambda c: None),
+    ])
+    with pytest.raises(ValueError):
+        upgrade._assert_unique_migration_ids()
+
+
+def test_migration_runs_once_across_beta_to_stable(
+    tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
+) -> None:
+    """A 0.1.12-targeted migration must run exactly once across b1→b2→final."""
+    counter: dict = {}
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [_counting_migration("0.1.12", counter)])
+    upgrade.write_marker("0.1.11")  # user starts on prior stable
+    for target in ["0.1.12b1", "0.1.12b2", "0.1.12"]:
+        _run(target, fake_config)
+    assert counter.get("0.1.12") == 1            # exactly once, not 3×
+    assert upgrade.read_marker() == "0.1.12"     # advanced to final
+    assert "0.1.12" in (upgrade.read_applied_migrations() or set())
+
+
+def test_marker_is_high_watermark_no_downgrade(
+    tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
+) -> None:
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    upgrade.write_marker("0.2.0")
+    report = _run("0.1.12", fake_config)   # downgrade target
+    assert upgrade.read_marker() == "0.2.0"   # not moved backward
+    assert report.marker_written is False
+
+
+def test_fresh_seed_prevents_migration_rerun(
+    tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
+) -> None:
+    counter: dict = {}
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [_counting_migration("0.1.12", counter)])
+    upgrade.write_marker("0.1.12")
+    upgrade.seed_fresh_migration_ledger()   # fresh install marks all applied
+    _run("0.1.13", fake_config)             # later upgrade
+    assert counter.get("0.1.12", 0) == 0    # fresh-seeded migration never re-runs
+
+
+# ── resilience: a failing repair never aborts the whole upgrade ────────
+
+
+def test_best_effort_repair_failure_does_not_abort_or_fail(
+    tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
+) -> None:
+    """A non-critical (best-effort) migration that raises is reported as a
+    warning, the upgrade stays ok, schema still initialises (service usable),
+    and the marker still advances."""
+    def boom_repair(_cfg):  # noqa: ANN001
+        raise RuntimeError("clawteam offline")
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [
+        upgrade.Migration("0.1.12", "best-effort", apply=boom_repair, critical=False),
+    ])
+    upgrade.write_marker("0.1.11")
+    report = _run("0.1.12", fake_config)
+    assert report.ok is True                              # NOT failed
+    assert report.errors == []
+    assert any("clawteam offline" in w for w in report.repair_warnings)
+    assert report.schema_ready is True                   # service usable
+    assert upgrade.read_marker() == "0.1.12"             # marker advanced
+    # marked applied → won't re-fail forever
+    assert "0.1.12" in (upgrade.read_applied_migrations() or set())
+
+
+def test_repair_returns_warnings_surfaced(
+    tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
+) -> None:
+    """A best-effort migration may RETURN a list of non-fatal failure messages
+    which are surfaced to the report (→ terminal)."""
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [
+        upgrade.Migration(
+            "0.1.12", "partial",
+            apply=lambda c: ["could not provision agent 'x'"],
+            critical=False,
+        ),
+    ])
+    upgrade.write_marker("0.1.11")
+    report = _run("0.1.12", fake_config)
+    assert report.ok is True
+    assert "could not provision agent 'x'" in report.repair_warnings
+
+
+def test_critical_migration_failure_still_runs_schema_keeps_marker(
+    tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
+) -> None:
+    """A critical migration failure blocks the marker (retry) but does NOT abort:
+    schema init still runs so the service can start."""
+    def boom(_cfg):  # noqa: ANN001
+        raise RuntimeError("bad schema step")
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [
+        upgrade.Migration("0.1.12", "critical", apply=boom, critical=True),
+    ])
+    upgrade.write_marker("0.1.11")
+    report = _run("0.1.12", fake_config)
+    assert report.ok is False                        # surfaced as error
+    assert report.schema_ready is True               # but service still usable
+    assert report.marker_written is False
+    assert upgrade.read_marker() == "0.1.11"         # retried next run
+    assert "0.1.12" not in (upgrade.read_applied_migrations() or set())
+
+
+def test_provision_repair_idempotent_when_already_fixed(
+    tmp_clawsomeflow_home: Path, fake_config: Config,
+) -> None:
+    """If the data is already in target state (rows exist), re-running the
+    repair must be a silent no-op: no exception, no reported failures, no CLI
+    calls (so it works even without hermes/clawteam installed)."""
+    from app.models import (
+        AgentKind, Flow, FlowAgent, FlowSpec, FlowTask, HermesAgent, ManagedAgent,
+    )
+    from app.storage import get_storage
+
+    storage = get_storage(fake_config)
+    # Pre-seed rows = "already fixed".
+    storage.hermes_create(HermesAgent(
+        id="fixedh", name="fixedh", profile_root="x", created_by_user="alice",
+    ))
+    storage.managed_create(ManagedAgent(
+        id="fixedc", kind="claude", name="fixedc", config_home="x",
+        clawteam_profile="csflow-claude-fixedc", created_by_user="alice",
+    ))
+    storage.flow_create(
+        Flow(name="f", description="g", owner_user="alice").with_spec(
+            FlowSpec(
+                agents=[
+                    FlowAgent(id="fixedh", kind=AgentKind.hermes, repo="/tmp/r", is_leader=True),
+                    FlowAgent(id="fixedc", kind=AgentKind.claude, repo="/tmp/r", is_leader=False),
+                ],
+                tasks=[
+                    FlowTask(id="t0", owner_agent_id="fixedc", subject="w"),
+                    FlowTask(id="t1", owner_agent_id="fixedh", subject="x",
+                             depends_on=["t0"], is_leader_summary=True),
+                ],
+            )
+        )
+    )
+    # Must not raise; must report zero failures (already fixed → success).
+    failures = upgrade._provision_managed_agents_for_existing_flows(fake_config)
+    assert failures == []
+
+
+def test_real_provision_migration_runs_for_latest_released_users() -> None:
+    """Guard: the bundled provision migration MUST be tagged above the highest
+    released version so a current user's ledger seed does NOT mark it applied
+    (else existing Hermes/Claude/Codex Flows would break, unprovisioned)."""
+    real_ids = {m.version for m in upgrade.MIGRATIONS}
+    assert "0.1.13b1" in real_ids
+    # marker = latest released (0.1.12): the migration must NOT be pre-applied.
+    assert "0.1.13b1" not in upgrade._seed_applied_from_marker("0.1.12")
+    # a fresh 0.1.13b1 install (seed-all) WOULD have it applied (no re-run).
+    assert "0.1.13b1" in {m.version for m in upgrade.MIGRATIONS}

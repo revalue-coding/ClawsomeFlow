@@ -181,8 +181,10 @@ class TestStorageAwareValidation:
         not_a_repo.mkdir()
         spec = FlowSpec(
             agents=[
-                FlowAgent(id="a", kind=AgentKind.claude, repo=str(not_a_repo), is_leader=True),
-                FlowAgent(id="w", kind=AgentKind.claude, repo=str(not_a_repo), is_leader=False),
+                # cursor is non-OpenClaw (repo validation applies) but not
+                # managed-enforced, so this still exercises the repo checks.
+                FlowAgent(id="a", kind=AgentKind.cursor, repo=str(not_a_repo), is_leader=True),
+                FlowAgent(id="w", kind=AgentKind.cursor, repo=str(not_a_repo), is_leader=False),
             ],
             tasks=[
                 FlowTask(id="t0", owner_agent_id="w", subject="w"),
@@ -200,8 +202,8 @@ class TestStorageAwareValidation:
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
         spec = FlowSpec(
             agents=[
-                FlowAgent(id="a", kind=AgentKind.claude, repo=str(repo), is_leader=True),
-                FlowAgent(id="w", kind=AgentKind.claude, repo=str(repo), is_leader=False),
+                FlowAgent(id="a", kind=AgentKind.cursor, repo=str(repo), is_leader=True),
+                FlowAgent(id="w", kind=AgentKind.cursor, repo=str(repo), is_leader=False),
             ],
             tasks=[
                 FlowTask(id="t0", owner_agent_id="w", subject="w"),
@@ -236,8 +238,8 @@ class TestStorageAwareValidation:
         )
         spec = FlowSpec(
             agents=[
-                FlowAgent(id="a", kind=AgentKind.claude, repo=str(repo), is_leader=True),
-                FlowAgent(id="w", kind=AgentKind.claude, repo=str(repo), is_leader=False),
+                FlowAgent(id="a", kind=AgentKind.cursor, repo=str(repo), is_leader=True),
+                FlowAgent(id="w", kind=AgentKind.cursor, repo=str(repo), is_leader=False),
             ],
             tasks=[
                 FlowTask(id="t0", owner_agent_id="w", subject="w"),

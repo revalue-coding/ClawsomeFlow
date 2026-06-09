@@ -136,9 +136,38 @@ class TmuxLiveSession(WorkerSession):
             self._spawn_cmd = list(agent.command or [])
             self._resume_cmd = list(agent.command or [])
         else:
-            self._spawn_cmd, self._resume_cmd = _KIND_TO_CMD[agent.kind]
+            # Copy the shared template lists — we may append per-agent flags
+            # below and must never mutate the module-level _KIND_TO_CMD entries.
+            base_spawn, base_resume = _KIND_TO_CMD[agent.kind]
+            self._spawn_cmd = list(base_spawn)
+            self._resume_cmd = list(base_resume)
+            if agent.kind == AgentKind.hermes:
+                # Bind the executor to its managed Hermes profile. The profile
+                # name IS the agent id (== HermesAgent.id). ``-p`` is a global,
+                # position-independent flag, so appending is safe for both the
+                # fresh and ``-c`` (continue) commands. This is the Hermes
+                # equivalent of OpenClaw's session-id binding and is REQUIRED so
+                # the agent's own identity/memory/skills are used.
+                self._spawn_cmd += ["-p", agent.id]
+                self._resume_cmd += ["-p", agent.id]
 
     # ── concrete state-machine actions ───────────────────────────────
+
+    def _resolve_profile(self) -> str | None:
+        """ClawTeam runtime profile to apply at spawn.
+
+        For env-home managed agents (claude/codex/cursor) this injects the
+        per-agent config home (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` /
+        ``CURSOR_CONFIG_DIR``) so the agent's bound skills/MCP/hooks load,
+        independent of the working directory. Idempotent — re-creates the
+        ClawTeam profile each spawn (ms-scale). Other kinds keep the
+        author-provided ``FlowAgent.profile`` (Hermes binds via ``-p`` instead).
+        """
+        from app.scheduler import managed_runtime
+        kind = self.agent.kind.value
+        if managed_runtime.is_managed_kind(kind):
+            return managed_runtime.ensure_profile(kind, self.agent.id)
+        return self.agent.profile
 
     async def _do_spawn(self) -> None:
         if not self.agent.repo:
@@ -153,7 +182,7 @@ class TmuxLiveSession(WorkerSession):
             repo=self.agent.repo,
             target_branch=self.agent.target_branch,
             command=self._spawn_cmd,
-            profile=self.agent.profile,
+            profile=self._resolve_profile(),
             skills=(),  # explicitly NO skills (no clawteam, no opt-ins)
         )
         # Wait for the CLI to finish booting before any dispatch.
@@ -236,7 +265,7 @@ class TmuxLiveSession(WorkerSession):
             agent_name=self.agent.id,
             existing_worktree=self.worktree.worktree_path,
             resume_command=command,
-            profile=self.agent.profile,
+            profile=self._resolve_profile(),
             skills=(),
         )
         ok = await wait_tui_ready(self.tmux_target, timeout_sec=self._ready_timeout)

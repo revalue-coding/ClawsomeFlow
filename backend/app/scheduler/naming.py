@@ -27,6 +27,15 @@ def openclaw_user_chat_session_id(user: str, agent_id: str) -> str:
     return f"user-chat-{user}-{agent_id}"
 
 
+def hermes_user_chat_session_id(user: str, agent_id: str) -> str:
+    """Hermes user-direct chat history-cache key (UI display only).
+
+    Hermes ``-z`` turns carry no session id; this only keys the in-process
+    chat-history cache so the WebUI can render a conversation per user × agent.
+    """
+    return f"hermes-user-chat-{user}-{agent_id}"
+
+
 def _short(run_id: str) -> str:
     """Return the suffix portion of a Run id usable in resource names.
 
@@ -40,6 +49,7 @@ def _short(run_id: str) -> str:
 
 
 __all__ = [
+    "hermes_user_chat_session_id",
     "openclaw_session_id_for_run",
     "openclaw_user_chat_session_id",
     "team_name_for_run",

@@ -26,6 +26,7 @@
   <a href="#-快速开始">快速开始</a> ·
   <a href="https://clawsomeflow.com/docs/">Docs</a> ·
   <a href="#-news">News</a> ·
+  <a href="#-谁最该试试它">谁最该试试它</a> ·
   <a href="#-核心特性">核心特性</a> ·
   <a href="#%EF%B8%8F-工作原理">工作原理</a> ·
   <a href="#-为什么是-clawsomeflow">为什么是 ClawsomeFlow</a> ·
@@ -49,6 +50,15 @@
 ## 📰 News
 
 - **2026-06-02**：ClawsomeFlow 公开发布 🎉
+
+---
+
+## 🎯 谁最该试试它？
+
+- 想让**多个 AI Agent 真正协同**、而非各自为战的开发者与团队；
+- 受够了 **Prompt 自调度黑盒**、追求可预测、成本可控的工程实践派；
+- 需要**并行 + 隔离 + 可回滚**来跑批量任务的重度用户；
+- 想认真探索 **OPC（一人公司）**、让 Agent 团队替自己干活的创造者。
 
 ---
 
@@ -154,24 +164,33 @@ curl -fsSL https://clawsomeflow.com/install.sh | bash
 
 ### 常用命令
 
+大多数时候只需要这三个：
+
+```bash
+csflow start      # 启动服务，并打印控制台地址
+csflow status     # 是否运行中？版本、模式、路径
+csflow upgrade    # 升级到最新版本（Flow / Run / 设置都会保留）
+```
+
+日常还会用到的一些：
+
 ```bash
 # 生命周期
-csflow start
 csflow stop
-csflow status
-csflow doctor
+csflow doctor                              # 健康检查（依赖 + 配置 + 网关）
 
 # Flow / Run
 csflow flows list
+csflow runs start <flow-id> --input k=v    # 带参数字段触发一次 Run
 csflow runs list
-csflow runs start <flow-id> --input k=v
 csflow runs abort <run-id>
 
 # Agent 治理
 csflow agents list
-csflow agents create "用自然语言描述你要的 Agent"
-csflow agents chat <agent-id> "继续完善该 Agent 的能力"
+# Agent 的创建与对话请在 Web UI（“我的团队”）中完成，不通过 CLI。
 ```
+
+每个命令都支持 `--help`。完整 CLI 文档：<https://clawsomeflow.com/docs/>
 
 ---
 

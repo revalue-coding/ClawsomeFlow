@@ -30,6 +30,13 @@ ERROR_INVALID_AGENT_REF = "INVALID_AGENT_REF"
 ERROR_INVALID_LEADER = "INVALID_LEADER"
 ERROR_MISSING_LEADER_SUMMARY = "MISSING_LEADER_SUMMARY"
 ERROR_OPENCLAW_AGENT_NOT_FOUND = "OPENCLAW_AGENT_NOT_FOUND"
+ERROR_HERMES_AGENT_NOT_FOUND = "HERMES_AGENT_NOT_FOUND"
+ERROR_MANAGED_AGENT_NOT_FOUND = "MANAGED_AGENT_NOT_FOUND"
+
+# Env-home kinds that must be created in the management module before use in a
+# Flow (parallel to OpenClaw/Hermes). Cursor is intentionally NOT enforced yet —
+# its management page is not built, so leaving it unenforced keeps cursor usable.
+_ENFORCED_MANAGED_KINDS = frozenset({AgentKind.claude, AgentKind.codex})
 ERROR_MISSING_AGENT_REPO = "MISSING_AGENT_REPO"
 ERROR_INVALID_REPO = "INVALID_REPO"
 ERROR_DUPLICATE_AGENT_ID = "DUPLICATE_AGENT_ID"
@@ -239,6 +246,9 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
     2. Each non-OpenClaw agent must have ``repo`` set and pointing at a real
        git repo with at least one commit (required by ``git worktree add``).
     3. Each ``kind=openclaw`` agent's ``id`` must exist in the OpenclawAgent table.
+    4. Each ``kind=hermes`` agent's ``id`` must exist in the HermesAgent table
+       (Hermes agents must be created from the management module, never ad-hoc
+       in the Flow editor) AND still requires a working-directory ``repo``.
     """
     validate_flow_spec(spec)
     # Keep DB index in sync with managed openclaw.json entries before checking refs.
@@ -255,6 +265,24 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
                     {"agent_id": a.id},
                 )
         else:
+            if a.kind == AgentKind.hermes and storage.hermes_get(a.id) is None:
+                raise FlowValidationError(
+                    ERROR_HERMES_AGENT_NOT_FOUND,
+                    f"agent {a.id!r}: kind=hermes, but no HermesAgent with that "
+                    "id is registered in ClawsomeFlow. Create the Hermes agent "
+                    "in the management module first.",
+                    {"agent_id": a.id},
+                )
+            if a.kind in _ENFORCED_MANAGED_KINDS:
+                row = storage.managed_get(a.id)
+                if row is None or row.kind != a.kind.value:
+                    raise FlowValidationError(
+                        ERROR_MANAGED_AGENT_NOT_FOUND,
+                        f"agent {a.id!r}: kind={a.kind.value}, but no managed "
+                        f"{a.kind.value} agent with that id is registered. Create "
+                        "it in the management module first.",
+                        {"agent_id": a.id, "kind": a.kind.value},
+                    )
             if not a.repo:
                 raise FlowValidationError(
                     ERROR_MISSING_AGENT_REPO,

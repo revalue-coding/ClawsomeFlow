@@ -12,14 +12,31 @@ Goal: a `pip install -U clawsomeflow` followed by `csflow upgrade` (or
 fully in sync with the new package version — schema + bundled runtime
 materials — **without ever destroying user state**.
 
-Design:
-* Single source of truth for the data-dir's "last-blessed version" is
-  ``~/.clawsomeflow/.csflow-version`` (a one-line text file). Read /
-  write via :func:`read_marker` / :func:`write_marker`.
-* Migrations are a versioned, ordered registry (:data:`MIGRATIONS`).
-  Each migration declares the version range it applies to and a
-  callable that takes a :class:`Config`. We apply every migration
-  whose ``applies_after`` < marker ≤ ``applies_through``, in order.
+Design (two independent pieces of state — this is the key to stable↔beta safety):
+
+* **Version marker** ``~/.clawsomeflow/.csflow-version`` — the human-facing
+  "what version last blessed this dir". Versions are PEP 440-ordered so
+  pre-releases sort *below* their final (``X.Y.Za1 < …b1 < …rc1 < X.Y.Z``; see
+  :func:`_key`). The marker is a **HIGH-WATERMARK**: :func:`run_upgrade` only
+  advances it (``_gt(target, marker)``), never moves it backward. So a downgrade
+  (e.g. an explicit ``csflow upgrade`` after installing an older build) keeps the
+  higher marker. ``needs_upgrade`` (what ``csflow start`` calls) only fires going
+  forward; downgrade is a no-op + warning.
+
+* **Applied-migrations ledger** ``~/.clawsomeflow/.csflow-migrations.json`` — the
+  *authoritative, direction-safe* gate for which migrations run. A migration runs
+  iff its id (``Migration.version``) is NOT in the ledger, so it executes
+  **exactly once ever**, regardless of how the user hops between stable and beta
+  builds (``0.1.12b1 → 0.1.12b2 → 0.1.12`` runs a 0.1.12-targeted migration once,
+  not three times) or downgrades then re-upgrades. On first use the ledger is
+  seeded from the existing marker (migrations ``≤ marker`` are treated as already
+  applied); a fresh install seeds the full set via :func:`seed_fresh_migration_ledger`.
+  ``Migration.version``/``applies_after`` remain useful for ordering + legacy
+  seeding, but they are no longer the run gate.
+
+* Migrations MUST be idempotent regardless (defence in depth), and registered in
+  chronological order with **unique** ids (enforced by :func:`_assert_unique_migration_ids`).
+
 * Non-migration upgrade steps (re-deploy source payloads and per-user agent
   runtime refresh: skills + common cron jobs) are idempotent — we
   run them every time, regardless of version delta. Cheap and self-healing.
@@ -46,6 +63,7 @@ will retry from the same starting point.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -125,6 +143,68 @@ def _gt(a: str | None, b: str | None) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Applied-migrations ledger — the authoritative, direction-safe gate
+# ──────────────────────────────────────────────────────────────────────
+#
+# The single version marker tells us "which code last touched the dir", but it
+# cannot answer "did migration X already run?" when the user hops between stable
+# and beta builds (e.g. 0.1.12b1 → 0.1.12b2 → 0.1.12) — a `version > marker`
+# gate would re-run a 0.1.12-targeted migration on every beta. The ledger records
+# the exact set of applied migration ids, so each migration runs **exactly once**
+# regardless of version direction (beta↔stable, downgrade-then-reupgrade).
+
+
+def read_applied_migrations() -> set[str] | None:
+    """Return the set of applied migration ids, or ``None`` if no ledger exists."""
+    path = paths.migrations_ledger_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        applied = data.get("applied", [])
+        return {str(x) for x in applied} if isinstance(applied, list) else set()
+    except (OSError, ValueError):
+        logger.warning("migrations_ledger_unreadable", path=str(path))
+        return set()
+
+
+def _write_applied_migrations(applied: set[str]) -> None:
+    path = paths.migrations_ledger_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps({"applied": sorted(applied)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _seed_applied_from_marker(marker: str | None) -> set[str]:
+    """First-time ledger seed: migrations whose ``version`` is at-or-below the
+    existing marker were already applied under the legacy marker-only scheme
+    (or are baked into a fresh install at ``marker``). ``marker is None``
+    (legacy/unmarked) seeds empty → every migration will run."""
+    if marker is None:
+        return set()
+    return {m.version for m in MIGRATIONS if not _gt(m.version, marker)}
+
+
+def seed_fresh_migration_ledger() -> None:
+    """Mark **all** registered migrations as applied — used on FRESH install,
+    whose schema already reflects the current code (no historical data to
+    migrate). Idempotent: overwrites the ledger with the full set."""
+    _write_applied_migrations({m.version for m in MIGRATIONS})
+
+
+def _assert_unique_migration_ids() -> None:
+    seen: set[str] = set()
+    for m in MIGRATIONS:
+        if m.version in seen:
+            raise ValueError(f"duplicate migration id {m.version!r} in MIGRATIONS")
+        seen.add(m.version)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Migration registry
 # ──────────────────────────────────────────────────────────────────────
 
@@ -149,12 +229,30 @@ class Migration:
     migration applies, in registry order, to bring the dir up to date.
 
     Migrations MUST be idempotent (re-running them on the same data dir
-    should be a safe no-op).
+    should be a safe no-op). In particular, **a repair that finds the data
+    structure already in its target state must treat that as SUCCESS, never an
+    error**: check the target state before mutating AND, if the mutating op still
+    raises, re-check — if it's now (or already was) fixed, swallow and move on;
+    only surface genuine failures. (The ledger may be reset / re-seeded, and
+    best-effort repairs are retried, so "already fixed" WILL happen.)
+
+    ``critical`` (default ``True``): a critical migration that RAISES blocks the
+    marker from advancing (so it retries next run) — use for schema/data
+    transforms that must not be skipped. A **best-effort repair** sets
+    ``critical=False``: if it raises, the failure is reported to the terminal but
+    the upgrade still completes and the marker advances (the service stays
+    usable). Either way, the rest of the pipeline (schema init, redeploy) always
+    runs — a migration failure never aborts the whole upgrade.
+
+    ``apply`` may return a ``list[str]`` of non-fatal "could not repair X"
+    messages; they are surfaced to the user terminal as warnings without marking
+    the upgrade failed. Returning ``None`` means "no warnings".
     """
     version: str
     description: str
-    apply: Callable[[Config], None]
+    apply: Callable[[Config], list[str] | None]
     applies_after: str | None = None
+    critical: bool = True
 
 
 def _applies(m: Migration, marker: str | None) -> bool:
@@ -168,11 +266,139 @@ def _applies(m: Migration, marker: str | None) -> bool:
     return True
 
 
+def _provision_managed_agents_for_existing_flows(config: Config) -> None:
+    """Back-compat: provision managed-agent records + runtime profiles for
+    Hermes / Claude / Codex agents already referenced by existing Flow templates.
+
+    Newer ClawsomeFlow requires these agents to be *managed* (created in the
+    management module) — `validate_flow_against_db` rejects unmanaged ones and
+    the scheduler binds them via a profile (Hermes ``-p <id>`` / Claude+Codex
+    ``CLAUDE_CONFIG_DIR``/``CODEX_HOME`` through a ClawTeam runtime profile).
+    Upgrade-only users whose Flows predate this would otherwise break, so we
+    create the minimal artifacts here:
+
+    * Hermes  → ``hermes profile create <id>`` + HermesAgent row.
+    * Claude/Codex → config home + ClawTeam env profile + ManagedAgent row.
+
+    Idempotent + best-effort: existing records are skipped, and any per-agent
+    failure (e.g. an id that isn't a valid lowercase-alphanumeric Hermes profile
+    name, or a missing CLI) is logged and skipped so the upgrade still advances.
+    """
+    from app.models import HermesAgent, ManagedAgent
+    from app.scheduler import managed_runtime
+    from app.services.hermes_agents import hermes_profile_root
+    from app.storage import get_storage
+
+    storage = get_storage(config)  # ensure HermesAgent/ManagedAgent tables exist
+
+    # Page through every user's Flows.
+    flows = []
+    offset = 0
+    while True:
+        page, total = storage.flow_list(owner_user=None, limit=200, offset=offset)
+        flows.extend(page)
+        offset += len(page)
+        if not page or offset >= total:
+            break
+
+    hermes_done = 0
+    managed_done = 0
+    failures: list[str] = []  # human-readable per-agent failures → terminal
+    hermes_exe = shutil.which("hermes")
+    for flow in flows:
+        spec = flow.spec if isinstance(flow.spec, dict) else {}
+        owner = flow.owner_user
+        flow_label = flow.name or flow.id
+        for agent in (spec.get("agents") or []):
+            if not isinstance(agent, dict):
+                continue
+            kind = agent.get("kind")
+            aid = str(agent.get("id") or "").strip()
+            if not aid:
+                continue
+            try:
+                if kind == "hermes":
+                    if storage.hermes_get(aid) is not None:
+                        continue
+                    if hermes_exe is None:
+                        failures.append(
+                            f"Flow '{flow_label}': Hermes agent '{aid}' not provisioned "
+                            "(hermes CLI not installed) — create it in the management module."
+                        )
+                        continue
+                    proc = subprocess.run(  # noqa: S603
+                        [hermes_exe, "profile", "create", aid],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    out = (proc.stderr or "") + (proc.stdout or "")
+                    if proc.returncode != 0 and "exist" not in out.lower():
+                        failures.append(
+                            f"Flow '{flow_label}': could not create Hermes profile '{aid}': "
+                            f"{out.strip()[:160]}"
+                        )
+                        continue
+                    try:
+                        storage.hermes_create(HermesAgent(
+                            id=aid, name=aid, profile_root=str(hermes_profile_root(aid)),
+                            created_by_user=owner,
+                        ))
+                    except Exception:
+                        # Already fixed (row appeared concurrently / out-of-band)
+                        # → not an error; only re-raise if it's a real failure.
+                        if storage.hermes_get(aid) is not None:
+                            continue
+                        raise
+                    hermes_done += 1
+                elif kind in ("claude", "codex"):
+                    if storage.managed_get(aid) is not None:
+                        continue
+                    home = managed_runtime.managed_home(kind, aid)
+                    home.mkdir(parents=True, exist_ok=True)
+                    profile = managed_runtime.ensure_profile(kind, aid)
+                    try:
+                        storage.managed_create(ManagedAgent(
+                            id=aid, kind=kind, name=aid, config_home=str(home),
+                            clawteam_profile=profile, created_by_user=owner,
+                        ))
+                    except Exception:
+                        if storage.managed_get(aid) is not None:
+                            continue  # already fixed → success, not error
+                        raise
+                    managed_done += 1
+                # cursor: not managed-enforced yet → skip.
+            except Exception as exc:  # best-effort: never block the upgrade
+                failures.append(
+                    f"Flow '{flow_label}': could not provision {kind} agent '{aid}': "
+                    f"{str(exc)[:160]}"
+                )
+                logger.warning(
+                    "upgrade_provision_agent_failed",
+                    agent_id=aid, kind=kind, error=str(exc)[:240],
+                )
+    if hermes_done or managed_done:
+        logger.info(
+            "upgrade_provisioned_managed_agents",
+            hermes=hermes_done, managed=managed_done, failures=len(failures),
+        )
+    return failures
+
+
 # Register migrations in chronological order. Newer entries come last.
-# Currently empty — 0.1.0 is the first published version, so there's
-# nothing to migrate from. Future schema changes append a Migration
-# here whose ``apply`` is an idempotent (re-runnable) callable.
-MIGRATIONS: list[Migration] = []
+# Each ``apply`` MUST be idempotent (re-runnable). A migration runs only when
+# the user's version marker is below the migration ``version`` (minimal,
+# baseline-aware compatibility).
+MIGRATIONS: list[Migration] = [
+    Migration(
+        # MUST be strictly greater than the highest already-released version
+        # (0.1.12) so existing users' ledger seed does NOT mark it already-applied
+        # — otherwise the provision would be skipped for current installs. This
+        # ships in the 0.1.13 line (first beta 0.1.13b1).
+        version="0.1.13b1",
+        description="provision managed-agent records/profiles for agents already in existing Flows",
+        apply=_provision_managed_agents_for_existing_flows,
+        critical=False,  # best-effort repair: failures are reported, never abort
+    ),
+]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -196,6 +422,9 @@ class UpgradeReport:
     schema_ready: bool = False
     marker_written: bool = False
     errors: list[str] = field(default_factory=list)
+    # Non-fatal repair failures (best-effort migrations + optional steps).
+    # Surfaced to the user terminal but do NOT make the upgrade "not ok".
+    repair_warnings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -278,28 +507,54 @@ def run_upgrade(
             detail=detail,
         )
         if status == "failed":
-            report.errors.append(f"frontend build: {detail}")
-            return report
+            # Non-aborting: editable-source SPA rebuild failed, but we still run
+            # the data-affecting steps below so the service stays usable.
+            report.repair_warnings.append(f"frontend build: {detail}")
     else:
         report.frontend_build_status = "not-requested"
 
-    # 1. Migrations.
+    # 1. Migrations — gated by the applied-ledger (direction-safe), NOT by a
+    #    `version > marker` comparison. This is what makes stable↔beta switching
+    #    correct: each migration runs exactly once, ever.
+    _assert_unique_migration_ids()
+    applied = read_applied_migrations()
+    if applied is None:
+        # First run with the ledger: seed from the legacy marker so migrations
+        # already applied under the old scheme aren't re-run.
+        applied = _seed_applied_from_marker(marker)
+        _write_applied_migrations(applied)
+    critical_migration_failed = False
     for m in MIGRATIONS:
-        if _applies(m, marker):
-            try:
-                m.apply(cfg)
-                report.migrations_run.append(m.version)
-                logger.info(
-                    "upgrade_migration_applied",
-                    version=m.version, description=m.description,
-                )
-            except Exception as exc:
+        if m.version in applied:
+            continue
+        try:
+            warnings = m.apply(cfg)
+            applied.add(m.version)
+            _write_applied_migrations(applied)  # record incrementally
+            report.migrations_run.append(m.version)
+            if warnings:
+                report.repair_warnings.extend(str(w) for w in warnings)
+            logger.info(
+                "upgrade_migration_applied",
+                version=m.version, description=m.description,
+                warnings=len(warnings or []),
+            )
+        except Exception as exc:
+            logger.exception(
+                "upgrade_migration_failed",
+                version=m.version, critical=m.critical, error=str(exc),
+            )
+            if m.critical:
+                # Block the marker (retry next run) but DO NOT abort — keep going
+                # so schema init etc. still run and the service stays usable.
                 report.errors.append(f"migration {m.version}: {exc}")
-                logger.exception(
-                    "upgrade_migration_failed",
-                    version=m.version, error=str(exc),
-                )
-                return report  # Don't bump marker on migration failure.
+                critical_migration_failed = True
+            else:
+                # Best-effort repair: report to terminal, give up on this one
+                # (mark applied so it doesn't re-fail forever), and continue.
+                report.repair_warnings.append(f"repair {m.version}: {exc}")
+                applied.add(m.version)
+                _write_applied_migrations(applied)
 
     # 2. Schema (idempotent — SQLModel.create_all + missing-column adds).
     try:
@@ -327,6 +582,7 @@ def run_upgrade(
             logger.warning("upgrade_openclaw_skipped", error=str(exc))
         except Exception as exc:
             report.openclaw_status = "integration-failed"
+            report.repair_warnings.append(f"openclaw integration: {exc}")
             logger.exception("upgrade_openclaw_failed", error=str(exc))
     else:
         report.openclaw_status = "skipped-by-flag"
@@ -344,26 +600,40 @@ def run_upgrade(
         except Exception as exc:
             # Most likely cause: storage not yet ready (server mode w/ no PG).
             # Don't fail the whole upgrade — warn.
+            report.repair_warnings.append(f"agent runtime refresh unavailable: {exc}")
             logger.warning("upgrade_user_runtime_refresh_skipped", error=str(exc))
         else:
             try:
                 report.user_agent_skill_results = reinstall_skills_for_all(config=cfg)
             except Exception as exc:
+                report.repair_warnings.append(f"agent skills refresh: {exc}")
                 logger.warning("upgrade_user_skills_refresh_failed", error=str(exc))
             try:
                 report.user_agent_cron_sync_results = sync_common_cron_jobs_for_all(config=cfg)
             except Exception as exc:
+                report.repair_warnings.append(f"agent common-cron refresh: {exc}")
                 logger.warning("upgrade_user_common_cron_refresh_failed", error=str(exc))
 
-    # 5. Persist marker — only if we got past migrations. We're lenient
-    #    about #3/#4 errors so the marker reflects "schema is at <target>".
-    if not any(e.startswith("migration ") for e in report.errors):
-        try:
-            write_marker(target)
-            report.marker_written = True
-        except Exception as exc:
-            report.errors.append(f"write marker: {exc}")
-            logger.exception("upgrade_marker_failed", error=str(exc))
+    # 5. Persist marker as a HIGH-WATERMARK — advance only, never move it
+    #    backward. So a downgrade (e.g. beta 0.2.0 → stable 0.1.12, possible via
+    #    an explicit `csflow upgrade`) keeps the higher marker; combined with the
+    #    direction-safe migration ledger, a later re-upgrade won't re-run
+    #    anything. We're lenient about #3/#4 errors so the marker still reflects
+    #    "schema reached <target>".
+    if not critical_migration_failed:
+        if _gt(target, marker):
+            try:
+                write_marker(target)
+                report.marker_written = True
+            except Exception as exc:
+                report.errors.append(f"write marker: {exc}")
+                logger.exception("upgrade_marker_failed", error=str(exc))
+        else:
+            logger.info(
+                "upgrade_marker_not_advanced",
+                marker=marker, target=target,
+                reason="target_not_greater_than_marker",
+            )
 
     logger.info(
         "upgrade_complete",

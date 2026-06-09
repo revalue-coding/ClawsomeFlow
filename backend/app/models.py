@@ -373,7 +373,7 @@ class FlowTask(_ApiBase):
     depends_on: list[str] = Field(default_factory=list)
     is_leader_summary: bool = False
     requires_human_checkpoint: bool = False
-    timeout_seconds: int = 7200  # 120 min default
+    timeout_seconds: int = 14400  # 240 min (4h) default
 
     @field_validator("id")
     @classmethod
@@ -573,11 +573,64 @@ class OpenclawAgent(_SQLBase, table=True):
 
 
 class OpenclawTeam(_SQLBase, table=True):
-    """Internal team grouping for user-managed OpenClaw agents."""
+    """Internal team grouping for user-managed OpenClaw agents.
+
+    Despite the ``Openclaw`` prefix this is a ClawsomeFlow-only grouping
+    concept shared across agent platforms (OpenClaw + Hermes). A unified
+    cross-platform board is future work.
+    """
 
     id: str = SQLField(primary_key=True)  # generated as ``csfow-group-xx``
     name: str
     created_by_user: str = SQLField(index=True)
+    created_at: datetime = SQLField(default_factory=_now, nullable=False)
+
+
+class HermesAgent(_SQLBase, table=True):
+    """A user Hermes agent governed by ClawsomeFlow.
+
+    ``id`` here is BOTH the Hermes **profile name** (``hermes -p <id>``) AND
+    the :class:`FlowAgent.id` used when this agent participates in a Flow.
+    There's exactly one canonical id per Hermes agent. Hermes owns its own
+    state under ``~/.hermes/profiles/{id}/`` (the ``profile_root``); we only
+    drive it through the ``hermes`` CLI and never write into that home for our
+    own bookkeeping. ``team_id`` references :class:`OpenclawTeam.id` (the
+    shared grouping).
+    """
+
+    id: str = SQLField(primary_key=True)  # = hermes profile name (no auto prefix)
+    name: str
+    description: str = ""
+    team_id: str = SQLField(default="", index=True)
+    profile_root: str  # = ~/.hermes/profiles/{id}
+    created_by_user: str = SQLField(index=True)
+    nl_prompt: str = ""
+    created_at: datetime = SQLField(default_factory=_now, nullable=False)
+
+
+class ManagedAgent(_SQLBase, table=True):
+    """A user-managed env-home TUI agent (Claude Code / Codex / Cursor).
+
+    Unlike OpenClaw (session-id) and Hermes (``-p`` profile), these platforms
+    carry their identity/skills/MCP in a relocatable config home selected via an
+    environment variable (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` /
+    ``CURSOR_CONFIG_DIR``). That env is injected at spawn through a ClawTeam
+    runtime profile (``clawteam profile set --env``), so tools follow the agent
+    regardless of the per-task working directory.
+
+    ``id`` is BOTH the canonical agent id AND the :class:`FlowAgent.id` used when
+    this agent participates in a Flow (one canonical id per managed agent).
+    """
+
+    id: str = SQLField(primary_key=True)  # = FlowAgent.id
+    kind: str = SQLField(index=True)  # "claude" | "codex" | "cursor"
+    name: str
+    description: str = ""
+    team_id: str = SQLField(default="", index=True)
+    config_home: str  # = ~/.clawsomeflow/agents/{id}/{kind}-home
+    clawteam_profile: str  # = csflow-{kind}-{id}
+    created_by_user: str = SQLField(index=True)
+    nl_prompt: str = ""
     created_at: datetime = SQLField(default_factory=_now, nullable=False)
 
 
@@ -700,6 +753,8 @@ __all__ = [
     "RunEvent",
     "OpenclawAgent",
     "OpenclawTeam",
+    "HermesAgent",
+    "ManagedAgent",
     "AgentStoreOwnership",
     "AgentStoreOrder",
     "OpenclawAgentRequest",

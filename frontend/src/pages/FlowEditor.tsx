@@ -15,7 +15,7 @@
  *    (`is_leader_summary=true`).
  *  - cleanupTeamOnFinish is always true (the previous UI checkbox
  *    expressed product policy; users no longer see or change it).
- *  - Task timeouts default to 7200s; users no longer set this.
+ *  - Task timeouts default to 14400s (4h); users no longer set this.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -31,6 +31,8 @@ import {
   FlowSpec,
   FlowSummary,
   FlowTask,
+  HermesAgentSummary,
+  ManagedAgentSummary,
   OpenclawAgentSummary,
   api,
 } from "@/lib/api";
@@ -124,7 +126,7 @@ interface RepoIssue {
   reason: RepoIssueReason;
 }
 
-const DEFAULT_TIMEOUT_SECONDS = 7200;
+const DEFAULT_TIMEOUT_SECONDS = 14400;
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 const newRowKey = () => Math.random().toString(36).slice(2, 10);
@@ -166,6 +168,27 @@ function isOpenclawKind(kind: OwnerKind): kind is "openclaw" {
 
 function isNonOpenclawKind(kind: OwnerKind): kind is NonOpenclawOwnerKind {
   return kind !== "openclaw";
+}
+
+// Kinds whose agent id must be picked from a managed-agent dropdown (not free
+// text). Unlike OpenClaw, these KEEP their repo/branch (working dir is per-task).
+const MANAGED_PICK_KINDS = new Set<OwnerKind>(["hermes", "claude", "codex"]);
+
+function isManagedPickKind(kind: OwnerKind): boolean {
+  return MANAGED_PICK_KINDS.has(kind);
+}
+
+/** Combined managed-agent picklist for a kind (Hermes + Claude/Codex). */
+function pickAgentsForKind(
+  kind: OwnerKind,
+  hermes: HermesAgentSummary[],
+  managed: ManagedAgentSummary[],
+): { id: string; name: string }[] {
+  if (kind === "hermes") return hermes.map((a) => ({ id: a.id, name: a.name }));
+  if (kind === "claude" || kind === "codex") {
+    return managed.filter((a) => a.kind === kind).map((a) => ({ id: a.id, name: a.name }));
+  }
+  return [];
 }
 
 function ownerKey(
@@ -311,6 +334,8 @@ export function FlowEditor() {
   const [version, setVersion] = useState<number | null>(null);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [openclawOptions, setOpenclawOptions] = useState<OpenclawAgentSummary[]>([]);
+  const [hermesOptions, setHermesOptions] = useState<HermesAgentSummary[]>([]);
+  const [managedOptions, setManagedOptions] = useState<ManagedAgentSummary[]>([]);
   const [deploymentMode, setDeploymentMode] = useState<DeploymentMode>("local");
   const [workspaceDirOptions, setWorkspaceDirOptions] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -354,6 +379,14 @@ export function FlowEditor() {
     api
       .listOpenclawAgents()
       .then((r) => setOpenclawOptions(r.items))
+      .catch(() => {});
+    api
+      .listHermesAgents()
+      .then((r) => setHermesOptions(r.items))
+      .catch(() => {});
+    api
+      .listManagedAgents()
+      .then((r) => setManagedOptions(r.items))
       .catch(() => {});
     api
       .listWorkspaceDirectories()
@@ -579,11 +612,18 @@ export function FlowEditor() {
       }
       return null;
     }
+    if (isManagedPickKind(leaderKind)) {
+      // Managed agent required (no ad-hoc creation), plus a working dir.
+      const opts = pickAgentsForKind(leaderKind, hermesOptions, managedOptions);
+      if (!opts.some((a) => a.id === leaderId.trim())) {
+        return t("flowEditor.validation.pickLeader");
+      }
+    }
     if (!leaderRepo.trim()) {
       return t("flowEditor.decompose.leaderRepoRequired");
     }
     return null;
-  }, [leaderId, leaderKind, leaderRepo, openclawOptions, t]);
+  }, [leaderId, leaderKind, leaderRepo, openclawOptions, hermesOptions, managedOptions, t]);
 
   const editingRow: TaskRow | null = (() => {
     if (!editing) return null;
@@ -707,13 +747,22 @@ export function FlowEditor() {
         r.ownerId === normalized,
     );
     if (conflicting) {
-      const agent = openclawOptions.find((a) => a.id === normalized);
+      const agent =
+        openclawOptions.find((a) => a.id === normalized) ??
+        hermesOptions.find((a) => a.id === normalized) ??
+        managedOptions.find((a) => a.id === normalized);
       window.alert(
         t("flowEditor.leaderInUseByTask", {
           name: agent ? `${agent.name} (${agent.id})` : normalized,
         }),
       );
       return; // keep leaderId untouched — select snaps back via controlled value
+    }
+    if (isManagedPickKind(leaderKind)) {
+      // Managed kinds (Hermes/Claude/Codex) bind identity via the managed id,
+      // but the working directory (repo/branch) is chosen separately — preserve it.
+      setLeaderId(normalized);
+      return;
     }
     setLeaderKind("openclaw");
     setLeaderRepo("");
@@ -1100,6 +1149,15 @@ export function FlowEditor() {
         return;
       }
     } else {
+      if (
+        isManagedPickKind(leaderKind) &&
+        !pickAgentsForKind(leaderKind, hermesOptions, managedOptions).some(
+          (a) => a.id === leaderId.trim(),
+        )
+      ) {
+        setError(t("flowEditor.validation.pickLeader"));
+        return;
+      }
       const repoReady = await ensureLeaderRepoReadyForDecompose();
       if (!repoReady) return;
     }
@@ -1259,6 +1317,26 @@ export function FlowEditor() {
                       </option>
                     ))}
                   </select>
+                ) : isManagedPickKind(leaderKind) ? (
+                  <>
+                    <select
+                      className="select"
+                      value={leaderId}
+                      onChange={(e) => tryChangeLeader(e.target.value)}
+                    >
+                      <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
+                      {pickAgentsForKind(leaderKind, hermesOptions, managedOptions).map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name} ({a.id})
+                        </option>
+                      ))}
+                    </select>
+                    {pickAgentsForKind(leaderKind, hermesOptions, managedOptions).length === 0 && (
+                      <div className="text-xs text-ink-500 mt-1">
+                        {t("flowEditor.hermesAgentEmpty")}
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <input
                     className="input"
@@ -1580,6 +1658,8 @@ export function FlowEditor() {
           initialRow={editingRow}
           tasks={tasks}
           openclawOptions={openclawOptions}
+          hermesOptions={hermesOptions}
+          managedOptions={managedOptions}
           leaderKind={leaderKind}
           leaderId={leaderId.trim()}
           leaderRepo={leaderRepo.trim()}
@@ -1816,6 +1896,8 @@ function TaskEditModal({
   initialRow,
   tasks,
   openclawOptions,
+  hermesOptions,
+  managedOptions,
   leaderKind,
   leaderId,
   leaderRepo,
@@ -1829,6 +1911,8 @@ function TaskEditModal({
   initialRow: TaskRow;
   tasks: TaskRow[];
   openclawOptions: OpenclawAgentSummary[];
+  hermesOptions: HermesAgentSummary[];
+  managedOptions: ManagedAgentSummary[];
   leaderKind: OwnerKind;
   /** Currently-selected leader id. Excluded from sub-task agent picker
    *  (leader can only own the auto-summary task). */
@@ -2138,6 +2222,8 @@ function TaskEditModal({
         tasks={tasks}
         ownerMode={ownerMode}
         existingOwnerOptions={existingOwnerOptions}
+        hermesOptions={hermesOptions}
+        managedOptions={managedOptions}
         deploymentMode={deploymentMode}
         workspaceDirOptions={workspaceDirOptions}
         branchOptions={branchOptions}
@@ -2204,6 +2290,8 @@ function TaskFormBody({
   tasks,
   ownerMode,
   existingOwnerOptions,
+  hermesOptions,
+  managedOptions,
   deploymentMode,
   workspaceDirOptions,
   branchOptions,
@@ -2219,6 +2307,8 @@ function TaskFormBody({
   tasks: TaskRow[];
   ownerMode: OwnerMode;
   existingOwnerOptions: ExistingOwnerOption[];
+  hermesOptions: HermesAgentSummary[];
+  managedOptions: ManagedAgentSummary[];
   deploymentMode: DeploymentMode;
   workspaceDirOptions: string[];
   branchOptions: string[];
@@ -2427,15 +2517,40 @@ function TaskFormBody({
         <>
           <div>
             <label className="label">
-              {t("flowEditor.taskFields.newAgentName")}
+              {isManagedPickKind(row.ownerKind)
+                ? t("flowEditor.hermesAgentLabel")
+                : t("flowEditor.taskFields.newAgentName")}
             </label>
-            <input
-              className="input"
-              placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
-              value={row.ownerId}
-              readOnly={ownerLocked}
-              onChange={(e) => onChange({ ownerId: e.target.value })}
-            />
+            {isManagedPickKind(row.ownerKind) ? (
+              <>
+                <select
+                  className="select"
+                  value={row.ownerId}
+                  disabled={ownerLocked}
+                  onChange={(e) => onChange({ ownerId: e.target.value })}
+                >
+                  <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
+                  {pickAgentsForKind(row.ownerKind, hermesOptions, managedOptions).map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} ({a.id})
+                    </option>
+                  ))}
+                </select>
+                {pickAgentsForKind(row.ownerKind, hermesOptions, managedOptions).length === 0 && (
+                  <div className="text-xs text-ink-500 mt-1">
+                    {t("flowEditor.hermesAgentEmpty")}
+                  </div>
+                )}
+              </>
+            ) : (
+              <input
+                className="input"
+                placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
+                value={row.ownerId}
+                readOnly={ownerLocked}
+                onChange={(e) => onChange({ ownerId: e.target.value })}
+              />
+            )}
           </div>
           <div>
             <label className="label">{t("flowEditor.taskFields.ownerKind")}</label>
@@ -2443,13 +2558,20 @@ function TaskFormBody({
               className="select"
               value={row.ownerKind}
               disabled={!ownerKindEditable}
-              onChange={(e) =>
+              onChange={(e) => {
+                const nextKind = e.target.value as OwnerKind;
+                // A free-typed name and a managed-agent id aren't interchangeable;
+                // clear the id when toggling in/out of a managed picker.
+                const togglesManaged =
+                  isManagedPickKind(row.ownerKind) !== isManagedPickKind(nextKind) ||
+                  (isManagedPickKind(nextKind) && row.ownerKind !== nextKind);
                 onChange({
-                  ownerKind: e.target.value as OwnerKind,
+                  ownerKind: nextKind,
+                  ...(togglesManaged ? { ownerId: "" } : {}),
                   ownerRepo: "",
                   ownerTargetBranch: DEFAULT_TARGET_BRANCH,
-                })
-              }
+                });
+              }}
             >
               <option value="claude">
                 {t("flowEditor.taskFields.ownerKindClaude")}

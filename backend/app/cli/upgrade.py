@@ -262,6 +262,14 @@ def _render_report(report: upgrade.UpgradeReport) -> None:
     )
     console.print(t)
 
+    if report.repair_warnings:
+        console.print(
+            "\n[yellow]Optional repairs that did not complete "
+            "(the service is fully usable; fix these when convenient):[/yellow]"
+        )
+        for w in report.repair_warnings:
+            console.print(f"  • {w}")
+
     if report.errors:
         console.print("\n[red]Errors:[/red]")
         for e in report.errors:

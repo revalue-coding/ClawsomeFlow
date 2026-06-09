@@ -59,6 +59,7 @@ def _collect_bundle_files() -> list[tuple[Path, Path, str]]:
     _add_file(paths.config_path(), Path("config.json"), "config")
     _add_file(paths.db_path(), Path("db.sqlite"), "database")
     _add_file(paths.version_marker_path(), Path(".csflow-version"), "version")
+    _add_file(paths.migrations_ledger_path(), Path(".csflow-migrations.json"), "migrations-ledger")
     _add_file(
         paths.system_dir() / "openclaw-managed-agents.json",
         Path(".system/openclaw-managed-agents.json"),

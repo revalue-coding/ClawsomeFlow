@@ -70,7 +70,6 @@ from app.scheduler.controller import RunController
 from app.scheduler.engine import get_scheduler
 from app.scheduler.finalize import (
     classify_merge_failure,
-    cleanup_non_openclaw_workspace_after_review_decision,
     perform_manual_merge,
     run_terminal_tail_cleanup,
 )
@@ -1072,16 +1071,13 @@ async def merge_pending(
     )
     preserved_agents = _read_preserved_worktree_agent_ids(run)
     if ok:
+        # Worktree deletion is DEFERRED to the end of the complaint phase
+        # (unified cleanup), so a merged agent's worktree stays available for
+        # any complaint-phase fixes. Dropping it from the preserve set means it
+        # WILL be removed by the terminal tail cleanup.
         preserved_agents.discard(payload.agent_id)
-        # Keep only failed manual-merge worktrees. Successful decisions can be
-        # cleaned immediately per-agent, instead of waiting for terminal tail
-        # cleanup (which may intentionally preserve failed worktrees).
-        await cleanup_non_openclaw_workspace_after_review_decision(
-            run=run,
-            agent_id=payload.agent_id,
-            storage=storage,
-        )
     else:
+        # Manual-merge FAILURE is the only case that keeps the worktree.
         preserved_agents.add(payload.agent_id)
     _write_preserved_worktree_agent_ids(
         run=run,
@@ -1140,9 +1136,9 @@ async def dismiss_pending_merge(
 ) -> RunSummary:
     """Drop a pending merge entry without merging.
 
-    Per cleanup policy, after dismissing an agent's merge decision we
-    immediately run best-effort ``clawteam workspace cleanup`` for that
-    non-OpenClaw agent.
+    Worktree removal is DEFERRED: regardless of merge or dismiss, the worktree
+    is kept until the complaint phase finishes, then removed by the unified
+    terminal cleanup (manual-merge FAILURES are the only ones preserved).
 
     When this resolves the final pending merge, the run enters
     ``awaiting_user_complaint`` before terminal team cleanup.
@@ -1170,16 +1166,13 @@ async def dismiss_pending_merge(
         )
     run.pending_merges = new_pending or None
     preserved_agents = _read_preserved_worktree_agent_ids(run)
+    # Dismiss = discard work; worktree removal is DEFERRED to the unified
+    # complaint-phase terminal cleanup (not preserved).
     preserved_agents.discard(payload.agent_id)
     _write_preserved_worktree_agent_ids(
         run=run,
         storage=storage,
         agent_ids=preserved_agents,
-    )
-    await cleanup_non_openclaw_workspace_after_review_decision(
-        run=run,
-        agent_id=payload.agent_id,
-        storage=storage,
     )
     if run.pending_merges is None:
         post_review_terminal = _consume_post_review_terminal_status(run)

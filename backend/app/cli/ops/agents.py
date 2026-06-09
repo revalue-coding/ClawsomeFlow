@@ -1,4 +1,8 @@
-"""``csflow agents`` — list / create / chat / remove."""
+"""``csflow agents`` — list / remove / reinstall-skills.
+
+Agent creation and chat are intentionally NOT exposed on the CLI (use the Web
+UI "我的团队" module); those commands exist but are hidden.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +39,8 @@ def list_agents(
     console.print(t)
 
 
-@app.command("create")
+# Hidden for now: agent creation is done via the Web UI ("我的团队"), not the CLI.
+@app.command("create", hidden=True)
 def create_agent(
     agent_id: str = typer.Option(
         ..., "--id", help="Agent ID — unique, no spaces (e.g. backend-dev)."
@@ -106,7 +111,8 @@ def remove_agent_hard(
     )
 
 
-@app.command("chat")
+# Hidden for now: agent chat is done via the Web UI, not the CLI.
+@app.command("chat", hidden=True)
 def chat(
     agent_id: str = typer.Argument(...),
     message: str = typer.Argument(...),

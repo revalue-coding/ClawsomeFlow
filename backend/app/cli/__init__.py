@@ -18,7 +18,7 @@ Lifecycle:
 Ops:
 * ``csflow flows``      — list / show
 * ``csflow runs``       — list / start / show / abort / merge
-* ``csflow agents``     — list / chat / reinstall-skills
+* ``csflow agents``     — list / remove / reinstall-skills
 * ``csflow logs``       — tail logs (incl. ``verify-anti-loop``)
 """
 

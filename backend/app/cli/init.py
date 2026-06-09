@@ -255,6 +255,9 @@ def init(
 
     try:
         upgrade_mod.write_marker(__version__)
+        # Fresh install already reflects the current schema → mark all migrations
+        # as applied so they never run later (direction-safe migration ledger).
+        upgrade_mod.seed_fresh_migration_ledger()
         console.print(
             f"[green]✓[/green] Version marker → [dim]{__version__}[/dim]"
         )

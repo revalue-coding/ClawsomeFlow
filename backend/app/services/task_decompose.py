@@ -553,7 +553,9 @@ def _extract_leader_hint(
     return kind, repo, target_branch
 
 
-def _non_openclaw_dispatch_argv(*, kind: AgentKind, message: str) -> list[str]:
+def _non_openclaw_dispatch_argv(
+    *, kind: AgentKind, message: str, profile: str | None = None,
+) -> list[str]:
     if kind == AgentKind.claude:
         return [
             "claude",
@@ -581,7 +583,13 @@ def _non_openclaw_dispatch_argv(*, kind: AgentKind, message: str) -> list[str]:
             message,
         ]
     if kind == AgentKind.hermes:
-        return ["hermes", "--yolo", "-z", message]
+        # Bind to the managed Hermes profile (== leader agent id). REQUIRED so
+        # the decomposition runs under the agent's own identity/memory.
+        argv = ["hermes", "--yolo"]
+        if profile:
+            argv += ["-p", profile]
+        argv += ["-z", message]
+        return argv
     raise RuntimeError(f"unsupported non-openclaw leader kind: {kind.value}")
 
 
@@ -753,6 +761,7 @@ async def _dispatch_to_non_openclaw_leader_via_cli(
     argv = _non_openclaw_dispatch_argv(
         kind=leader_target.kind,
         message=message,
+        profile=leader_target.id,
     )
     timeout_sec = _non_openclaw_cli_timeout_seconds()
     try:
