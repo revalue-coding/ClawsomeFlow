@@ -437,7 +437,7 @@ def test_start_existing_config_always_runs_safe_redeploy(
 
     def _fake_run_upgrade(*, include_frontend_build: bool = False, **_kw):
         captured["include_frontend_build"] = include_frontend_build
-        return SimpleNamespace(ok=True, to_version="1.0.0", errors=[])
+        return SimpleNamespace(ok=True, to_version="1.0.0", errors=[], repair_warnings=[])
 
     monkeypatch.setattr(upgrade_mod, "run_upgrade", _fake_run_upgrade)
 
@@ -648,7 +648,7 @@ def test_start_platform_summary_puts_openclaw_first_when_available(
     monkeypatch.setattr(
         upgrade_mod,
         "run_upgrade",
-        lambda **_kw: SimpleNamespace(ok=True, to_version="1.0.0", errors=[]),
+        lambda **_kw: SimpleNamespace(ok=True, to_version="1.0.0", errors=[], repair_warnings=[]),
     )
     monkeypatch.setattr(
         start_mod,
@@ -726,7 +726,7 @@ def test_start_hides_structured_upgrade_logs_from_terminal(
             to_version="0.1.1",
             is_first_install=False,
         )
-        return SimpleNamespace(ok=True, to_version="1.0.1", errors=[])
+        return SimpleNamespace(ok=True, to_version="1.0.1", errors=[], repair_warnings=[])
 
     monkeypatch.setattr(upgrade_mod, "run_upgrade", _fake_run_upgrade)
 
@@ -755,6 +755,7 @@ def _ok_upgrade_report() -> SimpleNamespace:
         user_agent_cron_sync_results={},
         marker_written=True,
         errors=[],
+        repair_warnings=[],
     )
 
 

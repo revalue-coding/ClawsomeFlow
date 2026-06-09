@@ -136,7 +136,9 @@ def test_api_chain_from_agent_create_to_flow_run(
         "spec": {
             "agents": [
                 {"id": agent_id, "kind": "openclaw", "isLeader": False},
-                {"id": "leader", "kind": "claude", "repo": repo, "isLeader": True},
+                # cursor: non-OpenClaw (repo validated) but not managed-enforced,
+                # so this end-to-end chain doesn't need a seeded managed agent.
+                {"id": "leader", "kind": "cursor", "repo": repo, "isLeader": True},
             ],
             "tasks": [
                 {"id": "t1", "ownerAgentId": agent_id, "subject": "Execute worker task"},

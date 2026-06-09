@@ -175,8 +175,10 @@ def test_tmux_live_session_registers_hermes_with_continue_flag() -> None:
     session = TmuxLiveSession(
         agent=hermes_agent, team_name="csflow-x", run_id="run-x",
     )
-    assert session._spawn_cmd == ["hermes", "--yolo"]
-    assert session._resume_cmd == ["hermes", "--yolo", "-c"]
+    # Hermes binds its managed profile via `-p <agent.id>` on both spawn+resume
+    # (profile name == FlowAgent.id).
+    assert session._spawn_cmd == ["hermes", "--yolo", "-p", "alice"]
+    assert session._resume_cmd == ["hermes", "--yolo", "-c", "-p", "alice"]
 
 
 def test_tmux_live_session_registers_claude_with_bypass_permissions_flags() -> None:
