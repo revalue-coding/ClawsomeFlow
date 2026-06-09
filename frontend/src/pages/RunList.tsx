@@ -28,7 +28,9 @@ const ACTIVE_STATUSES = new Set([
   "awaiting_user_checkpoint",
   "awaiting_user_review",
   "awaiting_user_complaint",
-  "complaint_processing",
+  // NOTE: "complaint_processing" is intentionally NOT active — once the user
+  // has submitted a complaint the Run is treated as ended and shown in the
+  // history list (no in-progress card while the background fix runs).
 ]);
 
 const HISTORY_PAGE_SIZE = 10;

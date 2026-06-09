@@ -18,6 +18,8 @@ from app.api import (
     agent_store,
     clawteam_board,
     flows,
+    hermes_agents,
+    managed_agents,
     openclaw_agents,
     profiles,
     runs,
@@ -33,6 +35,8 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(flows.router, prefix="/api")
     app.include_router(agent_store.router, prefix="/api")
     app.include_router(openclaw_agents.router, prefix="/api")
+    app.include_router(hermes_agents.router, prefix="/api")
+    app.include_router(managed_agents.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
     app.include_router(profiles.router, prefix="/api")
     app.include_router(system.router, prefix="/api")

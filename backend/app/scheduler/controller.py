@@ -36,6 +36,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -578,9 +579,17 @@ class RunController:
             "run_complaint_phase_started",
             payload={"complaint_length": len(text)},
         )
+        # Complaint fixes are dispatched to OpenClaw AND Hermes workers (other
+        # platforms are intentionally excluded for now). Only OpenClaw is also a
+        # merge target; Hermes complaint output is NOT merged (worktree removed
+        # by the unified terminal cleanup).
         complaint_targets = [
             a for a in self.spec.agents
-            if (not a.is_leader and a.kind == AgentKind.openclaw and a.id != self._leader_id)
+            if (
+                not a.is_leader
+                and a.kind in (AgentKind.openclaw, AgentKind.hermes)
+                and a.id != self._leader_id
+            )
         ]
         openclaw_merge_targets = self._merge_requirement_agents()
         if not complaint_targets and not openclaw_merge_targets:
@@ -722,6 +731,7 @@ class RunController:
                         task_id=ct_task_id,
                         user_complaint=text,
                         leader_feedback=message,
+                        merge_required=(target.kind == AgentKind.openclaw),
                     ),
                 )
             except Exception as exc:
@@ -2503,7 +2513,106 @@ class RunController:
                 dispatch_kind="complaint",
             )
             return
+        if agent.kind == AgentKind.hermes:
+            await self._dispatch_hermes_headless(
+                agent=agent,
+                task_id=task_id,
+                message=message,
+                dispatch_kind="complaint",
+            )
+            return
         await self._dispatch_custom_task(agent=agent, task_id=task_id, message=message)
+
+    async def _hermes_dispatch_cwd(self, agent: FlowAgent) -> tuple[str, str]:
+        """Resolve the worktree cwd for a headless Hermes complaint dispatch.
+
+        Hermes is non-OpenClaw → worktree at ``~/.clawteam/workspaces/{team}/{agent}``
+        (repo = ``FlowAgent.repo``). Recovers the session if the worktree is gone.
+        """
+        try:
+            wt = await self.worktree_lookup.get(
+                self.team_name, agent.id, repo=agent.repo, force=True,
+            )
+        except Exception:
+            wt = None
+        if wt is not None:
+            path = Path(wt.worktree_path)
+            if path.exists() and path.is_dir():
+                return str(path), "worktree_existing"
+        sess = await self._ensure_session_idle(agent)
+        await self._refresh_worktree(sess)
+        recovered = sess.worktree
+        if recovered is not None:
+            path = Path(recovered.worktree_path)
+            if path.exists() and path.is_dir():
+                return str(path), "worktree_created"
+        raise RuntimeError(
+            f"hermes dispatch worktree not found after recovery: agent={agent.id!r}",
+        )
+
+    async def _dispatch_hermes_headless(
+        self,
+        *,
+        agent: FlowAgent,
+        task_id: str,
+        message: str,
+        dispatch_kind: str = "complaint",
+    ) -> None:
+        executable = shutil.which("hermes")
+        if not executable:
+            raise RuntimeError("hermes CLI is not available in PATH")
+        cwd, cwd_source = await self._hermes_dispatch_cwd(agent)
+        message = self._inject_headless_dispatch_context(
+            message=message,
+            cwd=cwd,
+            cwd_source=cwd_source,
+            dispatch_kind=dispatch_kind,
+            platform="hermes",
+        )
+        # Bind the executor to its managed Hermes profile (-p); one-shot -z.
+        argv = [executable, "-p", agent.id, "--yolo", "-z", message]
+        env = os.environ.copy()
+        env.update({
+            "CLAWTEAM_AGENT_NAME": agent.id,
+            "CLAWTEAM_TEAM_NAME": self.team_name,
+        })
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=cwd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=_OPENCLAW_HEADLESS_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            await proc.communicate()
+            raise RuntimeError(
+                f"hermes {dispatch_kind} dispatch timeout on {agent.id} "
+                f"({_OPENCLAW_HEADLESS_TIMEOUT_SEC}s)",
+            ) from exc
+        if (proc.returncode or 0) != 0:
+            detail = (
+                stderr_b.decode("utf-8", errors="replace").strip()
+                or stdout_b.decode("utf-8", errors="replace").strip()
+                or f"exit code {proc.returncode or 1}"
+            )
+            raise RuntimeError(
+                f"hermes {dispatch_kind} dispatch failed for {agent.id}: {detail[:1000]}",
+            )
+        self._emit_event(
+            "complaint_headless_dispatched"
+            if dispatch_kind == "complaint"
+            else "merge_requirement_headless_dispatched",
+            agent_id=agent.id,
+            task_id=task_id,
+            payload={
+                "cwd": cwd,
+                "cwd_source": cwd_source,
+                "dispatch_kind": dispatch_kind,
+                "platform": "hermes",
+            },
+        )
 
     async def _dispatch_merge_requirement_task(
         self,
@@ -2534,11 +2643,12 @@ class RunController:
         if not executable:
             raise RuntimeError("openclaw CLI is not available in PATH")
         cwd, cwd_source = await self._openclaw_dispatch_cwd(agent)
-        message = self._inject_openclaw_dispatch_context(
+        message = self._inject_headless_dispatch_context(
             message=message,
             cwd=cwd,
             cwd_source=cwd_source,
             dispatch_kind=dispatch_kind,
+            platform="openclaw",
         )
         session_id = openclaw_session_id_for_run(self.team_name, agent.id)
         argv = [
@@ -2679,19 +2789,22 @@ class RunController:
             f"agent={agent.id!r} main_repo={main_repo!r}",
         )
 
-    def _inject_openclaw_dispatch_context(
+    def _inject_headless_dispatch_context(
         self,
         *,
         message: str,
         cwd: str,
         cwd_source: str,
         dispatch_kind: str,
+        platform: str,
     ) -> str:
         title = (
             "## ClawsomeFlow Complaint Dispatch Context"
             if dispatch_kind == "complaint"
             else "## ClawsomeFlow Merge Requirement Dispatch Context"
         )
+        if platform == "hermes":
+            return f"{title}\n\n{message}"
         return (
             f"{title}\n"
             f"- verified_workdir: `{cwd}`\n"
@@ -2877,17 +2990,13 @@ class RunController:
         targets: list[FlowAgent],
     ) -> str:
         targets_txt = ", ".join(f"`{a.id}`" for a in targets) or "(none)"
-        # NOTE — unlike the leader-SUMMARY dispatch (which must NOT pre-merge,
-        # because the scheduler still runs `clawteam workspace merge` after the
-        # user review stage), the complaint phase is the FINAL stage: there is no
-        # further user-review/merge step afterwards. So EVERY leader (OpenClaw or
-        # TUI) MUST self-merge into the baseline within this task — otherwise its
-        # complaint fixes would never reach the baseline.
+        # The leader only relays feedback + marks its task complete. It must NOT
+        # merge anything (merge wording is reserved for OpenClaw fix tasks).
         return (
             "## ClawsomeFlow Complaint Handling Task (Leader)\n"
             f"- team: `{self.team_name}`\n"
             f"- task_id: `{task_id}`\n"
-            f"- feedback targets (OpenClaw only, and cannot message yourself): {targets_txt}\n\n"
+            f"- feedback targets (and cannot message yourself): {targets_txt}\n\n"
             "Original user complaint:\n"
             f"{complaint_text}\n\n"
             "Execution steps:\n"
@@ -2899,10 +3008,8 @@ class RunController:
             f"--from {self._leader_id}`.\n"
             f"3) `--from {self._leader_id}` is mandatory and cannot be omitted.\n"
             "4) `<agent_id>` in the header must exactly match the inbox recipient.\n"
-            "5) Whether or not you are an OpenClaw agent, you must complete branch merge "
-            "(merge into baseline branch) within this task; do not wait for a separate merge task.\n"
-            f"6) VERY IMPORTANT! you MUST execute: `clawteam task update {self.team_name} {task_id} --status completed`.\n"
-            "7) If the complaint is not valid, you may skip inbox sends, but steps 5 and 6 are still mandatory."
+            f"5) VERY IMPORTANT! you MUST execute: `clawteam task update {self.team_name} {task_id} --status completed`.\n"
+            "6) If the complaint is not valid, you may skip inbox sends, but step 5 is still mandatory."
         )
 
     def _build_agent_complaint_prompt(
@@ -2911,7 +3018,27 @@ class RunController:
         task_id: str,
         user_complaint: str,
         leader_feedback: str,
+        merge_required: bool,
     ) -> str:
+        # Only OpenClaw self-merges its complaint fix into baseline. Hermes does
+        # not merge — it refines behavioral guidelines instead of code fixes.
+        if merge_required:
+            execution_requirements = (
+                "Execution requirements:\n"
+                "1) Implement fixes based on the complaint and leader feedback.\n"
+                "2) Make changes in this task worktree. After finishing the fixes and updating "
+                "the workspace, immediately perform branch merge in this task (merge into baseline branch).\n"
+                "3) No inbox send is needed. After completion, **VERY IMPORTANT! you MUST execute**:\n"
+                f"`clawteam task update {self.team_name} {task_id} --status completed`."
+            )
+        else:
+            execution_requirements = (
+                "Execution requirements:\n"
+                "1) Remember what the user was dissatisfied with and refine your "
+                "behavioral guidelines accordingly.\n"
+                "2) No inbox send is needed. After completion, **VERY IMPORTANT! you MUST execute**:\n"
+                f"`clawteam task update {self.team_name} {task_id} --status completed`."
+            )
         return (
             "## ClawsomeFlow Complaint Handling Task (Agent)\n"
             f"- team: `{self.team_name}`\n"
@@ -2920,12 +3047,7 @@ class RunController:
             f"{user_complaint}\n\n"
             "Leader feedback for you:\n"
             f"{leader_feedback}\n\n"
-            "Execution requirements:\n"
-            "1) Implement fixes based on the complaint and leader feedback.\n"
-            "2) Make changes in this task worktree. After finishing the fixes and updating the workspace, "
-            "immediately perform branch merge in this task (merge into baseline branch).\n"
-            "3) No inbox send is needed. After completion, **VERY IMPORTANT! you MUST execute**:\n"
-            f"`clawteam task update {self.team_name} {task_id} --status completed`."
+            f"{execution_requirements}"
         )
 
     def _merge_requirement_agents(self) -> list[FlowAgent]:

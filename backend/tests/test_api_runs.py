@@ -859,10 +859,14 @@ def test_dismiss_pending_merge(
     async def fake_cleanup(**_kw):
         return True
 
+    # Worktree cleanup is now DEFERRED to the complaint-phase terminal cleanup;
+    # the merge/dismiss endpoints no longer call it. Stub tolerantly (raising=False)
+    # so these state-machine tests stay valid whether or not the symbol exists.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_cleanup,
+        raising=False,
     )
     r = app_client.post(
         f"/api/runs/{run.id}/dismiss-merge", json={"agentId": "alice"},
@@ -886,10 +890,14 @@ def test_dismiss_pending_merge_clears_preserve_worktree_flag(
     async def fake_cleanup(**_kw):
         return True
 
+    # Worktree cleanup is now DEFERRED to the complaint-phase terminal cleanup;
+    # the merge/dismiss endpoints no longer call it. Stub tolerantly (raising=False)
+    # so these state-machine tests stay valid whether or not the symbol exists.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_cleanup,
+        raising=False,
     )
     r = app_client.post(
         f"/api/runs/{run.id}/dismiss-merge", json={"agentId": "alice"},
@@ -927,10 +935,14 @@ def test_dismiss_pending_merge_resolved_enters_awaiting_complaint(
     async def fake_cleanup(**_kw):
         return True
 
+    # Worktree cleanup is now DEFERRED to the complaint-phase terminal cleanup;
+    # the merge/dismiss endpoints no longer call it. Stub tolerantly (raising=False)
+    # so these state-machine tests stay valid whether or not the symbol exists.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_cleanup,
+        raising=False,
     )
     r = app_client.post(
         f"/api/runs/{run.id}/dismiss-merge", json={"agentId": "alice"},
@@ -977,10 +989,14 @@ def test_merge_calls_perform_manual_merge(
 
     from app.api import runs as runs_mod
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
+    # Worktree cleanup is now DEFERRED to the complaint-phase terminal cleanup;
+    # the merge/dismiss endpoints no longer call it. Stub tolerantly (raising=False)
+    # so these state-machine tests stay valid whether or not the symbol exists.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_cleanup,
+        raising=False,
     )
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
     assert r.status_code == 200, r.text
@@ -989,8 +1005,9 @@ def test_merge_calls_perform_manual_merge(
     }
     assert captured["agent_id"] == "alice"
     assert captured["terminalize"] is False
-    assert captured["cleanup_run_id"] == run.id
-    assert captured["cleanup_agent_id"] == "alice"
+    # Worktree cleanup is DEFERRED to the complaint-phase terminal cleanup, so the
+    # merge endpoint must NOT clean the agent worktree immediately.
+    assert "cleanup_run_id" not in captured
     refreshed = get_storage().run_get(run.id)
     assert refreshed is not None
     assert "_csflow_preserve_worktree_agent_ids" not in (refreshed.inputs or {})
@@ -1019,10 +1036,14 @@ def test_merge_conflict_returns_reason_and_manual_resolution_guidance(
 
     from app.api import runs as runs_mod
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
+    # Worktree cleanup is now DEFERRED to the complaint-phase terminal cleanup;
+    # the merge/dismiss endpoints no longer call it. Stub tolerantly (raising=False)
+    # so these state-machine tests stay valid whether or not the symbol exists.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_cleanup,
+        raising=False,
     )
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
     assert r.status_code == 200, r.text
@@ -1062,10 +1083,14 @@ def test_merge_environment_error_returns_repo_guidance(
 
     from app.api import runs as runs_mod
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
+    # Worktree cleanup is now DEFERRED to the complaint-phase terminal cleanup;
+    # the merge/dismiss endpoints no longer call it. Stub tolerantly (raising=False)
+    # so these state-machine tests stay valid whether or not the symbol exists.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_cleanup,
+        raising=False,
     )
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
     assert r.status_code == 200, r.text
@@ -1108,10 +1133,12 @@ def test_merge_failed_run_pending_resolved_keeps_terminal_and_triggers_cleanup(
 
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
     monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_cleanup)
+    # Deferred-cleanup: endpoint no longer calls per-agent review cleanup.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_review_cleanup,
+        raising=False,
     )
 
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
@@ -1151,10 +1178,12 @@ def test_merge_review_with_failed_terminal_hint_resolves_to_failed(
 
     monkeypatch.setattr(runs_mod, "perform_manual_merge", fake_merge)
     monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_cleanup)
+    # Deferred-cleanup: endpoint no longer calls per-agent review cleanup.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_review_cleanup,
+        raising=False,
     )
 
     r = app_client.post(f"/api/runs/{run.id}/merge", json={"agentId": "alice"})
@@ -1187,10 +1216,12 @@ def test_dismiss_aborted_run_pending_resolved_keeps_terminal_and_triggers_cleanu
         return True
 
     monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_cleanup)
+    # Deferred-cleanup: endpoint no longer calls per-agent review cleanup.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_review_cleanup,
+        raising=False,
     )
 
     r = app_client.post(
@@ -1224,10 +1255,12 @@ def test_dismiss_review_with_aborted_terminal_hint_resolves_to_aborted(
         return True
 
     monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_cleanup)
+    # Deferred-cleanup: endpoint no longer calls per-agent review cleanup.
     monkeypatch.setattr(
         runs_mod,
         "cleanup_non_openclaw_workspace_after_review_decision",
         fake_review_cleanup,
+        raising=False,
     )
 
     r = app_client.post(

@@ -196,6 +196,12 @@ def start(
                 "to sync bundled skills/rules/tools.[/dim]"
             )
         report = upgrade_mod.run_upgrade(include_frontend_build=needs)
+        if report.repair_warnings:
+            console.print(
+                "[yellow]Some optional repairs need your attention "
+                "(the service still starts normally):[/yellow]\n  • "
+                + "\n  • ".join(report.repair_warnings)
+            )
         if not report.ok:
             console.print(
                 "[red]Upgrade had errors:[/red]\n  • "

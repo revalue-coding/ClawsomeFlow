@@ -108,6 +108,18 @@ def version_marker_path() -> Path:
     return clawsomeflow_home() / ".csflow-version"
 
 
+def migrations_ledger_path() -> Path:
+    """Path to ``~/.clawsomeflow/.csflow-migrations.json``.
+
+    JSON ledger of which migration ids have already been applied
+    (``{"applied": ["0.1.12", ...]}``). This is the *authoritative* gate for
+    "which migrations to run" — unlike the version marker it is direction-safe,
+    so switching between stable and beta builds (or downgrading then
+    re-upgrading) never re-applies or skips a migration. See :mod:`app.upgrade`.
+    """
+    return clawsomeflow_home() / ".csflow-migrations.json"
+
+
 def flows_dir() -> Path:
     """Directory holding Flow definition JSON files."""
     p = clawsomeflow_home() / ".flows"

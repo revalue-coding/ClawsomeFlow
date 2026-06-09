@@ -26,6 +26,7 @@
   <a href="#-quick-start">Quick Start</a> ·
   <a href="https://clawsomeflow.com/docs/">Docs</a> ·
   <a href="#-news">News</a> ·
+  <a href="#-who-should-try-it">Who Should Try It</a> ·
   <a href="#-core-features">Core Features</a> ·
   <a href="#%EF%B8%8F-how-it-works">How It Works</a> ·
   <a href="#-why-clawsomeflow">Why ClawsomeFlow</a> ·
@@ -49,6 +50,15 @@
 ## 📰 News
 
 - **2026-06-02**: ClawsomeFlow public release 🎉
+
+---
+
+## 🎯 Who Should Try It?
+
+- Developers and teams who want **multiple AI agents to genuinely collaborate** — instead of each one running off on its own;
+- Engineering-minded folks who are **done with the black box of prompt self-scheduling** and want predictable behavior with controllable cost;
+- Power users who need **parallelism + isolation + rollback** to run batch workloads;
+- Builders seriously exploring the **OPC (One-Person Company)** — putting an agent team to work on their behalf.
 
 ---
 
@@ -154,24 +164,34 @@ curl -fsSL https://clawsomeflow.com/install.sh | bash
 
 ### Common Commands
 
+Most of the time you only need these three:
+
+```bash
+csflow start      # start the service, print the console URL
+csflow status     # is it running? version, mode, paths
+csflow upgrade    # update to the latest release (flows/runs/settings preserved)
+```
+
+A few more for day-to-day use:
+
 ```bash
 # Lifecycle
-csflow start
 csflow stop
-csflow status
-csflow doctor
+csflow doctor                              # health check (deps + config + gateway)
 
 # Flow / Run
 csflow flows list
+csflow runs start <flow-id> --input k=v    # trigger a run with parameter fields
 csflow runs list
-csflow runs start <flow-id> --input k=v
 csflow runs abort <run-id>
 
 # Agent governance
 csflow agents list
-csflow agents create "Describe the Agent you want in natural language"
-csflow agents chat <agent-id> "Keep improving this Agent's capabilities"
+# Creating agents and chatting with them is done in the Web UI ("My Team"),
+# not the CLI.
 ```
+
+Every command accepts `--help`. Full CLI reference: <https://clawsomeflow.com/docs/>
 
 ---
 

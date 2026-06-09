@@ -8,6 +8,7 @@ behaves as the design intends. No real subprocesses are spawned.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2481,6 +2482,64 @@ async def test_openclaw_headless_dispatch_injects_verified_workdir_context(
 
 
 @pytest.mark.asyncio
+async def test_hermes_headless_dispatch_injects_minimal_complaint_context(
+    fake_lookup,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    rc = RunController(
+        run=run,
+        spec=spec,
+        flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+    )
+    verified = tmp_path / "verified-worktree"
+    verified.mkdir(parents=True, exist_ok=True)
+    captured: dict[str, Any] = {}
+
+    async def fake_cwd(agent: FlowAgent) -> tuple[str, str]:
+        del agent
+        return str(verified), "worktree_created"
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+        def kill(self) -> None:
+            return None
+
+    async def fake_create_subprocess_exec(*argv, **kwargs):
+        captured["argv"] = argv
+        return _Proc()
+
+    monkeypatch.setattr(rc, "_hermes_dispatch_cwd", fake_cwd)
+    monkeypatch.setattr(shutil, "which", lambda name: "hermes" if name == "hermes" else None)
+    monkeypatch.setattr(ctrl_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    hermes_agent = FlowAgent(
+        id="myh", kind=AgentKind.hermes, repo="/tmp/r",
+        target_branch="main", is_leader=False,
+    )
+    await rc._dispatch_hermes_headless(
+        agent=hermes_agent,
+        task_id="complaint-hermes-1",
+        message="hello hermes",
+    )
+
+    argv = list(captured["argv"])
+    msg = str(argv[-1])
+    assert msg.startswith("## ClawsomeFlow Complaint Dispatch Context\n\nhello hermes")
+    assert "verified_workdir" not in msg
+
+
+@pytest.mark.asyncio
 async def test_openclaw_headless_dispatch_auto_repairs_scope_pending(
     fake_lookup,
     monkeypatch: pytest.MonkeyPatch,
@@ -2570,13 +2629,14 @@ def test_leader_complaint_prompt_requires_explicit_from_sender(fake_lookup) -> N
     )
     assert "--from leader" in prompt
     assert "is mandatory and cannot be omitted" in prompt
-    assert "Whether or not you are an OpenClaw agent, you must complete branch merge" in prompt
+    # Leader must NOT mention merge — merge wording is reserved for OpenClaw fixes.
+    assert "merge" not in prompt.lower()
     assert "VERY IMPORTANT! you MUST execute" in prompt
     assert "[csflow-complaint-relay:ct-1:<agent_id>]" in prompt
     assert "`<agent_id>` in the header must exactly match the inbox recipient" in prompt
 
 
-def test_agent_complaint_prompt_requires_in_task_merge(fake_lookup) -> None:
+def test_agent_complaint_prompt_merge_only_for_openclaw(fake_lookup) -> None:
     spec = _make_spec()
     run = _persist_flow_and_run(spec)
     rc = RunController(
@@ -2586,18 +2646,56 @@ def test_agent_complaint_prompt_requires_in_task_merge(fake_lookup) -> None:
             agent=a, team_name=run.team_name, run_id=run.id,
         ),
     )
-    prompt = rc._build_agent_complaint_prompt(
-        task_id="ct-2",
-        user_complaint="输出不完整",
-        leader_feedback="请补全边界条件",
+    # OpenClaw fix → keeps in-task self-merge instruction.
+    oc_prompt = rc._build_agent_complaint_prompt(
+        task_id="ct-2", user_complaint="输出不完整",
+        leader_feedback="请补全边界条件", merge_required=True,
     )
-    assert (
-        "Make changes in this task worktree. After finishing the fixes and updating "
-        "the workspace, immediately perform branch merge in this task"
-    ) in prompt
-    assert "VERY IMPORTANT! you MUST execute" in prompt
-    assert "do not wait for a separate merge task" not in prompt
-    assert "更新到 workspace" not in prompt
+    assert "immediately perform branch merge in this task" in oc_prompt
+    assert "VERY IMPORTANT! you MUST execute" in oc_prompt
+    # Hermes / other → MUST NOT mention merge at all.
+    hermes_prompt = rc._build_agent_complaint_prompt(
+        task_id="ct-3", user_complaint="输出不完整",
+        leader_feedback="请补全边界条件", merge_required=False,
+    )
+    assert "merge" not in hermes_prompt.lower()
+    assert "Remember what the user was dissatisfied with" in hermes_prompt
+    assert "refine your behavioral guidelines accordingly" in hermes_prompt
+    assert "Implement fixes based on the complaint" not in hermes_prompt
+    assert "Make changes in this task worktree" not in hermes_prompt
+    assert "VERY IMPORTANT! you MUST execute" in hermes_prompt
+
+
+@pytest.mark.asyncio
+async def test_complaint_dispatch_routes_hermes_to_headless(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+    )
+    routed: dict[str, str] = {}
+
+    async def fake_oc(*, agent, task_id, message, dispatch_kind="complaint"):
+        routed["kind"] = "openclaw"
+
+    async def fake_hermes(*, agent, task_id, message, dispatch_kind="complaint"):
+        routed["kind"] = "hermes"
+
+    monkeypatch.setattr(rc, "_dispatch_openclaw_headless", fake_oc)
+    monkeypatch.setattr(rc, "_dispatch_hermes_headless", fake_hermes)
+
+    hermes_agent = FlowAgent(
+        id="myh", kind=AgentKind.hermes, repo="/tmp/r",
+        target_branch="main", is_leader=False,
+    )
+    await rc._dispatch_complaint_task(agent=hermes_agent, task_id="c1", message="m")
+    assert routed["kind"] == "hermes"
 
 
 @pytest.mark.asyncio

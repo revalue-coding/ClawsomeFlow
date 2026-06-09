@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import {
   AlarmIcon,
+  AssistantIcon,
   BrandIcon,
   DocsIcon,
   ExternalLinkIcon,
@@ -73,6 +74,9 @@ const NAV: NavGroup[] = [
     titleKey: "nav.groupAgents",
     items: [
       { to: "/chat", labelKey: "nav.chat", icon: <LobsterIcon className="h-8 w-8" /> },
+      { to: "/hermes", labelKey: "nav.hermes", icon: <AssistantIcon className="h-8 w-8" /> },
+      { to: "/claude", labelKey: "nav.claude", icon: <AssistantIcon className="h-8 w-8" /> },
+      { to: "/codex", labelKey: "nav.codex", icon: <AssistantIcon className="h-8 w-8" /> },
     ],
   },
   // ── Settings group temporarily hidden (Profile module).

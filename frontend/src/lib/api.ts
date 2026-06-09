@@ -590,6 +590,87 @@ export interface TriggerUpgradeResult {
   via: string;
 }
 
+// ── Hermes agents ───────────────────────────────────────────────────────
+export interface HermesAgentSummary {
+  id: string;
+  name: string;
+  description: string;
+  teamId: string;
+  teamName: string;
+  profileRoot: string;
+  createdByUser: string;
+  createdAt: string;
+}
+
+export interface HermesAgentDetail extends HermesAgentSummary {
+  nlPrompt: string;
+}
+
+export interface HermesClaimableAgent {
+  id: string;
+  description: string;
+}
+
+export interface HermesModelSetting {
+  default: string;
+  provider: string;
+  baseUrl: string;
+}
+
+export interface HermesSecretSetting {
+  key: string;
+  preview: string;
+  isSet: boolean;
+}
+
+export interface HermesSkillSetting {
+  name: string;
+  description: string;
+  path: string;
+  content?: string | null;
+}
+
+export interface HermesCronJob {
+  id: string;
+  name: string;
+  schedule: string;
+  enabled: boolean;
+  detail: string;
+  raw: string;
+}
+
+// ── Managed agents (Claude / Codex / Cursor env-home) ───────────────────
+export type ManagedKind = "claude" | "codex" | "cursor";
+
+export interface ManagedAgentSummary {
+  id: string;
+  kind: ManagedKind;
+  name: string;
+  description: string;
+  teamId: string;
+  teamName: string;
+  configHome: string;
+  createdByUser: string;
+  createdAt: string;
+}
+
+export interface ManagedAgentDetail extends ManagedAgentSummary {
+  nlPrompt: string;
+  clawteamProfile: string;
+}
+
+export interface ManagedMcpServer {
+  name: string;
+  detail: string;
+}
+
+export interface ManagedSkill {
+  name: string;
+  description: string;
+  path: string;
+  content?: string | null;
+}
+
 export const api = {
   // Flows
   listFlows: () =>
@@ -968,6 +1049,147 @@ export const api = {
     ),
   resetOpenclawAgentChat: (id: string) =>
     request<void>("POST", `/api/openclaw/agents/${id}/reset`),
+
+  // ── Hermes agents ────────────────────────────────────────────────
+  listHermesAgents: () =>
+    request<{ items: HermesAgentSummary[] }>("GET", "/api/hermes/agents"),
+  getHermesAgent: (id: string) =>
+    request<HermesAgentDetail>("GET", `/api/hermes/agents/${id}`),
+  getHermesRuntimeStatus: () =>
+    request<{ running: boolean; reason: string }>(
+      "GET",
+      "/api/hermes/agents/runtime/status",
+      undefined,
+      { cache: "no-store" },
+    ),
+  createHermesAgent: (
+    payload: { id?: string; name: string; responsibility: string; teamId?: string },
+    init?: RequestInit,
+  ) => request<HermesAgentDetail>("POST", "/api/hermes/agents", payload, init),
+  patchHermesAgent: (
+    id: string,
+    payload: { name?: string; description?: string; teamId?: string },
+  ) => request<HermesAgentDetail>("PATCH", `/api/hermes/agents/${id}`, payload),
+  deleteHermesAgent: (id: string) =>
+    request<void>("DELETE", `/api/hermes/agents/${id}`),
+  listHermesClaimable: () =>
+    request<{ items: HermesClaimableAgent[]; total: number }>(
+      "GET",
+      "/api/hermes/agents/claimable",
+    ),
+  claimHermesAgent: (payload: { id: string; name?: string; teamId?: string }) =>
+    request<HermesAgentDetail>("POST", "/api/hermes/agents/claim", payload),
+  // settings
+  getHermesSoul: (id: string) =>
+    request<{ content: string }>("GET", `/api/hermes/agents/${id}/settings/soul`),
+  putHermesSoul: (id: string, content: string) =>
+    request<{ content: string }>("PUT", `/api/hermes/agents/${id}/settings/soul`, { content }),
+  getHermesModel: (id: string) =>
+    request<HermesModelSetting>("GET", `/api/hermes/agents/${id}/settings/model`),
+  putHermesModel: (id: string, payload: HermesModelSetting) =>
+    request<HermesModelSetting>("PUT", `/api/hermes/agents/${id}/settings/model`, payload),
+  getHermesSecrets: (id: string) =>
+    request<HermesSecretSetting[]>("GET", `/api/hermes/agents/${id}/settings/secrets`),
+  putHermesSecret: (id: string, payload: { key: string; value: string }) =>
+    request<void>("PUT", `/api/hermes/agents/${id}/settings/secrets`, payload),
+  deleteHermesSecret: (id: string, key: string) =>
+    request<void>("DELETE", `/api/hermes/agents/${id}/settings/secrets/${encodeURIComponent(key)}`),
+  getHermesSkills: (id: string) =>
+    request<HermesSkillSetting[]>("GET", `/api/hermes/agents/${id}/settings/skills`),
+  getHermesSkill: (id: string, name: string) =>
+    request<HermesSkillSetting>("GET", `/api/hermes/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
+  deleteHermesSkill: (id: string, name: string) =>
+    request<void>("DELETE", `/api/hermes/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
+  getHermesCron: (id: string) =>
+    request<{ available: boolean; items: HermesCronJob[] }>(
+      "GET",
+      `/api/hermes/agents/${id}/settings/cron`,
+    ),
+  createHermesCron: (
+    id: string,
+    payload: { schedule: string; prompt?: string; name?: string; workdir?: string },
+  ) => request<void>("POST", `/api/hermes/agents/${id}/settings/cron`, payload),
+  hermesCronAction: (id: string, jobId: string, action: "pause" | "resume" | "remove") =>
+    request<void>(
+      "POST",
+      `/api/hermes/agents/${id}/settings/cron/${encodeURIComponent(jobId)}/${action}`,
+    ),
+  chatWithHermesAgent: (
+    id: string,
+    body: { message: string; workdir: string },
+    init?: RequestInit,
+  ) =>
+    fetch(`/api/hermes/agents/${id}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      ...init,
+    }),
+  getHermesAgentChatHistory: (id: string) =>
+    request<{ messages: ChatHistoryMessage[] }>(
+      "GET",
+      `/api/hermes/agents/${id}/chat-history`,
+    ),
+  resetHermesAgentChat: (id: string) =>
+    request<void>("POST", `/api/hermes/agents/${id}/reset`),
+
+  // ── Managed agents (Claude / Codex / Cursor) ─────────────────────
+  listManagedAgents: (kind?: ManagedKind) =>
+    request<{ items: ManagedAgentSummary[] }>(
+      "GET",
+      `/api/managed/agents${kind ? `?kind=${kind}` : ""}`,
+    ),
+  getManagedAgent: (id: string) =>
+    request<ManagedAgentDetail>("GET", `/api/managed/agents/${id}`),
+  getManagedRuntimeStatus: (kind: ManagedKind) =>
+    request<{ running: boolean; reason: string }>(
+      "GET",
+      `/api/managed/agents/runtime/status?kind=${kind}`,
+      undefined,
+      { cache: "no-store" },
+    ),
+  createManagedAgent: (
+    payload: { kind: ManagedKind; id?: string; name: string; responsibility: string; teamId?: string },
+    init?: RequestInit,
+  ) => request<ManagedAgentDetail>("POST", "/api/managed/agents", payload, init),
+  patchManagedAgent: (
+    id: string,
+    payload: { name?: string; description?: string; teamId?: string },
+  ) => request<ManagedAgentDetail>("PATCH", `/api/managed/agents/${id}`, payload),
+  deleteManagedAgent: (id: string) =>
+    request<void>("DELETE", `/api/managed/agents/${id}`),
+  getManagedRole: (id: string) =>
+    request<{ content: string }>("GET", `/api/managed/agents/${id}/settings/role`),
+  putManagedRole: (id: string, content: string) =>
+    request<{ content: string }>("PUT", `/api/managed/agents/${id}/settings/role`, { content }),
+  getManagedMcp: (id: string) =>
+    request<ManagedMcpServer[]>("GET", `/api/managed/agents/${id}/settings/mcp`),
+  addManagedMcp: (id: string, payload: { name: string; command: string[] }) =>
+    request<void>("POST", `/api/managed/agents/${id}/settings/mcp`, payload),
+  deleteManagedMcp: (id: string, name: string) =>
+    request<void>("DELETE", `/api/managed/agents/${id}/settings/mcp/${encodeURIComponent(name)}`),
+  getManagedSkills: (id: string) =>
+    request<ManagedSkill[]>("GET", `/api/managed/agents/${id}/settings/skills`),
+  getManagedSkill: (id: string, name: string) =>
+    request<ManagedSkill>("GET", `/api/managed/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
+  chatWithManagedAgent: (
+    id: string,
+    body: { message: string; workdir: string },
+    init?: RequestInit,
+  ) =>
+    fetch(`/api/managed/agents/${id}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      ...init,
+    }),
+  getManagedAgentChatHistory: (id: string) =>
+    request<{ messages: ChatHistoryMessage[] }>(
+      "GET",
+      `/api/managed/agents/${id}/chat-history`,
+    ),
+  resetManagedAgentChat: (id: string) =>
+    request<void>("POST", `/api/managed/agents/${id}/reset`),
 
   // Agent Store
   loginAgentStore: (payload: { email: string; password: string }) =>

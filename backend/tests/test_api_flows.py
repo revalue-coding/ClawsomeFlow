@@ -60,9 +60,11 @@ def _flow_payload(repo_path: str, name: str = "test-flow") -> dict:
         "description": "demo",
         "spec": {
             "agents": [
-                {"id": "alice", "kind": "claude", "repo": repo_path,
+                # cursor: non-OpenClaw (repo validation applies) but not
+                # managed-enforced, so flow CRUD tests don't need seeded agents.
+                {"id": "alice", "kind": "cursor", "repo": repo_path,
                  "isLeader": False},
-                {"id": "leader", "kind": "claude", "repo": repo_path,
+                {"id": "leader", "kind": "cursor", "repo": repo_path,
                  "isLeader": True},
             ],
             "tasks": [
@@ -83,7 +85,7 @@ def _flow_payload_with_openclaw(
     payload = _flow_payload(repo_path, name=name)
     payload["spec"]["agents"] = [
         {"id": openclaw_agent_id, "kind": "openclaw", "isLeader": False},
-        {"id": "leader", "kind": "claude", "repo": repo_path, "isLeader": True},
+        {"id": "leader", "kind": "cursor", "repo": repo_path, "isLeader": True},
     ]
     payload["spec"]["tasks"][0]["ownerAgentId"] = openclaw_agent_id
     return payload
