@@ -105,6 +105,12 @@ class SkillView(_CamelModel):
     content: str | None = None
 
 
+class SkillCreatePayload(_CamelModel):
+    name: str
+    description: str = ""
+    content: str = ""
+
+
 class ChatPayload(_CamelModel):
     message: str
     workdir: str
@@ -318,6 +324,23 @@ def get_skill(
         return SkillView(name=name, content=svc.read_skill(agent_id, name, storage=storage))
     except svc.ManagedAgentError as exc:
         raise _map_err(exc) from exc
+
+
+@router.post("/{agent_id}/settings/skills", response_model=SkillView, status_code=201)
+def create_skill(
+    agent_id: Annotated[str, Path()],
+    payload: Annotated[SkillCreatePayload, Body()],
+    user: UserDep, storage: StorageDep,
+) -> SkillView:
+    _owned(agent_id, user, storage)
+    try:
+        out = svc.write_skill(
+            agent_id, name=payload.name, description=payload.description,
+            content=payload.content, storage=storage,
+        )
+    except svc.ManagedAgentError as exc:
+        raise _map_err(exc) from exc
+    return SkillView(name=out["name"], description=out.get("description", ""), path=out.get("path", ""))
 
 
 # ── chat ──────────────────────────────────────────────────────────────

@@ -103,8 +103,11 @@ class HermesClaimableListResponse(_CamelModel):
 
 
 class CreatePayload(_CamelModel):
+    # ``id`` IS the Hermes profile id and is the primary, required field in the
+    # UI ("Agent name (Profile id)"). ``name`` is optional and defaults to the
+    # id; legacy callers may still send only ``name`` (id derived from it).
     id: str = ""
-    name: str
+    name: str = ""
     responsibility: str = ""  # → description / nl_prompt
     team_id: str = ""
 
@@ -147,6 +150,12 @@ class SkillView(_CamelModel):
     description: str = ""
     path: str = ""
     content: str | None = None
+
+
+class SkillCreatePayload(_CamelModel):
+    name: str
+    description: str = ""
+    content: str = ""
 
 
 class CronJobView(_CamelModel):
@@ -462,6 +471,23 @@ def get_skill(
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
     return SkillView(name=name, content=content)
+
+
+@router.post("/{agent_id}/settings/skills", response_model=SkillView, status_code=201)
+def create_skill(
+    agent_id: Annotated[str, Path()],
+    payload: Annotated[SkillCreatePayload, Body()],
+    user: UserDep,
+    storage: StorageDep,
+) -> SkillView:
+    _get_owned(agent_id, user, storage)
+    try:
+        out = svc.write_skill(
+            agent_id, name=payload.name, description=payload.description, content=payload.content,
+        )
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return SkillView(name=out["name"], description=out.get("description", ""), path=out.get("path", ""))
 
 
 @router.delete("/{agent_id}/settings/skills/{name}", status_code=204)

@@ -141,13 +141,14 @@ class TmuxLiveSession(WorkerSession):
             base_spawn, base_resume = _KIND_TO_CMD[agent.kind]
             self._spawn_cmd = list(base_spawn)
             self._resume_cmd = list(base_resume)
-            if agent.kind == AgentKind.hermes:
+            if agent.kind == AgentKind.hermes and not agent.is_temporary:
                 # Bind the executor to its managed Hermes profile. The profile
                 # name IS the agent id (== HermesAgent.id). ``-p`` is a global,
                 # position-independent flag, so appending is safe for both the
                 # fresh and ``-c`` (continue) commands. This is the Hermes
                 # equivalent of OpenClaw's session-id binding and is REQUIRED so
                 # the agent's own identity/memory/skills are used.
+                # Temporary Hermes agents have NO managed profile → no ``-p``.
                 self._spawn_cmd += ["-p", agent.id]
                 self._resume_cmd += ["-p", agent.id]
 
@@ -163,6 +164,10 @@ class TmuxLiveSession(WorkerSession):
         ClawTeam profile each spawn (ms-scale). Other kinds keep the
         author-provided ``FlowAgent.profile`` (Hermes binds via ``-p`` instead).
         """
+        # Temporary (ad-hoc) agents are not managed: no config-home env profile
+        # and no author-provided profile binding.
+        if self.agent.is_temporary:
+            return None
         from app.scheduler import managed_runtime
         kind = self.agent.kind.value
         if managed_runtime.is_managed_kind(kind):

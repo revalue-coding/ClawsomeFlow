@@ -5,11 +5,9 @@ import { useTranslation } from "react-i18next";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import {
   AlarmIcon,
-  AssistantIcon,
   DocsIcon,
   ExternalLinkIcon,
   FlowIcon,
-  LobsterIcon,
   RunIcon,
   StoreIcon,
   // SettingsIcon — re-import when restoring the Settings nav group below.
@@ -22,6 +20,7 @@ import {
   getUpgradeModalOpen,
   setUpgradeModalOpen,
 } from "@/components/UpdateNotice";
+import { Modal } from "@/components/ui";
 import type { UpdateStatus } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
@@ -73,10 +72,10 @@ const NAV: NavGroup[] = [
   {
     titleKey: "nav.groupAgents",
     items: [
-      { to: "/chat", labelKey: "nav.chat", icon: <LobsterIcon className="h-8 w-8" /> },
-      { to: "/hermes", labelKey: "nav.hermes", icon: <AssistantIcon className="h-8 w-8" /> },
-      { to: "/claude", labelKey: "nav.claude", icon: <AssistantIcon className="h-8 w-8" /> },
-      { to: "/codex", labelKey: "nav.codex", icon: <AssistantIcon className="h-8 w-8" /> },
+      { to: "/chat", labelKey: "nav.chat", icon: <img src="/agent-icons/openclaw.png" alt="" className="h-8 w-8 object-contain" /> },
+      { to: "/hermes", labelKey: "nav.hermes", icon: <img src="/agent-icons/hermes.png" alt="" className="h-8 w-8 object-contain" /> },
+      { to: "/claude", labelKey: "nav.claude", icon: <img src="/agent-icons/claude.png" alt="" className="h-8 w-8 object-contain" /> },
+      { to: "/codex", labelKey: "nav.codex", icon: <img src="/agent-icons/codex.png" alt="" className="h-8 w-8 object-contain" /> },
     ],
   },
   // ── Settings group temporarily hidden (Profile module).
@@ -168,6 +167,7 @@ function Sidebar({
   const { t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
+  const [storeComingSoon, setStoreComingSoon] = useState(false);
 
   const isItemActive = (to: string): boolean =>
     location.pathname === to || location.pathname.startsWith(`${to}/`);
@@ -270,42 +270,31 @@ function Sidebar({
           </div>
         ))}
 
-        {/* Resources — Agent Store is an internal SPA module; Docs is external. */}
+        {/* Resources — Agent Store is visible but not open to the public yet:
+            clicking it shows a "Coming soon" notice instead of routing to the
+            (still-resolvable) /store page. Docs is external. */}
         <div className="mb-6">
           <div className="px-5 py-1 text-sm font-semibold uppercase tracking-wider text-ink-400">
             {t("nav.groupResources")}
           </div>
-          {(() => {
-            const storeItem: NavItem = {
-              to: "/store",
-              labelKey: "nav.agentStore",
-              icon: <StoreIcon className="h-8 w-8" />,
-            };
-            const isActive = isItemActive(storeItem.to);
-            return (
-              <button
-                type="button"
-                onClick={() => navigateToModule(storeItem)}
-                aria-current={isActive ? "page" : undefined}
-                className={cn(
-                  "group mx-2 my-1 flex w-[calc(100%-1rem)] appearance-none items-center gap-3 rounded-md border-0 bg-transparent px-3 py-2 text-left text-sm font-medium transition-all",
-                  isActive
-                    ? "bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_theme(colors.brand.200),0_0_18px_-8px_theme(colors.brand.400)]"
-                    : "text-ink-700 hover:bg-ink-100 hover:text-brand-700",
-                )}
-              >
-                <span
-                  className={cn(
-                    "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-white text-brand-500 transition-all",
-                    "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
-                  )}
-                >
-                  {storeItem.icon}
-                </span>
-                <span>{t(storeItem.labelKey)}</span>
-              </button>
-            );
-          })()}
+          <button
+            type="button"
+            onClick={() => setStoreComingSoon(true)}
+            className={cn(
+              "group mx-2 my-1 flex w-[calc(100%-1rem)] appearance-none items-center gap-3 rounded-md border-0 bg-transparent px-3 py-2 text-left text-sm font-medium transition-all",
+              "text-ink-700 hover:bg-ink-100 hover:text-brand-700",
+            )}
+          >
+            <span
+              className={cn(
+                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-white text-brand-500 transition-all",
+                "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
+              )}
+            >
+              <StoreIcon className="h-8 w-8" />
+            </span>
+            <span>{t("nav.agentStore")}</span>
+          </button>
           <a
             href={DOCS_URL}
             target="_blank"
@@ -364,6 +353,35 @@ function Sidebar({
           <span className="pill-danger shrink-0">● {t("shell.backendOffline")}</span>
         )}
       </div>
+
+      <Modal
+        open={storeComingSoon}
+        onClose={() => setStoreComingSoon(false)}
+        title=""
+        width="max-w-md"
+      >
+        <div className="relative overflow-hidden rounded-2xl border border-brand-100 bg-gradient-to-br from-indigo-50 via-white to-fuchsia-50 px-6 py-7">
+          <div className="pointer-events-none absolute -left-10 -top-10 h-28 w-28 rounded-full bg-indigo-300/30 blur-2xl" />
+          <div className="pointer-events-none absolute -bottom-12 -right-12 h-32 w-32 rounded-full bg-fuchsia-300/30 blur-2xl" />
+          <div className="relative space-y-4 text-center">
+            <span className="mx-auto inline-flex h-20 w-20 items-center justify-center rounded-[22px] bg-gradient-to-br from-indigo-500 via-fuchsia-500 to-orange-500 text-white shadow-[0_0_24px_-6px_rgba(217,70,239,0.85)]">
+              <StoreIcon className="h-9 w-9" />
+            </span>
+            <h4 className="text-xl font-semibold tracking-tight text-ink-900">
+              {t("store.comingSoon.headline")}
+            </h4>
+            <div className="pt-1">
+              <button
+                type="button"
+                className="inline-flex rounded-full border border-fuchsia-300 bg-gradient-to-r from-indigo-500 via-fuchsia-500 to-orange-500 px-5 py-2 text-sm font-semibold text-white shadow-[0_0_20px_-8px_rgba(217,70,239,0.8)] transition hover:from-indigo-600 hover:to-orange-600"
+                onClick={() => setStoreComingSoon(false)}
+              >
+                {t("store.comingSoon.action")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Modal>
     </aside>
   );
 }

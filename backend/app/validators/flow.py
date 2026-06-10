@@ -265,7 +265,15 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
                     {"agent_id": a.id},
                 )
         else:
-            if a.kind == AgentKind.hermes and storage.hermes_get(a.id) is None:
+            # Temporary (ad-hoc) agents are not registered in any managed store,
+            # so skip the existence lookups for them — they still need a valid
+            # working-directory ``repo`` (checked below). OpenClaw cannot be
+            # temporary (rejected at the model level).
+            if (
+                a.kind == AgentKind.hermes
+                and not a.is_temporary
+                and storage.hermes_get(a.id) is None
+            ):
                 raise FlowValidationError(
                     ERROR_HERMES_AGENT_NOT_FOUND,
                     f"agent {a.id!r}: kind=hermes, but no HermesAgent with that "
@@ -273,7 +281,7 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
                     "in the management module first.",
                     {"agent_id": a.id},
                 )
-            if a.kind in _ENFORCED_MANAGED_KINDS:
+            if a.kind in _ENFORCED_MANAGED_KINDS and not a.is_temporary:
                 row = storage.managed_get(a.id)
                 if row is None or row.kind != a.kind.value:
                     raise FlowValidationError(

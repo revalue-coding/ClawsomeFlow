@@ -134,6 +134,28 @@ def test_flow_rejects_unmanaged_claude(tmp_path: Path) -> None:
     assert exc.value.code == ERROR_MANAGED_AGENT_NOT_FOUND
 
 
+def test_write_skill_creates_and_lists(tmp_path: Path) -> None:
+    """write_skill creates a SKILL.md (no CLI needed) and shows up in list."""
+    st = get_storage()
+    aid = "mgskill"
+    home = tmp_path / "home"
+    (home / "skills").mkdir(parents=True)
+    st.managed_create(ManagedAgent(
+        id=aid, kind="claude", name=aid, config_home=str(home),
+        clawteam_profile=f"csflow-claude-{aid}", created_by_user="alice",
+    ))
+    out = svc.write_skill(aid, name="my-skill", description="d", content="# hi", storage=st)
+    assert out["name"] == "my-skill"
+    assert any(s["name"] == "my-skill" for s in svc.list_skills(aid, storage=st))
+    assert "# hi" in svc.read_skill(aid, "my-skill", storage=st)
+    with pytest.raises(svc.AgentAlreadyExists):
+        svc.write_skill(aid, name="my-skill", content="x", storage=st)
+    with pytest.raises(svc.AgentIdInvalid):
+        svc.write_skill(aid, name="bad name", content="x", storage=st)
+    with pytest.raises(svc.AgentIdInvalid):
+        svc.write_skill(aid, name="ok", content="   ", storage=st)
+
+
 def test_flow_accepts_managed_claude(tmp_path: Path) -> None:
     st = get_storage()
     repo = _git_repo(tmp_path)

@@ -283,6 +283,13 @@ class FlowAgent(_ApiBase):
     on_failure: OnFailure = OnFailure.retry
     max_retries: int = 2
     dispose_after_done: bool = True
+    # Temporary (ad-hoc) agent created inline while authoring a Flow, as opposed
+    # to a persistent/managed agent. Temporary agents are NOT registered in the
+    # managed/Hermes/OpenClaw stores: at run time they get no ClawTeam profile
+    # and no per-agent identity binding (no ``-p`` / config-home env injection).
+    # Additive with a safe default → old specs load unchanged. OpenClaw cannot
+    # be temporary (it always references a persistent OpenClaw agent).
+    is_temporary: bool = False
 
     @field_validator("id")
     @classmethod
@@ -317,6 +324,12 @@ class FlowAgent(_ApiBase):
             )
         # Compatibility check (TUI cannot use agent_self; OpenClaw cannot use manual/auto).
         _validate_merge_strategy(self.kind, self.merge_strategy)
+        # OpenClaw always references a persistent OpenClaw agent — it can never
+        # be a temporary/ad-hoc agent.
+        if self.is_temporary and self.kind == AgentKind.openclaw:
+            raise ValueError(
+                f"agent {self.id!r}: kind=openclaw cannot be a temporary agent"
+            )
         # OpenClaw uses its own main workspace; reject explicit repo.
         if self.kind == AgentKind.openclaw and self.repo not in (None, ""):
             raise ValueError(

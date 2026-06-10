@@ -395,13 +395,44 @@ def get_agent(
     return row
 
 
+def _adopt_unmanaged_profiles(
+    *,
+    user: str,
+    storage: StorageBackend,
+) -> None:
+    """Bring any on-disk Hermes profile not yet in the DB under management.
+
+    Every Hermes profile is treated the same regardless of where it was created
+    — there is no separate "claim" step. Best-effort and idempotent: profiles
+    already managed are skipped, and individual failures (invalid id, races,
+    CLI errors) never abort the listing.
+    """
+    try:
+        on_disk = list_profile_names()
+    except HermesAgentError:
+        return
+    managed = {r.id for r in storage.hermes_list()}
+    for name in on_disk:
+        if name in managed:
+            continue
+        try:
+            claim_profile(profile_name=name, user=user, storage=storage)
+        except HermesAgentError:
+            continue
+
+
 def list_agents(
     *,
     user: str | None = None,
     storage: StorageBackend | None = None,
     config: Config | None = None,
+    adopt: bool = True,
 ) -> list[HermesAgent]:
     storage = storage or get_storage(config or load_config())
+    # Auto-adopt every existing profile so the management page loads them all
+    # uniformly (no manual "claim"). Only when we have a concrete owner user.
+    if adopt and user:
+        _adopt_unmanaged_profiles(user=user, storage=storage)
     return storage.hermes_list(owner_user=user)
 
 
@@ -705,6 +736,35 @@ def read_skill(agent_id: str, name: str) -> str:
     if not skill_md.is_file():
         raise AgentNotFound(f"skill {name!r} not found")
     return skill_md.read_text(encoding="utf-8", errors="replace")
+
+
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _build_skill_md(name: str, description: str, body: str) -> str:
+    desc = (description or "").strip().replace("\\", "\\\\").replace('"', '\\"')
+    return f'---\nname: {name}\ndescription: "{desc}"\n---\n\n{(body or "").strip()}\n'
+
+
+def write_skill(agent_id: str, *, name: str, description: str = "", content: str) -> dict[str, str]:
+    """Create a new user-defined skill (``skills/{name}/SKILL.md``)."""
+    aid = _validate_agent_id(agent_id)
+    skill_name = (name or "").strip()
+    if not _SKILL_NAME_RE.match(skill_name):
+        raise AgentIdInvalid(
+            "skill name must be non-empty and contain only letters, digits, '-' or '_'"
+        )
+    body = (content or "").strip()
+    if not body:
+        raise AgentIdInvalid("skill content is required")
+    skill_dir = hermes_profile_root(aid) / _SKILLS_DIRNAME / skill_name
+    if skill_dir.exists():
+        raise AgentAlreadyExists(f"skill {skill_name!r} already exists")
+    skill_dir.mkdir(parents=True, exist_ok=False)
+    (skill_dir / _SKILL_ENTRY_FILENAME).write_text(
+        _build_skill_md(skill_name, description, body), encoding="utf-8"
+    )
+    return {"name": skill_name, "description": (description or "").strip(), "path": str(skill_dir)}
 
 
 def delete_skill(agent_id: str, name: str) -> None:

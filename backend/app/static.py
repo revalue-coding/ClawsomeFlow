@@ -27,7 +27,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
@@ -132,6 +132,20 @@ def mount_frontend(app: FastAPI) -> Path | None:
         # index.html in place of a missing image / font.
         if full_path.startswith(("api/", "ws/", "assets/", "health", "version", "docs", "openapi.json")):
             return PlainTextResponse("not found", status_code=404)
+        # Root-level static files shipped in dist (logo.png, favicon, robots.txt,
+        # …). ``/assets/*`` is already mounted above; this serves the *root* of
+        # the bundle so e.g. ``/logo.png`` returns the PNG instead of falling
+        # through to index.html (HTML), which is what broke the sidebar logo and
+        # favicon in the packaged wheel. Guard against path traversal by
+        # resolving and confirming the file stays inside ``dist``.
+        if full_path:
+            candidate = (dist / full_path).resolve()
+            try:
+                candidate.relative_to(dist.resolve())
+            except ValueError:
+                candidate = None  # escaped the dist root → fall through to SPA
+            if candidate is not None and candidate.is_file():
+                return FileResponse(candidate)
         return _spa_index_response()
 
     logger.info("frontend_static_mounted", dist=str(dist))

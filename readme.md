@@ -58,6 +58,7 @@
 - Developers and teams who want **multiple AI agents to genuinely collaborate** — instead of each one running off on its own;
 - Engineering-minded folks who are **done with the black box of prompt self-scheduling** and want predictable behavior with controllable cost;
 - Power users who need **parallelism + isolation + rollback** to run batch workloads;
+- People who aren't deeply versed in driving **OpenClaw / Hermes / Claude Code / Codex** and the like, but still want to **put their capabilities to work** — ClawsomeFlow gives you a natural-language management layer over all of them;
 - Builders seriously exploring the **OPC (One-Person Company)** — putting an agent team to work on their behalf.
 
 ---
@@ -148,6 +149,7 @@ ClawsomeFlow is built on top of **ClawTeam**.
 | **OpenClaw adaptation** | Supported as an optional CLI Agent | Deeply adapted, resolving session and workspace concurrency conflicts |
 | **Failure & guardrails** | Basic lifecycle protocol | Human checkpoints / rollback / complaint-loop / entropy management |
 | **Skill configuration** | Requires extra skill setup on the Agent platform | No extra skill configuration needed, works out of the box |
+| **Persistent specialist members** | Swarm intelligence can't flexibly schedule persistent, platform-managed agents | Create persistent members with their own expertise and continuous self-learning on **Hermes / OpenClaw / Claude Code** and more, then invoke them on demand |
 | **Usage form** | CLI + MCP + monitoring dashboard | Web UI + CLI, full-flow governance in natural language |
 
 ---

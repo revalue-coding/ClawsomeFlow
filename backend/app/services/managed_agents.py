@@ -386,6 +386,38 @@ def read_skill(agent_id: str, name: str, *, storage: StorageBackend | None = Non
     return md.read_text(encoding="utf-8", errors="replace")
 
 
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def write_skill(
+    agent_id: str,
+    *,
+    name: str,
+    description: str = "",
+    content: str,
+    storage: StorageBackend | None = None,
+) -> dict[str, str]:
+    """Create a new user-defined skill (``{config_home}/skills/{name}/SKILL.md``)."""
+    row = get_agent(agent_id, storage=storage)
+    skill_name = (name or "").strip()
+    if not _SKILL_NAME_RE.match(skill_name):
+        raise AgentIdInvalid(
+            "skill name must be non-empty and contain only letters, digits, '-' or '_'"
+        )
+    body = (content or "").strip()
+    if not body:
+        raise AgentIdInvalid("skill content is required")
+    skill_dir = Path(row.config_home) / "skills" / skill_name
+    if skill_dir.exists():
+        raise AgentAlreadyExists(f"skill {skill_name!r} already exists")
+    skill_dir.mkdir(parents=True, exist_ok=False)
+    desc = (description or "").strip().replace("\\", "\\\\").replace('"', '\\"')
+    (skill_dir / "SKILL.md").write_text(
+        f'---\nname: {skill_name}\ndescription: "{desc}"\n---\n\n{body}\n', encoding="utf-8"
+    )
+    return {"name": skill_name, "description": (description or "").strip(), "path": str(skill_dir)}
+
+
 # ── role doc (identity) ───────────────────────────────────────────────
 
 

@@ -71,6 +71,10 @@ interface TaskRow {
   ownerId: string;
   ownerRepo: string;
   ownerTargetBranch: string;
+  /** True when the owner is a temporary (ad-hoc) agent created inline ("new"
+   *  source), false when it references a persistent/managed agent ("existing"
+   *  source). Drives backend FlowAgent.is_temporary. */
+  ownerIsTemporary: boolean;
   dependsOn: string[];
   isLeaderSummary: boolean;
   timeoutSeconds: number;
@@ -147,11 +151,19 @@ function blankRow(): TaskRow {
     ownerId: "",
     ownerRepo: "",
     ownerTargetBranch: DEFAULT_TARGET_BRANCH,
+    // Blank rows default to the "new" source → a temporary agent.
+    ownerIsTemporary: true,
     dependsOn: [],
     isLeaderSummary: false,
     timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
   };
 }
+
+// Owner-kind option sets, split by source. "Existing" picks a persistent /
+// managed agent (OpenClaw + managed Claude/Codex/Hermes). "New" creates a
+// temporary ad-hoc agent of any non-OpenClaw kind.
+const EXISTING_OWNER_KINDS: OwnerKind[] = ["openclaw", "claude", "codex", "hermes"];
+const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = ["claude", "codex", "cursor", "hermes"];
 
 /** Detect whether the SPA is served to a non-loopback host. The native
  *  directory picker only works when backend and browser run on the same
@@ -320,6 +332,9 @@ export function FlowEditor() {
   const [description, setDescription] = useState("");
   const [leaderId, setLeaderId] = useState("");
   const [leaderKind, setLeaderKind] = useState<OwnerKind>("openclaw");
+  // Leader source: false = existing/persistent agent, true = temporary ad-hoc.
+  // OpenClaw default → existing.
+  const [leaderIsTemporary, setLeaderIsTemporary] = useState(false);
   const [leaderRepo, setLeaderRepo] = useState("");
   const [leaderTargetBranch, setLeaderTargetBranch] = useState(DEFAULT_TARGET_BRANCH);
   const [leaderBranchOptions, setLeaderBranchOptions] = useState<string[]>([
@@ -413,6 +428,7 @@ export function FlowEditor() {
         if (summary) {
           setLeaderId(summary.ownerId);
           setLeaderKind(summary.ownerKind);
+          setLeaderIsTemporary(summary.ownerKind !== "openclaw" && summary.ownerIsTemporary);
           setLeaderRepo(summary.ownerRepo);
           setLeaderTargetBranch(
             summary.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
@@ -436,6 +452,7 @@ export function FlowEditor() {
     const normalizedLeaderTargetBranch = isNonOpenclawKind(leaderKind)
       ? (leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
       : "";
+    const normalizedLeaderTemporary = leaderKind !== "openclaw" && leaderIsTemporary;
     setTasks((rows) => {
       const idx = rows.findIndex((r) => r.isLeaderSummary);
       if (idx >= 0) {
@@ -446,6 +463,7 @@ export function FlowEditor() {
           && cur.ownerId === nextOwnerId
           && cur.ownerRepo === normalizedLeaderRepo
           && cur.ownerTargetBranch === normalizedLeaderTargetBranch
+          && cur.ownerIsTemporary === normalizedLeaderTemporary
         ) {
           return rows;
         }
@@ -456,6 +474,7 @@ export function FlowEditor() {
           ownerId: nextOwnerId,
           ownerRepo: normalizedLeaderRepo,
           ownerTargetBranch: normalizedLeaderTargetBranch,
+          ownerIsTemporary: normalizedLeaderTemporary,
           requiresHumanCheckpoint: false,
         };
         return next;
@@ -472,6 +491,7 @@ export function FlowEditor() {
         ownerId: normalizedLeaderId,
         ownerRepo: normalizedLeaderRepo,
         ownerTargetBranch: normalizedLeaderTargetBranch,
+        ownerIsTemporary: normalizedLeaderTemporary,
         // New summary rows start with empty dependencies and require explicit
         // user selection of upstream tasks.
         dependsOn: [],
@@ -480,7 +500,7 @@ export function FlowEditor() {
       };
       return [...rows, summary];
     });
-  }, [leaderId, leaderKind, leaderRepo, leaderTargetBranch, t]);
+  }, [leaderId, leaderKind, leaderIsTemporary, leaderRepo, leaderTargetBranch, t]);
 
   useEffect(() => {
     if (leaderKind === "openclaw") {
@@ -1265,7 +1285,32 @@ export function FlowEditor() {
                 {t("flowEditor.aiDecompose")}
               </button>
             </div>
-            <div className="mt-2 grid gap-2 md:grid-cols-2">
+            <div className="mt-2 grid gap-2 md:grid-cols-3">
+              <div>
+                <label className="label">{t("flowEditor.taskFields.ownerSource")}</label>
+                <select
+                  className="select"
+                  value={leaderIsTemporary ? "new" : "existing"}
+                  onChange={(e) => {
+                    const nextMode = e.target.value as OwnerMode;
+                    setLeaderId("");
+                    if (nextMode === "new") {
+                      setLeaderIsTemporary(true);
+                      if (leaderKind === "openclaw") setLeaderKind("claude");
+                    } else {
+                      setLeaderIsTemporary(false);
+                      if (leaderKind === "cursor") {
+                        setLeaderKind("openclaw");
+                        setLeaderRepo("");
+                        setLeaderTargetBranch(DEFAULT_TARGET_BRANCH);
+                      }
+                    }
+                  }}
+                >
+                  <option value="existing">{t("flowEditor.taskFields.ownerSourceExisting")}</option>
+                  <option value="new">{t("flowEditor.taskFields.ownerSourceNew")}</option>
+                </select>
+              </div>
               <div>
                 <label className="label">{t("flowEditor.leaderKindLabel")}</label>
                 <select
@@ -1273,11 +1318,7 @@ export function FlowEditor() {
                   value={leaderKind}
                   onChange={(e) => {
                     const nextKind = e.target.value as OwnerKind;
-                    const toggledOpenclaw =
-                      (leaderKind === "openclaw") !== (nextKind === "openclaw");
-                    if (toggledOpenclaw) {
-                      setLeaderId("");
-                    }
+                    setLeaderId("");
                     setLeaderKind(nextKind);
                     if (nextKind === "openclaw") {
                       setLeaderRepo("");
@@ -1285,26 +1326,16 @@ export function FlowEditor() {
                     }
                   }}
                 >
-                  <option value="openclaw">
-                    {t("flowEditor.taskFields.ownerKindOpenclaw")}
-                  </option>
-                  <option value="claude">
-                    {t("flowEditor.taskFields.ownerKindClaude")}
-                  </option>
-                  <option value="codex">
-                    {t("flowEditor.taskFields.ownerKindCodex")}
-                  </option>
-                  <option value="cursor">
-                    {t("flowEditor.taskFields.ownerKindCursor")}
-                  </option>
-                  <option value="hermes">
-                    {t("flowEditor.taskFields.ownerKindHermes")}
-                  </option>
+                  {(leaderIsTemporary ? NEW_OWNER_KINDS : EXISTING_OWNER_KINDS).map((k) => (
+                    <option key={k} value={k}>
+                      {ownerKindLabel(k, (key) => t(key))}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
                 <label className="label">{t("flowEditor.leaderAgentLabel")}</label>
-                {leaderKind === "openclaw" ? (
+                {!leaderIsTemporary && leaderKind === "openclaw" ? (
                   <select
                     className="select"
                     value={leaderId}
@@ -1317,7 +1348,7 @@ export function FlowEditor() {
                       </option>
                     ))}
                   </select>
-                ) : isManagedPickKind(leaderKind) ? (
+                ) : !leaderIsTemporary && isManagedPickKind(leaderKind) ? (
                   <>
                     <select
                       className="select"
@@ -1937,46 +1968,11 @@ function TaskEditModal({
   const [branchLoading, setBranchLoading] = useState(false);
   const readOnly = mode === "view";
   const isSummary = draft.isLeaderSummary;
-  const existingOwnerOptions = useMemo(
-    () =>
-      buildExistingOwnerOptions(
-        tasks,
-        openclawOptions,
-        {
-          leaderKind,
-          leaderId,
-          leaderRepo,
-          leaderTargetBranch,
-          isSummary,
-          t: (k: string) => t(k),
-        },
-      ),
-    [
-      tasks,
-      openclawOptions,
-      leaderKind,
-      leaderId,
-      leaderRepo,
-      leaderTargetBranch,
-      isSummary,
-      t,
-    ],
+  const [ownerMode, setOwnerMode] = useState<OwnerMode>(() =>
+    initialRow.ownerKind !== "openclaw" && initialRow.ownerIsTemporary
+      ? "new"
+      : "existing",
   );
-  const [ownerMode, setOwnerMode] = useState<OwnerMode>(() => {
-    if (initialRow.ownerKind === "openclaw") return "existing";
-    const hit = existingOwnerOptions.find((opt) =>
-      opt.id === initialRow.ownerId.trim()
-      && opt.kind === initialRow.ownerKind
-      && (
-        opt.kind === "openclaw"
-        || (
-          opt.repo === initialRow.ownerRepo.trim()
-          && (opt.targetBranch || DEFAULT_TARGET_BRANCH) === (initialRow.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
-        )
-      )
-    );
-    return hit ? "existing" : "new";
-  });
   const knownAgentIds = useMemo(
     () => collectKnownAgentIds(tasks, initialRow.rowKey),
     [tasks, initialRow.rowKey],
@@ -2221,7 +2217,7 @@ function TaskEditModal({
         showCheckpointField={mode !== "edit"}
         tasks={tasks}
         ownerMode={ownerMode}
-        existingOwnerOptions={existingOwnerOptions}
+        openclawOptions={openclawOptions}
         hermesOptions={hermesOptions}
         managedOptions={managedOptions}
         deploymentMode={deploymentMode}
@@ -2232,29 +2228,27 @@ function TaskEditModal({
         onOwnerModeChange={(nextMode) => {
           setOwnerMode(nextMode);
           if (nextMode === "new") {
+            // New source → temporary ad-hoc agent (any non-OpenClaw kind).
             patch({
               ownerKind: draft.ownerKind === "openclaw" ? "claude" : draft.ownerKind,
               ownerId: "",
               ownerRepo: "",
               ownerTargetBranch: DEFAULT_TARGET_BRANCH,
+              ownerIsTemporary: true,
             });
             return;
           }
-          const first = existingOwnerOptions[0];
-          if (!first) {
-            patch({
-              ownerKind: "claude",
-              ownerId: "",
-              ownerRepo: "",
-              ownerTargetBranch: DEFAULT_TARGET_BRANCH,
-            });
-            return;
-          }
+          // Existing source → persistent/managed agent picked by type filter.
+          // Cursor has no management page, so fall back to OpenClaw.
           patch({
-            ownerKind: first.kind,
-            ownerId: first.id,
-            ownerRepo: first.repo,
-            ownerTargetBranch: first.targetBranch,
+            ownerKind: draft.ownerKind === "cursor" ? "openclaw" : draft.ownerKind,
+            ownerId: "",
+            ownerRepo: draft.ownerKind === "cursor" ? "" : draft.ownerRepo,
+            ownerTargetBranch:
+              draft.ownerKind === "cursor"
+                ? DEFAULT_TARGET_BRANCH
+                : draft.ownerTargetBranch,
+            ownerIsTemporary: false,
           });
         }}
         onChange={patch}
@@ -2289,7 +2283,7 @@ function TaskFormBody({
   showCheckpointField,
   tasks,
   ownerMode,
-  existingOwnerOptions,
+  openclawOptions,
   hermesOptions,
   managedOptions,
   deploymentMode,
@@ -2306,7 +2300,7 @@ function TaskFormBody({
   showCheckpointField: boolean;
   tasks: TaskRow[];
   ownerMode: OwnerMode;
-  existingOwnerOptions: ExistingOwnerOption[];
+  openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
   managedOptions: ManagedAgentSummary[];
   deploymentMode: DeploymentMode;
@@ -2320,29 +2314,9 @@ function TaskFormBody({
   const { t } = useTranslation();
   const [pickingRepo, setPickingRepo] = useState(false);
   const ownerLocked = readOnly || isSummary;
-  const selectedExistingKey = useMemo(() => {
-    const hit = existingOwnerOptions.find((opt) =>
-      opt.id === row.ownerId.trim()
-      && opt.kind === row.ownerKind
-      && (
-        opt.kind === "openclaw"
-        || (
-          opt.repo === row.ownerRepo.trim()
-          && (opt.targetBranch || DEFAULT_TARGET_BRANCH) === (row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
-        )
-      )
-    );
-    return hit?.key ?? "";
-  }, [
-    existingOwnerOptions,
-    row.ownerId,
-    row.ownerKind,
-    row.ownerRepo,
-    row.ownerTargetBranch,
-  ]);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
   const ownerIsNew = ownerMode === "new";
-  const ownerKindEditable = ownerIsNew && !ownerLocked;
+  const ownerKindEditable = !ownerLocked;
   const branchHelperText = branchEditable
     ? t("flowEditor.taskBranchCheck.editableHint")
     : "";
@@ -2457,138 +2431,93 @@ function TaskFormBody({
         </select>
       </div>
 
-      {ownerMode === "existing" ? (
-        <>
-          <div>
-            <label className="label">
-              {t("flowEditor.taskFields.existingAgent")}
-            </label>
+      {/* Owner type (kind). Selectable in both sources: existing → a filter
+          over registered agents; new → the kind of the temporary agent. */}
+      <div>
+        <label className="label">{t("flowEditor.taskFields.ownerKind")}</label>
+        <select
+          className="select"
+          value={row.ownerKind}
+          disabled={!ownerKindEditable}
+          onChange={(e) => {
+            const nextKind = e.target.value as OwnerKind;
+            onChange({
+              ownerKind: nextKind,
+              ownerId: "",
+              ...(nextKind === "openclaw"
+                ? { ownerRepo: "", ownerTargetBranch: DEFAULT_TARGET_BRANCH }
+                : {}),
+            });
+          }}
+        >
+          {(ownerIsNew ? NEW_OWNER_KINDS : EXISTING_OWNER_KINDS).map((k) => (
+            <option key={k} value={k}>
+              {ownerKindLabel(k, (key) => t(key))}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Agent identity: existing → pick a registered agent of the chosen kind;
+          new → free-typed name for the temporary agent. */}
+      <div>
+        <label className="label">
+          {ownerIsNew
+            ? t("flowEditor.taskFields.newAgentName")
+            : t("flowEditor.taskFields.existingAgent")}
+        </label>
+        {ownerIsNew ? (
+          <input
+            className="input"
+            placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
+            value={row.ownerId}
+            readOnly={ownerLocked}
+            onChange={(e) => onChange({ ownerId: e.target.value })}
+          />
+        ) : ownerIsOpenclaw ? (
+          <>
             <select
               className="select"
-              value={selectedExistingKey}
-              disabled={ownerLocked || existingOwnerOptions.length === 0}
-              onChange={(e) => {
-                const picked = existingOwnerOptions.find((opt) => opt.key === e.target.value);
-                if (!picked) return;
-                onChange({
-                  ownerKind: picked.kind,
-                  ownerId: picked.id,
-                  ownerRepo: picked.repo,
-                  ownerTargetBranch: picked.targetBranch,
-                });
-              }}
+              value={row.ownerId}
+              disabled={ownerLocked}
+              onChange={(e) => onChange({ ownerId: e.target.value })}
             >
-              <option value="">
-                {t("flowEditor.taskFields.existingAgentPlaceholder")}
-              </option>
-              {existingOwnerOptions.map((opt) => (
-                <option key={opt.key} value={opt.key}>
-                  {opt.label}
+              <option value="">{t("flowEditor.taskFields.existingAgentPlaceholder")}</option>
+              {openclawOptions.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} ({a.id})
                 </option>
               ))}
             </select>
-            {existingOwnerOptions.length === 0 && (
+            {openclawOptions.length === 0 && (
               <div className="text-xs text-ink-500 mt-1">
                 {t("flowEditor.taskFields.existingAgentEmpty")}
               </div>
             )}
-          </div>
-          {!ownerIsOpenclaw && (
-            <div>
-              <label className="label">{t("flowEditor.taskFields.ownerKind")}</label>
-              <select className="select" value={row.ownerKind} disabled={true}>
-                <option value="claude">
-                  {t("flowEditor.taskFields.ownerKindClaude")}
-                </option>
-                <option value="codex">
-                  {t("flowEditor.taskFields.ownerKindCodex")}
-                </option>
-                <option value="cursor">
-                  {t("flowEditor.taskFields.ownerKindCursor")}
-                </option>
-                <option value="hermes">
-                  {t("flowEditor.taskFields.ownerKindHermes")}
-                </option>
-              </select>
-            </div>
-          )}
-        </>
-      ) : (
-        <>
-          <div>
-            <label className="label">
-              {isManagedPickKind(row.ownerKind)
-                ? t("flowEditor.hermesAgentLabel")
-                : t("flowEditor.taskFields.newAgentName")}
-            </label>
-            {isManagedPickKind(row.ownerKind) ? (
-              <>
-                <select
-                  className="select"
-                  value={row.ownerId}
-                  disabled={ownerLocked}
-                  onChange={(e) => onChange({ ownerId: e.target.value })}
-                >
-                  <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
-                  {pickAgentsForKind(row.ownerKind, hermesOptions, managedOptions).map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name} ({a.id})
-                    </option>
-                  ))}
-                </select>
-                {pickAgentsForKind(row.ownerKind, hermesOptions, managedOptions).length === 0 && (
-                  <div className="text-xs text-ink-500 mt-1">
-                    {t("flowEditor.hermesAgentEmpty")}
-                  </div>
-                )}
-              </>
-            ) : (
-              <input
-                className="input"
-                placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
-                value={row.ownerId}
-                readOnly={ownerLocked}
-                onChange={(e) => onChange({ ownerId: e.target.value })}
-              />
-            )}
-          </div>
-          <div>
-            <label className="label">{t("flowEditor.taskFields.ownerKind")}</label>
+          </>
+        ) : (
+          <>
             <select
               className="select"
-              value={row.ownerKind}
-              disabled={!ownerKindEditable}
-              onChange={(e) => {
-                const nextKind = e.target.value as OwnerKind;
-                // A free-typed name and a managed-agent id aren't interchangeable;
-                // clear the id when toggling in/out of a managed picker.
-                const togglesManaged =
-                  isManagedPickKind(row.ownerKind) !== isManagedPickKind(nextKind) ||
-                  (isManagedPickKind(nextKind) && row.ownerKind !== nextKind);
-                onChange({
-                  ownerKind: nextKind,
-                  ...(togglesManaged ? { ownerId: "" } : {}),
-                  ownerRepo: "",
-                  ownerTargetBranch: DEFAULT_TARGET_BRANCH,
-                });
-              }}
+              value={row.ownerId}
+              disabled={ownerLocked}
+              onChange={(e) => onChange({ ownerId: e.target.value })}
             >
-              <option value="claude">
-                {t("flowEditor.taskFields.ownerKindClaude")}
-              </option>
-              <option value="codex">
-                {t("flowEditor.taskFields.ownerKindCodex")}
-              </option>
-              <option value="cursor">
-                {t("flowEditor.taskFields.ownerKindCursor")}
-              </option>
-              <option value="hermes">
-                {t("flowEditor.taskFields.ownerKindHermes")}
-              </option>
+              <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
+              {pickAgentsForKind(row.ownerKind, hermesOptions, managedOptions).map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} ({a.id})
+                </option>
+              ))}
             </select>
-          </div>
-        </>
-      )}
+            {pickAgentsForKind(row.ownerKind, hermesOptions, managedOptions).length === 0 && (
+              <div className="text-xs text-ink-500 mt-1">
+                {t("flowEditor.hermesAgentEmpty")}
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       {!ownerIsOpenclaw && (
         <div className="md:col-span-2">
@@ -3532,6 +3461,8 @@ function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
             isLeader,
             repo: null,
             targetBranch: null,
+            // OpenClaw is always a persistent agent.
+            isTemporary: false,
           }
         : {
             id: r.ownerId.trim(),
@@ -3539,6 +3470,7 @@ function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
             isLeader,
             repo: r.ownerRepo.trim(),
             targetBranch: r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
+            isTemporary: !!r.ownerIsTemporary,
           };
     byKey.set(k, agent);
   }
@@ -4017,7 +3949,10 @@ function proposalToRows(
   proposal: DecomposeProposal,
   openclawOptions: OpenclawAgentSummary[],
 ): TaskRow[] {
-  const byId = new Map<string, { kind: OwnerKind; repo: string; targetBranch: string }>();
+  const byId = new Map<
+    string,
+    { kind: OwnerKind; repo: string; targetBranch: string; isTemporary: boolean }
+  >();
   for (const a of proposal.agents) {
     const aid = String(a.id ?? "").trim();
     if (!aid) continue;
@@ -4034,11 +3969,16 @@ function proposalToRows(
     const targetBranch = String(
       a.targetBranch ?? a.target_branch ?? DEFAULT_TARGET_BRANCH,
     ).trim() || DEFAULT_TARGET_BRANCH;
-    byId.set(aid, { kind, repo, targetBranch });
+    // Proposed non-OpenClaw agents are ad-hoc (temporary) unless the proposal
+    // explicitly says otherwise. OpenClaw is always persistent.
+    const isTemporary =
+      kind !== "openclaw" &&
+      (a.isTemporary ?? a.is_temporary ?? true) !== false;
+    byId.set(aid, { kind, repo, targetBranch, isTemporary });
   }
   for (const a of openclawOptions) {
     if (!byId.has(a.id)) {
-      byId.set(a.id, { kind: "openclaw", repo: "", targetBranch: "" });
+      byId.set(a.id, { kind: "openclaw", repo: "", targetBranch: "", isTemporary: false });
     }
   }
 
@@ -4048,6 +3988,7 @@ function proposalToRows(
       kind: "claude" as OwnerKind,
       repo: "",
       targetBranch: DEFAULT_TARGET_BRANCH,
+      isTemporary: true,
     };
     const dependsOn = Array.isArray(tk.dependsOn ?? tk.depends_on)
       ? ((tk.dependsOn ?? tk.depends_on) as unknown[]).map(String)
@@ -4069,6 +4010,7 @@ function proposalToRows(
       ownerTargetBranch: isNonOpenclawKind(meta.kind)
         ? (meta.targetBranch || DEFAULT_TARGET_BRANCH)
         : "",
+      ownerIsTemporary: meta.kind !== "openclaw" && meta.isTemporary,
       dependsOn,
       isLeaderSummary: !!(tk.isLeaderSummary ?? tk.is_leader_summary),
       timeoutSeconds: Number(
@@ -4107,6 +4049,8 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       ownerTargetBranch: isNonOpenclawKind(ownerKind)
         ? (a?.targetBranch ?? DEFAULT_TARGET_BRANCH)
         : "",
+      // OpenClaw is never temporary; otherwise honor the persisted flag.
+      ownerIsTemporary: ownerKind !== "openclaw" && !!a?.isTemporary,
       dependsOn: tk.dependsOn ?? [],
       isLeaderSummary: !!tk.isLeaderSummary,
       timeoutSeconds: tk.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,

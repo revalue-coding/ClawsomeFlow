@@ -149,6 +149,10 @@ export interface FlowAgent {
   repo?: string | null;
   targetBranch?: string | null;
   isLeader: boolean;
+  /** Temporary (ad-hoc) agent created inline while authoring the Flow, as
+   *  opposed to a persistent/managed agent. Temporary agents get no profile
+   *  and no `-p`/env injection at run time. OpenClaw cannot be temporary. */
+  isTemporary?: boolean;
   mergeStrategy?: MergeStrategy;
   onFailure?: OnFailure;
   maxRetries?: number;
@@ -1063,7 +1067,7 @@ export const api = {
       { cache: "no-store" },
     ),
   createHermesAgent: (
-    payload: { id?: string; name: string; responsibility: string; teamId?: string },
+    payload: { id?: string; name?: string; responsibility?: string; teamId?: string },
     init?: RequestInit,
   ) => request<HermesAgentDetail>("POST", "/api/hermes/agents", payload, init),
   patchHermesAgent: (
@@ -1098,6 +1102,8 @@ export const api = {
     request<HermesSkillSetting[]>("GET", `/api/hermes/agents/${id}/settings/skills`),
   getHermesSkill: (id: string, name: string) =>
     request<HermesSkillSetting>("GET", `/api/hermes/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
+  createHermesSkill: (id: string, payload: { name: string; description?: string; content: string }) =>
+    request<HermesSkillSetting>("POST", `/api/hermes/agents/${id}/settings/skills`, payload),
   deleteHermesSkill: (id: string, name: string) =>
     request<void>("DELETE", `/api/hermes/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
   getHermesCron: (id: string) =>
@@ -1172,6 +1178,8 @@ export const api = {
     request<ManagedSkill[]>("GET", `/api/managed/agents/${id}/settings/skills`),
   getManagedSkill: (id: string, name: string) =>
     request<ManagedSkill>("GET", `/api/managed/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
+  createManagedSkill: (id: string, payload: { name: string; description?: string; content: string }) =>
+    request<ManagedSkill>("POST", `/api/managed/agents/${id}/settings/skills`, payload),
   chatWithManagedAgent: (
     id: string,
     body: { message: string; workdir: string },

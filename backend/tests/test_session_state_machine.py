@@ -181,6 +181,41 @@ def test_tmux_live_session_registers_hermes_with_continue_flag() -> None:
     assert session._resume_cmd == ["hermes", "--yolo", "-c", "-p", "alice"]
 
 
+def test_tmux_live_session_temporary_hermes_skips_profile_binding() -> None:
+    """A temporary (ad-hoc) Hermes agent has no managed profile → no `-p`
+    binding on spawn/resume and no ClawTeam runtime profile applied."""
+    from app.scheduler.sessions.tmux_live import TmuxLiveSession
+
+    temp_hermes = FlowAgent(
+        id="adhoc", kind=AgentKind.hermes, repo="/tmp/x",
+        is_leader=False, merge_strategy=MergeStrategy.manual,
+        on_failure=OnFailure.retry, max_retries=2, is_temporary=True,
+    )
+    session = TmuxLiveSession(
+        agent=temp_hermes, team_name="csflow-x", run_id="run-x",
+    )
+    assert session._spawn_cmd == ["hermes", "--yolo"]
+    assert session._resume_cmd == ["hermes", "--yolo", "-c"]
+    assert session._resolve_profile() is None
+
+
+def test_tmux_live_session_temporary_claude_skips_managed_profile() -> None:
+    """A temporary claude agent must not trigger managed-profile creation."""
+    from app.scheduler.sessions.tmux_live import TmuxLiveSession
+
+    temp_claude = FlowAgent(
+        id="adhoc-claude", kind=AgentKind.claude, repo="/tmp/x",
+        is_leader=False, merge_strategy=MergeStrategy.manual,
+        on_failure=OnFailure.retry, max_retries=2, is_temporary=True,
+    )
+    session = TmuxLiveSession(
+        agent=temp_claude, team_name="csflow-x", run_id="run-x",
+    )
+    # No ClawTeam runtime profile for temporary agents (would otherwise be the
+    # config-home env profile ``csflow-claude-adhoc-claude``).
+    assert session._resolve_profile() is None
+
+
 def test_tmux_live_session_registers_claude_with_bypass_permissions_flags() -> None:
     from app.scheduler.sessions.tmux_live import TmuxLiveSession
 

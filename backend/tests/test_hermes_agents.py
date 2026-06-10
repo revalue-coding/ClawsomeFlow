@@ -239,10 +239,53 @@ def test_api_runtime_status(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     assert r.json()["running"] is True
 
 
-def test_api_list_empty(client: TestClient) -> None:
+def test_write_skill_creates_and_lists(hermes_home: Path) -> None:
+    """write_skill creates skills/<name>/SKILL.md (no CLI) and lists it."""
+    out = svc.write_skill("agt", name="my-skill", description="d", content="# hi")
+    assert out["name"] == "my-skill"
+    assert any(s["name"] == "my-skill" for s in svc.list_skills("agt"))
+    assert "# hi" in svc.read_skill("agt", "my-skill")
+    with pytest.raises(svc.AgentAlreadyExists):
+        svc.write_skill("agt", name="my-skill", content="x")
+    with pytest.raises(svc.AgentIdInvalid):
+        svc.write_skill("agt", name="bad name", content="x")
+    with pytest.raises(svc.AgentIdInvalid):
+        svc.write_skill("agt", name="ok", content="   ")
+
+
+def test_api_list_empty(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Listing now auto-adopts on-disk profiles, so isolate the profile source.
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
     r = client.get("/api/hermes/agents")
     assert r.status_code == 200
     assert r.json()["items"] == []
+
+
+def test_api_list_auto_adopts_unmanaged_profiles(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing on-disk profiles show up in the management list without any
+    separate "claim" step (treated uniformly regardless of origin)."""
+    monkeypatch.setattr(svc, "list_profile_names", lambda: ["preexisting"])
+    monkeypatch.setattr(svc, "read_profile_description", lambda _aid: "from disk")
+    listing = client.get("/api/hermes/agents").json()
+    assert any(a["id"] == "preexisting" for a in listing["items"])
+
+
+def test_api_create_uses_id_as_profile_name(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The single "Agent name (Profile id)" field is sent as ``id`` and used
+    verbatim as the profile id; ``name`` defaults to it."""
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run([]))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    r = client.post("/api/hermes/agents", json={"id": "myprofile"})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["id"] == "myprofile"
+    assert body["name"] == "myprofile"
 
 
 def test_api_create_and_list(

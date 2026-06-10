@@ -9,7 +9,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
-import { Card, CardTitle, EmptyState, ErrorBox, Loading, Modal } from "@/components/ui";
+import { Card, EmptyState, ErrorBox, Loading, Modal } from "@/components/ui";
+import { AssistantIcon } from "@/components/icons";
+import { cn } from "@/lib/cn";
 import {
   api,
   ApiError,
@@ -26,6 +28,9 @@ const KIND_LABEL: Record<ManagedKind, string> = {
   codex: "Codex",
   cursor: "Cursor",
 };
+
+const CREATE_TEAM_SENTINEL = "__create_team__";
+const DEFAULT_WORKDIR = "~";
 
 function isRemoteBrowser(): boolean {
   if (typeof window === "undefined") return false;
@@ -89,6 +94,7 @@ function Picker({ kind }: { kind: ManagedKind }) {
   const [error, setError] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<ManagedAgentSummary | null>(null);
+  const [viewMode, setViewMode] = useState<"card" | "list">("card");
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -110,22 +116,40 @@ function Picker({ kind }: { kind: ManagedKind }) {
   }, [agents, t]);
 
   return (
-    <div className="mx-auto max-w-5xl py-8 px-4">
-      <div className="flex items-center justify-between mb-6">
+    <div className="space-y-5">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-ink-900">
+          <h1 className="text-xl font-semibold text-ink-900">
             {t("managed.title", { platform: KIND_LABEL[kind] })}
           </h1>
           <p className="text-sm text-ink-500">{t("managed.pickerTitle", { platform: KIND_LABEL[kind] })}</p>
         </div>
-        <div className="flex gap-2">
-          <button type="button" className="rounded border border-ink-200 px-3 py-2 text-sm hover:bg-ink-50" onClick={() => void reload()}>
+        <div className="flex shrink-0 gap-2">
+          <button type="button" className="btn-outline" onClick={() => void reload()}>
             {t("hermes.refresh")}
           </button>
-          <button type="button" className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700" onClick={() => setShowCreate(true)}>
+          <button type="button" className="btn-primary" onClick={() => setShowCreate(true)}>
             {t("hermes.createAgent")}
           </button>
         </div>
+      </div>
+
+      <div className="inline-flex rounded-lg border border-brand-200 bg-brand-50/60 p-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+        {(["card", "list"] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            className={cn(
+              "min-w-[52px] rounded-md px-2 py-1 text-xs font-semibold transition-all duration-200",
+              viewMode === m
+                ? "bg-gradient-to-r from-brand-600 to-brand-400 text-white"
+                : "text-ink-600 hover:bg-white/70 hover:text-brand-700",
+            )}
+            onClick={() => setViewMode(m)}
+          >
+            {m === "card" ? t("chat.viewCard") : t("chat.viewList")}
+          </button>
+        ))}
       </div>
 
       {error && <ErrorBox>{error}</ErrorBox>}
@@ -133,33 +157,68 @@ function Picker({ kind }: { kind: ManagedKind }) {
         <Loading label={t("common.loading")} />
       ) : agents.length === 0 ? (
         <EmptyState title={t("managed.title", { platform: KIND_LABEL[kind] })} hint={t("managed.listEmpty")} />
-      ) : (
-        <div className="space-y-8">
+      ) : viewMode === "card" ? (
+        <div className="space-y-5">
           {grouped.map(([team, list]) => (
-            <div key={team}>
-              <div className="text-xs font-semibold uppercase tracking-wide text-ink-400 mb-2">
+            <div key={team} className="space-y-3">
+              <div className="inline-flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700">
                 {t("hermes.team")}: {team}
               </div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {list.map((a) => (
-                  <Card key={a.id} className="flex flex-col gap-2">
+                  <div
+                    key={a.id}
+                    className="group card p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)]"
+                  >
                     <div className="flex items-start justify-between">
-                      <CardTitle>{a.name}</CardTitle>
+                      <div className="mb-3 inline-flex h-14 w-14 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 text-brand-500">
+                        <AssistantIcon className="h-9 w-9" />
+                      </div>
                       <button type="button" className="text-xs text-rose-500 hover:text-rose-700" onClick={() => setRemoveTarget(a)}>
                         {t("hermes.removeAgent")}
                       </button>
                     </div>
-                    <code className="text-xs text-ink-400">{a.id}</code>
-                    {a.description && <p className="text-sm text-ink-600 line-clamp-3">{a.description}</p>}
-                    <button type="button" className="mt-auto self-start rounded bg-ink-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-ink-700" onClick={() => navigate(`${basePath(kind)}/${a.id}`)}>
+                    <div className="font-semibold text-ink-900">{a.name}</div>
+                    <div className="mt-0.5 font-mono text-xs text-ink-500">{a.id}</div>
+                    {a.description && <p className="mt-2 line-clamp-3 text-xs text-ink-500">{a.description}</p>}
+                    <button type="button" className="btn-primary mt-3" onClick={() => navigate(`${basePath(kind)}/${a.id}`)}>
                       {t("hermes.open")}
                     </button>
-                  </Card>
+                  </div>
                 ))}
               </div>
             </div>
           ))}
         </div>
+      ) : (
+        <Card className="overflow-hidden p-0">
+          <table className="w-full text-sm">
+            <thead className="bg-ink-50 text-ink-500">
+              <tr>
+                <th className="px-4 py-2 text-left font-medium">{t("chat.agentLabel")}</th>
+                <th className="px-4 py-2 text-left font-medium">{t("chat.columnId")}</th>
+                <th className="px-4 py-2 text-left font-medium">{t("chat.teamLabel")}</th>
+                <th className="px-4 py-2 text-left font-medium">{t("common.description")}</th>
+                <th className="px-4 py-2 text-right font-medium">{t("common.actions")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {agents.map((a) => (
+                <tr key={a.id} className="table-row">
+                  <td className="px-4 py-3 font-medium text-ink-900">{a.name}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-ink-500">{a.id}</td>
+                  <td className="px-4 py-3 text-ink-600">{a.teamName || t("hermes.ungrouped")}</td>
+                  <td className="px-4 py-3 text-ink-600">{a.description || t("common.none")}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button type="button" className="btn-primary" onClick={() => navigate(`${basePath(kind)}/${a.id}`)}>
+                      {t("hermes.open")}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
       )}
 
       {showCreate && (
@@ -172,14 +231,47 @@ function Picker({ kind }: { kind: ManagedKind }) {
   );
 }
 
-function TeamSelect({ teams, value, onChange }: { teams: OpenclawTeam[]; value: string; onChange: (v: string) => void }) {
+function TeamSelect({
+  teams,
+  value,
+  onChange,
+  newTeamName,
+  onNewTeamNameChange,
+}: {
+  teams: OpenclawTeam[];
+  value: string;
+  onChange: (v: string) => void;
+  newTeamName: string;
+  onNewTeamNameChange: (v: string) => void;
+}) {
   const { t } = useTranslation();
   return (
-    <select className="w-full rounded border border-ink-200 px-3 py-2 text-sm" value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">{t("hermes.ungrouped")}</option>
-      {teams.map((tm) => <option key={tm.id} value={tm.id}>{tm.name}</option>)}
-    </select>
+    <div className="space-y-2">
+      <select className="select" value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{t("hermes.ungrouped")}</option>
+        {teams.map((tm) => <option key={tm.id} value={tm.id}>{tm.name}</option>)}
+        <option value={CREATE_TEAM_SENTINEL}>{t("assistant.teamSelect.createNew")}</option>
+      </select>
+      {value === CREATE_TEAM_SENTINEL && (
+        <input
+          className="input"
+          value={newTeamName}
+          placeholder={t("assistant.teamSelect.newTeamPlaceholder")}
+          onChange={(e) => onNewTeamNameChange(e.target.value)}
+        />
+      )}
+    </div>
   );
+}
+
+async function resolveTeamId(choice: string, newTeamName: string): Promise<string | undefined> {
+  if (choice === CREATE_TEAM_SENTINEL) {
+    const name = newTeamName.trim();
+    if (!name) throw new Error("new team name required");
+    const created = await api.createOpenclawTeam({ name });
+    return created.id;
+  }
+  return choice || undefined;
 }
 
 function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; teams: OpenclawTeam[]; onClose: () => void; onDone: (c: { id: string }) => void }) {
@@ -187,7 +279,8 @@ function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; team
   const [name, setName] = useState("");
   const [responsibility, setResponsibility] = useState("");
   const [id, setId] = useState("");
-  const [teamId, setTeamId] = useState("");
+  const [teamChoice, setTeamChoice] = useState("");
+  const [newTeamName, setNewTeamName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const effectiveId = id.trim() || deriveId(name);
@@ -195,35 +288,38 @@ function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; team
   const submit = async () => {
     setBusy(true); setError("");
     try {
-      const created = await api.createManagedAgent({ kind, id: id.trim() || undefined, name: name.trim(), responsibility: responsibility.trim(), teamId: teamId || undefined });
+      const teamId = await resolveTeamId(teamChoice, newTeamName);
+      const created = await api.createManagedAgent({ kind, id: id.trim() || undefined, name: name.trim(), responsibility: responsibility.trim(), teamId });
       onDone(created);
     } catch (e) { setError(errText(e)); setBusy(false); }
   };
 
+  const teamReady = teamChoice !== CREATE_TEAM_SENTINEL || newTeamName.trim().length > 0;
+
   return (
-    <Modal open onClose={onClose} title={t("managed.create.title", { platform: KIND_LABEL[kind] })} dismissible={!busy}>
-      <div className="space-y-4">
+    <Modal open onClose={onClose} title={t("managed.create.title", { platform: KIND_LABEL[kind] })} dismissible={!busy} width="max-w-2xl">
+      <div className="space-y-3">
         {error && <ErrorBox>{error}</ErrorBox>}
-        <label className="block text-sm">
-          <span className="text-ink-600">{t("hermes.create.name")}</span>
-          <input className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm" value={name} placeholder={t("hermes.create.namePlaceholder")} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="block text-sm">
-          <span className="text-ink-600">{t("hermes.create.responsibility")}</span>
-          <textarea className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm" rows={4} value={responsibility} placeholder={t("hermes.create.responsibilityPlaceholder")} onChange={(e) => setResponsibility(e.target.value)} />
-        </label>
-        <label className="block text-sm">
-          <span className="text-ink-600">{t("hermes.create.idLabel")}</span>
-          <input className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm font-mono" value={id} placeholder={effectiveId} onChange={(e) => setId(e.target.value)} />
-          <span className="mt-1 block text-xs text-ink-400">{t("managed.create.idHint")}</span>
-        </label>
-        <label className="block text-sm">
-          <span className="text-ink-600">{t("hermes.create.teamLabel")}</span>
-          <div className="mt-1"><TeamSelect teams={teams} value={teamId} onChange={setTeamId} /></div>
-        </label>
+        <div>
+          <label className="label">{t("hermes.create.name")}</label>
+          <input className="input" value={name} placeholder={t("hermes.create.namePlaceholder")} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">{t("hermes.create.responsibility")}</label>
+          <textarea className="textarea h-24" value={responsibility} placeholder={t("hermes.create.responsibilityPlaceholder")} onChange={(e) => setResponsibility(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">{t("hermes.create.idLabel")}</label>
+          <input className="input font-mono" value={id} placeholder={effectiveId} onChange={(e) => setId(e.target.value)} />
+          <div className="mt-1 text-xs text-ink-400">{t("managed.create.idHint")}</div>
+        </div>
+        <div>
+          <label className="label">{t("hermes.create.teamLabel")}</label>
+          <TeamSelect teams={teams} value={teamChoice} onChange={setTeamChoice} newTeamName={newTeamName} onNewTeamNameChange={setNewTeamName} />
+        </div>
         <div className="flex justify-end gap-2 pt-2">
-          <button type="button" className="rounded border border-ink-200 px-3 py-2 text-sm" onClick={onClose} disabled={busy}>{t("common.cancel")}</button>
-          <button type="button" className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50" onClick={() => void submit()} disabled={busy || !name.trim() || !effectiveId}>
+          <button type="button" className="btn-outline" onClick={onClose} disabled={busy}>{t("common.cancel")}</button>
+          <button type="button" className="btn-primary" onClick={() => void submit()} disabled={busy || !name.trim() || !effectiveId || !teamReady}>
             {busy ? t("hermes.create.creating") : t("hermes.create.submit")}
           </button>
         </div>
@@ -272,7 +368,12 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
   const [configHome, setConfigHome] = useState("");
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
-  const [workdir, setWorkdir] = useState(() => localStorage.getItem(`managed-workdir-${agentId}`) ?? "");
+  const [workdir, setWorkdir] = useState(() => localStorage.getItem(`managed-workdir-${agentId}`) || DEFAULT_WORKDIR);
+  const updateWorkdir = (next: string) => {
+    setWorkdir(next);
+    if (next.trim()) localStorage.setItem(`managed-workdir-${agentId}`, next);
+    else localStorage.removeItem(`managed-workdir-${agentId}`);
+  };
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [showSettings, setShowSettings] = useState(false);
@@ -295,7 +396,7 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
     if (isRemoteBrowser()) { window.alert(t("hermes.remoteUnavailable")); return; }
     try {
       const out = await api.pickDirectory({ title: t("hermes.workdir"), initialPath: workdir || undefined });
-      if (out.path) { setWorkdir(out.path); localStorage.setItem(`managed-workdir-${agentId}`, out.path); }
+      if (out.path) updateWorkdir(out.path);
     } catch (e) { setError(errText(e)); }
   };
 
@@ -381,8 +482,13 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
 
       <div className="mt-2 border-t border-ink-100 pt-3">
         <div className="mb-2 flex items-center gap-2 text-xs text-ink-500">
-          <button type="button" className="rounded border border-ink-200 px-2 py-1 hover:bg-ink-50" onClick={() => void pickWorkdir()}>{t("hermes.pickWorkdir")}</button>
-          <span className="truncate font-mono">{workdir || t("hermes.workdirNeeded")}</span>
+          <button type="button" className="shrink-0 rounded border border-ink-200 px-2 py-1 hover:bg-ink-50" onClick={() => void pickWorkdir()}>{t("hermes.pickWorkdir")}</button>
+          <input
+            className="input flex-1 font-mono text-xs"
+            value={workdir}
+            placeholder={t("hermes.workdirNeeded")}
+            onChange={(e) => updateWorkdir(e.target.value)}
+          />
         </div>
         <div className="flex gap-2">
           <textarea className="flex-1 resize-none rounded border border-ink-200 px-3 py-2 text-sm" rows={2} value={input} placeholder={t("hermes.messagePlaceholder")} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void send(); }} disabled={sending} />
@@ -495,11 +601,27 @@ function SkillsTab({ agentId }: { agentId: string }) {
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [content, setContent] = useState("");
-  useEffect(() => { api.getManagedSkills(agentId).then(setSkills).catch((e) => setError(errText(e))).finally(() => setLoading(false)); }, [agentId]);
+  const [newName, setNewName] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [newContent, setNewContent] = useState("");
+  const [creating, setCreating] = useState(false);
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try { setSkills(await api.getManagedSkills(agentId)); } catch (e) { setError(errText(e)); } finally { setLoading(false); }
+  }, [agentId]);
+  useEffect(() => { void reload(); }, [reload]);
   const view = async (n: string) => {
     if (expanded === n) { setExpanded(null); return; }
     setError("");
     try { const r = await api.getManagedSkill(agentId, n); setContent(r.content ?? ""); setExpanded(n); } catch (e) { setError(errText(e)); }
+  };
+  const create = async () => {
+    if (!newName.trim() || !newContent.trim()) return;
+    setCreating(true); setError("");
+    try {
+      await api.createManagedSkill(agentId, { name: newName.trim(), description: newDesc.trim(), content: newContent });
+      setNewName(""); setNewDesc(""); setNewContent(""); await reload();
+    } catch (e) { setError(errText(e)); } finally { setCreating(false); }
   };
   if (loading) return <Loading label={t("common.loading")} />;
   return (
@@ -520,6 +642,15 @@ function SkillsTab({ agentId }: { agentId: string }) {
           ))}
         </ul>
       )}
+      <div className="space-y-2 border-t border-ink-100 pt-3">
+        <div className="text-sm font-medium text-ink-700">{t("hermes.settingsModal.skills.create")}</div>
+        <input className="w-full rounded border border-ink-200 px-3 py-2 text-sm font-mono" value={newName} placeholder={t("hermes.settingsModal.skills.namePlaceholder")} onChange={(e) => setNewName(e.target.value)} />
+        <input className="w-full rounded border border-ink-200 px-3 py-2 text-sm" value={newDesc} placeholder={t("hermes.settingsModal.skills.descPlaceholder")} onChange={(e) => setNewDesc(e.target.value)} />
+        <textarea className="w-full rounded border border-ink-200 px-3 py-2 font-mono text-xs" rows={5} value={newContent} placeholder={t("hermes.settingsModal.skills.contentPlaceholder")} onChange={(e) => setNewContent(e.target.value)} />
+        <button type="button" className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50" onClick={() => void create()} disabled={creating || !newName.trim() || !newContent.trim()}>
+          {creating ? t("hermes.create.creating") : t("hermes.settingsModal.skills.add")}
+        </button>
+      </div>
     </div>
   );
 }

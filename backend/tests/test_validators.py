@@ -293,6 +293,66 @@ class TestStorageAwareValidation:
         validate_flow_against_db(spec, storage)
 
 
+class TestTemporaryAgents:
+    @staticmethod
+    def _git_repo(tmp_path: Path) -> Path:
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "README.md").write_text("hello\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=T", "-c", "user.email=t@e.com",
+             "commit", "-m", "init"],
+            cwd=repo, check=True,
+        )
+        return repo
+
+    def test_temporary_managed_kind_skips_db_lookup(self, tmp_path: Path) -> None:
+        """A temporary claude/hermes agent passes db validation WITHOUT any
+        managed/Hermes registration (only the working-dir repo is required)."""
+        repo = self._git_repo(tmp_path)
+        spec = FlowSpec(
+            agents=[
+                FlowAgent(id="tmp-lead", kind=AgentKind.hermes, repo=str(repo),
+                          is_leader=True, is_temporary=True),
+                FlowAgent(id="tmp-worker", kind=AgentKind.claude, repo=str(repo),
+                          is_leader=False, is_temporary=True),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="tmp-worker", subject="w"),
+                FlowTask(id="t1", owner_agent_id="tmp-lead", subject="x",
+                         depends_on=["t0"], is_leader_summary=True),
+            ],
+        )
+        # No DB rows created → would raise for persistent agents, but temporary
+        # agents skip the lookup.
+        validate_flow_against_db(spec, get_storage())
+
+    def test_temporary_agent_still_requires_repo(self) -> None:
+        spec = FlowSpec(
+            agents=[
+                FlowAgent(id="a", kind=AgentKind.claude, repo="", is_leader=True,
+                          is_temporary=True),
+                FlowAgent(id="w", kind=AgentKind.claude, repo="", is_leader=False,
+                          is_temporary=True),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="w", subject="w"),
+                FlowTask(id="t1", owner_agent_id="a", subject="x",
+                         depends_on=["t0"], is_leader_summary=True),
+            ],
+        )
+        with pytest.raises(FlowValidationError) as exc:
+            validate_flow_against_db(spec, get_storage())
+        assert exc.value.code == ERROR_MISSING_AGENT_REPO
+
+    def test_openclaw_cannot_be_temporary(self) -> None:
+        with pytest.raises(Exception):
+            FlowAgent(id="oc", kind=AgentKind.openclaw, is_leader=True,
+                      is_temporary=True)
+
+
 class TestUniqueness:
     def test_duplicate_agent_id(self) -> None:
         spec = FlowSpec(
