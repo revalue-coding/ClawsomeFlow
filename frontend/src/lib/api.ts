@@ -21,6 +21,12 @@ export class ApiError extends Error {
   }
 }
 
+/** True when the failure is "couldn't reach the ClawsomeFlow service at all"
+ * (fetch threw), as opposed to a platform/runtime being unavailable. */
+export function isNetworkError(e: unknown): boolean {
+  return e instanceof ApiError && e.code === "NETWORK_ERROR";
+}
+
 interface ErrorEnvelope {
   error?: string;
   message?: string;
@@ -60,15 +66,24 @@ async function request<T>(
   body?: unknown,
   init: RequestInit = {},
 ): Promise<T> {
-  const res = await fetch(url, {
-    method,
-    headers: {
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      ...(init.headers ?? {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    ...init,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: {
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(init.headers ?? {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      ...init,
+    });
+  } catch (e) {
+    // fetch only throws on network-level failure (backend/ClawsomeFlow service
+    // unreachable) — NOT on HTTP error statuses. Surface this as a typed error
+    // so callers can show the real reason instead of "platform unavailable".
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    throw new ApiError(0, "NETWORK_ERROR", e instanceof Error ? e.message : String(e));
+  }
   if (res.status === 204) {
     // @ts-expect-error — caller should type-guard their T
     return undefined;
@@ -1149,10 +1164,10 @@ export const api = {
     ),
   getManagedAgent: (id: string) =>
     request<ManagedAgentDetail>("GET", `/api/managed/agents/${id}`),
-  getManagedRuntimeStatus: (kind: ManagedKind) =>
+  getManagedRuntimeStatus: (kind: ManagedKind, mode: "fast" | "full" = "full") =>
     request<{ running: boolean; reason: string }>(
       "GET",
-      `/api/managed/agents/runtime/status?kind=${kind}`,
+      `/api/managed/agents/runtime/status?kind=${kind}&mode=${mode}`,
       undefined,
       { cache: "no-store" },
     ),

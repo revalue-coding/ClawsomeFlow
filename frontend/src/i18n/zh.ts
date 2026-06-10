@@ -26,6 +26,9 @@ const zh = {
     error: "出错了",
     success: "成功",
     optional: "可选",
+    serviceUnreachableTitle: "无法连接 ClawsomeFlow 服务",
+    serviceUnreachableHint:
+      "ClawsomeFlow 后端无响应。请确认服务已启动（例如 `csflow start`），然后刷新。",
     required: "必填",
     name: "名称",
     description: "描述",
@@ -860,10 +863,11 @@ const zh = {
     create: {
       title: "创建 Hermes Agent",
       name: "名称",
+      nameLabel: "Agent 名称",
       namePlaceholder: "例如 后端助手",
       responsibility: "职责",
       responsibilityPlaceholder: "这个 Agent 负责什么？",
-      idLabel: "Agent名称（Profile id）",
+      idLabel: "Profile ID",
       idPlaceholder: "例如 backend-helper",
       idHint: "仅限小写字母和数字，将直接作为 Hermes profile id。",
       teamLabel: "团队",
@@ -940,7 +944,7 @@ const zh = {
     pickerTitle: "和你的 {{platform}} Agent 对话",
     listEmpty: "还没有 Agent,先创建一个吧。",
     notInstalledTitle: "{{platform}} 不可用",
-    notInstalled: "本机未安装或无法使用 {{platform}} CLI。",
+    notInstalled: "本机未安装或无法使用 {{platform}} CLI。请先安装（{{install}}）再刷新。",
     openHome: "配置目录",
     openHomeFailed: "打开配置目录失败:{{message}}",
     create: {

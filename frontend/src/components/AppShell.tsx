@@ -20,7 +20,7 @@ import {
   getUpgradeModalOpen,
   setUpgradeModalOpen,
 } from "@/components/UpdateNotice";
-import { Modal } from "@/components/ui";
+import { Modal, MODAL_ROOT_ID } from "@/components/ui";
 import type { UpdateStatus } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
@@ -146,13 +146,17 @@ export function AppShell() {
   return (
     <div className="flex h-screen w-screen bg-ink-50 text-ink-900">
       <Sidebar health={health} update={update} onOpenUpgrade={() => setUpgradeOpen(true)} />
-      <main className="flex-1 overflow-hidden flex flex-col">
+      <main className="relative flex-1 overflow-hidden flex flex-col">
         <TopBar location={location.pathname} />
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-7xl px-6 py-6">
             <Outlet />
           </div>
         </div>
+        {/* Modeless modal host: covers only the content area (not the sidebar),
+            so nav stays clickable while a modal is open. pointer-events-none so
+            it never blocks when empty; each Modal's overlay re-enables events. */}
+        <div id={MODAL_ROOT_ID} className="pointer-events-none absolute inset-0 z-40" />
       </main>
       {update?.updateAvailable && (
         <UpgradeModal

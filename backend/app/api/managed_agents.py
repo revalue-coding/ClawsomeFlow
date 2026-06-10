@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
@@ -30,6 +31,11 @@ from app.storage import StorageBackend, get_storage
 router = APIRouter(prefix="/managed/agents", tags=["managed"])
 logger = get_logger("api.managed_agents")
 _EXEC = ThreadPoolExecutor(max_workers=4, thread_name_prefix="managed-cli")
+
+# Per-(user, agent) chat session revision. Bumped on /reset so claude's
+# deterministic ``--session-id`` UUID changes and never collides with the
+# previous (now-cleared) conversation. In-memory only.
+_CHAT_SESSION_REVISIONS: dict[tuple[str, str], int] = {}
 
 
 def _storage_dep() -> StorageBackend:
@@ -171,7 +177,20 @@ def _owned(agent_id: str, user: str, storage: StorageBackend) -> ManagedAgent:
 
 
 def _session_key(user: str, agent_id: str) -> str:
-    return f"managed-user-chat-{user}-{agent_id}"
+    revision = _CHAT_SESSION_REVISIONS.get((user, agent_id), 0)
+    suffix = "" if revision <= 0 else f"-r{revision}"
+    return f"managed-user-chat-{user}-{agent_id}{suffix}"
+
+
+def _bump_session_revision(user: str, agent_id: str) -> str:
+    slot = (user, agent_id)
+    _CHAT_SESSION_REVISIONS[slot] = _CHAT_SESSION_REVISIONS.get(slot, 0) + 1
+    return _session_key(user, agent_id)
+
+
+def _session_uuid(session_key: str) -> str:
+    """Deterministic UUID for ``claude --session-id`` derived from the key."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, session_key))
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────
@@ -190,10 +209,14 @@ def list_agents(
 @router.get("/runtime/status", response_model=RuntimeStatusResponse)
 def runtime_status(
     user: UserDep, kind: Annotated[str, Query()],
+    mode: Annotated[str, Query()] = svc.PROBE_FULL,
 ) -> RuntimeStatusResponse:
     del user
+    # ``mode=fast`` is presence-only (instant) so the WebUI renders right away;
+    # the default ``full`` runs the CLI to confirm it works.
+    level = svc.PROBE_FAST if mode == svc.PROBE_FAST else svc.PROBE_FULL
     try:
-        running, reason = svc.probe_runtime_running(kind)
+        running, reason = svc.probe_runtime_running(kind, level=level)
     except svc.ManagedAgentError as exc:
         raise _map_err(exc) from exc
     return RuntimeStatusResponse(running=running, reason=reason)
@@ -203,10 +226,12 @@ def runtime_status(
 async def create_agent(
     payload: Annotated[CreatePayload, Body()], user: UserDep, storage: StorageDep,
 ) -> ManagedAgentDetail:
+    display_name = (payload.name or "").strip()
+    if not display_name:
+        raise ApiError("INVALID_PAYLOAD", "name is required", status_code=400)
     aid = (payload.id or payload.name or "").strip().lower()
     if not payload.id:
         aid = "".join(ch for ch in aid if ch.isalnum() or ch == "-").strip("-")
-    display_name = (payload.name or aid).strip() or aid
     cmd = svc.CommitInput(
         id=aid, kind=payload.kind, name=display_name,
         description=payload.responsibility, nl_prompt=payload.responsibility,
@@ -385,13 +410,22 @@ async def chat_with_agent(
     if not workdir:
         raise ApiError("INVALID_PAYLOAD", "workdir is required", status_code=400)
     session_key = _session_key(user, agent_id)
+    # Resume the existing session whenever this conversation already has turns
+    # (persisted history → survives a restart). ``/reset`` clears history and
+    # rotates the revision, so the next turn starts a fresh session.
+    resume = len(await chat_history.list_messages(session_key)) > 0
+    session_uuid = _session_uuid(session_key)
     await chat_history.append_message(session_key, role="user", content=message)
 
     async def _stream():
         loop = asyncio.get_running_loop()
         try:
             answer = await loop.run_in_executor(
-                _EXEC, lambda: svc.chat_once(agent_id, message=message, workdir=workdir, storage=storage),
+                _EXEC,
+                lambda: svc.chat_once(
+                    agent_id, message=message, workdir=workdir,
+                    resume=resume, session_uuid=session_uuid, storage=storage,
+                ),
             )
         except svc.ManagedAgentError as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
@@ -408,6 +442,8 @@ async def chat_with_agent(
 async def reset_chat(agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep) -> None:
     _owned(agent_id, user, storage)
     await chat_history.clear_messages(_session_key(user, agent_id))
+    # Rotate so the next claude turn gets a fresh ``--session-id`` UUID.
+    _bump_session_revision(user, agent_id)
 
 
 __all__ = ["router"]

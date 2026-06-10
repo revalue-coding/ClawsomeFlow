@@ -22,6 +22,10 @@ const en = {
     error: "Error",
     success: "Success",
     optional: "optional",
+    serviceUnreachableTitle: "Can't reach the ClawsomeFlow service",
+    serviceUnreachableHint:
+      "The ClawsomeFlow backend isn't responding. Make sure the service is running " +
+      "(e.g. `csflow start`), then refresh.",
     required: "required",
     name: "Name",
     description: "Description",
@@ -873,10 +877,11 @@ const en = {
     create: {
       title: "Create a Hermes agent",
       name: "Name",
+      nameLabel: "Agent Name",
       namePlaceholder: "e.g. Backend Helper",
       responsibility: "Responsibility",
       responsibilityPlaceholder: "What is this agent responsible for?",
-      idLabel: "Agent name (Profile id)",
+      idLabel: "Profile ID",
       idPlaceholder: "e.g. backend-helper",
       idHint: "Lowercase letters/numbers only. Used directly as the Hermes profile id.",
       teamLabel: "Team",
@@ -953,7 +958,9 @@ const en = {
     pickerTitle: "Chat with your {{platform}} agents",
     listEmpty: "No agents yet. Create one to get started.",
     notInstalledTitle: "{{platform}} is not available",
-    notInstalled: "The {{platform}} CLI is not installed or not usable on this host.",
+    notInstalled:
+      "The {{platform}} CLI is not installed or not usable on this host. " +
+      "Install it ({{install}}) and refresh.",
     openHome: "config home",
     openHomeFailed: "Failed to open the config home: {{message}}",
     create: {

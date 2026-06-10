@@ -3,8 +3,13 @@
  */
 
 import { ReactNode, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/cn";
+
+/** Portal host id rendered by AppShell over the content area (not the sidebar),
+ * so modals dim/cover only the page content and the nav stays clickable. */
+export const MODAL_ROOT_ID = "csflow-modal-root";
 
 // ── Card ──────────────────────────────────────────────────────────
 
@@ -145,10 +150,12 @@ export function Modal({
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose, dismissible]);
   if (!open) return null;
-  return (
-    <div
-      className="fixed inset-0 z-50 overflow-y-auto bg-black/40 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
-    >
+  // Modeless: the overlay covers only the content area (it is portaled into the
+  // host AppShell renders over `<Outlet>`, NOT the sidebar), uses a light dim,
+  // and does NOT dismiss on outside-click — so users can switch modules via the
+  // nav while the modal stays open. Esc still closes when dismissible.
+  const body = (
+    <div className="absolute inset-0 z-40 overflow-y-auto bg-black/20 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] pointer-events-auto">
       <div className="flex min-h-full items-center justify-center">
         <div
           ref={ref}
@@ -177,4 +184,6 @@ export function Modal({
       </div>
     </div>
   );
+  const host = typeof document !== "undefined" ? document.getElementById(MODAL_ROOT_ID) : null;
+  return host ? createPortal(body, host) : body;
 }

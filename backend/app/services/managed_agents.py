@@ -41,6 +41,13 @@ _AGENT_ID_MIN_LEN = 2
 _AGENT_ID_MAX_LEN = 48
 _CLI_TIMEOUT_SEC = 60.0
 _CHAT_TIMEOUT_SEC = 1800.0
+# Two-tier runtime probe (mirrors hermes): ``fast`` = presence on PATH only
+# (instant, lets the WebUI render immediately); ``full`` = actually run
+# ``<cli> --version`` to confirm the binary works. Generous timeout so a slow
+# first invocation never false-negatives a usable CLI.
+PROBE_FAST = "fast"
+PROBE_FULL = "full"
+_FULL_PROBE_TIMEOUT_SEC = 30.0
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _SKILL_FM_RE = re.compile(r"^---\s*\n(?P<h>.*?)\n---", re.DOTALL)
 
@@ -137,11 +144,26 @@ def _run_cli(
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
-def probe_runtime_running(kind: str) -> tuple[bool, str]:
+def probe_runtime_running(kind: str, *, level: str = PROBE_FULL) -> tuple[bool, str]:
     _validate_kind(kind)
-    if cli_available(kind):
-        return True, f"{_cli_for(kind)} available"
-    return False, f"`{_cli_for(kind)}` CLI not installed"
+    cli = _cli_for(kind)
+    exe = shutil.which(cli)
+    if exe is None:
+        return False, f"`{cli}` CLI not installed"
+    if level == PROBE_FAST:
+        return True, f"{cli} available"
+    # FULL: confirm the binary actually runs.
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [exe, "--version"], capture_output=True, text=True,
+            timeout=_FULL_PROBE_TIMEOUT_SEC,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False, f"`{cli}` CLI present but failed to run (`{cli} --version`)"
+    if proc.returncode == 0:
+        first = next((ln for ln in (proc.stdout or "").splitlines() if ln.strip()), "")
+        return True, first or f"{cli} available"
+    return False, f"`{cli}` CLI present but failed to run (`{cli} --version`)"
 
 
 # ── Codex inference config seeding ────────────────────────────────────
@@ -548,15 +570,40 @@ def write_role_doc(agent_id: str, content: str, *, storage: StorageBackend | Non
 # ── direct chat (headless, profile-home, cwd = chosen workdir) ─────────
 
 
-def chat_once(agent_id: str, *, message: str, workdir: str, storage: StorageBackend | None = None) -> str:
+def chat_once(
+    agent_id: str,
+    *,
+    message: str,
+    workdir: str,
+    resume: bool = False,
+    session_uuid: str | None = None,
+    storage: StorageBackend | None = None,
+) -> str:
+    """Run one headless chat turn, entering the agent's role via its config home.
+
+    Consecutive turns of one conversation resume the same logical session:
+    - claude: a deterministic ``--session-id <uuid>`` on the first turn, then
+      ``--resume <uuid>`` thereafter (caller supplies ``session_uuid``).
+    - codex: a fresh ``exec`` on the first turn, then ``exec resume --last``
+      (the most-recent session recorded in this agent's ``CODEX_HOME``).
+    - cursor: unchanged (stateless).
+    The agent's role/identity is always entered via the per-agent home dir env
+    var injected by ``_run_cli`` (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` / …).
+    """
     row = get_agent(agent_id, storage=storage)
     wd = Path(workdir).expanduser()
     if not wd.is_dir():
         raise ManagedAgentError(f"working directory does not exist: {workdir}")
     if row.kind == "claude":
-        args = ["-p", "--permission-mode", "bypassPermissions", message]
+        args = ["-p", "--permission-mode", "bypassPermissions"]
+        if session_uuid:
+            args += ["--resume", session_uuid] if resume else ["--session-id", session_uuid]
+        args.append(message)
     elif row.kind == "codex":
-        args = ["exec", "--dangerously-bypass-approvals-and-sandbox", message]
+        if resume:
+            args = ["exec", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox", message]
+        else:
+            args = ["exec", "--dangerously-bypass-approvals-and-sandbox", message]
     else:  # cursor
         args = ["-p", "--force", message]
     rc, out, err = _run_cli(row.kind, row.id, args, cwd=wd, timeout=_CHAT_TIMEOUT_SEC)

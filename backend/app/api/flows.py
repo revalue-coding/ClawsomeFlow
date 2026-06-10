@@ -563,6 +563,15 @@ def update_flow(
     if existing is None:
         raise ApiError("NOT_FOUND", f"flow {flow_id!r} not found", status_code=404)
     _ensure_owner(existing, user)
+    # A running Run snapshots the spec at start but finalize re-reads the Flow
+    # (merge advice / cleanup / version), so editing mid-run could affect it.
+    # Refuse any edit while a Run is active (mirrors delete_flow).
+    if storage.run_count_active_for_flow(flow_id) > 0:
+        raise ApiError(
+            "RUNS_IN_PROGRESS",
+            f"flow {flow_id!r} has active runs; cannot edit",
+            status_code=409,
+        )
     _validate_flow_meta(description=payload.description)
     # Re-validate against DB (OpenClaw refs / repo paths might have changed).
     validate_flow_against_db(payload.spec, storage)
@@ -591,6 +600,19 @@ def delete_flow(
             "RUNS_IN_PROGRESS",
             f"flow {flow_id!r} has active runs; cannot delete",
             status_code=409,
+        )
+    blocking_schedules = [
+        s
+        for s in storage.run_schedule_list(user=user)
+        if any((it or {}).get("flow_id") == flow_id for it in (s.items or []))
+    ]
+    if blocking_schedules:
+        raise ApiError(
+            "FLOW_HAS_SCHEDULES",
+            f"flow {flow_id!r} is referenced by {len(blocking_schedules)} scheduled "
+            "task(s); remove them first",
+            status_code=409,
+            details={"schedule_names": [s.name or s.id for s in blocking_schedules]},
         )
     try:
         storage.flow_delete(flow_id)

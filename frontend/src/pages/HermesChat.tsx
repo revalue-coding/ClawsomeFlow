@@ -24,6 +24,7 @@ import { cn } from "@/lib/cn";
 import {
   api,
   ApiError,
+  isNetworkError,
   type ChatHistoryMessage,
   type HermesAgentSummary,
   type HermesCronJob,
@@ -32,6 +33,7 @@ import {
   type HermesSkillSetting,
   type OpenclawTeam,
 } from "@/lib/api";
+import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 
 const CREATE_TEAM_SENTINEL = "__create_team__";
 const DEFAULT_WORKDIR = "~";
@@ -53,7 +55,13 @@ function agentCardTitle(agent: { id: string; name: string }): string {
 }
 
 function errText(e: unknown): string {
-  if (e instanceof ApiError) return e.message;
+  if (e instanceof ApiError) {
+    const flows = e.details?.flow_names;
+    if (Array.isArray(flows) && flows.length > 0) {
+      return `${e.message}: ${flows.join(", ")}`;
+    }
+    return e.message;
+  }
   if (e instanceof Error) return e.message;
   return String(e);
 }
@@ -67,10 +75,12 @@ export function HermesChat() {
   const { t } = useTranslation();
   const [running, setRunning] = useState<boolean | null>(null);
   const [reason, setReason] = useState("");
+  const [netDown, setNetDown] = useState(false);
 
   const checkRuntime = useCallback(() => {
     let alive = true;
     setRunning(null);
+    setNetDown(false);
     // Stage 1 — fastest path (binary presence on PATH): render the UI right
     // away instead of blocking on the slow `hermes --version` update-check.
     api
@@ -95,8 +105,10 @@ export function HermesChat() {
             /* background verify failed to reach the server — keep showing UI */
           });
       })
-      .catch(() => {
+      .catch((e) => {
         if (!alive) return;
+        // Backend unreachable (service down) ≠ Hermes CLI missing. Say so.
+        setNetDown(isNetworkError(e));
         setRunning(false);
         setReason("");
       });
@@ -112,8 +124,12 @@ export function HermesChat() {
     return (
       <div className="mx-auto max-w-2xl py-16">
         <EmptyState
-          title={t("hermes.notInstalledTitle")}
-          hint={`${t("hermes.notInstalled")}${reason ? `\n\n${reason}` : ""}`}
+          title={netDown ? t("common.serviceUnreachableTitle") : t("hermes.notInstalledTitle")}
+          hint={
+            netDown
+              ? t("common.serviceUnreachableHint")
+              : `${t("hermes.notInstalled")}${reason ? `\n\n${reason}` : ""}`
+          }
           action={
             <button type="button" className="btn-primary" onClick={() => checkRuntime()}>
               {t("common.refresh")}
@@ -137,8 +153,10 @@ function Picker() {
   const [teams, setTeams] = useState<OpenclawTeam[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showCreate, setShowCreate] = useState(false);
-  const [removeTarget, setRemoveTarget] = useState<HermesAgentSummary | null>(null);
+  const [showCreate, setShowCreate] = useSessionBackedModalFlag("hermes:picker:create");
+  const [removeTarget, setRemoveTarget] = useSessionBackedState<HermesAgentSummary | null>(
+    "hermes:picker:removeTarget", null, { isClosed: (v) => v === null },
+  );
   const [viewMode, setViewMode] = useState<"card" | "list">("card");
 
   const reload = useCallback(async () => {
@@ -292,6 +310,7 @@ function Picker() {
       {showCreate && (
         <CreateModal
           teams={teams}
+          agents={agents}
           onClose={() => setShowCreate(false)}
           onDone={(created) => {
             setShowCreate(false);
@@ -373,23 +392,50 @@ async function resolveTeamId(
 
 function CreateModal({
   teams,
+  agents,
   onClose,
   onDone,
 }: {
   teams: OpenclawTeam[];
+  agents: HermesAgentSummary[];
   onClose: () => void;
   onDone: (created: { id: string }) => void;
 }) {
   const { t } = useTranslation();
-  // The single required field IS the Hermes profile id (used verbatim).
-  const [profileId, setProfileId] = useState("");
-  const [responsibility, setResponsibility] = useState("");
-  const [teamChoice, setTeamChoice] = useState("");
-  const [newTeamName, setNewTeamName] = useState("");
-  const [busy, setBusy] = useState(false);
+  // ``name`` is the human-friendly Agent Name (shown as the card title and
+  // injected into the bootstrap prompt). ``profileId`` is the Hermes profile id.
+  // Session-backed so switching modules mid-create keeps the form + busy state.
+  const [name, setName] = useSessionBackedState("hermes:create:name", "");
+  const [profileId, setProfileId] = useSessionBackedState("hermes:create:profileId", "");
+  const [responsibility, setResponsibility] = useSessionBackedState("hermes:create:responsibility", "");
+  const [teamChoice, setTeamChoice] = useSessionBackedState("hermes:create:teamChoice", "");
+  const [newTeamName, setNewTeamName] = useSessionBackedState("hermes:create:newTeamName", "");
+  const [busy, setBusy] = useSessionBackedState("hermes:create:busy", false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const resetForm = () => {
+    setName(""); setProfileId(""); setResponsibility("");
+    setTeamChoice(""); setNewTeamName(""); setBusy(false);
+  };
+
+  // Reconcile-on-return: if we navigated away mid-create and the agent finished
+  // while unmounted, the freshly-reloaded list now contains it → treat as done.
+  useEffect(() => {
+    if (!busy) return;
+    const created = profileId.trim();
+    if (created && agents.some((a) => a.id === created)) {
+      setBusy(false);
+      onDone({ id: created });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents]);
 
   const submit = async () => {
     setBusy(true);
@@ -401,14 +447,18 @@ function CreateModal({
       const created = await api.createHermesAgent(
         {
           id: profileId.trim(),
+          name: name.trim(),
           responsibility: responsibility.trim(),
           teamId,
         },
         { signal: ac.signal },
       );
+      if (!mountedRef.current) return; // returned via reconcile instead
+      resetForm();
       onDone(created);
     } catch (e) {
       if (ac.signal.aborted) return; // cancelled — handled by cancelCreate
+      if (!mountedRef.current) return;
       setError(errText(e));
       setBusy(false);
     }
@@ -424,6 +474,7 @@ function CreateModal({
     } catch {
       /* best-effort — closing anyway */
     }
+    resetForm();
     onClose();
   };
 
@@ -433,6 +484,15 @@ function CreateModal({
     <Modal open onClose={onClose} title={t("hermes.create.title")} dismissible={!busy} width="max-w-2xl">
       <div className="space-y-3">
         {error && <ErrorBox>{error}</ErrorBox>}
+        <div>
+          <label className="label">{t("hermes.create.nameLabel")}</label>
+          <input
+            className="input"
+            value={name}
+            placeholder={t("hermes.create.namePlaceholder")}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </div>
         <div>
           <label className="label">{t("hermes.create.idLabel")}</label>
           <input
@@ -479,7 +539,7 @@ function CreateModal({
             type="button"
             className="btn-primary"
             onClick={() => void submit()}
-            disabled={busy || !profileId.trim() || !teamReady}
+            disabled={busy || !name.trim() || !profileId.trim() || !teamReady}
           >
             {busy ? t("hermes.create.creating") : t("hermes.create.submit")}
           </button>
@@ -566,6 +626,13 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const navigate = useNavigate();
   const [name, setName] = useState(agentId);
   const [teamName, setTeamName] = useState("");
+  const [teamId, setTeamId] = useState("");
+  const [teams, setTeams] = useState<OpenclawTeam[]>([]);
+  const [teamEditOpen, setTeamEditOpen] = useSessionBackedModalFlag(`hermes:${agentId}:teamEdit:open`);
+  const [teamEditChoice, setTeamEditChoice] = useSessionBackedState(`hermes:${agentId}:teamEdit:choice`, "");
+  const [teamEditNewTeamName, setTeamEditNewTeamName] = useSessionBackedState(`hermes:${agentId}:teamEdit:newTeam`, "");
+  const [teamEditError, setTeamEditError] = useState("");
+  const [teamEditSaving, setTeamEditSaving] = useState(false);
   const [profileRoot, setProfileRoot] = useState("");
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
@@ -580,19 +647,22 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const [sending, setSending] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useSessionBackedModalFlag(`hermes:${agentId}:settings:open`);
   const [opening, setOpening] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void (async () => {
       try {
-        const [detail, hist] = await Promise.all([
+        const [detail, hist, teamList] = await Promise.all([
           api.getHermesAgent(agentId),
           api.getHermesAgentChatHistory(agentId),
+          api.listOpenclawTeams(),
         ]);
         setName(detail.name);
         setTeamName(detail.teamName);
+        setTeamId(detail.teamId);
+        setTeams(teamList.items);
         setProfileRoot(detail.profileRoot);
         setMessages(hist.messages.map((m: ChatHistoryMessage) => ({ role: m.role, content: m.content })));
       } catch (e) {
@@ -630,6 +700,36 @@ function ChatRoom({ agentId }: { agentId: string }) {
       window.alert(t("hermes.openFailed", { message: errText(e) }));
     } finally {
       setOpening(false);
+    }
+  };
+
+  const openTeamEdit = () => {
+    setTeamEditChoice(teamId || "");
+    setTeamEditNewTeamName("");
+    setTeamEditError("");
+    setTeamEditOpen(true);
+  };
+
+  const saveTeam = async () => {
+    if (teamEditSaving) return;
+    if (teamEditChoice === CREATE_TEAM_SENTINEL && !teamEditNewTeamName.trim()) {
+      setTeamEditError(t("chat.teamEdit.newTeamRequired"));
+      return;
+    }
+    setTeamEditSaving(true);
+    setTeamEditError("");
+    try {
+      const resolved = await resolveTeamId(teamEditChoice, teamEditNewTeamName);
+      const updated = await api.patchHermesAgent(agentId, { teamId: resolved ?? "" });
+      setTeamName(updated.teamName);
+      setTeamId(updated.teamId);
+      const teamList = await api.listOpenclawTeams();
+      setTeams(teamList.items);
+      setTeamEditOpen(false);
+    } catch (e) {
+      setTeamEditError(errText(e));
+    } finally {
+      setTeamEditSaving(false);
     }
   };
 
@@ -730,6 +830,13 @@ function ChatRoom({ agentId }: { agentId: string }) {
             <span className="rounded-full border border-ink-200 bg-ink-50 px-2 py-0.5">
               {teamName || t("chat.ungroupedTeam")}
             </span>
+            <button
+              type="button"
+              className="text-ink-500 underline-offset-2 hover:text-ink-800 hover:underline"
+              onClick={openTeamEdit}
+            >
+              {t("chat.teamEdit.action")}
+            </button>
           </div>
         </div>
         <div className="inline-flex shrink-0 items-center gap-2">
@@ -829,6 +936,66 @@ function ChatRoom({ agentId }: { agentId: string }) {
       {showSettings && (
         <SettingsModal agentId={agentId} onClose={() => setShowSettings(false)} />
       )}
+
+      <Modal
+        open={teamEditOpen}
+        onClose={() => {
+          if (teamEditSaving) return;
+          setTeamEditOpen(false);
+        }}
+        title={t("chat.teamEdit.title")}
+      >
+        <div className="space-y-3">
+          {teamEditError && <ErrorBox>{teamEditError}</ErrorBox>}
+          <div>
+            <label className="label">{t("chat.teamEdit.label")}</label>
+            <select
+              className="select"
+              value={teamEditChoice}
+              onChange={(e) => setTeamEditChoice(e.target.value)}
+              disabled={teamEditSaving}
+            >
+              <option value="">{t("chat.teamEdit.noneOptional")}</option>
+              {teams.map((tm) => (
+                <option key={tm.id} value={tm.id}>
+                  {tm.name}
+                </option>
+              ))}
+              <option value={CREATE_TEAM_SENTINEL}>{t("chat.teamEdit.createNew")}</option>
+            </select>
+          </div>
+          {teamEditChoice === CREATE_TEAM_SENTINEL && (
+            <div>
+              <label className="label">{t("chat.teamEdit.newTeamLabel")}</label>
+              <input
+                className="input"
+                value={teamEditNewTeamName}
+                onChange={(e) => setTeamEditNewTeamName(e.target.value)}
+                placeholder={t("chat.teamEdit.newTeamPlaceholder")}
+                disabled={teamEditSaving}
+              />
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => setTeamEditOpen(false)}
+              disabled={teamEditSaving}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void saveTeam()}
+              disabled={teamEditSaving}
+            >
+              {teamEditSaving ? t("chat.teamEdit.saving") : t("common.save")}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

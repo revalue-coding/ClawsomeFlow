@@ -385,16 +385,19 @@ def test_cancel_create_rolls_back_when_cancelled_during_bootstrap(
 def test_cancel_create_agent_kills_live_bootstrap(
     hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """cancel_create_agent kills a registered bootstrap proc and rolls back."""
+    """cancel_create_agent kills the bootstrap's whole process group + rolls back."""
     calls: list[list[str]] = []
     monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    # The bootstrap is started in its own process group; cancel must killpg it
+    # (so children die too), not just proc.kill() the parent.
+    group_kills: list[object] = []
+    monkeypatch.setattr(
+        svc._subproc_registry, "kill_group",
+        lambda proc, **_k: group_kills.append(proc) or True,
+    )
 
     class _FakeProc:
-        def __init__(self) -> None:
-            self.killed = False
-
-        def kill(self) -> None:
-            self.killed = True
+        pid = 4242
 
     proc = _FakeProc()
     with svc._CREATE_LOCK:
@@ -402,7 +405,7 @@ def test_cancel_create_agent_kills_live_bootstrap(
 
     killed = svc.cancel_create_agent("live")
     assert killed is True
-    assert proc.killed is True
+    assert proc in group_kills
     assert svc._is_create_cancelled("live")
     assert ["profile", "delete", "live", "-y"] in calls
     with svc._CREATE_LOCK:
@@ -487,18 +490,44 @@ def test_api_list_auto_adopts_unmanaged_profiles(
     assert any(a["id"] == "preexisting" for a in listing["items"])
 
 
-def test_api_create_uses_id_as_profile_name(
+def test_api_create_keeps_name_and_profile_id_distinct(
     client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The single "Agent name (Profile id)" field is sent as ``id`` and used
-    verbatim as the profile id; ``name`` defaults to it."""
+    """``name`` (Agent Name) and ``id`` (Profile id) are stored separately."""
     monkeypatch.setattr(svc, "_run_hermes", _fake_run([]))
     monkeypatch.setattr(svc, "list_profile_names", lambda: [])
-    r = client.post("/api/hermes/agents", json={"id": "myprofile"})
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (True, ["myprofile"]))
+    r = client.post(
+        "/api/hermes/agents", json={"id": "myprofile", "name": "Backend Helper"}
+    )
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["id"] == "myprofile"
-    assert body["name"] == "myprofile"
+    assert body["name"] == "Backend Helper"
+
+
+def test_api_create_requires_name(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run([]))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    r = client.post("/api/hermes/agents", json={"id": "myprofile", "name": "   "})
+    assert r.status_code == 400
+
+
+def test_chat_once_resume_adds_continue_flag(
+    hermes_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Always enters the role via ``-p``; resume turns add ``-c`` to stay in the
+    same session, first turns do not."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls, out="ok"))
+
+    svc.chat_once("chatty", message="hi", workdir=str(tmp_path), resume=False)
+    svc.chat_once("chatty", message="more", workdir=str(tmp_path), resume=True)
+
+    assert calls[0] == ["-p", "chatty", "--yolo", "-z", "hi"]
+    assert calls[1] == ["-p", "chatty", "--yolo", "-c", "-z", "more"]
 
 
 def test_api_create_and_list(
