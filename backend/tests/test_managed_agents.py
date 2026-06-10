@@ -221,6 +221,23 @@ def test_api_list_empty(client: TestClient) -> None:
     assert r.json()["items"] == []
 
 
+def test_cancel_create_noop_when_absent() -> None:
+    """Cancelling an id that was never created is a safe no-op (returns False)."""
+    assert svc.cancel_create_agent("neverwas", storage=get_storage()) is False
+
+
+def test_api_cancel_create_endpoint(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(
+        svc, "cancel_create_agent", lambda aid, **_k: seen.append(aid) or False
+    )
+    r = client.post("/api/managed/agents/foo/cancel-create")
+    assert r.status_code == 202, r.text
+    assert seen == ["foo"]
+
+
 @_CLAUDE
 def test_api_create_and_list(client: TestClient) -> None:
     r = client.post("/api/managed/agents", json={"kind": "claude", "name": "API CC", "responsibility": "x"})
@@ -230,3 +247,56 @@ def test_api_create_and_list(client: TestClient) -> None:
         assert any(a["id"] == aid for a in client.get("/api/managed/agents?kind=claude").json()["items"])
     finally:
         client.delete(f"/api/managed/agents/{aid}")
+
+
+# ── Codex inference config seeding ────────────────────────────────────
+
+
+def test_seed_codex_inference_config_copies_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "operator-codex"
+    source.mkdir()
+    (source / "config.toml").write_text(
+        'model_provider = "poe"\n\n[model_providers.poe]\nbase_url = "https://api.poe.com/v1"\n',
+        encoding="utf-8",
+    )
+    dest = tmp_path / "managed-codex"
+    dest.mkdir()
+
+    monkeypatch.setattr(svc, "_default_codex_home", lambda: source)
+    svc._seed_codex_inference_config(dest)
+
+    text = (dest / "config.toml").read_text(encoding="utf-8")
+    assert 'model_provider = "poe"' in text
+    assert (dest / "config.toml").stat().st_mode & 0o777 == 0o600
+
+
+def test_seed_codex_inference_config_backfills_minimal_project_only_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "operator-codex"
+    source.mkdir()
+    (source / "config.toml").write_text('model_provider = "poe"\n', encoding="utf-8")
+    dest = tmp_path / "managed-codex"
+    dest.mkdir()
+    (dest / "config.toml").write_text('[projects."/tmp"]\ntrust_level = "trusted"\n', encoding="utf-8")
+
+    monkeypatch.setattr(svc, "_default_codex_home", lambda: source)
+    svc._seed_codex_inference_config(dest)
+
+    assert 'model_provider = "poe"' in (dest / "config.toml").read_text(encoding="utf-8")
+
+
+def test_seed_codex_inference_config_is_idempotent_when_customised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "operator-codex"
+    source.mkdir()
+    (source / "config.toml").write_text('model_provider = "poe"\n', encoding="utf-8")
+    dest = tmp_path / "managed-codex"
+    dest.mkdir()
+    (dest / "config.toml").write_text('model_provider = "custom"\n', encoding="utf-8")
+
+    monkeypatch.setattr(svc, "_default_codex_home", lambda: source)
+    svc._seed_codex_inference_config(dest)
+
+    assert (dest / "config.toml").read_text(encoding="utf-8") == 'model_provider = "custom"\n'

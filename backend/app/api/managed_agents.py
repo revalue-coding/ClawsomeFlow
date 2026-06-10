@@ -73,7 +73,7 @@ class RuntimeStatusResponse(_CamelModel):
 class CreatePayload(_CamelModel):
     kind: str
     id: str = ""
-    name: str
+    name: str = ""
     responsibility: str = ""
     team_id: str = ""
 
@@ -206,8 +206,9 @@ async def create_agent(
     aid = (payload.id or payload.name or "").strip().lower()
     if not payload.id:
         aid = "".join(ch for ch in aid if ch.isalnum() or ch == "-").strip("-")
+    display_name = (payload.name or aid).strip() or aid
     cmd = svc.CommitInput(
-        id=aid, kind=payload.kind, name=payload.name,
+        id=aid, kind=payload.kind, name=display_name,
         description=payload.responsibility, nl_prompt=payload.responsibility,
         team_id=payload.team_id,
     )
@@ -220,6 +221,22 @@ async def create_agent(
         raise _map_err(exc) from exc
     names = _team_name_map(storage=storage, user=user)
     return _detail(row, team_name=names.get(row.team_id, ""))
+
+
+@router.post("/{agent_id}/cancel-create", status_code=202)
+async def cancel_create(
+    agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,
+) -> dict[str, bool]:
+    """Cancel/roll back an in-flight or just-finished create for *agent_id*."""
+    del user
+    loop = asyncio.get_running_loop()
+    try:
+        rolled = await loop.run_in_executor(
+            _EXEC, lambda: svc.cancel_create_agent(agent_id, storage=storage),
+        )
+    except svc.ManagedAgentError as exc:
+        raise _map_err(exc) from exc
+    return {"rolledBack": rolled}
 
 
 @router.get("/{agent_id}", response_model=ManagedAgentDetail)

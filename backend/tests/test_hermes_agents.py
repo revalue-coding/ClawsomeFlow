@@ -40,6 +40,14 @@ def _fake_run(records: list[list[str]], rc: int = 0, out: str = "", err: str = "
     return _run
 
 
+@pytest.fixture(autouse=True)
+def _stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bootstrap is a real (killable) subprocess; stub it out by default so
+    `commit_agent` tests don't spawn `hermes`. Tests exercising bootstrap or
+    cancellation override ``svc._run_bootstrap`` themselves."""
+    monkeypatch.setattr(svc, "_run_bootstrap", lambda *_a, **_kw: 0)
+
+
 # ── id validation ────────────────────────────────────────────────────
 
 
@@ -61,7 +69,9 @@ def test_commit_agent_creates_profile_and_row(
     hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[list[str]] = []
+    boots: list[list[str]] = []
     monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "_run_bootstrap", lambda _aid, args, **_k: boots.append(args) or 0)
     monkeypatch.setattr(svc, "list_profile_names", lambda: [])
 
     row = svc.commit_agent(
@@ -71,9 +81,9 @@ def test_commit_agent_creates_profile_and_row(
     assert row.id == "helper"
     assert row.created_by_user == "alice"
     assert get_storage().hermes_get("helper") is not None
-    # profile create + bootstrap (-p helper -z ...) both invoked
+    # profile create via _run_hermes; bootstrap (-p helper --yolo -z ...) via _run_bootstrap
     assert ["profile", "create", "helper", "--description", "do things"] in calls
-    assert any(a[:3] == ["-p", "helper", "--yolo"] for a in calls)
+    assert any(a[:3] == ["-p", "helper", "--yolo"] for a in boots)
 
 
 def test_commit_agent_rejects_duplicate(
@@ -239,6 +249,179 @@ def test_api_runtime_status(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     assert r.json()["running"] is True
 
 
+def test_api_runtime_status_mode_passthrough(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    def _probe(**kw):  # noqa: ANN003
+        seen.append(kw.get("level"))
+        return True, "ok"
+
+    monkeypatch.setattr(svc, "probe_runtime_running", _probe)
+    client.get("/api/hermes/agents/runtime/status?mode=fast")
+    client.get("/api/hermes/agents/runtime/status?mode=full")
+    client.get("/api/hermes/agents/runtime/status")  # default → full
+    assert seen == [svc.PROBE_FAST, svc.PROBE_FULL, svc.PROBE_FULL]
+
+
+def test_probe_runtime_fast_is_presence_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fast level must NOT shell out — presence on PATH is enough."""
+    monkeypatch.setattr(svc, "hermes_executable", lambda: "/usr/local/bin/hermes")
+
+    def _boom(*_a, **_kw):  # any subprocess call would be a bug
+        raise AssertionError("fast probe must not run a subprocess")
+
+    monkeypatch.setattr(svc, "_run_hermes", _boom)
+    running, reason = svc.probe_runtime_running(level=svc.PROBE_FAST)
+    assert running is True
+    assert reason == "/usr/local/bin/hermes"
+
+
+def test_probe_runtime_full_detects_broken_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """full level re-blocks only when the present binary can't run a version cmd."""
+    monkeypatch.setattr(svc, "hermes_executable", lambda: "/usr/local/bin/hermes")
+    monkeypatch.setattr(svc, "_run_hermes", lambda *_a, **_kw: (1, "", "boom"))
+    running, _reason = svc.probe_runtime_running(level=svc.PROBE_FULL)
+    assert running is False
+
+
+def test_probe_runtime_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(svc, "hermes_executable", lambda: None)
+    assert svc.probe_runtime_running(level=svc.PROBE_FAST)[0] is False
+    assert svc.probe_runtime_running(level=svc.PROBE_FULL)[0] is False
+
+
+# ── availability probe (regression: slow `hermes --version`) ──────────
+
+
+def test_check_hermes_available_when_present_but_version_probe_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binary on PATH whose `--version` is slow (update-check) must still be
+    reported usable — gating on the version probe wrongly showed 'Hermes 不可用'."""
+    from app.cli import deps
+
+    monkeypatch.setattr(deps.shutil, "which", lambda _name: "/usr/local/bin/hermes")
+    # Simulate every version probe hitting the timeout (`_run` returns None).
+    monkeypatch.setattr(deps, "_run", lambda *_a, **_kw: None)
+
+    status = deps.check_hermes()
+    assert status.ok is True
+    assert status.found_version == "hermes available"
+
+
+def test_check_hermes_not_found_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.cli import deps
+
+    monkeypatch.setattr(deps.shutil, "which", lambda _name: None)
+    status = deps.check_hermes()
+    assert status.ok is False
+
+
+# ── new-profile inference config seeding (fixes SOUL.md bootstrap) ────
+
+
+def test_seed_profile_inherits_config_copies_model_and_keys(hermes_home: Path) -> None:
+    """A fresh profile must inherit config.yaml + .env (model + API keys) from
+    the root profile so the bootstrap `hermes -p <id> -z` has a provider; it
+    must NOT inherit SOUL.md or memories (operator identity stays private)."""
+    # Root profile: model config + keys + a personal SOUL/memory.
+    (hermes_home / "config.yaml").write_text("model:\n  provider: custom:poe\n")
+    (hermes_home / ".env").write_text("OPENAI_API_KEY=sk-secret\n")
+    (hermes_home / "SOUL.md").write_text("operator personal persona")
+
+    profile = hermes_home / "profiles" / "agt"
+    profile.mkdir(parents=True)
+
+    svc._seed_profile_inference_config("agt")
+
+    assert (profile / "config.yaml").read_text() == "model:\n  provider: custom:poe\n"
+    assert (profile / ".env").read_text() == "OPENAI_API_KEY=sk-secret\n"
+    assert (profile / ".env").stat().st_mode & 0o777 == 0o600
+    assert not (profile / "SOUL.md").exists()  # never leak operator identity
+
+
+def test_seed_profile_inference_config_is_idempotent(hermes_home: Path) -> None:
+    """Re-seeding must never clobber a profile's own config/keys."""
+    (hermes_home / "config.yaml").write_text("model:\n  provider: root\n")
+    profile = hermes_home / "profiles" / "agt"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model:\n  provider: customised\n")
+
+    svc._seed_profile_inference_config("agt")
+
+    assert (profile / "config.yaml").read_text() == "model:\n  provider: customised\n"
+
+
+# ── create cancellation + rollback ───────────────────────────────────
+
+
+def test_cancel_create_rolls_back_when_cancelled_during_bootstrap(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel flag set while the bootstrap runs must roll back the profile and
+    raise AgentCreateCancelled instead of persisting a half-built agent."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+
+    # Simulate the user cancelling mid-bootstrap: the bootstrap sets the flag.
+    def _bootstrap(aid, _args, **_k):  # noqa: ANN001
+        with svc._CREATE_LOCK:
+            svc._CANCELLED_CREATES.add(aid)
+        return 0
+
+    monkeypatch.setattr(svc, "_run_bootstrap", _bootstrap)
+
+    with pytest.raises(svc.AgentCreateCancelled):
+        svc.commit_agent(svc.CommitInput(id="cancelme", name="X"), user="alice")
+
+    assert get_storage().hermes_get("cancelme") is None  # no row persisted
+    assert ["profile", "delete", "cancelme", "-y"] in calls  # profile rolled back
+    assert not svc._is_create_cancelled("cancelme")  # flag cleared for retry
+
+
+def test_cancel_create_agent_kills_live_bootstrap(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cancel_create_agent kills a registered bootstrap proc and rolls back."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    proc = _FakeProc()
+    with svc._CREATE_LOCK:
+        svc._BOOTSTRAP_PROCS["live"] = proc  # type: ignore[assignment]
+
+    killed = svc.cancel_create_agent("live")
+    assert killed is True
+    assert proc.killed is True
+    assert svc._is_create_cancelled("live")
+    assert ["profile", "delete", "live", "-y"] in calls
+    with svc._CREATE_LOCK:
+        svc._CANCELLED_CREATES.discard("live")
+        svc._BOOTSTRAP_PROCS.pop("live", None)
+
+
+def test_api_cancel_create_endpoint(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(
+        svc, "cancel_create_agent", lambda aid, **_k: seen.append(aid) or False
+    )
+    r = client.post("/api/hermes/agents/foo/cancel-create")
+    assert r.status_code == 202, r.text
+    assert seen == ["foo"]
+
+
 def test_write_skill_creates_and_lists(hermes_home: Path) -> None:
     """write_skill creates skills/<name>/SKILL.md (no CLI) and lists it."""
     out = svc.write_skill("agt", name="my-skill", description="d", content="# hi")
@@ -256,11 +439,41 @@ def test_write_skill_creates_and_lists(hermes_home: Path) -> None:
 def test_api_list_empty(
     client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Listing now auto-adopts on-disk profiles, so isolate the profile source.
-    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    # Listing reconciles against on-disk profiles, so isolate the profile source.
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (True, []))
     r = client.get("/api/hermes/agents")
     assert r.status_code == 200
     assert r.json()["items"] == []
+
+
+def test_api_list_prunes_orphan_whose_profile_is_gone(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A managed row whose Hermes profile no longer exists must not be shown —
+    Hermes is the source of truth (the reported 'ghost agent' bug)."""
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="ghost", name="Ghost", profile_root="x", created_by_user=owner)
+    )
+    # Hermes reports the profile is gone (query succeeded, name absent).
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (True, []))
+    listing = client.get("/api/hermes/agents").json()
+    assert all(a["id"] != "ghost" for a in listing["items"])
+    assert get_storage().hermes_get("ghost") is None  # pruned from DB
+
+
+def test_api_list_keeps_rows_when_hermes_query_fails(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient Hermes failure must NOT prune valid rows (query_ok=False)."""
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="keep", name="Keep", profile_root="x", created_by_user=owner)
+    )
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (False, []))
+    listing = client.get("/api/hermes/agents").json()
+    assert any(a["id"] == "keep" for a in listing["items"])
+    assert get_storage().hermes_get("keep") is not None
 
 
 def test_api_list_auto_adopts_unmanaged_profiles(
@@ -268,7 +481,7 @@ def test_api_list_auto_adopts_unmanaged_profiles(
 ) -> None:
     """Existing on-disk profiles show up in the management list without any
     separate "claim" step (treated uniformly regardless of origin)."""
-    monkeypatch.setattr(svc, "list_profile_names", lambda: ["preexisting"])
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (True, ["preexisting"]))
     monkeypatch.setattr(svc, "read_profile_description", lambda _aid: "from disk")
     listing = client.get("/api/hermes/agents").json()
     assert any(a["id"] == "preexisting" for a in listing["items"])
@@ -293,6 +506,8 @@ def test_api_create_and_list(
 ) -> None:
     monkeypatch.setattr(svc, "_run_hermes", _fake_run([]))
     monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    # After creation the profile exists on disk, so the reconcile keeps the row.
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (True, ["backendhelper"]))
     r = client.post(
         "/api/hermes/agents",
         json={"name": "Backend Helper", "responsibility": "owns the API"},

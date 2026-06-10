@@ -144,6 +144,88 @@ def probe_runtime_running(kind: str) -> tuple[bool, str]:
     return False, f"`{_cli_for(kind)}` CLI not installed"
 
 
+# ── Codex inference config seeding ────────────────────────────────────
+
+_CODEX_INFERENCE_CONFIG_FILES = ("config.toml", "auth.json")
+
+
+def _default_codex_home() -> Path:
+    """Operator-level Codex home — the source we copy provider auth from."""
+    override = (os.environ.get("CODEX_HOME") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".codex"
+
+
+def _codex_config_needs_inference_seed(*, dest: Path, source: Path) -> bool:
+    """True when *dest* lacks model/provider settings but *source* has them."""
+    src = source / "config.toml"
+    dst = dest / "config.toml"
+    if not src.is_file():
+        return False
+    if not dst.is_file():
+        return True
+    try:
+        dst_text = dst.read_text(encoding="utf-8")
+        src_text = src.read_text(encoding="utf-8")
+    except OSError:
+        return True
+    has_dst_provider = "model_providers" in dst_text or "model_provider" in dst_text
+    has_src_provider = "model_providers" in src_text or "model_provider" in src_text
+    return not has_dst_provider and has_src_provider
+
+
+def _seed_codex_inference_config(home: Path) -> None:
+    """Copy model/provider auth into a managed Codex home (idempotent).
+
+    Never clobbers an agent home that already defines its own provider; will
+    backfill homes that only have project-trust defaults (Codex auto-writes
+    those on first run). Best-effort: failures are logged, not raised.
+    """
+    source = _default_codex_home()
+    if source.resolve() == home.resolve():
+        return
+
+    src_config = source / "config.toml"
+    dst_config = home / "config.toml"
+    if _codex_config_needs_inference_seed(dest=home, source=source):
+        try:
+            shutil.copy2(src_config, dst_config)
+            dst_config.chmod(0o600)
+        except OSError as exc:
+            logger.warning(
+                "codex_seed_config_failed", home=str(home), file="config.toml", error=str(exc),
+            )
+
+    for name in _CODEX_INFERENCE_CONFIG_FILES:
+        if name == "config.toml":
+            continue
+        src = source / name
+        dst = home / name
+        if not src.is_file() or dst.exists():
+            continue
+        try:
+            shutil.copy2(src, dst)
+            dst.chmod(0o600)
+        except OSError as exc:
+            logger.warning("codex_seed_config_failed", home=str(home), file=name, error=str(exc))
+
+
+def backfill_codex_inference_config(*, storage: StorageBackend | None = None, config: Config | None = None) -> int:
+    """Ensure every managed Codex agent home inherits operator inference config."""
+    cfg = config or load_config()
+    storage = storage or get_storage(cfg)
+    seeded = 0
+    for row in storage.managed_list(kind="codex"):
+        home = Path(row.config_home)
+        before = (home / "config.toml").read_text(encoding="utf-8") if (home / "config.toml").is_file() else ""
+        _seed_codex_inference_config(home)
+        after = (home / "config.toml").read_text(encoding="utf-8") if (home / "config.toml").is_file() else ""
+        if after and after != before:
+            seeded += 1
+    return seeded
+
+
 # ── role-doc seeding ──────────────────────────────────────────────────
 
 
@@ -189,6 +271,8 @@ def commit_agent(
     home = managed_home(kind, aid)
     home.mkdir(parents=True, exist_ok=True)
     _seed_role_doc(kind, home, cmd.name.strip() or aid, (cmd.description or "").strip())
+    if kind == "codex":
+        _seed_codex_inference_config(home)
     profile = ensure_profile(kind, aid)
 
     row = ManagedAgent(
@@ -264,6 +348,28 @@ def delete_agent(
     shutil.rmtree(Path(row.config_home), ignore_errors=True)
     storage.managed_delete(aid)
     logger.info("managed_agent_deleted", agent_id=aid, kind=row.kind)
+
+
+def cancel_create_agent(
+    agent_id: str, *, storage: StorageBackend | None = None, config: Config | None = None,
+) -> bool:
+    """Roll back a managed agent created (or being created) under *agent_id*.
+
+    Managed creation is fast and synchronous (no long bootstrap), so there is
+    no subprocess to kill — "cancel" means: if the row exists, remove it. Safe
+    to call when nothing was created (returns False)."""
+    storage = storage or get_storage(config or load_config())
+    try:
+        aid = _validate_id(agent_id)
+    except AgentIdInvalid:
+        return False
+    if storage.managed_get(aid) is None:
+        return False
+    try:
+        delete_agent(aid, storage=storage)
+    except AgentNotFound:
+        return False
+    return True
 
 
 def is_managed(agent_id: str, kind: str, *, storage: StorageBackend) -> bool:
@@ -465,8 +571,10 @@ __all__ = [
     "CliUnavailable", "CliFailed",
     "cli_available", "probe_runtime_running",
     "commit_agent", "get_agent", "list_agents", "update_agent", "delete_agent",
-    "is_managed",
+    "cancel_create_agent", "is_managed",
     "list_mcp", "add_mcp", "remove_mcp",
     "list_skills", "read_skill", "read_role_doc", "write_role_doc",
     "chat_once",
+    "backfill_codex_inference_config",
+    "_seed_codex_inference_config",
 ]

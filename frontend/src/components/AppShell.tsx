@@ -60,6 +60,16 @@ function writeLastModuleRoute(moduleBase: string, route: string): void {
   }
 }
 
+function NavAgentIcon({ src, compact = false }: { src: string; compact?: boolean }) {
+  return (
+    <img
+      src={src}
+      alt=""
+      className={cn("object-contain", compact ? "h-6 w-6" : "h-7 w-7")}
+    />
+  );
+}
+
 const NAV: NavGroup[] = [
   {
     titleKey: "nav.groupOrchestration",
@@ -72,10 +82,10 @@ const NAV: NavGroup[] = [
   {
     titleKey: "nav.groupAgents",
     items: [
-      { to: "/chat", labelKey: "nav.chat", icon: <img src="/agent-icons/openclaw.png" alt="" className="h-8 w-8 object-contain" /> },
-      { to: "/hermes", labelKey: "nav.hermes", icon: <img src="/agent-icons/hermes.png" alt="" className="h-8 w-8 object-contain" /> },
-      { to: "/claude", labelKey: "nav.claude", icon: <img src="/agent-icons/claude.png" alt="" className="h-8 w-8 object-contain" /> },
-      { to: "/codex", labelKey: "nav.codex", icon: <img src="/agent-icons/codex.png" alt="" className="h-8 w-8 object-contain" /> },
+      { to: "/chat", labelKey: "nav.chat", icon: <NavAgentIcon src="/agent-icons/openclaw.png" /> },
+      { to: "/hermes", labelKey: "nav.hermes", icon: <NavAgentIcon src="/agent-icons/hermes.png" /> },
+      { to: "/claude", labelKey: "nav.claude", icon: <NavAgentIcon src="/agent-icons/claude.png" compact /> },
+      { to: "/codex", labelKey: "nav.codex", icon: <NavAgentIcon src="/agent-icons/codex.png" compact /> },
     ],
   },
   // ── Settings group temporarily hidden (Profile module).
@@ -202,11 +212,13 @@ function Sidebar({
     <aside className="w-56 shrink-0 border-r border-ink-200 bg-white flex flex-col">
       <div className="px-5 py-5 border-b border-ink-100">
         <div className="flex items-center gap-2">
-          <img
-            src="/logo.png"
-            alt="ClawsomeFlow"
-            className="h-12 w-12 shrink-0 animate-pulse-glow"
-          />
+          <span className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-black animate-pulse-glow">
+            <img
+              src="/logo.png"
+              alt="ClawsomeFlow"
+              className="h-9 w-9 object-contain"
+            />
+          </span>
           <div>
             <div className="text-[15px] uppercase tracking-wide text-ink-500 font-semibold">
               {t("shell.sidebarTopLabel")}

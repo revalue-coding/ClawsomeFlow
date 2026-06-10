@@ -409,19 +409,17 @@ def check_hermes() -> Status:
             detail="`hermes` CLI not found — required only if you use Hermes agents.",
             install_hint=_hint_for("hermes"),
         )
+    # Presence on PATH == usable. The version string is best-effort only:
+    # `hermes --version` runs a synchronous update-check (a git fetch that can
+    # take well over the probe timeout on a stale checkout), so gating
+    # availability on it made a perfectly usable binary look "unusable" and the
+    # UI report "Hermes 不可用". Probe for a version but never fail on it.
     out = (
         _run([hermes_bin, "--version"])
         or _run([hermes_bin, "version"])
-        or _run([hermes_bin, "-v"])
     )
-    if out is None:
-        return Status(
-            name="hermes", ok=False, found_version=None,
-            detail=f"`hermes` executable is unusable: {hermes_bin}",
-            install_hint=_hint_for("hermes"),
-        )
     return Status(
-        name="hermes", ok=True, found_version=out,
+        name="hermes", ok=True, found_version=out or "hermes available",
         detail="", install_hint=_hint_for("hermes"),
     )
 

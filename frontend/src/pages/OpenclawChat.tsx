@@ -38,7 +38,9 @@ import {
   Modal,
 } from "@/components/ui";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
-import { ChatIcon, DesktopIcon, EditIcon, SettingsIcon, StoreIcon } from "@/components/icons";
+import { AgentCardAvatar } from "@/components/AgentCardAvatar";
+import { DesktopIcon, EditIcon, SettingsIcon, StoreIcon } from "@/components/icons";
+import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
   clearChatHistory,
@@ -1200,6 +1202,16 @@ function AgentQuickActions() {
 }
 
 
+function agentCardShowsIdLine(agent: { id: string; name: string }): boolean {
+  const name = agent.name.trim();
+  return name.length > 0 && name !== agent.id;
+}
+
+function agentCardTitle(agent: { id: string; name: string }): string {
+  const name = agent.name.trim();
+  return agentCardShowsIdLine(agent) ? name : agent.id;
+}
+
 function ChatPicker() {
   const { t } = useTranslation();
   const [items, setItems] = useState<OpenclawAgentSummary[] | null>(null);
@@ -1341,7 +1353,7 @@ function ChatPicker() {
       {!items && !error && <Loading />}
       {items && items.length === 0 && (
         <EmptyState
-          icon={<ChatIcon className="h-10 w-10" />}
+          icon={<AgentCardAvatar size="empty" className="mb-0" />}
           action={
             <div className="flex flex-col items-center gap-2">
               <div className="flex items-center gap-2">
@@ -1387,13 +1399,11 @@ function ChatPicker() {
                     to={`/chat/${a.id}`}
                     className="group card p-5 hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)] transition-all"
                   >
-                    <div className="mb-3 inline-flex h-14 w-14 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 text-brand-500 shadow-[0_0_18px_-8px_theme(colors.brand.400)] transition-shadow group-hover:shadow-[0_0_22px_-6px_theme(colors.brand.400)]">
-                      <ChatIcon className="h-9 w-9" />
-                    </div>
-                    <div className="font-semibold text-ink-900">{a.name}</div>
-                    <div className="text-xs text-ink-500 font-mono mt-0.5">
-                      {a.id}
-                    </div>
+                    <AgentCardAvatar />
+                    <div className="font-semibold text-ink-900">{agentCardTitle(a)}</div>
+                    {agentCardShowsIdLine(a) && (
+                      <div className="mt-0.5 font-mono text-xs text-ink-500">{a.id}</div>
+                    )}
                     {a.description && (
                       <div className="text-xs text-ink-500 mt-2 line-clamp-3">
                         {a.description}
@@ -1809,9 +1819,7 @@ function ChatRoom({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold text-ink-900 flex items-center gap-3">
-            <span className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 text-brand-500 shadow-[0_0_18px_-8px_theme(colors.brand.400)]">
-              <ChatIcon className="h-7 w-7" />
-            </span>
+            <AgentCardAvatar size="header" />
             <span className="truncate">{agent.name}</span>
             <button
               type="button"
@@ -1915,10 +1923,11 @@ function ChatRoom({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                if (!streaming) (e.currentTarget.form as HTMLFormElement).requestSubmit();
-              }
+              handleChatTextareaEnterKey(e, () => {
+                if (!streaming) {
+                  (e.currentTarget.form as HTMLFormElement).requestSubmit();
+                }
+              });
             }}
             disabled={streaming}
           />

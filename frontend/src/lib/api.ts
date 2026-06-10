@@ -1059,10 +1059,10 @@ export const api = {
     request<{ items: HermesAgentSummary[] }>("GET", "/api/hermes/agents"),
   getHermesAgent: (id: string) =>
     request<HermesAgentDetail>("GET", `/api/hermes/agents/${id}`),
-  getHermesRuntimeStatus: () =>
+  getHermesRuntimeStatus: (mode: "fast" | "full" = "full") =>
     request<{ running: boolean; reason: string }>(
       "GET",
-      "/api/hermes/agents/runtime/status",
+      `/api/hermes/agents/runtime/status?mode=${mode}`,
       undefined,
       { cache: "no-store" },
     ),
@@ -1070,6 +1070,8 @@ export const api = {
     payload: { id?: string; name?: string; responsibility?: string; teamId?: string },
     init?: RequestInit,
   ) => request<HermesAgentDetail>("POST", "/api/hermes/agents", payload, init),
+  cancelHermesAgentCreate: (id: string) =>
+    request<void>("POST", `/api/hermes/agents/${id}/cancel-create`),
   patchHermesAgent: (
     id: string,
     payload: { name?: string; description?: string; teamId?: string },
@@ -1155,9 +1157,11 @@ export const api = {
       { cache: "no-store" },
     ),
   createManagedAgent: (
-    payload: { kind: ManagedKind; id?: string; name: string; responsibility: string; teamId?: string },
+    payload: { kind: ManagedKind; id?: string; name?: string; responsibility?: string; teamId?: string },
     init?: RequestInit,
   ) => request<ManagedAgentDetail>("POST", "/api/managed/agents", payload, init),
+  cancelManagedAgentCreate: (id: string) =>
+    request<void>("POST", `/api/managed/agents/${id}/cancel-create`),
   patchManagedAgent: (
     id: string,
     payload: { name?: string; description?: string; teamId?: string },

@@ -354,6 +354,10 @@ def _provision_managed_agents_for_existing_flows(config: Config) -> None:
                         continue
                     home = managed_runtime.managed_home(kind, aid)
                     home.mkdir(parents=True, exist_ok=True)
+                    if kind == "codex":
+                        from app.services.managed_agents import _seed_codex_inference_config
+
+                        _seed_codex_inference_config(home)
                     profile = managed_runtime.ensure_profile(kind, aid)
                     try:
                         storage.managed_create(ManagedAgent(
@@ -495,6 +499,19 @@ def run_upgrade(
     except Exception as exc:  # pragma: no cover - defensive; never block upgrade
         report.errors.append(f"secrets init: {exc}")
         logger.exception("upgrade_secrets_init_failed", error=str(exc))
+
+    # 0b. Managed Codex agents use an isolated CODEX_HOME; seed operator-level
+    # provider/auth config so chat/exec does not fall back to unauthenticated
+    # OpenAI (401). Idempotent + best-effort.
+    try:
+        from app.services.managed_agents import backfill_codex_inference_config
+
+        seeded = backfill_codex_inference_config(config=cfg)
+        if seeded:
+            logger.info("upgrade_codex_inference_config_seeded", agents=seeded)
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"codex inference config backfill: {exc}")
+        logger.warning("upgrade_codex_inference_backfill_failed", error=str(exc))
 
     # 0. Editable-source frontend build (optional).
     if include_frontend_build:

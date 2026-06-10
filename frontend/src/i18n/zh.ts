@@ -869,6 +869,8 @@ const zh = {
       teamLabel: "团队",
       submit: "创建",
       creating: "创建中…",
+      cancelCreate: "取消创建",
+      cancelling: "取消中…",
     },
     claim: {
       title: "纳管已有的 Hermes profile",
@@ -943,7 +945,7 @@ const zh = {
     openHomeFailed: "打开配置目录失败:{{message}}",
     create: {
       title: "创建 {{platform}} Agent",
-      idHint: "仅限小写字母/数字/'-'。留空则根据名称自动生成。",
+      idHint: "仅限小写字母/数字/'-'，将直接作为 Agent profile id。",
     },
     remove: {
       title: "移除 Agent",

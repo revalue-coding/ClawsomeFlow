@@ -30,7 +30,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Path
+from fastapi import APIRouter, Body, Depends, Path, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
@@ -228,6 +228,7 @@ def _map_service_error(exc: svc.HermesAgentError) -> ApiError:
         svc.AgentInUse: ("AGENT_IN_USE", 409),
         svc.HermesUnavailable: ("HERMES_UNAVAILABLE", 503),
         svc.ProfileOpFailed: ("HERMES_CLI_FAILED", 502),
+        svc.AgentCreateCancelled: ("AGENT_CREATE_CANCELLED", 409),
     }
     code, status = mapping.get(type(exc), ("HERMES_ERROR", 500))
     return ApiError(code, str(exc), status_code=status, details=exc.details)
@@ -262,9 +263,15 @@ def list_agents(user: UserDep, storage: StorageDep) -> HermesAgentListResponse:
 
 
 @router.get("/runtime/status", response_model=HermesRuntimeStatusResponse)
-def runtime_status(user: UserDep) -> HermesRuntimeStatusResponse:
+def runtime_status(
+    user: UserDep,
+    mode: Annotated[str, Query()] = svc.PROBE_FULL,
+) -> HermesRuntimeStatusResponse:
     del user
-    running, reason = svc.probe_runtime_running()
+    # ``mode=fast`` is presence-only (instant) so the WebUI can render right
+    # away; the default ``full`` actually executes the CLI to confirm it runs.
+    level = svc.PROBE_FAST if mode == svc.PROBE_FAST else svc.PROBE_FULL
+    running, reason = svc.probe_runtime_running(level=level)
     return HermesRuntimeStatusResponse(running=running, reason=reason)
 
 
@@ -319,6 +326,26 @@ async def create_agent(
         raise _map_service_error(exc) from exc
     team_names = _team_name_map(storage=storage, user=user)
     return _to_detail(row, team_name=team_names.get(row.team_id, ""))
+
+
+@router.post("/{agent_id}/cancel-create", status_code=202)
+async def cancel_create(
+    agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,
+) -> dict[str, bool]:
+    """Cancel an in-flight create (kills the bootstrap + rolls back artifacts).
+
+    No ownership check: the row may not exist yet mid-create, and the id is
+    user-chosen, so anyone who knows it could only ever *undo* a creation."""
+    del user
+    loop = asyncio.get_running_loop()
+    try:
+        killed = await loop.run_in_executor(
+            _CHAT_EXECUTOR,
+            lambda: svc.cancel_create_agent(agent_id, storage=storage),
+        )
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return {"killed": killed}
 
 
 @router.get("/{agent_id}", response_model=HermesAgentDetail)

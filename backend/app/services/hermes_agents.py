@@ -18,13 +18,13 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from app.cli.deps import check_hermes
 from app.config import Config, load_config
 from app.logging_setup import get_logger
 from app.models import Flow, HermesAgent
@@ -96,6 +96,10 @@ class AgentInUse(HermesAgentError):
 
 class ProfileOpFailed(HermesAgentError):
     """A ``hermes`` CLI operation failed."""
+
+
+class AgentCreateCancelled(HermesAgentError):
+    """Creation was cancelled by the user before it finished."""
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -180,12 +184,45 @@ def _validate_agent_id(agent_id: str) -> str:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def probe_runtime_running(*, config: Config | None = None) -> tuple[bool, str]:
-    """Hermes has no long-lived daemon in our usage; "running" == CLI usable."""
-    status = check_hermes()
-    if status.ok:
-        return True, status.found_version or "hermes available"
-    return False, status.detail or "hermes CLI not available"
+PROBE_FAST = "fast"
+PROBE_FULL = "full"
+# Generous timeout for the FULL probe: `hermes --version` runs a synchronous
+# update-check (git) that can take several seconds on the first (cold-cache)
+# call, so the 5s default would false-negative a perfectly usable binary. The
+# result is cached by hermes for 6h, so later probes are instant.
+_FULL_PROBE_TIMEOUT_SEC = 30.0
+
+
+def probe_runtime_running(
+    *, config: Config | None = None, level: str = PROBE_FULL
+) -> tuple[bool, str]:
+    """Hermes has no long-lived daemon in our usage; "running" == CLI usable.
+
+    Two levels so the UI can show fast and verify in the background:
+
+    * ``fast`` — presence on PATH only (``shutil.which``); microseconds, no
+      subprocess. Lets the WebUI render immediately.
+    * ``full`` — actually execute ``hermes --version`` (generous timeout) to
+      confirm the binary really runs, catching a genuinely broken install. A
+      slow update-check never false-negatives here thanks to the long timeout.
+    """
+    exe = hermes_executable()
+    if exe is None:
+        return False, "hermes CLI not available"
+    if level == PROBE_FAST:
+        return True, exe
+    for ver_args in (["--version"], ["version"]):
+        try:
+            rc, out, _err = _run_hermes(ver_args, timeout=_FULL_PROBE_TIMEOUT_SEC)
+        except HermesAgentError:
+            continue
+        if rc == 0:
+            first = next(
+                (ln for ln in _strip_ansi(out).splitlines() if ln.strip()), ""
+            )
+            return True, first or "hermes available"
+    # Present on PATH but no version command ran cleanly → broken install.
+    return False, "hermes CLI present but failed to run (`hermes --version`)"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -193,11 +230,7 @@ def probe_runtime_running(*, config: Config | None = None) -> tuple[bool, str]:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def list_profile_names() -> list[str]:
-    """Parse ``hermes profile list`` → profile names (default excluded)."""
-    rc, out, _err = _run_hermes(["profile", "list"])
-    if rc != 0:
-        return []
+def _parse_profile_list(out: str) -> list[str]:
     names: list[str] = []
     for raw in out.splitlines():
         line = _strip_ansi(raw).strip()
@@ -213,6 +246,26 @@ def list_profile_names() -> list[str]:
         if first not in names:
             names.append(first)
     return names
+
+
+def list_profile_names_checked() -> tuple[bool, list[str]]:
+    """``(query_ok, names)`` from ``hermes profile list``.
+
+    ``query_ok=False`` means hermes could not be asked (CLI missing or the
+    command failed) — callers MUST NOT treat the empty list as "no profiles
+    exist", or a transient failure would wrongly prune every managed row."""
+    try:
+        rc, out, _err = _run_hermes(["profile", "list"])
+    except HermesAgentError:
+        return False, []
+    if rc != 0:
+        return False, []
+    return True, _parse_profile_list(out)
+
+
+def list_profile_names() -> list[str]:
+    """Parse ``hermes profile list`` → profile names (default excluded)."""
+    return list_profile_names_checked()[1]
 
 
 def read_profile_description(agent_id: str) -> str:
@@ -255,6 +308,146 @@ class CommitInput:
     skip_bootstrap: bool = False
 
 
+# Inference config files a fresh profile needs to be usable. A brand-new
+# `hermes profile create` leaves these absent, so the profile has NO model /
+# API keys — every `hermes -p <id> …` call (bootstrap, chat, task dispatch)
+# then dies with "No inference provider configured" and SOUL.md is never
+# written. We seed them from the user's active/root profile so managed agents
+# inherit the host's model + keys (config.yaml + .env only — never SOUL.md or
+# memories, to avoid leaking the operator's personal identity/memory).
+_INFERENCE_CONFIG_FILES = ("config.yaml", ".env")
+
+
+def _active_profile_root() -> Path:
+    """The profile `hermes` uses when invoked without ``-p`` — the source we
+    copy inference config from. Honours ``~/.hermes/active_profile`` (set by
+    ``hermes profile use``), falling back to the root profile ``~/.hermes``."""
+    root = hermes_home()
+    try:
+        active = (root / "active_profile").read_text().strip()
+    except OSError:
+        active = ""
+    if active and active != "default":
+        candidate = root / "profiles" / active
+        if candidate.is_dir():
+            return candidate
+    return root
+
+
+def _seed_profile_inference_config(agent_id: str) -> None:
+    """Copy model + API-key config into a freshly created profile (idempotent;
+    never clobbers existing files). Best-effort: failures are logged, not
+    raised — the caller surfaces a clearer error if bootstrap then fails."""
+    source = _active_profile_root()
+    dest = hermes_profile_root(agent_id)
+    if source.resolve() == dest.resolve():
+        return
+    for name in _INFERENCE_CONFIG_FILES:
+        src = source / name
+        dst = dest / name
+        if not src.is_file() or dst.exists():
+            continue
+        try:
+            shutil.copy2(src, dst)
+            if name == ".env":  # keys file — keep it private
+                dst.chmod(0o600)
+        except OSError as exc:
+            logger.warning(
+                "hermes_seed_config_failed", agent_id=agent_id, file=name, error=str(exc)
+            )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Create cancellation (the bootstrap `hermes -z` can run up to 10 min; the
+# UI must be able to abort it). We track the live bootstrap subprocess per
+# agent id so a concurrent cancel request can kill it, and a flag so the
+# create thread rolls back instead of persisting a half-built agent.
+# ──────────────────────────────────────────────────────────────────────
+
+_CREATE_LOCK = threading.Lock()
+_BOOTSTRAP_PROCS: dict[str, subprocess.Popen] = {}
+_CANCELLED_CREATES: set[str] = set()
+
+
+def _is_create_cancelled(aid: str) -> bool:
+    with _CREATE_LOCK:
+        return aid in _CANCELLED_CREATES
+
+
+def _run_bootstrap(aid: str, args: list[str], *, cwd: str, timeout: float) -> int:
+    """Run the bootstrap ``hermes`` call as a killable subprocess registered
+    under *aid* so :func:`cancel_create_agent` can terminate it mid-flight.
+    Returns the exit code (non-zero if killed/cancelled)."""
+    exe = hermes_executable()
+    if exe is None:
+        raise HermesUnavailable("`hermes` CLI not found on PATH")
+    proc = subprocess.Popen(  # noqa: S603 — args are constructed, not shell
+        [exe, *args],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=os.environ.copy(),
+    )
+    with _CREATE_LOCK:
+        _BOOTSTRAP_PROCS[aid] = proc
+    try:
+        _out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise ProfileOpFailed(
+            f"hermes bootstrap for {aid!r} timed out after {timeout}s"
+        ) from None
+    finally:
+        with _CREATE_LOCK:
+            if _BOOTSTRAP_PROCS.get(aid) is proc:
+                _BOOTSTRAP_PROCS.pop(aid, None)
+    if proc.returncode != 0 and err:
+        logger.warning(
+            "hermes_bootstrap_failed", agent_id=aid, error=_strip_ansi(err).strip()[:500]
+        )
+    return proc.returncode
+
+
+def _rollback_create(aid: str, *, storage: StorageBackend | None = None) -> None:
+    """Best-effort removal of everything a (cancelled/failed) create produced:
+    the DB row (if persisted) and the Hermes profile."""
+    if storage is not None:
+        try:
+            if storage.hermes_get(aid) is not None:
+                storage.hermes_delete(aid)
+        except Exception as exc:  # noqa: BLE001 — cleanup must not raise
+            logger.warning("hermes_rollback_row_failed", agent_id=aid, error=str(exc))
+    try:
+        _run_hermes(["profile", "delete", aid, "-y"])
+    except HermesAgentError as exc:
+        logger.warning("hermes_rollback_profile_failed", agent_id=aid, error=str(exc))
+
+
+def cancel_create_agent(
+    agent_id: str,
+    *,
+    storage: StorageBackend | None = None,
+    config: Config | None = None,
+) -> bool:
+    """Request cancellation of an in-flight create and roll back its artifacts.
+
+    Idempotent and safe to call whether the create is mid-bootstrap, already
+    finished, or never started. Returns True if a live bootstrap was killed."""
+    aid = _validate_agent_id(agent_id)
+    storage = storage or get_storage(config or load_config())
+    with _CREATE_LOCK:
+        _CANCELLED_CREATES.add(aid)
+        proc = _BOOTSTRAP_PROCS.get(aid)
+    killed = False
+    if proc is not None:
+        proc.kill()
+        killed = True
+    _rollback_create(aid, storage=storage)
+    return killed
+
+
 def _bootstrap_prompt(name: str, responsibility: str) -> str:
     return (
         f"You are a newly created Hermes agent named '{name}'. "
@@ -285,6 +478,18 @@ def commit_agent(
             f"a Hermes profile named {aid!r} already exists; claim it instead",
         )
 
+    # Fresh attempt: clear any stale cancel flag from a previous create of the
+    # same id (the user may retry an id whose earlier create they cancelled).
+    with _CREATE_LOCK:
+        _CANCELLED_CREATES.discard(aid)
+
+    def _abort_if_cancelled() -> None:
+        if _is_create_cancelled(aid):
+            _rollback_create(aid, storage=storage)
+            with _CREATE_LOCK:
+                _CANCELLED_CREATES.discard(aid)
+            raise AgentCreateCancelled(f"creation of {aid!r} cancelled by user")
+
     description = (cmd.description or "").strip()
     create_args = ["profile", "create", aid]
     if description:
@@ -297,22 +502,26 @@ def commit_agent(
 
     profile_root = str(hermes_profile_root(aid))
 
-    # Bootstrap self-definition (best-effort: keep the agent even if it fails).
+    # Seed model + API keys so the new profile can actually run (bootstrap +
+    # later chat/task dispatch all go through `hermes -p <id>` and need them).
+    _seed_profile_inference_config(aid)
+
+    _abort_if_cancelled()  # cancelled during profile create → roll back now
+
+    # Bootstrap self-definition (best-effort: keep the agent even if it fails,
+    # but honour a cancel that lands while the up-to-10-min `hermes -z` runs).
     if not cmd.skip_bootstrap:
         try:
-            b_rc, _b_out, b_err = _hermes_profile(
+            _run_bootstrap(
                 aid,
-                ["--yolo", "-z", _bootstrap_prompt(cmd.name, description)],
+                ["-p", aid, "--yolo", "-z", _bootstrap_prompt(cmd.name, description)],
                 cwd=profile_root,
                 timeout=_BOOTSTRAP_TIMEOUT_SEC,
             )
-            if b_rc != 0:
-                logger.warning(
-                    "hermes_bootstrap_failed", agent_id=aid,
-                    error=_strip_ansi(b_err).strip()[:500],
-                )
         except HermesAgentError as exc:
             logger.warning("hermes_bootstrap_error", agent_id=aid, error=str(exc))
+
+    _abort_if_cancelled()  # cancelled during bootstrap → roll back, don't persist
 
     row = HermesAgent(
         id=aid,
@@ -395,30 +604,42 @@ def get_agent(
     return row
 
 
-def _adopt_unmanaged_profiles(
+def _reconcile_managed_profiles(
     *,
     user: str,
     storage: StorageBackend,
 ) -> None:
-    """Bring any on-disk Hermes profile not yet in the DB under management.
+    """Make the managed-agent DB rows mirror the Hermes profiles that actually
+    exist — Hermes is the source of truth:
 
-    Every Hermes profile is treated the same regardless of where it was created
-    — there is no separate "claim" step. Best-effort and idempotent: profiles
-    already managed are skipped, and individual failures (invalid id, races,
-    CLI errors) never abort the listing.
+    * **adopt** any on-disk profile not yet in the DB (no manual "claim"); and
+    * **prune** any managed row whose profile is gone (deleted via the CLI, by
+      the agent itself, or externally) so the platform never shows a ghost.
+
+    The DB row only carries ClawsomeFlow-specific metadata (team, owner, display
+    name, nl_prompt) layered on top of the profile — it is not a second source
+    of truth. Best-effort and idempotent; individual failures never abort the
+    listing. Crucially, reconciliation is **skipped entirely** when Hermes can't
+    be queried, so a transient CLI failure never prunes valid rows.
     """
-    try:
-        on_disk = list_profile_names()
-    except HermesAgentError:
-        return
-    managed = {r.id for r in storage.hermes_list()}
-    for name in on_disk:
-        if name in managed:
-            continue
-        try:
-            claim_profile(profile_name=name, user=user, storage=storage)
-        except HermesAgentError:
-            continue
+    query_ok, on_disk = list_profile_names_checked()
+    if not query_ok:
+        return  # hermes unavailable — trust the DB as-is, do not mutate
+    on_disk_set = set(on_disk)
+    managed = {r.id: r for r in storage.hermes_list(owner_user=user)}
+    for name in on_disk:  # adopt newcomers
+        if name not in managed:
+            try:
+                claim_profile(profile_name=name, user=user, storage=storage)
+            except HermesAgentError:
+                continue
+    for aid in managed:  # prune ghosts whose profile no longer exists
+        if aid not in on_disk_set:
+            try:
+                storage.hermes_delete(aid)
+                logger.info("hermes_agent_pruned_orphan", agent_id=aid)
+            except Exception as exc:  # noqa: BLE001 — cleanup must not abort list
+                logger.warning("hermes_prune_failed", agent_id=aid, error=str(exc))
 
 
 def list_agents(
@@ -429,10 +650,10 @@ def list_agents(
     adopt: bool = True,
 ) -> list[HermesAgent]:
     storage = storage or get_storage(config or load_config())
-    # Auto-adopt every existing profile so the management page loads them all
-    # uniformly (no manual "claim"). Only when we have a concrete owner user.
+    # Reconcile against live Hermes profiles so the list always reflects what
+    # actually exists. Only when we have a concrete owner user.
     if adopt and user:
-        _adopt_unmanaged_profiles(user=user, storage=storage)
+        _reconcile_managed_profiles(user=user, storage=storage)
     return storage.hermes_list(owner_user=user)
 
 
@@ -910,11 +1131,16 @@ __all__ = [
     "AgentNotFound",
     "AgentInUse",
     "ProfileOpFailed",
+    "AgentCreateCancelled",
+    "cancel_create_agent",
+    "PROBE_FAST",
+    "PROBE_FULL",
     "hermes_home",
     "hermes_profile_root",
     "hermes_executable",
     "probe_runtime_running",
     "list_profile_names",
+    "list_profile_names_checked",
     "commit_agent",
     "claim_profile",
     "list_claimable_profiles",

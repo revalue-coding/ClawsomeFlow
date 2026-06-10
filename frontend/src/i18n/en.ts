@@ -882,6 +882,8 @@ const en = {
       teamLabel: "Team",
       submit: "Create",
       creating: "Creating…",
+      cancelCreate: "Cancel creation",
+      cancelling: "Cancelling…",
     },
     claim: {
       title: "Claim an existing Hermes profile",
@@ -956,7 +958,7 @@ const en = {
     openHomeFailed: "Failed to open the config home: {{message}}",
     create: {
       title: "Create a {{platform}} agent",
-      idHint: "Lowercase letters/numbers/'-' only. Auto-derived from the name if blank.",
+      idHint: "Lowercase letters/numbers/'-' only. Used directly as the agent profile id.",
     },
     remove: {
       title: "Remove agent",

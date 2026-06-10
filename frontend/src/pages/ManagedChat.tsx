@@ -6,11 +6,14 @@
  * "open config home" opens the config dir.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { Card, EmptyState, ErrorBox, Loading, Modal } from "@/components/ui";
-import { AssistantIcon } from "@/components/icons";
+import { AgentCardAvatar } from "@/components/AgentCardAvatar";
+import { ChatBubble } from "@/components/ChatBubble";
+import { DesktopIcon, SettingsIcon } from "@/components/icons";
+import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
   api,
@@ -38,17 +41,20 @@ function isRemoteBrowser(): boolean {
   return h !== "localhost" && h !== "127.0.0.1" && h !== "::1" && h !== "";
 }
 
-function deriveId(name: string): string {
-  return Array.from(name.toLowerCase())
-    .filter((c) => /[a-z0-9-]/.test(c))
-    .join("")
-    .replace(/^-+|-+$/g, "");
-}
-
 function errText(e: unknown): string {
   if (e instanceof ApiError) return e.message;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+function agentCardShowsIdLine(agent: { id: string; name: string }): boolean {
+  const name = agent.name.trim();
+  return name.length > 0 && name !== agent.id;
+}
+
+function agentCardTitle(agent: { id: string; name: string }): string {
+  const name = agent.name.trim();
+  return agentCardShowsIdLine(agent) ? name : agent.id;
 }
 
 export function ManagedChat({ kind }: { kind: ManagedKind }) {
@@ -166,25 +172,31 @@ function Picker({ kind }: { kind: ManagedKind }) {
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {list.map((a) => (
-                  <div
+                  <Link
                     key={a.id}
-                    className="group card p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)]"
+                    to={`${basePath(kind)}/${a.id}`}
+                    className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)]"
                   >
                     <div className="flex items-start justify-between">
-                      <div className="mb-3 inline-flex h-14 w-14 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 text-brand-500">
-                        <AssistantIcon className="h-9 w-9" />
-                      </div>
-                      <button type="button" className="text-xs text-rose-500 hover:text-rose-700" onClick={() => setRemoveTarget(a)}>
+                      <AgentCardAvatar />
+                      <button
+                        type="button"
+                        className="text-xs text-rose-500 hover:text-rose-700"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setRemoveTarget(a);
+                        }}
+                      >
                         {t("hermes.removeAgent")}
                       </button>
                     </div>
-                    <div className="font-semibold text-ink-900">{a.name}</div>
-                    <div className="mt-0.5 font-mono text-xs text-ink-500">{a.id}</div>
+                    <div className="font-semibold text-ink-900">{agentCardTitle(a)}</div>
+                    {agentCardShowsIdLine(a) && (
+                      <div className="mt-0.5 font-mono text-xs text-ink-500">{a.id}</div>
+                    )}
                     {a.description && <p className="mt-2 line-clamp-3 text-xs text-ink-500">{a.description}</p>}
-                    <button type="button" className="btn-primary mt-3" onClick={() => navigate(`${basePath(kind)}/${a.id}`)}>
-                      {t("hermes.open")}
-                    </button>
-                  </div>
+                  </Link>
                 ))}
               </div>
             </div>
@@ -276,22 +288,43 @@ async function resolveTeamId(choice: string, newTeamName: string): Promise<strin
 
 function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; teams: OpenclawTeam[]; onClose: () => void; onDone: (c: { id: string }) => void }) {
   const { t } = useTranslation();
-  const [name, setName] = useState("");
+  const [profileId, setProfileId] = useState("");
   const [responsibility, setResponsibility] = useState("");
-  const [id, setId] = useState("");
   const [teamChoice, setTeamChoice] = useState("");
   const [newTeamName, setNewTeamName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
-  const effectiveId = id.trim() || deriveId(name);
+  const abortRef = useRef<AbortController | null>(null);
 
   const submit = async () => {
     setBusy(true); setError("");
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
       const teamId = await resolveTeamId(teamChoice, newTeamName);
-      const created = await api.createManagedAgent({ kind, id: id.trim() || undefined, name: name.trim(), responsibility: responsibility.trim(), teamId });
+      const created = await api.createManagedAgent({
+        kind,
+        id: profileId.trim(),
+        responsibility: responsibility.trim(),
+        teamId,
+      }, { signal: ac.signal });
       onDone(created);
-    } catch (e) { setError(errText(e)); setBusy(false); }
+    } catch (e) {
+      if (ac.signal.aborted) return; // cancelled — handled by cancelCreate
+      setError(errText(e)); setBusy(false);
+    }
+  };
+
+  const cancelCreate = async () => {
+    setCancelling(true);
+    abortRef.current?.abort();
+    try {
+      await api.cancelManagedAgentCreate(profileId.trim());
+    } catch {
+      /* best-effort — closing anyway */
+    }
+    onClose();
   };
 
   const teamReady = teamChoice !== CREATE_TEAM_SENTINEL || newTeamName.trim().length > 0;
@@ -301,25 +334,37 @@ function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; team
       <div className="space-y-3">
         {error && <ErrorBox>{error}</ErrorBox>}
         <div>
-          <label className="label">{t("hermes.create.name")}</label>
-          <input className="input" value={name} placeholder={t("hermes.create.namePlaceholder")} onChange={(e) => setName(e.target.value)} />
+          <label className="label">{t("hermes.create.idLabel")}</label>
+          <input
+            className="input font-mono"
+            value={profileId}
+            placeholder={t("hermes.create.idPlaceholder")}
+            onChange={(e) => setProfileId(e.target.value)}
+          />
+          <div className="mt-1 text-xs text-ink-400">{t("managed.create.idHint")}</div>
         </div>
         <div>
           <label className="label">{t("hermes.create.responsibility")}</label>
           <textarea className="textarea h-24" value={responsibility} placeholder={t("hermes.create.responsibilityPlaceholder")} onChange={(e) => setResponsibility(e.target.value)} />
         </div>
         <div>
-          <label className="label">{t("hermes.create.idLabel")}</label>
-          <input className="input font-mono" value={id} placeholder={effectiveId} onChange={(e) => setId(e.target.value)} />
-          <div className="mt-1 text-xs text-ink-400">{t("managed.create.idHint")}</div>
-        </div>
-        <div>
           <label className="label">{t("hermes.create.teamLabel")}</label>
           <TeamSelect teams={teams} value={teamChoice} onChange={setTeamChoice} newTeamName={newTeamName} onNewTeamNameChange={setNewTeamName} />
         </div>
         <div className="flex justify-end gap-2 pt-2">
-          <button type="button" className="btn-outline" onClick={onClose} disabled={busy}>{t("common.cancel")}</button>
-          <button type="button" className="btn-primary" onClick={() => void submit()} disabled={busy || !name.trim() || !effectiveId || !teamReady}>
+          <button
+            type="button"
+            className="btn-outline"
+            onClick={busy ? () => void cancelCreate() : onClose}
+            disabled={cancelling}
+          >
+            {busy
+              ? cancelling
+                ? t("hermes.create.cancelling")
+                : t("hermes.create.cancelCreate")
+              : t("common.cancel")}
+          </button>
+          <button type="button" className="btn-primary" onClick={() => void submit()} disabled={busy || !profileId.trim() || !teamReady}>
             {busy ? t("hermes.create.creating") : t("hermes.create.submit")}
           </button>
         </div>
@@ -365,6 +410,7 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [name, setName] = useState(agentId);
+  const [teamName, setTeamName] = useState("");
   const [configHome, setConfigHome] = useState("");
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
@@ -375,6 +421,7 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
     else localStorage.removeItem(`managed-workdir-${agentId}`);
   };
   const [sending, setSending] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [opening, setOpening] = useState(false);
@@ -384,7 +431,9 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
     void (async () => {
       try {
         const [detail, hist] = await Promise.all([api.getManagedAgent(agentId), api.getManagedAgentChatHistory(agentId)]);
-        setName(detail.name); setConfigHome(detail.configHome);
+        setName(detail.name);
+        setTeamName(detail.teamName);
+        setConfigHome(detail.configHome);
         setMessages(hist.messages.map((m: ChatHistoryMessage) => ({ role: m.role, content: m.content })));
       } catch (e) { setError(errText(e)); }
     })();
@@ -450,53 +499,138 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
   };
 
   const reset = async () => {
-    try { await api.resetManagedAgentChat(agentId); setMessages([]); } catch (e) { setError(errText(e)); }
+    if (sending || resetting) return;
+    setResetting(true);
+    setError("");
+    try {
+      await api.resetManagedAgentChat(agentId);
+      setMessages([]);
+      setInput("");
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setResetting(false);
+    }
   };
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-4rem)] max-w-4xl flex-col py-4 px-4">
-      <div className="mb-3 flex items-center justify-between border-b border-ink-100 pb-3">
-        <div className="flex items-center gap-3">
-          <button type="button" className="text-sm text-ink-500 hover:text-ink-800" onClick={() => navigate(basePath(kind))}>← {t("hermes.back")}</button>
-          <h2 className="text-lg font-semibold text-ink-900">{name}</h2>
-          <code className="text-xs text-ink-400">{agentId}</code>
+    <div className="flex h-[calc(100vh-6rem)] min-h-0 flex-col gap-5 overflow-hidden">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="flex items-center gap-3 text-xl font-semibold text-ink-900">
+            <AgentCardAvatar size="header" />
+            <span className="truncate">{name}</span>
+            <button
+              type="button"
+              className="btn-outline inline-flex h-8 items-center justify-center gap-1.5 px-2.5 py-0 text-xs font-medium"
+              onClick={() => void openHome()}
+              disabled={opening || !configHome}
+              title={t("managed.openHome")}
+            >
+              <DesktopIcon className="h-3.5 w-3.5" />
+              {opening ? t("hermes.opening") : t("managed.openHome")}
+            </button>
+          </h1>
+          <div className="mt-2 inline-flex items-center gap-2 text-xs text-ink-600">
+            <span>{t("chat.teamLabel")}:</span>
+            <span className="rounded-full border border-ink-200 bg-ink-50 px-2 py-0.5">
+              {teamName || t("chat.ungroupedTeam")}
+            </span>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <button type="button" className="rounded border border-ink-200 px-2.5 py-1.5 text-xs hover:bg-ink-50 disabled:opacity-50" onClick={() => void openHome()} disabled={opening || !configHome}>
-            {opening ? t("hermes.opening") : t("managed.openHome")}
+        <div className="inline-flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            className="btn-outline inline-flex h-10 items-center justify-center px-4 py-0 text-sm font-medium"
+            onClick={() => navigate(basePath(kind))}
+          >
+            {t("common.back")}
           </button>
-          <button type="button" className="rounded border border-ink-200 px-2.5 py-1.5 text-xs hover:bg-ink-50" onClick={() => setShowSettings(true)}>{t("hermes.settings")}</button>
-          <button type="button" className="rounded border border-ink-200 px-2.5 py-1.5 text-xs hover:bg-ink-50" onClick={() => void reset()}>{t("hermes.reset")}</button>
+          <button
+            type="button"
+            className="btn-outline inline-flex h-10 items-center justify-center gap-2 px-4 py-0 text-sm font-medium"
+            onClick={() => setShowSettings(true)}
+          >
+            <SettingsIcon className="h-4 w-4" />
+            {t("hermes.settings")}
+          </button>
         </div>
       </div>
 
       {error && <ErrorBox>{error}</ErrorBox>}
 
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto py-2">
-        {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "ml-auto max-w-[80%] rounded-lg bg-brand-600 px-3 py-2 text-sm text-white" : "mr-auto max-w-[80%] rounded-lg bg-ink-100 px-3 py-2 text-sm text-ink-900 whitespace-pre-wrap"}>
-            {m.content || (m.role === "assistant" && sending ? "…" : "")}
+      <Card className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
+        <div
+          ref={scrollRef}
+          className="min-h-[280px] flex-1 space-y-4 overflow-auto bg-ink-50/40 px-5 py-4"
+        >
+          {messages
+            .filter((m) => m.role !== "system")
+            .map((m, i, list) => (
+              <ChatBubble
+                key={i}
+                msg={m}
+                pending={
+                  sending &&
+                  i === list.length - 1 &&
+                  m.role === "assistant" &&
+                  !m.content
+                }
+                noTextReply={t("chat.noTextReply")}
+              />
+            ))}
+        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!sending && !resetting) void send();
+          }}
+          className="space-y-2 border-t border-ink-100 p-3"
+        >
+          <div className="flex items-center gap-2 text-xs text-ink-500">
+            <button
+              type="button"
+              className="btn-outline shrink-0 !px-2 !py-1 text-xs"
+              onClick={() => void pickWorkdir()}
+            >
+              {t("hermes.pickWorkdir")}
+            </button>
+            <input
+              className="input flex-1 font-mono text-xs"
+              value={workdir}
+              placeholder={t("hermes.workdirNeeded")}
+              onChange={(e) => updateWorkdir(e.target.value)}
+            />
           </div>
-        ))}
-      </div>
-
-      <div className="mt-2 border-t border-ink-100 pt-3">
-        <div className="mb-2 flex items-center gap-2 text-xs text-ink-500">
-          <button type="button" className="shrink-0 rounded border border-ink-200 px-2 py-1 hover:bg-ink-50" onClick={() => void pickWorkdir()}>{t("hermes.pickWorkdir")}</button>
-          <input
-            className="input flex-1 font-mono text-xs"
-            value={workdir}
-            placeholder={t("hermes.workdirNeeded")}
-            onChange={(e) => updateWorkdir(e.target.value)}
-          />
-        </div>
-        <div className="flex gap-2">
-          <textarea className="flex-1 resize-none rounded border border-ink-200 px-3 py-2 text-sm" rows={2} value={input} placeholder={t("hermes.messagePlaceholder")} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void send(); }} disabled={sending} />
-          <button type="button" className="rounded bg-brand-600 px-4 text-sm font-medium text-white disabled:opacity-50" onClick={() => void send()} disabled={sending || !input.trim()}>
-            {sending ? t("hermes.sending") : t("hermes.send")}
-          </button>
-        </div>
-      </div>
+          <div className="flex items-end gap-2">
+            <textarea
+              className="textarea h-20 flex-1 resize-none"
+              placeholder={t("chat.inputPlaceholder")}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                handleChatTextareaEnterKey(e, () => {
+                  if (!sending && !resetting) {
+                    (e.currentTarget.form as HTMLFormElement).requestSubmit();
+                  }
+                });
+              }}
+              disabled={sending || resetting}
+            />
+            <button
+              type="button"
+              className="btn-outline"
+              disabled={sending || resetting}
+              onClick={() => void reset()}
+            >
+              {resetting ? t("chat.resetting") : t("chat.reset")}
+            </button>
+            <button type="submit" className="btn-primary" disabled={sending || resetting || !input.trim()}>
+              {sending ? t("chat.sending") : t("chat.send")}
+            </button>
+          </div>
+        </form>
+      </Card>
 
       {showSettings && <SettingsModal kind={kind} agentId={agentId} onClose={() => setShowSettings(false)} />}
     </div>
