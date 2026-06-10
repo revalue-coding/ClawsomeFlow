@@ -178,7 +178,7 @@ function Picker({ kind }: { kind: ManagedKind }) {
                     className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)]"
                   >
                     <div className="flex items-start justify-between">
-                      <AgentCardAvatar />
+                      <AgentCardAvatar platform={kind} />
                       <button
                         type="button"
                         className="text-xs text-rose-500 hover:text-rose-700"
@@ -518,7 +518,7 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="flex items-center gap-3 text-xl font-semibold text-ink-900">
-            <AgentCardAvatar size="header" />
+            <AgentCardAvatar size="header" platform={kind} />
             <span className="truncate">{name}</span>
             <button
               type="button"

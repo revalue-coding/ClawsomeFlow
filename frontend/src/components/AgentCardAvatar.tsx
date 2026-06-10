@@ -1,14 +1,27 @@
 import { cn } from "@/lib/cn";
 
-const OPENCLAW_AVATAR = "/agent-icons/openclaw.png";
+export type AgentPlatform = "openclaw" | "hermes" | "claude" | "codex" | "cursor";
+
+const PLATFORM_ICONS: Record<AgentPlatform, string> = {
+  openclaw: "/agent-icons/openclaw.png",
+  hermes: "/agent-icons/hermes.png",
+  claude: "/agent-icons/claude.png",
+  codex: "/agent-icons/codex.png",
+  cursor: "/agent-icons/claude.png",
+};
 
 type AgentCardAvatarProps = {
   className?: string;
   /** Card grid uses 56px tile; chat header uses 44px. */
   size?: "card" | "header" | "empty";
+  platform?: AgentPlatform;
 };
 
-export function AgentCardAvatar({ className, size = "card" }: AgentCardAvatarProps) {
+export function AgentCardAvatar({
+  className,
+  size = "card",
+  platform = "openclaw",
+}: AgentCardAvatarProps) {
   const boxClass =
     size === "card"
       ? "mb-3 inline-flex h-14 w-14 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 shadow-[0_0_18px_-8px_theme(colors.brand.400)] transition-shadow group-hover:shadow-[0_0_22px_-6px_theme(colors.brand.400)]"
@@ -20,7 +33,11 @@ export function AgentCardAvatar({ className, size = "card" }: AgentCardAvatarPro
 
   return (
     <div className={cn(boxClass, className)}>
-      <img src={OPENCLAW_AVATAR} alt="" className={cn(imgClass, "object-contain")} />
+      <img
+        src={PLATFORM_ICONS[platform]}
+        alt=""
+        className={cn(imgClass, "object-contain")}
+      />
     </div>
   );
 }

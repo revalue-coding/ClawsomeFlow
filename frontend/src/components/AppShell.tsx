@@ -65,7 +65,7 @@ function NavAgentIcon({ src, compact = false }: { src: string; compact?: boolean
     <img
       src={src}
       alt=""
-      className={cn("object-contain", compact ? "h-6 w-6" : "h-7 w-7")}
+      className={cn("object-contain", compact ? "h-6 w-6" : "h-8 w-8")}
     />
   );
 }

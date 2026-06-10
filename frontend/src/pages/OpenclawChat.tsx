@@ -1353,7 +1353,7 @@ function ChatPicker() {
       {!items && !error && <Loading />}
       {items && items.length === 0 && (
         <EmptyState
-          icon={<AgentCardAvatar size="empty" className="mb-0" />}
+          icon={<AgentCardAvatar size="empty" className="mb-0" platform="openclaw" />}
           action={
             <div className="flex flex-col items-center gap-2">
               <div className="flex items-center gap-2">
@@ -1399,7 +1399,7 @@ function ChatPicker() {
                     to={`/chat/${a.id}`}
                     className="group card p-5 hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)] transition-all"
                   >
-                    <AgentCardAvatar />
+                    <AgentCardAvatar platform="openclaw" />
                     <div className="font-semibold text-ink-900">{agentCardTitle(a)}</div>
                     {agentCardShowsIdLine(a) && (
                       <div className="mt-0.5 font-mono text-xs text-ink-500">{a.id}</div>
@@ -1819,7 +1819,7 @@ function ChatRoom({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold text-ink-900 flex items-center gap-3">
-            <AgentCardAvatar size="header" />
+            <AgentCardAvatar size="header" platform="openclaw" />
             <span className="truncate">{agent.name}</span>
             <button
               type="button"
