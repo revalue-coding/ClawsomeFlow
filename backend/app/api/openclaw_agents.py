@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path as FsPath
 from typing import Annotated, Any, Literal
@@ -59,6 +60,7 @@ from app.models import OpenclawAgent, iso_utc
 from app.scheduler.naming import openclaw_user_chat_session_id
 from app.services import openclaw_agents as svc
 from app.services import openclaw_chat_history as chat_history
+from app.services import subprocess_registry as _subproc_registry
 from app.storage import StorageBackend, get_storage
 
 router = APIRouter(prefix="/openclaw/agents", tags=["openclaw"])
@@ -104,6 +106,11 @@ _SYSTEM_TIMEZONE_CANDIDATES = (
 )
 _SETTINGS_CACHE_TTL_SEC = 10.0
 _SETTINGS_CACHE: dict[tuple[str, str], tuple[float, "OpenclawAgentSettingsResponse"]] = {}
+# Settings/skill/cron handlers are sync ``def`` → FastAPI runs them in a
+# threadpool, so the cache is touched by multiple threads concurrently. Guard
+# every access (incl. the invalidate scan) to avoid lost writes and
+# "dictionary changed size during iteration".
+_SETTINGS_CACHE_LOCK = threading.Lock()
 _IMPORT_OPTIMIZE_PROMPT = (
     "Follow the shared rules in AGENTS.md and improve each definition document based on your role. "
     "Keep content professional, concise, well-structured, and correct any unprofessional wording. "
@@ -297,14 +304,15 @@ async def _wait_until_agent_create_cleanup_visible(
 
 def _settings_cache_get(*, user: str, agent_id: str) -> "OpenclawAgentSettingsResponse" | None:
     key = (user, agent_id)
-    item = _SETTINGS_CACHE.get(key)
-    if item is None:
-        return None
-    ts, payload = item
-    if time.time() - ts > _SETTINGS_CACHE_TTL_SEC:
-        _SETTINGS_CACHE.pop(key, None)
-        return None
-    return payload.model_copy(deep=True)
+    with _SETTINGS_CACHE_LOCK:
+        item = _SETTINGS_CACHE.get(key)
+        if item is None:
+            return None
+        ts, payload = item
+        if time.time() - ts > _SETTINGS_CACHE_TTL_SEC:
+            _SETTINGS_CACHE.pop(key, None)
+            return None
+        return payload.model_copy(deep=True)
 
 
 def _settings_cache_put(
@@ -313,15 +321,17 @@ def _settings_cache_put(
     agent_id: str,
     payload: "OpenclawAgentSettingsResponse",
 ) -> None:
-    _SETTINGS_CACHE[(user, agent_id)] = (time.time(), payload.model_copy(deep=True))
+    with _SETTINGS_CACHE_LOCK:
+        _SETTINGS_CACHE[(user, agent_id)] = (time.time(), payload.model_copy(deep=True))
 
 
 def _settings_cache_invalidate(*, agent_id: str, user: str | None = None) -> None:
-    if user is not None:
-        _SETTINGS_CACHE.pop((user, agent_id), None)
-        return
-    for key in [k for k in _SETTINGS_CACHE if k[1] == agent_id]:
-        _SETTINGS_CACHE.pop(key, None)
+    with _SETTINGS_CACHE_LOCK:
+        if user is not None:
+            _SETTINGS_CACHE.pop((user, agent_id), None)
+            return
+        for key in [k for k in _SETTINGS_CACHE if k[1] == agent_id]:
+            _SETTINGS_CACHE.pop(key, None)
 
 
 def _trim_cli_output(text: str, *, limit: int = 1200) -> str:
@@ -3096,13 +3106,17 @@ async def _chat_completion_via_cli(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Own process group so a cancel / shutdown can killpg the whole tree
+            # (the openclaw CLI spawns children that keep writing artifacts;
+            # a bare proc.kill() left them alive → cancel-create took ~20s).
+            start_new_session=True,
         )
         cancel_event = _agent_create_cancellation_event(agent_id)
         if cancel_event is None:
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
             except asyncio.TimeoutError as exc:
-                proc.kill()
+                _subproc_registry.kill_group(proc)
                 await proc.communicate()
                 raise ApiError(
                     "OPENCLAW_CLI_TIMEOUT",
@@ -3110,6 +3124,9 @@ async def _chat_completion_via_cli(
                     status_code=504,
                 ) from exc
         else:
+            # This is a create/bootstrap turn (cancellation armed) — register so
+            # a graceful shutdown sweep can killpg it if still running.
+            _subproc_registry.register(proc)
             communicate_task = asyncio.create_task(proc.communicate())
             cancel_task = asyncio.create_task(cancel_event.wait())
             try:
@@ -3121,7 +3138,7 @@ async def _chat_completion_via_cli(
                 if communicate_task in done:
                     stdout, stderr = communicate_task.result()
                 elif cancel_task in done and cancel_task.result():
-                    proc.kill()
+                    _subproc_registry.kill_group(proc)
                     try:
                         await communicate_task
                     except Exception:
@@ -3132,7 +3149,7 @@ async def _chat_completion_via_cli(
                         status_code=409,
                     )
                 else:
-                    proc.kill()
+                    _subproc_registry.kill_group(proc)
                     try:
                         await communicate_task
                     except Exception:
@@ -3144,6 +3161,7 @@ async def _chat_completion_via_cli(
                     )
             finally:
                 cancel_task.cancel()
+                _subproc_registry.unregister(proc)
         _raise_if_agent_create_cancelled(agent_id=agent_id)
 
         out_text = stdout.decode("utf-8", errors="replace").strip()

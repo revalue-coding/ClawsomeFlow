@@ -28,6 +28,7 @@ import yaml
 from app.config import Config, load_config
 from app.logging_setup import get_logger
 from app.models import Flow, HermesAgent
+from app.services import subprocess_registry as _subproc_registry
 from app.storage import StorageBackend, get_storage
 
 logger = get_logger("services.hermes_agents")
@@ -388,18 +389,23 @@ def _run_bootstrap(aid: str, args: list[str], *, cwd: str, timeout: float) -> in
         stderr=subprocess.PIPE,
         text=True,
         env=os.environ.copy(),
+        # Own process group so a cancel / shutdown can killpg the whole tree
+        # (the bootstrap CLI may spawn children that would otherwise linger).
+        start_new_session=True,
     )
     with _CREATE_LOCK:
         _BOOTSTRAP_PROCS[aid] = proc
+    _subproc_registry.register(proc)
     try:
         _out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _subproc_registry.kill_group(proc)
         proc.communicate()
         raise ProfileOpFailed(
             f"hermes bootstrap for {aid!r} timed out after {timeout}s"
         ) from None
     finally:
+        _subproc_registry.unregister(proc)
         with _CREATE_LOCK:
             if _BOOTSTRAP_PROCS.get(aid) is proc:
                 _BOOTSTRAP_PROCS.pop(aid, None)
@@ -442,7 +448,8 @@ def cancel_create_agent(
         proc = _BOOTSTRAP_PROCS.get(aid)
     killed = False
     if proc is not None:
-        proc.kill()
+        # Kill the whole group so any children the bootstrap spawned die too.
+        _subproc_registry.kill_group(proc)
         killed = True
     _rollback_create(aid, storage=storage)
     return killed
@@ -1100,19 +1107,24 @@ def create_cron(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def chat_once(agent_id: str, *, message: str, workdir: str) -> str:
+def chat_once(agent_id: str, *, message: str, workdir: str, resume: bool = False) -> str:
     """Run a single profile-scoped turn in ``workdir`` and return clean text.
 
-    Uses ``hermes -p <id> --yolo -z <message>`` which prints only the final
-    answer on stdout. Conversation continuity is provided by the profile's
-    persistent memory (each ``-z`` is its own session).
+    Always enters the agent's role via ``hermes -p <id>``. The first turn of a
+    conversation runs ``--yolo -z <message>`` (creates the session); subsequent
+    turns add ``-c`` (``--continue`` with no name) to resume the most-recent
+    session in this profile, so consecutive turns stay in one logical session.
+    Each profile backs exactly one agent and only direct chat uses it, so
+    "most recent" reliably identifies this conversation. ``-z`` prints only the
+    final answer on stdout.
     """
     aid = _validate_agent_id(agent_id)
     wd = Path(workdir).expanduser()
     if not wd.is_dir():
         raise HermesAgentError(f"working directory does not exist: {workdir}")
+    args = ["--yolo", *(["-c"] if resume else []), "-z", message]
     rc, out, err = _hermes_profile(
-        aid, ["--yolo", "-z", message], cwd=wd, timeout=_CHAT_TIMEOUT_SEC,
+        aid, args, cwd=wd, timeout=_CHAT_TIMEOUT_SEC,
     )
     if rc != 0:
         raise ProfileOpFailed(

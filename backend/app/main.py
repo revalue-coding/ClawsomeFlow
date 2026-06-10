@@ -148,6 +148,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await close_mcp_client()
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("mcp_clients_shutdown_failed", error=str(exc))
+        # Kill any leftover bootstrap/create subprocess groups so no residual
+        # session/bootstrap processes survive a graceful stop / restart / uninstall.
+        try:
+            from app.services import subprocess_registry
+            subprocess_registry.terminate_all()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("subprocess_registry_shutdown_failed", error=str(exc))
         if common_cron_sync_task is not None and not common_cron_sync_task.done():
             common_cron_sync_task.cancel()
             try:

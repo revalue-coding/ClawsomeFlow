@@ -17,6 +17,7 @@ import { useTranslation } from "react-i18next";
 
 import {
   ApiError,
+  isNetworkError,
   ExternalOpenclawImportCandidate,
   ExternalOpenclawImportFailure,
   ExternalOpenclawImportResult,
@@ -108,6 +109,7 @@ export function OpenclawChat() {
   const [runtimeReady, setRuntimeReady] = useState<boolean | null>(null);
   const [runtimeChecking, setRuntimeChecking] = useState(false);
   const [runtimeCheckError, setRuntimeCheckError] = useState<string | null>(null);
+  const [runtimeNetDown, setRuntimeNetDown] = useState(false);
   const [runtimeGatewayUrl, setRuntimeGatewayUrl] = useState<string | null>(null);
   const runtimeProbeTokenRef = useRef(0);
 
@@ -135,6 +137,7 @@ export function OpenclawChat() {
     runtimeProbeTokenRef.current = token;
     setRuntimeChecking(true);
     setRuntimeCheckError(null);
+    setRuntimeNetDown(false);
     try {
       const status = await api.getOpenclawRuntimeStatus("fast");
       if (runtimeProbeTokenRef.current !== token) return;
@@ -148,6 +151,8 @@ export function OpenclawChat() {
       if (runtimeProbeTokenRef.current !== token) return;
       setRuntimeGatewayUrl(null);
       setRuntimeReady(false);
+      // Backend unreachable (service down) ≠ OpenClaw gateway down — say so.
+      setRuntimeNetDown(isNetworkError(e));
       setRuntimeCheckError(
         e instanceof ApiError ? `${e.code}: ${e.message}` : String(e),
       );
@@ -175,9 +180,16 @@ export function OpenclawChat() {
       <div className="flex min-h-[55vh] items-center justify-center">
         <Card className="w-full max-w-2xl px-8 py-10 text-center">
           <p className="text-base font-medium text-ink-900">
-            {t("chat.runtimeUnavailableMessage")}
+            {runtimeNetDown
+              ? t("common.serviceUnreachableTitle")
+              : t("chat.runtimeUnavailableMessage")}
           </p>
-          {runtimeCheckError && (
+          {runtimeNetDown && (
+            <p className="mt-2 whitespace-pre-line text-sm text-ink-600">
+              {t("common.serviceUnreachableHint")}
+            </p>
+          )}
+          {!runtimeNetDown && runtimeCheckError && (
             <p className="mt-3 text-xs text-rose-600">{runtimeCheckError}</p>
           )}
           <div className="mt-6">
@@ -219,12 +231,12 @@ function AgentQuickActions() {
   const [createModalOpen, setCreateModalOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:create-modal-open",
   );
-  const [createAgentId, setCreateAgentId] = useState("");
-  const [createAgentName, setCreateAgentName] = useState("");
-  const [createResponsibility, setCreateResponsibility] = useState("");
-  const [createExtra, setCreateExtra] = useState("");
-  const [createTeamChoice, setCreateTeamChoice] = useState("");
-  const [createTeamName, setCreateTeamName] = useState("");
+  const [createAgentId, setCreateAgentId] = useSessionBackedState("openclaw:create:agentId", "");
+  const [createAgentName, setCreateAgentName] = useSessionBackedState("openclaw:create:agentName", "");
+  const [createResponsibility, setCreateResponsibility] = useSessionBackedState("openclaw:create:responsibility", "");
+  const [createExtra, setCreateExtra] = useSessionBackedState("openclaw:create:extra", "");
+  const [createTeamChoice, setCreateTeamChoice] = useSessionBackedState("openclaw:create:teamChoice", "");
+  const [createTeamName, setCreateTeamName] = useSessionBackedState("openclaw:create:teamName", "");
   const [createError, setCreateError] = useState<string | null>(null);
   const [removeModalOpen, setRemoveModalOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:remove-modal-open",

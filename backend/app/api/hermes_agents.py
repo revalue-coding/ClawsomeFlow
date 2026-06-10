@@ -305,13 +305,16 @@ def claim_agent(
 async def create_agent(
     payload: Annotated[CreatePayload, Body()], user: UserDep, storage: StorageDep,
 ) -> HermesAgentDetail:
+    display_name = (payload.name or "").strip()
+    if not display_name:
+        raise ApiError("INVALID_PAYLOAD", "name is required", status_code=400)
     agent_id = (payload.id or payload.name or "").strip().lower()
     # Best-effort derive an id from the name if not provided: keep [a-z0-9].
     if not payload.id:
         agent_id = "".join(ch for ch in agent_id if ch.isalnum())
     cmd = svc.CommitInput(
         id=agent_id,
-        name=payload.name,
+        name=display_name,
         description=payload.responsibility,
         nl_prompt=payload.responsibility,
         team_id=payload.team_id,
@@ -611,6 +614,10 @@ async def chat_with_agent(
         raise ApiError("INVALID_PAYLOAD", "workdir is required", status_code=400)
 
     session_key = _session_key(user, agent_id)
+    # Resume the existing session whenever this conversation already has turns
+    # (history is persisted, so this survives a backend restart). ``/reset``
+    # clears history → next turn starts a fresh session.
+    resume = len(await chat_history.list_messages(session_key)) > 0
     await chat_history.append_message(session_key, role="user", content=message)
 
     async def _stream():
@@ -618,7 +625,7 @@ async def chat_with_agent(
         try:
             answer = await loop.run_in_executor(
                 _CHAT_EXECUTOR,
-                lambda: svc.chat_once(agent_id, message=message, workdir=workdir),
+                lambda: svc.chat_once(agent_id, message=message, workdir=workdir, resume=resume),
             )
         except svc.HermesAgentError as exc:
             err = {"error": str(exc)}

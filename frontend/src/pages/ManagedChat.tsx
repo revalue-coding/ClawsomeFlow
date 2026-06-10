@@ -18,6 +18,7 @@ import { cn } from "@/lib/cn";
 import {
   api,
   ApiError,
+  isNetworkError,
   type ChatHistoryMessage,
   type ManagedAgentSummary,
   type ManagedKind,
@@ -25,11 +26,19 @@ import {
   type ManagedSkill,
   type OpenclawTeam,
 } from "@/lib/api";
+import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 
 const KIND_LABEL: Record<ManagedKind, string> = {
   claude: "Claude Code",
   codex: "Codex",
   cursor: "Cursor",
+};
+
+// CLI install commands shown on the "not available" screen (parity with hermes).
+const INSTALL_CMD: Record<ManagedKind, string> = {
+  claude: "npm install -g @anthropic-ai/claude-code",
+  codex: "npm install -g @openai/codex",
+  cursor: "curl https://cursor.com/install -fsS | bash",
 };
 
 const CREATE_TEAM_SENTINEL = "__create_team__";
@@ -42,7 +51,13 @@ function isRemoteBrowser(): boolean {
 }
 
 function errText(e: unknown): string {
-  if (e instanceof ApiError) return e.message;
+  if (e instanceof ApiError) {
+    const flows = e.details?.flow_names;
+    if (Array.isArray(flows) && flows.length > 0) {
+      return `${e.message}: ${flows.join(", ")}`;
+    }
+    return e.message;
+  }
   if (e instanceof Error) return e.message;
   return String(e);
 }
@@ -62,22 +77,59 @@ export function ManagedChat({ kind }: { kind: ManagedKind }) {
   const { t } = useTranslation();
   const [running, setRunning] = useState<boolean | null>(null);
   const [reason, setReason] = useState("");
+  const [netDown, setNetDown] = useState(false);
 
-  useEffect(() => {
+  const checkRuntime = useCallback(() => {
     let alive = true;
-    api.getManagedRuntimeStatus(kind)
-      .then((s) => { if (alive) { setRunning(s.running); setReason(s.reason); } })
-      .catch(() => { if (alive) { setRunning(false); setReason(""); } });
+    setRunning(null);
+    setNetDown(false);
+    // Stage 1 — presence on PATH (instant): render the UI right away.
+    api.getManagedRuntimeStatus(kind, "fast")
+      .then((fast) => {
+        if (!alive) return;
+        setRunning(fast.running);
+        setReason(fast.reason);
+        if (!fast.running) return;
+        // Stage 2 — verify the CLI actually runs, in the background. Only
+        // re-block if it genuinely fails; never on a slow/unreachable probe.
+        api.getManagedRuntimeStatus(kind, "full")
+          .then((full) => {
+            if (!alive) return;
+            if (!full.running) { setRunning(false); setReason(full.reason); }
+          })
+          .catch(() => { /* keep showing UI */ });
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setNetDown(isNetworkError(e));
+        setRunning(false);
+        setReason("");
+      });
     return () => { alive = false; };
   }, [kind]);
+
+  useEffect(() => checkRuntime(), [checkRuntime]);
 
   if (running === null) return <Loading label={t("common.loading")} />;
   if (!running) {
     return (
       <div className="mx-auto max-w-2xl py-16">
         <EmptyState
-          title={t("managed.notInstalledTitle", { platform: KIND_LABEL[kind] })}
-          hint={`${t("managed.notInstalled", { platform: KIND_LABEL[kind] })}${reason ? `\n\n${reason}` : ""}`}
+          title={
+            netDown
+              ? t("common.serviceUnreachableTitle")
+              : t("managed.notInstalledTitle", { platform: KIND_LABEL[kind] })
+          }
+          hint={
+            netDown
+              ? t("common.serviceUnreachableHint")
+              : `${t("managed.notInstalled", { platform: KIND_LABEL[kind], install: INSTALL_CMD[kind] })}${reason ? `\n\n${reason}` : ""}`
+          }
+          action={
+            <button type="button" className="btn-primary" onClick={() => checkRuntime()}>
+              {t("common.refresh")}
+            </button>
+          }
         />
       </div>
     );
@@ -98,8 +150,10 @@ function Picker({ kind }: { kind: ManagedKind }) {
   const [teams, setTeams] = useState<OpenclawTeam[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showCreate, setShowCreate] = useState(false);
-  const [removeTarget, setRemoveTarget] = useState<ManagedAgentSummary | null>(null);
+  const [showCreate, setShowCreate] = useSessionBackedModalFlag(`managed:${kind}:picker:create`);
+  const [removeTarget, setRemoveTarget] = useSessionBackedState<ManagedAgentSummary | null>(
+    `managed:${kind}:picker:removeTarget`, null, { isClosed: (v) => v === null },
+  );
   const [viewMode, setViewMode] = useState<"card" | "list">("card");
 
   const reload = useCallback(async () => {
@@ -234,7 +288,7 @@ function Picker({ kind }: { kind: ManagedKind }) {
       )}
 
       {showCreate && (
-        <CreateModal kind={kind} teams={teams} onClose={() => setShowCreate(false)} onDone={(c) => { setShowCreate(false); void reload(); navigate(`${basePath(kind)}/${c.id}`); }} />
+        <CreateModal kind={kind} teams={teams} agents={agents} onClose={() => setShowCreate(false)} onDone={(c) => { setShowCreate(false); void reload(); navigate(`${basePath(kind)}/${c.id}`); }} />
       )}
       {removeTarget && (
         <RemoveModal agent={removeTarget} onClose={() => setRemoveTarget(null)} onDone={() => { setRemoveTarget(null); void reload(); }} />
@@ -286,16 +340,40 @@ async function resolveTeamId(choice: string, newTeamName: string): Promise<strin
   return choice || undefined;
 }
 
-function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; teams: OpenclawTeam[]; onClose: () => void; onDone: (c: { id: string }) => void }) {
+function CreateModal({ kind, teams, agents, onClose, onDone }: { kind: ManagedKind; teams: OpenclawTeam[]; agents: ManagedAgentSummary[]; onClose: () => void; onDone: (c: { id: string }) => void }) {
   const { t } = useTranslation();
-  const [profileId, setProfileId] = useState("");
-  const [responsibility, setResponsibility] = useState("");
-  const [teamChoice, setTeamChoice] = useState("");
-  const [newTeamName, setNewTeamName] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Session-backed so switching modules mid-create keeps the form + busy state.
+  const [name, setName] = useSessionBackedState(`managed:${kind}:create:name`, "");
+  const [profileId, setProfileId] = useSessionBackedState(`managed:${kind}:create:profileId`, "");
+  const [responsibility, setResponsibility] = useSessionBackedState(`managed:${kind}:create:responsibility`, "");
+  const [teamChoice, setTeamChoice] = useSessionBackedState(`managed:${kind}:create:teamChoice`, "");
+  const [newTeamName, setNewTeamName] = useSessionBackedState(`managed:${kind}:create:newTeamName`, "");
+  const [busy, setBusy] = useSessionBackedState(`managed:${kind}:create:busy`, false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const resetForm = () => {
+    setName(""); setProfileId(""); setResponsibility("");
+    setTeamChoice(""); setNewTeamName(""); setBusy(false);
+  };
+
+  // Reconcile-on-return: a create that finished while we were on another tab
+  // shows up in the freshly-reloaded list → treat as done.
+  useEffect(() => {
+    if (!busy) return;
+    const created = profileId.trim();
+    if (created && agents.some((a) => a.id === created)) {
+      setBusy(false);
+      onDone({ id: created });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents]);
 
   const submit = async () => {
     setBusy(true); setError("");
@@ -306,12 +384,16 @@ function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; team
       const created = await api.createManagedAgent({
         kind,
         id: profileId.trim(),
+        name: name.trim(),
         responsibility: responsibility.trim(),
         teamId,
       }, { signal: ac.signal });
+      if (!mountedRef.current) return; // returned via reconcile instead
+      resetForm();
       onDone(created);
     } catch (e) {
       if (ac.signal.aborted) return; // cancelled — handled by cancelCreate
+      if (!mountedRef.current) return;
       setError(errText(e)); setBusy(false);
     }
   };
@@ -324,6 +406,7 @@ function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; team
     } catch {
       /* best-effort — closing anyway */
     }
+    resetForm();
     onClose();
   };
 
@@ -333,6 +416,15 @@ function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; team
     <Modal open onClose={onClose} title={t("managed.create.title", { platform: KIND_LABEL[kind] })} dismissible={!busy} width="max-w-2xl">
       <div className="space-y-3">
         {error && <ErrorBox>{error}</ErrorBox>}
+        <div>
+          <label className="label">{t("hermes.create.nameLabel")}</label>
+          <input
+            className="input"
+            value={name}
+            placeholder={t("hermes.create.namePlaceholder")}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </div>
         <div>
           <label className="label">{t("hermes.create.idLabel")}</label>
           <input
@@ -364,7 +456,7 @@ function CreateModal({ kind, teams, onClose, onDone }: { kind: ManagedKind; team
                 : t("hermes.create.cancelCreate")
               : t("common.cancel")}
           </button>
-          <button type="button" className="btn-primary" onClick={() => void submit()} disabled={busy || !profileId.trim() || !teamReady}>
+          <button type="button" className="btn-primary" onClick={() => void submit()} disabled={busy || !name.trim() || !profileId.trim() || !teamReady}>
             {busy ? t("hermes.create.creating") : t("hermes.create.submit")}
           </button>
         </div>
@@ -411,6 +503,13 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
   const navigate = useNavigate();
   const [name, setName] = useState(agentId);
   const [teamName, setTeamName] = useState("");
+  const [teamId, setTeamId] = useState("");
+  const [teams, setTeams] = useState<OpenclawTeam[]>([]);
+  const [teamEditOpen, setTeamEditOpen] = useSessionBackedModalFlag(`managed:${kind}:${agentId}:teamEdit:open`);
+  const [teamEditChoice, setTeamEditChoice] = useSessionBackedState(`managed:${kind}:${agentId}:teamEdit:choice`, "");
+  const [teamEditNewTeamName, setTeamEditNewTeamName] = useSessionBackedState(`managed:${kind}:${agentId}:teamEdit:newTeam`, "");
+  const [teamEditError, setTeamEditError] = useState("");
+  const [teamEditSaving, setTeamEditSaving] = useState(false);
   const [configHome, setConfigHome] = useState("");
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
@@ -423,16 +522,18 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
   const [sending, setSending] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useSessionBackedModalFlag(`managed:${kind}:${agentId}:settings:open`);
   const [opening, setOpening] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void (async () => {
       try {
-        const [detail, hist] = await Promise.all([api.getManagedAgent(agentId), api.getManagedAgentChatHistory(agentId)]);
+        const [detail, hist, teamList] = await Promise.all([api.getManagedAgent(agentId), api.getManagedAgentChatHistory(agentId), api.listOpenclawTeams()]);
         setName(detail.name);
         setTeamName(detail.teamName);
+        setTeamId(detail.teamId);
+        setTeams(teamList.items);
         setConfigHome(detail.configHome);
         setMessages(hist.messages.map((m: ChatHistoryMessage) => ({ role: m.role, content: m.content })));
       } catch (e) { setError(errText(e)); }
@@ -455,6 +556,36 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
     try { await api.openDirectory({ path: configHome }); }
     catch (e) { window.alert(t("managed.openHomeFailed", { message: errText(e) })); }
     finally { setOpening(false); }
+  };
+
+  const openTeamEdit = () => {
+    setTeamEditChoice(teamId || "");
+    setTeamEditNewTeamName("");
+    setTeamEditError("");
+    setTeamEditOpen(true);
+  };
+
+  const saveTeam = async () => {
+    if (teamEditSaving) return;
+    if (teamEditChoice === CREATE_TEAM_SENTINEL && !teamEditNewTeamName.trim()) {
+      setTeamEditError(t("chat.teamEdit.newTeamRequired"));
+      return;
+    }
+    setTeamEditSaving(true);
+    setTeamEditError("");
+    try {
+      const resolved = await resolveTeamId(teamEditChoice, teamEditNewTeamName);
+      const updated = await api.patchManagedAgent(agentId, { teamId: resolved ?? "" });
+      setTeamName(updated.teamName);
+      setTeamId(updated.teamId);
+      const teamList = await api.listOpenclawTeams();
+      setTeams(teamList.items);
+      setTeamEditOpen(false);
+    } catch (e) {
+      setTeamEditError(errText(e));
+    } finally {
+      setTeamEditSaving(false);
+    }
   };
 
   const send = async () => {
@@ -536,6 +667,13 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
             <span className="rounded-full border border-ink-200 bg-ink-50 px-2 py-0.5">
               {teamName || t("chat.ungroupedTeam")}
             </span>
+            <button
+              type="button"
+              className="text-ink-500 underline-offset-2 hover:text-ink-800 hover:underline"
+              onClick={openTeamEdit}
+            >
+              {t("chat.teamEdit.action")}
+            </button>
           </div>
         </div>
         <div className="inline-flex shrink-0 items-center gap-2">
@@ -633,6 +771,66 @@ function ChatRoom({ kind, agentId }: { kind: ManagedKind; agentId: string }) {
       </Card>
 
       {showSettings && <SettingsModal kind={kind} agentId={agentId} onClose={() => setShowSettings(false)} />}
+
+      <Modal
+        open={teamEditOpen}
+        onClose={() => {
+          if (teamEditSaving) return;
+          setTeamEditOpen(false);
+        }}
+        title={t("chat.teamEdit.title")}
+      >
+        <div className="space-y-3">
+          {teamEditError && <ErrorBox>{teamEditError}</ErrorBox>}
+          <div>
+            <label className="label">{t("chat.teamEdit.label")}</label>
+            <select
+              className="select"
+              value={teamEditChoice}
+              onChange={(e) => setTeamEditChoice(e.target.value)}
+              disabled={teamEditSaving}
+            >
+              <option value="">{t("chat.teamEdit.noneOptional")}</option>
+              {teams.map((tm) => (
+                <option key={tm.id} value={tm.id}>
+                  {tm.name}
+                </option>
+              ))}
+              <option value={CREATE_TEAM_SENTINEL}>{t("chat.teamEdit.createNew")}</option>
+            </select>
+          </div>
+          {teamEditChoice === CREATE_TEAM_SENTINEL && (
+            <div>
+              <label className="label">{t("chat.teamEdit.newTeamLabel")}</label>
+              <input
+                className="input"
+                value={teamEditNewTeamName}
+                onChange={(e) => setTeamEditNewTeamName(e.target.value)}
+                placeholder={t("chat.teamEdit.newTeamPlaceholder")}
+                disabled={teamEditSaving}
+              />
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => setTeamEditOpen(false)}
+              disabled={teamEditSaving}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void saveTeam()}
+              disabled={teamEditSaving}
+            >
+              {teamEditSaving ? t("chat.teamEdit.saving") : t("common.save")}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

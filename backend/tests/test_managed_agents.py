@@ -249,6 +249,76 @@ def test_api_create_and_list(client: TestClient) -> None:
         client.delete(f"/api/managed/agents/{aid}")
 
 
+def test_api_create_requires_name(client: TestClient) -> None:
+    r = client.post("/api/managed/agents", json={"kind": "claude", "id": "noname", "name": "  "})
+    assert r.status_code == 400
+
+
+def test_probe_fast_is_presence_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fast probe = shutil.which presence only (no `--version` subprocess)."""
+    monkeypatch.setattr(svc.shutil, "which", lambda c: f"/usr/bin/{c}")
+    ran: list[str] = []
+    monkeypatch.setattr(svc.subprocess, "run", lambda *a, **k: ran.append("ran"))
+    ok, _ = svc.probe_runtime_running("claude", level=svc.PROBE_FAST)
+    assert ok is True
+    assert ran == []  # fast path never runs the CLI
+
+
+def test_probe_absent_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(svc.shutil, "which", lambda c: None)
+    for level in (svc.PROBE_FAST, svc.PROBE_FULL):
+        ok, reason = svc.probe_runtime_running("claude", level=level)
+        assert ok is False
+        assert "not installed" in reason
+
+
+def test_api_runtime_status_fast(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(svc.shutil, "which", lambda c: f"/usr/bin/{c}")
+    r = client.get("/api/managed/agents/runtime/status?kind=claude&mode=fast")
+    assert r.status_code == 200, r.text
+    assert r.json()["running"] is True
+
+
+def _seed_row(kind: str) -> str:
+    st = get_storage()
+    aid = f"{kind}chat"
+    st.managed_create(ManagedAgent(
+        id=aid, kind=kind, name="X", config_home="x",
+        clawteam_profile=f"csflow-{kind}-{aid}", created_by_user="alice",
+    ))
+    return aid
+
+
+def test_chat_once_claude_session_id_then_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """claude enters its role via the config home (always) and threads one
+    session: ``--session-id`` on the first turn, ``--resume`` thereafter."""
+    aid = _seed_row("claude")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_cli", lambda k, a, args, **_kw: calls.append(args) or (0, "ok", ""))
+
+    svc.chat_once(aid, message="hi", workdir=str(tmp_path), resume=False, session_uuid="u-1")
+    svc.chat_once(aid, message="more", workdir=str(tmp_path), resume=True, session_uuid="u-1")
+
+    assert calls[0] == ["-p", "--permission-mode", "bypassPermissions", "--session-id", "u-1", "hi"]
+    assert calls[1] == ["-p", "--permission-mode", "bypassPermissions", "--resume", "u-1", "more"]
+
+
+def test_chat_once_codex_resume_uses_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    aid = _seed_row("codex")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_cli", lambda k, a, args, **_kw: calls.append(args) or (0, "ok", ""))
+
+    svc.chat_once(aid, message="hi", workdir=str(tmp_path), resume=False)
+    svc.chat_once(aid, message="more", workdir=str(tmp_path), resume=True)
+
+    assert calls[0] == ["exec", "--dangerously-bypass-approvals-and-sandbox", "hi"]
+    assert calls[1] == ["exec", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox", "more"]
+
+
 # ── Codex inference config seeding ────────────────────────────────────
 
 

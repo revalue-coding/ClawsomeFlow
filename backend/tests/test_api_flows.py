@@ -13,7 +13,9 @@ from app import paths
 from app.config import load_config, save_config
 from app.integrations import openclaw_json as oj
 from app.main import create_app
-from app.models import FlowRun, RunEvent, RunStatus
+from datetime import datetime, timezone
+
+from app.models import FlowRun, FlowRunSchedule, RunEvent, RunStatus
 from app.storage import get_storage
 
 
@@ -268,6 +270,51 @@ def test_delete_with_terminal_run_history(client: TestClient, repo: str) -> None
     assert resp.status_code == 204
     assert client.get(f"/api/flows/{flow_id}").status_code == 404
     assert storage.run_get(run.id) is None
+
+
+def test_update_blocked_by_active_run(client: TestClient, repo: str) -> None:
+    """Editing a Flow while a Run is active is refused (mirrors delete)."""
+    flow_id = client.post("/api/flows", json=_flow_payload(repo)).json()["id"]
+    storage = get_storage()
+    storage.run_create(
+        FlowRun(
+            flow_id=flow_id,
+            flow_version=1,
+            team_name=f"csflow-{flow_id[-8:]}",
+            status=RunStatus.running,
+            user="alice",
+        )
+    )
+    payload = _flow_payload(repo, name="edited")
+    payload["version"] = 1
+    resp = client.put(f"/api/flows/{flow_id}", json=payload)
+    assert resp.status_code == 409
+    assert resp.json()["error"] == "RUNS_IN_PROGRESS"
+    # Unchanged on disk.
+    assert client.get(f"/api/flows/{flow_id}").json()["version"] == 1
+
+
+def test_delete_blocked_by_schedule(
+    client: TestClient, repo: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Flow referenced by a scheduled task cannot be deleted."""
+    monkeypatch.setenv("CSFLOW_USER", "alice")
+    flow_id = client.post("/api/flows", json=_flow_payload(repo)).json()["id"]
+    storage = get_storage()
+    storage.run_schedule_create(
+        FlowRunSchedule(
+            user="alice",
+            name="nightly",
+            next_run_at=datetime.now(timezone.utc),
+            items=[{"flow_id": flow_id, "inputs": {}}],
+        )
+    )
+    resp = client.delete(f"/api/flows/{flow_id}")
+    assert resp.status_code == 409
+    assert resp.json()["error"] == "FLOW_HAS_SCHEDULES"
+    assert "nightly" in resp.json()["details"]["schedule_names"]
+    # Still present.
+    assert client.get(f"/api/flows/{flow_id}").status_code == 200
 
 
 def test_get_other_user_forbidden(
