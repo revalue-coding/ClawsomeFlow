@@ -82,6 +82,7 @@ const en = {
     updateCurrent: "Current",
     updateLatest: "Latest",
     updateNow: "Upgrade now",
+    updateRetry: "Retry upgrade",
     updateDismiss: "Skip this version",
     updateClose: "Later",
     updateInProgress: "Upgrading…",

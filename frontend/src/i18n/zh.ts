@@ -86,6 +86,7 @@ const zh = {
     updateCurrent: "当前版本",
     updateLatest: "最新版本",
     updateNow: "立即升级",
+    updateRetry: "重试升级",
     updateDismiss: "忽略此版本",
     updateClose: "稍后",
     updateInProgress: "升级中…",

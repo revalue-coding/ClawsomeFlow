@@ -103,6 +103,15 @@ export function UpgradeModal({
     };
   }, []);
 
+  // Reopening the modal after a failed upgrade must return to the selection
+  // page (so the user can retry) instead of being stuck on the "failed" view.
+  // Keyed on `open` only — reacting to `phase` would wipe the failure message
+  // the instant it appears. We don't reset while an upgrade is in progress.
+  useEffect(() => {
+    if (open && phase === "failed") setPhase("idle");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   const dismissible = phase !== "done";
 
   function stopHealthPoll() {
@@ -228,9 +237,14 @@ export function UpgradeModal({
             </button>
           )}
           {phase === "failed" && (
-            <button className="btn-outline" onClick={onClose} type="button">
-              {t("shell.updateClose")}
-            </button>
+            <>
+              <button className="btn-outline" onClick={onClose} type="button">
+                {t("shell.updateClose")}
+              </button>
+              <button className="btn-primary" onClick={onUpgrade} type="button">
+                {t("shell.updateRetry")}
+              </button>
+            </>
           )}
         </div>
       </div>
