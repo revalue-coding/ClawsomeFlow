@@ -15,6 +15,7 @@ import { ScheduledFlows } from "@/pages/ScheduledFlows";
 import { OpenclawChat } from "@/pages/OpenclawChat";
 import { HermesChat } from "@/pages/HermesChat";
 import { ManagedChat } from "@/pages/ManagedChat";
+import { OpenclawAgentStore } from "@/pages/OpenclawAgentStore";
 import { Profiles } from "@/pages/Profiles";
 
 import "@/i18n"; // initialise i18next before any component reads `t()`
@@ -34,10 +35,9 @@ const router = createBrowserRouter([
       { path: "runs/:id", element: <RunDetail /> },
       { path: "assistant", element: <Navigate to="/chat" replace /> },
       { path: "chat", element: <OpenclawChat /> },
-      {
-        path: "chat/store",
-        element: <Navigate to={{ pathname: "/chat", search: "?storeComingSoon=1" }} replace />,
-      },
+      { path: "store", element: <OpenclawAgentStore /> },
+      // Back-compat: old in-chat store entry now points at the standalone module.
+      { path: "chat/store", element: <Navigate to="/store" replace /> },
       { path: "chat/:id", element: <OpenclawChat /> },
       { path: "hermes", element: <HermesChat /> },
       { path: "hermes/:id", element: <HermesChat /> },

@@ -65,6 +65,7 @@ const en = {
     codex: "Codex Agent",
     profiles: "Profile",
     groupResources: "Resources",
+    agentStore: "Agent Store",
     docs: "Docs",
   },
   shell: {

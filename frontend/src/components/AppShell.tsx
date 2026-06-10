@@ -6,12 +6,12 @@ import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import {
   AlarmIcon,
   AssistantIcon,
-  BrandIcon,
   DocsIcon,
   ExternalLinkIcon,
   FlowIcon,
   LobsterIcon,
   RunIcon,
+  StoreIcon,
   // SettingsIcon — re-import when restoring the Settings nav group below.
 } from "@/components/icons";
 import {
@@ -202,9 +202,11 @@ function Sidebar({
     <aside className="w-56 shrink-0 border-r border-ink-200 bg-white flex flex-col">
       <div className="px-5 py-5 border-b border-ink-100">
         <div className="flex items-center gap-2">
-          <span className="inline-flex h-12 w-12 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 text-brand-500 animate-pulse-glow">
-            <BrandIcon className="h-8 w-8" />
-          </span>
+          <img
+            src="/logo.png"
+            alt="ClawsomeFlow"
+            className="h-12 w-12 shrink-0 animate-pulse-glow"
+          />
           <div>
             <div className="text-[15px] uppercase tracking-wide text-ink-500 font-semibold">
               {t("shell.sidebarTopLabel")}
@@ -268,11 +270,42 @@ function Sidebar({
           </div>
         ))}
 
-        {/* Resources — external links open in a new tab (not SPA routes). */}
+        {/* Resources — Agent Store is an internal SPA module; Docs is external. */}
         <div className="mb-6">
           <div className="px-5 py-1 text-sm font-semibold uppercase tracking-wider text-ink-400">
             {t("nav.groupResources")}
           </div>
+          {(() => {
+            const storeItem: NavItem = {
+              to: "/store",
+              labelKey: "nav.agentStore",
+              icon: <StoreIcon className="h-8 w-8" />,
+            };
+            const isActive = isItemActive(storeItem.to);
+            return (
+              <button
+                type="button"
+                onClick={() => navigateToModule(storeItem)}
+                aria-current={isActive ? "page" : undefined}
+                className={cn(
+                  "group mx-2 my-1 flex w-[calc(100%-1rem)] appearance-none items-center gap-3 rounded-md border-0 bg-transparent px-3 py-2 text-left text-sm font-medium transition-all",
+                  isActive
+                    ? "bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_theme(colors.brand.200),0_0_18px_-8px_theme(colors.brand.400)]"
+                    : "text-ink-700 hover:bg-ink-100 hover:text-brand-700",
+                )}
+              >
+                <span
+                  className={cn(
+                    "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-white text-brand-500 transition-all",
+                    "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
+                  )}
+                >
+                  {storeItem.icon}
+                </span>
+                <span>{t(storeItem.labelKey)}</span>
+              </button>
+            );
+          })()}
           <a
             href={DOCS_URL}
             target="_blank"

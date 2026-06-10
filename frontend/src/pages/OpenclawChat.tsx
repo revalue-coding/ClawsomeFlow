@@ -764,22 +764,11 @@ function AgentQuickActions() {
             >
               {t("assistant.askImport")}
             </button>
-            <button
-              type="button"
-              className="btn inline-flex items-center gap-1.5 rounded-full border border-fuchsia-300 bg-gradient-to-r from-indigo-500 via-fuchsia-500 to-orange-500 px-4 py-1.5 text-sm font-semibold text-white shadow-[0_0_18px_-6px_rgba(217,70,239,0.75)] hover:from-indigo-600 hover:to-orange-600"
-              onClick={openStoreComingSoon}
-            >
-              <StoreIcon className="h-4 w-4" />
-              {t("store.entryButton")}
-            </button>
+            {/* Agent Store moved out of My Team → it's now its own module under
+                the "Resources" nav group (see AppShell). */}
           </div>
         </div>
       </Card>
-
-      <StoreComingSoonModal
-        open={storeComingSoonOpen}
-        onClose={() => setStoreComingSoonOpen(false)}
-      />
 
       <Modal
         open={createModalOpen}

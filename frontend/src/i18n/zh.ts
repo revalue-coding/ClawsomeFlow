@@ -69,6 +69,7 @@ const zh = {
     codex: "Codex Agent",
     profiles: "Profile",
     groupResources: "资源",
+    agentStore: "Agent Store",
     docs: "Docs",
   },
   shell: {
