@@ -463,15 +463,22 @@ start_user_service() {
 
 health_check() {
   local url="http://127.0.0.1:${CSFLOW_PORT}/"
-  local i
-  for i in 1 2 3 4 5; do
+  # First boot after an upgrade runs init/migration before uvicorn starts
+  # listening, which can take well over a few seconds on a busy host. Give it
+  # a generous window so a slow-but-successful start is not reported as a
+  # failure.
+  local attempts=60 i
+  for ((i = 1; i <= attempts; i++)); do
     if curl -fsS "${url}" >/dev/null 2>&1; then
       say "✅ ClawsomeFlow is running in background: ${url}"
       return
     fi
+    if (( i == 10 )); then
+      say "… still starting (running upgrade/migration), waiting up to ${attempts}s …"
+    fi
     sleep 1
   done
-  fail "Service started but health check failed: ${url}"
+  fail "Service started but health check failed after ${attempts}s: ${url}"
 }
 
 print_deployed_version() {
