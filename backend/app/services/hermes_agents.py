@@ -1117,20 +1117,36 @@ def chat_once(agent_id: str, *, message: str, workdir: str, resume: bool = False
     Each profile backs exactly one agent and only direct chat uses it, so
     "most recent" reliably identifies this conversation. ``-z`` prints only the
     final answer on stdout.
+
+    When ``resume=True`` but the CLI session cannot be continued (e.g. after a
+    restart), we silently fall back to a fresh turn without ``-c`` so the user
+    can keep chatting; UI history remains the source of truth for the thread.
     """
     aid = _validate_agent_id(agent_id)
     wd = Path(workdir).expanduser()
     if not wd.is_dir():
         raise HermesAgentError(f"working directory does not exist: {workdir}")
-    args = ["--yolo", *(["-c"] if resume else []), "-z", message]
-    rc, out, err = _hermes_profile(
-        aid, args, cwd=wd, timeout=_CHAT_TIMEOUT_SEC,
-    )
-    if rc != 0:
-        raise ProfileOpFailed(
-            f"hermes chat failed: {(_strip_ansi(err) or _strip_ansi(out)).strip()[:1000]}"
+
+    def _run(*, with_resume: bool) -> tuple[int, str, str]:
+        args = ["--yolo", *(["-c"] if with_resume else []), "-z", message]
+        return _hermes_profile(aid, args, cwd=wd, timeout=_CHAT_TIMEOUT_SEC)
+
+    rc, out, err = _run(with_resume=resume)
+    if rc == 0:
+        return out.strip()
+    if resume:
+        resume_err = (_strip_ansi(err) or _strip_ansi(out)).strip()[:500]
+        logger.warning(
+            "hermes_chat_resume_failed_fallback_fresh",
+            agent_id=aid,
+            error=resume_err,
         )
-    return out.strip()
+        rc, out, err = _run(with_resume=False)
+        if rc == 0:
+            return out.strip()
+    raise ProfileOpFailed(
+        f"hermes chat failed: {(_strip_ansi(err) or _strip_ansi(out)).strip()[:1000]}"
+    )
 
 
 __all__ = [

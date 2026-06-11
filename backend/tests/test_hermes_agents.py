@@ -530,6 +530,25 @@ def test_chat_once_resume_adds_continue_flag(
     assert calls[1] == ["-p", "chatty", "--yolo", "-c", "-z", "more"]
 
 
+def test_chat_once_resume_failure_falls_back_to_fresh(
+    hermes_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``-c`` cannot continue the CLI session, retry without it — no error."""
+    calls: list[list[str]] = []
+
+    def _run(args, *, cwd=None, timeout=svc._CLI_TIMEOUT_SEC):  # noqa: ANN001
+        calls.append(list(args))
+        if "-c" in args:
+            return 1, "", "no session to continue"
+        return 0, "fresh ok", ""
+
+    monkeypatch.setattr(svc, "_run_hermes", _run)
+    out = svc.chat_once("chatty", message="more", workdir=str(tmp_path), resume=True)
+    assert out == "fresh ok"
+    assert calls[0] == ["-p", "chatty", "--yolo", "-c", "-z", "more"]
+    assert calls[1] == ["-p", "chatty", "--yolo", "-z", "more"]
+
+
 def test_api_create_and_list(
     client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

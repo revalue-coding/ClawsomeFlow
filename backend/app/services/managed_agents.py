@@ -589,27 +589,52 @@ def chat_once(
     - cursor: unchanged (stateless).
     The agent's role/identity is always entered via the per-agent home dir env
     var injected by ``_run_cli`` (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` / …).
+
+    When ``resume=True`` but the CLI session cannot be continued, we silently
+    fall back to a fresh turn (``--session-id`` for claude, plain ``exec`` for
+    codex) so the user can keep chatting without seeing an error.
     """
     row = get_agent(agent_id, storage=storage)
     wd = Path(workdir).expanduser()
     if not wd.is_dir():
         raise ManagedAgentError(f"working directory does not exist: {workdir}")
-    if row.kind == "claude":
-        args = ["-p", "--permission-mode", "bypassPermissions"]
-        if session_uuid:
-            args += ["--resume", session_uuid] if resume else ["--session-id", session_uuid]
-        args.append(message)
-    elif row.kind == "codex":
-        if resume:
-            args = ["exec", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox", message]
-        else:
-            args = ["exec", "--dangerously-bypass-approvals-and-sandbox", message]
-    else:  # cursor
-        args = ["-p", "--force", message]
+
+    def _build_args(*, with_resume: bool) -> list[str]:
+        if row.kind == "claude":
+            args = ["-p", "--permission-mode", "bypassPermissions"]
+            if session_uuid:
+                if with_resume:
+                    args += ["--resume", session_uuid]
+                else:
+                    args += ["--session-id", session_uuid]
+            args.append(message)
+            return args
+        if row.kind == "codex":
+            if with_resume:
+                return [
+                    "exec", "resume", "--last",
+                    "--dangerously-bypass-approvals-and-sandbox", message,
+                ]
+            return ["exec", "--dangerously-bypass-approvals-and-sandbox", message]
+        return ["-p", "--force", message]
+
+    args = _build_args(with_resume=resume)
     rc, out, err = _run_cli(row.kind, row.id, args, cwd=wd, timeout=_CHAT_TIMEOUT_SEC)
-    if rc != 0:
-        raise CliFailed(f"chat failed: {(_strip(err) or _strip(out)).strip()[:1000]}")
-    return out.strip()
+    if rc == 0:
+        return out.strip()
+    if resume and row.kind in {"claude", "codex"}:
+        resume_err = (_strip(err) or _strip(out)).strip()[:500]
+        logger.warning(
+            "managed_chat_resume_failed_fallback_fresh",
+            agent_id=row.id,
+            kind=row.kind,
+            error=resume_err,
+        )
+        args = _build_args(with_resume=False)
+        rc, out, err = _run_cli(row.kind, row.id, args, cwd=wd, timeout=_CHAT_TIMEOUT_SEC)
+        if rc == 0:
+            return out.strip()
+    raise CliFailed(f"chat failed: {(_strip(err) or _strip(out)).strip()[:1000]}")
 
 
 __all__ = [

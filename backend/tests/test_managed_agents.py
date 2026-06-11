@@ -319,6 +319,48 @@ def test_chat_once_codex_resume_uses_last(
     assert calls[1] == ["exec", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox", "more"]
 
 
+def test_chat_once_claude_resume_failure_falls_back_to_session_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    aid = _seed_row("claude")
+    calls: list[list[str]] = []
+
+    def _cli(_k, _a, args, **_kw):
+        calls.append(args)
+        if "--resume" in args:
+            return 1, "", "session not found"
+        return 0, "fresh ok", ""
+
+    monkeypatch.setattr(svc, "_run_cli", _cli)
+    out = svc.chat_once(
+        aid, message="more", workdir=str(tmp_path), resume=True, session_uuid="u-1",
+    )
+    assert out == "fresh ok"
+    assert calls[0] == ["-p", "--permission-mode", "bypassPermissions", "--resume", "u-1", "more"]
+    assert calls[1] == [
+        "-p", "--permission-mode", "bypassPermissions", "--session-id", "u-1", "more",
+    ]
+
+
+def test_chat_once_codex_resume_failure_falls_back_to_fresh_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    aid = _seed_row("codex")
+    calls: list[list[str]] = []
+
+    def _cli(_k, _a, args, **_kw):
+        calls.append(args)
+        if "resume" in args:
+            return 1, "", "no session"
+        return 0, "fresh ok", ""
+
+    monkeypatch.setattr(svc, "_run_cli", _cli)
+    out = svc.chat_once(aid, message="more", workdir=str(tmp_path), resume=True)
+    assert out == "fresh ok"
+    assert calls[0] == ["exec", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox", "more"]
+    assert calls[1] == ["exec", "--dangerously-bypass-approvals-and-sandbox", "more"]
+
+
 # ── Codex inference config seeding ────────────────────────────────────
 
 
