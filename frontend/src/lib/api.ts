@@ -658,38 +658,6 @@ export interface HermesCronJob {
   raw: string;
 }
 
-// ── Managed agents (Claude / Codex / Cursor env-home) ───────────────────
-export type ManagedKind = "claude" | "codex" | "cursor";
-
-export interface ManagedAgentSummary {
-  id: string;
-  kind: ManagedKind;
-  name: string;
-  description: string;
-  teamId: string;
-  teamName: string;
-  configHome: string;
-  createdByUser: string;
-  createdAt: string;
-}
-
-export interface ManagedAgentDetail extends ManagedAgentSummary {
-  nlPrompt: string;
-  clawteamProfile: string;
-}
-
-export interface ManagedMcpServer {
-  name: string;
-  detail: string;
-}
-
-export interface ManagedSkill {
-  name: string;
-  description: string;
-  path: string;
-  content?: string | null;
-}
-
 export const api = {
   // Flows
   listFlows: () =>
@@ -1155,68 +1123,6 @@ export const api = {
     ),
   resetHermesAgentChat: (id: string) =>
     request<void>("POST", `/api/hermes/agents/${id}/reset`),
-
-  // ── Managed agents (Claude / Codex / Cursor) ─────────────────────
-  listManagedAgents: (kind?: ManagedKind) =>
-    request<{ items: ManagedAgentSummary[] }>(
-      "GET",
-      `/api/managed/agents${kind ? `?kind=${kind}` : ""}`,
-    ),
-  getManagedAgent: (id: string) =>
-    request<ManagedAgentDetail>("GET", `/api/managed/agents/${id}`),
-  getManagedRuntimeStatus: (kind: ManagedKind, mode: "fast" | "full" = "full") =>
-    request<{ running: boolean; reason: string }>(
-      "GET",
-      `/api/managed/agents/runtime/status?kind=${kind}&mode=${mode}`,
-      undefined,
-      { cache: "no-store" },
-    ),
-  createManagedAgent: (
-    payload: { kind: ManagedKind; id?: string; name?: string; responsibility?: string; teamId?: string },
-    init?: RequestInit,
-  ) => request<ManagedAgentDetail>("POST", "/api/managed/agents", payload, init),
-  cancelManagedAgentCreate: (id: string) =>
-    request<void>("POST", `/api/managed/agents/${id}/cancel-create`),
-  patchManagedAgent: (
-    id: string,
-    payload: { name?: string; description?: string; teamId?: string },
-  ) => request<ManagedAgentDetail>("PATCH", `/api/managed/agents/${id}`, payload),
-  deleteManagedAgent: (id: string) =>
-    request<void>("DELETE", `/api/managed/agents/${id}`),
-  getManagedRole: (id: string) =>
-    request<{ content: string }>("GET", `/api/managed/agents/${id}/settings/role`),
-  putManagedRole: (id: string, content: string) =>
-    request<{ content: string }>("PUT", `/api/managed/agents/${id}/settings/role`, { content }),
-  getManagedMcp: (id: string) =>
-    request<ManagedMcpServer[]>("GET", `/api/managed/agents/${id}/settings/mcp`),
-  addManagedMcp: (id: string, payload: { name: string; command: string[] }) =>
-    request<void>("POST", `/api/managed/agents/${id}/settings/mcp`, payload),
-  deleteManagedMcp: (id: string, name: string) =>
-    request<void>("DELETE", `/api/managed/agents/${id}/settings/mcp/${encodeURIComponent(name)}`),
-  getManagedSkills: (id: string) =>
-    request<ManagedSkill[]>("GET", `/api/managed/agents/${id}/settings/skills`),
-  getManagedSkill: (id: string, name: string) =>
-    request<ManagedSkill>("GET", `/api/managed/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
-  createManagedSkill: (id: string, payload: { name: string; description?: string; content: string }) =>
-    request<ManagedSkill>("POST", `/api/managed/agents/${id}/settings/skills`, payload),
-  chatWithManagedAgent: (
-    id: string,
-    body: { message: string; workdir: string },
-    init?: RequestInit,
-  ) =>
-    fetch(`/api/managed/agents/${id}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      ...init,
-    }),
-  getManagedAgentChatHistory: (id: string) =>
-    request<{ messages: ChatHistoryMessage[] }>(
-      "GET",
-      `/api/managed/agents/${id}/chat-history`,
-    ),
-  resetManagedAgentChat: (id: string) =>
-    request<void>("POST", `/api/managed/agents/${id}/reset`),
 
   // Agent Store
   loginAgentStore: (payload: { email: string; password: string }) =>

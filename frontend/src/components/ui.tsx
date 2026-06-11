@@ -129,6 +129,7 @@ export function Modal({
   children,
   width = "max-w-xl",
   dismissible = true,
+  fullscreenBackdrop = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -136,6 +137,10 @@ export function Modal({
   children: ReactNode;
   width?: string;
   dismissible?: boolean;
+  /** When true, render a viewport-covering, fully-opaque blocking overlay
+   *  (covers the sidebar too) instead of the default modeless content-area dim.
+   *  Used for the auto-upgrade modal, which must mask everything behind it. */
+  fullscreenBackdrop?: boolean;
 }) {
   const { t } = useTranslation();
   const ref = useRef<HTMLDivElement>(null);
@@ -155,7 +160,16 @@ export function Modal({
   // and does NOT dismiss on outside-click — so users can switch modules via the
   // nav while the modal stays open. Esc still closes when dismissible.
   const body = (
-    <div className="absolute inset-0 z-40 overflow-y-auto bg-black/20 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] pointer-events-auto">
+    <div
+      className={cn(
+        "overflow-y-auto px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] pointer-events-auto",
+        fullscreenBackdrop
+          // Cover the WHOLE viewport (sidebar included), opaque + blurred, above
+          // all app chrome — nothing behind the upgrade modal stays visible.
+          ? "fixed inset-0 z-[100] bg-ink-900/80 backdrop-blur-sm"
+          : "absolute inset-0 z-40 bg-black/20",
+      )}
+    >
       <div className="flex min-h-full items-center justify-center">
         <div
           ref={ref}
@@ -184,6 +198,13 @@ export function Modal({
       </div>
     </div>
   );
-  const host = typeof document !== "undefined" ? document.getElementById(MODAL_ROOT_ID) : null;
+  // Fullscreen backdrop portals to <body> so it escapes the content-area host
+  // and covers the sidebar; the default modeless modal stays in MODAL_ROOT_ID.
+  const host =
+    typeof document !== "undefined"
+      ? fullscreenBackdrop
+        ? document.body
+        : document.getElementById(MODAL_ROOT_ID)
+      : null;
   return host ? createPortal(body, host) : body;
 }

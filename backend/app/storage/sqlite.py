@@ -29,7 +29,6 @@ from app.models import (
     FlowRunSchedule,
     FlowRunScheduleExecution,
     HermesAgent,
-    ManagedAgent,
     OpenclawRequestStatus,
     OpenclawAgent,
     OpenclawAgentRequest,
@@ -611,52 +610,6 @@ class SqliteStorage:
     def hermes_delete(self, agent_id: str) -> bool:
         with self._session() as s:
             agent = s.get(HermesAgent, agent_id)
-            if agent is None:
-                return False
-            s.delete(agent)
-            s.commit()
-            return True
-
-    # ---- ManagedAgents (claude/codex/cursor env-home) ----
-
-    def managed_create(self, agent: ManagedAgent) -> ManagedAgent:
-        with self._session() as s:
-            s.add(agent)
-            s.commit()
-            s.refresh(agent)
-            return agent
-
-    def managed_get(self, agent_id: str) -> ManagedAgent | None:
-        with self._session() as s:
-            return s.get(ManagedAgent, agent_id)
-
-    def managed_list(
-        self, *, owner_user: str | None = None, kind: str | None = None,
-    ) -> list[ManagedAgent]:
-        with self._session() as s:
-            stmt = select(ManagedAgent)
-            if owner_user:
-                stmt = stmt.where(ManagedAgent.created_by_user == owner_user)
-            if kind:
-                stmt = stmt.where(ManagedAgent.kind == kind)
-            stmt = stmt.order_by(ManagedAgent.created_at.desc())
-            return list(s.exec(stmt).all())
-
-    def managed_update(self, agent: ManagedAgent) -> ManagedAgent:
-        with self._session() as s:
-            current = s.get(ManagedAgent, agent.id)
-            if current is None:
-                raise KeyError(agent.id)
-            for field in ("name", "description", "team_id"):
-                setattr(current, field, getattr(agent, field))
-            s.add(current)
-            s.commit()
-            s.refresh(current)
-            return current
-
-    def managed_delete(self, agent_id: str) -> bool:
-        with self._session() as s:
-            agent = s.get(ManagedAgent, agent_id)
             if agent is None:
                 return False
             s.delete(agent)

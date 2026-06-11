@@ -266,142 +266,14 @@ def _applies(m: Migration, marker: str | None) -> bool:
     return True
 
 
-def _provision_managed_agents_for_existing_flows(config: Config) -> None:
-    """Back-compat: provision managed-agent records + runtime profiles for
-    Hermes / Claude / Codex agents already referenced by existing Flow templates.
-
-    Newer ClawsomeFlow requires these agents to be *managed* (created in the
-    management module) — `validate_flow_against_db` rejects unmanaged ones and
-    the scheduler binds them via a profile (Hermes ``-p <id>`` / Claude+Codex
-    ``CLAUDE_CONFIG_DIR``/``CODEX_HOME`` through a ClawTeam runtime profile).
-    Upgrade-only users whose Flows predate this would otherwise break, so we
-    create the minimal artifacts here:
-
-    * Hermes  → ``hermes profile create <id>`` + HermesAgent row.
-    * Claude/Codex → config home + ClawTeam env profile + ManagedAgent row.
-
-    Idempotent + best-effort: existing records are skipped, and any per-agent
-    failure (e.g. an id that isn't a valid lowercase-alphanumeric Hermes profile
-    name, or a missing CLI) is logged and skipped so the upgrade still advances.
-    """
-    from app.models import HermesAgent, ManagedAgent
-    from app.scheduler import managed_runtime
-    from app.services.hermes_agents import hermes_profile_root
-    from app.storage import get_storage
-
-    storage = get_storage(config)  # ensure HermesAgent/ManagedAgent tables exist
-
-    # Page through every user's Flows.
-    flows = []
-    offset = 0
-    while True:
-        page, total = storage.flow_list(owner_user=None, limit=200, offset=offset)
-        flows.extend(page)
-        offset += len(page)
-        if not page or offset >= total:
-            break
-
-    hermes_done = 0
-    managed_done = 0
-    failures: list[str] = []  # human-readable per-agent failures → terminal
-    hermes_exe = shutil.which("hermes")
-    for flow in flows:
-        spec = flow.spec if isinstance(flow.spec, dict) else {}
-        owner = flow.owner_user
-        flow_label = flow.name or flow.id
-        for agent in (spec.get("agents") or []):
-            if not isinstance(agent, dict):
-                continue
-            kind = agent.get("kind")
-            aid = str(agent.get("id") or "").strip()
-            if not aid:
-                continue
-            try:
-                if kind == "hermes":
-                    if storage.hermes_get(aid) is not None:
-                        continue
-                    if hermes_exe is None:
-                        failures.append(
-                            f"Flow '{flow_label}': Hermes agent '{aid}' not provisioned "
-                            "(hermes CLI not installed) — create it in the management module."
-                        )
-                        continue
-                    proc = subprocess.run(  # noqa: S603
-                        [hermes_exe, "profile", "create", aid],
-                        capture_output=True, text=True, timeout=60,
-                    )
-                    out = (proc.stderr or "") + (proc.stdout or "")
-                    if proc.returncode != 0 and "exist" not in out.lower():
-                        failures.append(
-                            f"Flow '{flow_label}': could not create Hermes profile '{aid}': "
-                            f"{out.strip()[:160]}"
-                        )
-                        continue
-                    try:
-                        storage.hermes_create(HermesAgent(
-                            id=aid, name=aid, profile_root=str(hermes_profile_root(aid)),
-                            created_by_user=owner,
-                        ))
-                    except Exception:
-                        # Already fixed (row appeared concurrently / out-of-band)
-                        # → not an error; only re-raise if it's a real failure.
-                        if storage.hermes_get(aid) is not None:
-                            continue
-                        raise
-                    hermes_done += 1
-                elif kind in ("claude", "codex"):
-                    if storage.managed_get(aid) is not None:
-                        continue
-                    home = managed_runtime.managed_home(kind, aid)
-                    home.mkdir(parents=True, exist_ok=True)
-                    if kind == "codex":
-                        from app.services.managed_agents import _seed_codex_inference_config
-
-                        _seed_codex_inference_config(home)
-                    profile = managed_runtime.ensure_profile(kind, aid)
-                    try:
-                        storage.managed_create(ManagedAgent(
-                            id=aid, kind=kind, name=aid, config_home=str(home),
-                            clawteam_profile=profile, created_by_user=owner,
-                        ))
-                    except Exception:
-                        if storage.managed_get(aid) is not None:
-                            continue  # already fixed → success, not error
-                        raise
-                    managed_done += 1
-                # cursor: not managed-enforced yet → skip.
-            except Exception as exc:  # best-effort: never block the upgrade
-                failures.append(
-                    f"Flow '{flow_label}': could not provision {kind} agent '{aid}': "
-                    f"{str(exc)[:160]}"
-                )
-                logger.warning(
-                    "upgrade_provision_agent_failed",
-                    agent_id=aid, kind=kind, error=str(exc)[:240],
-                )
-    if hermes_done or managed_done:
-        logger.info(
-            "upgrade_provisioned_managed_agents",
-            hermes=hermes_done, managed=managed_done, failures=len(failures),
-        )
-    return failures
-
-
 # Register migrations in chronological order. Newer entries come last.
 # Each ``apply`` MUST be idempotent (re-runnable). A migration runs only when
 # the user's version marker is below the migration ``version`` (minimal,
 # baseline-aware compatibility).
 MIGRATIONS: list[Migration] = [
-    Migration(
-        # MUST be strictly greater than the highest already-released version
-        # (0.1.12) so existing users' ledger seed does NOT mark it already-applied
-        # — otherwise the provision would be skipped for current installs. This
-        # ships in the 0.1.13 line (first beta 0.1.13b1).
-        version="0.1.13b1",
-        description="provision managed-agent records/profiles for agents already in existing Flows",
-        apply=_provision_managed_agents_for_existing_flows,
-        critical=False,  # best-effort repair: failures are reported, never abort
-    ),
+    # No active DB migrations. (The 0.1.13b1 "provision managed agents for
+    # existing flows" migration was removed: Claude/Codex no longer have a
+    # persistent management platform — non-OpenClaw agents are temporary/ad-hoc.)
 ]
 
 
@@ -500,18 +372,18 @@ def run_upgrade(
         report.errors.append(f"secrets init: {exc}")
         logger.exception("upgrade_secrets_init_failed", error=str(exc))
 
-    # 0b. Managed Codex agents use an isolated CODEX_HOME; seed operator-level
-    # provider/auth config so chat/exec does not fall back to unauthenticated
-    # OpenAI (401). Idempotent + best-effort.
+    # 0b. Managed Hermes profiles read only their own config (no global to
+    # reference live), so backfill inference config into any profile that lacks
+    # it from the operator's active/root profile. Idempotent + best-effort.
     try:
-        from app.services.managed_agents import backfill_codex_inference_config
+        from app.services.hermes_agents import backfill_hermes_inference_config
 
-        seeded = backfill_codex_inference_config(config=cfg)
+        seeded = backfill_hermes_inference_config(config=cfg)
         if seeded:
-            logger.info("upgrade_codex_inference_config_seeded", agents=seeded)
+            logger.info("upgrade_hermes_inference_config_seeded", agents=seeded)
     except Exception as exc:  # pragma: no cover - defensive; never block upgrade
-        report.repair_warnings.append(f"codex inference config backfill: {exc}")
-        logger.warning("upgrade_codex_inference_backfill_failed", error=str(exc))
+        report.repair_warnings.append(f"hermes inference config backfill: {exc}")
+        logger.warning("upgrade_hermes_inference_backfill_failed", error=str(exc))
 
     # 0. Editable-source frontend build (optional).
     if include_frontend_build:

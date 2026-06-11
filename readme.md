@@ -156,6 +156,15 @@ ClawsomeFlow is built on top of **ClawTeam**.
 
 ## 🚀 Quick Start
 
+> **Before you start — make sure your agent CLIs work.**
+> ClawsomeFlow drives external agent CLIs (`claude`, `codex`, `hermes`, …) and
+> agents **inherit your global CLI authentication**. So first install and log in
+> to each CLI you plan to use and confirm it runs on its own (e.g. `claude -p hi`,
+> `hermes` chat, `codex`). If a CLI isn't authenticated, agents using it will stall
+> on a login prompt. For Hermes you can also set the model/provider/key per agent
+> in **Settings → Model**. If you hit auth errors, verify the CLI's own
+> model/provider config first.
+
 ### Install
 
 Linux/macOS

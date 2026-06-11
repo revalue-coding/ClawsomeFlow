@@ -196,7 +196,7 @@ function Picker() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-ink-900">{t("hermes.title")}</h1>
-          <p className="text-sm text-ink-500">{t("hermes.pickerTitle")}</p>
+          <p className="text-sm text-rose-600">{t("hermes.modelNote")}</p>
         </div>
         <div className="flex shrink-0 gap-2">
           <button type="button" className="btn-outline" onClick={() => void reload()}>
@@ -635,7 +635,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const [teamEditSaving, setTeamEditSaving] = useState(false);
   const [profileRoot, setProfileRoot] = useState("");
   const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
+  // Persist the unsent composer text so switching tabs doesn't discard it.
+  const [input, setInput] = useSessionBackedState(`hermes:${agentId}:input`, "", {
+    isClosed: (v) => v.trim() === "",
+  });
   const [workdir, setWorkdir] = useState(
     () => localStorage.getItem(`hermes-workdir-${agentId}`) || DEFAULT_WORKDIR,
   );
@@ -1160,11 +1163,13 @@ function ModelTab({ agentId }: { agentId: string }) {
     <div className="space-y-4">
       {error && <ErrorBox>{error}</ErrorBox>}
       <div className="space-y-2">
+        <p className="text-xs text-ink-400">{t("hermes.settingsModal.model.hint")}</p>
         <label className="block text-sm">
           <span className="text-ink-600">{t("hermes.settingsModal.model.modelLabel")}</span>
           <input
             className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
             value={model.default}
+            placeholder={t("hermes.settingsModal.model.modelPlaceholder")}
             onChange={(e) => setModel({ ...model, default: e.target.value })}
           />
         </label>
@@ -1173,6 +1178,7 @@ function ModelTab({ agentId }: { agentId: string }) {
           <input
             className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
             value={model.provider}
+            placeholder={t("hermes.settingsModal.model.providerPlaceholder")}
             onChange={(e) => setModel({ ...model, provider: e.target.value })}
           />
         </label>
@@ -1181,6 +1187,7 @@ function ModelTab({ agentId }: { agentId: string }) {
           <input
             className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
             value={model.baseUrl}
+            placeholder={t("hermes.settingsModal.model.baseUrlPlaceholder")}
             onChange={(e) => setModel({ ...model, baseUrl: e.target.value })}
           />
         </label>

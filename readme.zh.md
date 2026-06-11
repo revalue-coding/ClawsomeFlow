@@ -154,6 +154,14 @@ ClawsomeFlow 构建在 **ClawTeam**  之上
 
 ## 🚀 快速开始
 
+> **开始之前——请先确保你的 Agent CLI 可正常使用。**
+> ClawsomeFlow 通过调用外部 Agent CLI（`claude`、`codex`、`hermes` 等)来运行，
+> 且 Agent **会继承你全局 CLI 的认证**。因此请先安装并登录每个你打算使用的 CLI，
+> 并确认它们能独立运行（例如 `claude -p hi`、`hermes` 对话、`codex`）。若某个 CLI
+> 未完成认证,使用它的 Agent 会卡在登录界面。Hermes 还可在 **设置 → 模型** 中为
+> 每个 Agent 单独配置模型/提供商/密钥。遇到认证报错时,请优先排查 CLI 自身的
+> 模型/提供商配置是否正确。
+
 ### 安装
 
 Linux/macOS

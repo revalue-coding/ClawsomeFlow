@@ -31,6 +31,7 @@ Concurrency:
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -2027,7 +2028,13 @@ async def commit_agent(
     """
     cfg = config or load_config()
     storage = storage or get_storage(cfg)
-    reindex_registered_agents(storage=storage, config=cfg)
+    # NB: every blocking call below (DB scans, filesystem scaffolding, git
+    # init, openclaw CLI cron sync) is dispatched via ``asyncio.to_thread`` so
+    # the uvicorn event loop stays responsive. Running them inline froze the
+    # whole backend for seconds (git ``subprocess.run`` ×5 + cron-sync CLI
+    # calls at 15s each), making every other page hang while an agent was being
+    # created.
+    await asyncio.to_thread(reindex_registered_agents, storage=storage, config=cfg)
     # Self-heal managed entries from legacy invalid keys (e.g. description)
     # so subsequent openclaw CLI commands pass schema validation.
     await oj.sanitize_managed_agent_entries(config=cfg)
@@ -2061,16 +2068,23 @@ async def commit_agent(
 
     workspace = _agent_workspace(aid)
 
-    # Filesystem-side preparation (cheap; reversible).
+    # Filesystem-side preparation (cheap; reversible). Offloaded to a worker
+    # thread — git init shells out repeatedly and must not block the loop.
     try:
-        deploy_common_agent_workspace(workspace, overwrite_agents_md=True)
+        await asyncio.to_thread(
+            deploy_common_agent_workspace, workspace, overwrite_agents_md=True
+        )
     except FileNotFoundError as exc:
         raise OpenclawAgentError(
             f"common-agent source is missing: {exc}",
         ) from exc
-    _ensure_workspace_templates(workspace, agent_id=aid, agent_name=cmd.name)
-    _git_init_workspace(workspace)
-    installed_skills = _install_user_skills(workspace, cmd.extra_skills)
+    await asyncio.to_thread(
+        _ensure_workspace_templates, workspace, agent_id=aid, agent_name=cmd.name
+    )
+    await asyncio.to_thread(_git_init_workspace, workspace)
+    installed_skills = await asyncio.to_thread(
+        _install_user_skills, workspace, cmd.extra_skills
+    )
 
     entry = _build_openclaw_entry(
         cmd,
@@ -2111,7 +2125,8 @@ async def commit_agent(
 
     seeded_auth_profiles = 0
     try:
-        seeded_auth_profiles = _seed_portable_static_auth_profiles(
+        seeded_auth_profiles = await asyncio.to_thread(
+            _seed_portable_static_auth_profiles,
             agent_id=aid,
             config=cfg,
             source_agent_id=auth_seed_source_agent_id,
@@ -2125,7 +2140,9 @@ async def commit_agent(
 
     sessions_dir_ready = False
     try:
-        sessions_dir_ready = _ensure_agent_sessions_dir(agent_id=aid, config=cfg)
+        sessions_dir_ready = await asyncio.to_thread(
+            _ensure_agent_sessions_dir, agent_id=aid, config=cfg
+        )
     except Exception as exc:  # pragma: no cover - non-blocking best-effort path
         logger.warning(
             "openclaw_agent_sessions_dir_prepare_failed",
@@ -2133,7 +2150,11 @@ async def commit_agent(
             error=str(exc)[:240],
         )
 
-    entropy_scheduled = _schedule_default_entropy_management_task(agent_id=aid, config=cfg)
+    # Cron sync shells out to the openclaw CLI (list + add/edit, 15s timeout
+    # each) — by far the worst event-loop offender; keep it on a worker thread.
+    entropy_scheduled = await asyncio.to_thread(
+        _schedule_default_entropy_management_task, agent_id=aid, config=cfg
+    )
     logger.info(
         "openclaw_agent_committed",
         agent_id=aid,
@@ -2238,7 +2259,7 @@ async def delete_agent(
     """
     cfg = config or load_config()
     storage = storage or get_storage(cfg)
-    reindex_registered_agents(storage=storage, config=cfg)
+    await asyncio.to_thread(reindex_registered_agents, storage=storage, config=cfg)
     aid = _validate_agent_id(agent_id)
     if mode is None:
         mode = _DELETE_MODE_PURGE if bool(purge_workspace) else _DELETE_MODE_UNREGISTER
@@ -2272,7 +2293,9 @@ async def delete_agent(
     backup_entries_count = 0
     backup_captured = False
     if mode == _DELETE_MODE_UNREGISTER and oj.has_managed_agent(aid, cfg):
-        backup_entries, backup_captured = _capture_custom_cron_backup(
+        # Cron backup shells out to the openclaw CLI — keep it off the loop.
+        backup_entries, backup_captured = await asyncio.to_thread(
+            _capture_custom_cron_backup,
             agent_id=aid,
             current_snapshot=(
                 row.openclaw_config_snapshot
@@ -2302,7 +2325,7 @@ async def delete_agent(
 
     if mode == _DELETE_MODE_PURGE:
         storage.openclaw_delete(aid)
-        _safe_rmtree(Path(row.workspace_path).parent)
+        await asyncio.to_thread(_safe_rmtree, Path(row.workspace_path).parent)
 
     logger.info(
         "openclaw_agent_deleted",
@@ -2449,7 +2472,7 @@ async def restore_agent_registration(
     """Re-register one previously-unregistered managed agent into runtime."""
     cfg = config or load_config()
     storage = storage or get_storage(cfg)
-    reindex_registered_agents(storage=storage, config=cfg)
+    await asyncio.to_thread(reindex_registered_agents, storage=storage, config=cfg)
     aid = _validate_agent_id(agent_id)
 
     existing_runtime = oj.find_agent(aid, cfg)
@@ -2462,7 +2485,8 @@ async def restore_agent_registration(
             )
         if row.created_by_user != user:
             raise AgentUnmanaged("agent belongs to a different user")
-        restored_cron_jobs = _restore_custom_cron_jobs_from_backup(
+        restored_cron_jobs = await asyncio.to_thread(
+            _restore_custom_cron_jobs_from_backup,
             agent_id=aid,
             snapshot=row.openclaw_config_snapshot
             if isinstance(row.openclaw_config_snapshot, dict)
@@ -2550,8 +2574,12 @@ async def restore_agent_registration(
         raise OpenclawAgentError(msg) from exc
     row.openclaw_config_snapshot = entry
     saved = storage.openclaw_update(row)
-    entropy_scheduled = _schedule_default_entropy_management_task(agent_id=aid, config=cfg)
-    restored_cron_jobs = _restore_custom_cron_jobs_from_backup(
+    # Both calls shell out to the openclaw CLI — offload off the event loop.
+    entropy_scheduled = await asyncio.to_thread(
+        _schedule_default_entropy_management_task, agent_id=aid, config=cfg
+    )
+    restored_cron_jobs = await asyncio.to_thread(
+        _restore_custom_cron_jobs_from_backup,
         agent_id=aid,
         snapshot=raw_snapshot,
         config=cfg,
@@ -2643,7 +2671,7 @@ async def import_external_agent(
     """Import one unmanaged runtime agent into ClawsomeFlow governance."""
     cfg = config or load_config()
     storage = storage or get_storage(cfg)
-    reindex_registered_agents(storage=storage, config=cfg)
+    await asyncio.to_thread(reindex_registered_agents, storage=storage, config=cfg)
     source_id = _validate_agent_id(source_agent_id)
     candidate_map = _load_external_candidate_map(storage=storage, config=cfg)
     source = candidate_map.get(source_id)
@@ -2681,7 +2709,9 @@ async def import_external_agent(
             f"source and target workspace are identical: {target_workspace}"
         )
 
-    try:
+    def _overlay_workspace() -> None:
+        # Recursive copytree + skill install + AGENTS.md rewrite — all blocking
+        # filesystem work; run in a worker thread to keep the loop responsive.
         _copy_workspace_overlay(source=source_workspace, target=target_workspace)
         deploy_common_agent_workspace(target_workspace, overwrite_agents_md=False)
         _install_user_skills(target_workspace, ())
@@ -2689,6 +2719,9 @@ async def import_external_agent(
             workspace=target_workspace,
             source_workspace=source_workspace,
         )
+
+    try:
+        await asyncio.to_thread(_overlay_workspace)
     except Exception as exc:
         try:
             await delete_agent(

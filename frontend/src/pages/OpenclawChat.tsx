@@ -1575,7 +1575,12 @@ function ChatRoom({
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
+  // Persist the unsent composer text so switching tabs doesn't discard it.
+  const [input, setInput] = useSessionBackedState(
+    `openclaw-chat:room:${agentId}:input`,
+    "",
+    { isClosed: (v) => v.trim() === "" },
+  );
   const [streaming, setStreaming] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [teamEditOpen, setTeamEditOpen] = useSessionBackedModalFlag(

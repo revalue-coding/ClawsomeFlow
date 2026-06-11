@@ -157,21 +157,14 @@ class TmuxLiveSession(WorkerSession):
     def _resolve_profile(self) -> str | None:
         """ClawTeam runtime profile to apply at spawn.
 
-        For env-home managed agents (claude/codex/cursor) this injects the
-        per-agent config home (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` /
-        ``CURSOR_CONFIG_DIR``) so the agent's bound skills/MCP/hooks load,
-        independent of the working directory. Idempotent — re-creates the
-        ClawTeam profile each spawn (ms-scale). Other kinds keep the
-        author-provided ``FlowAgent.profile`` (Hermes binds via ``-p`` instead).
+        Temporary (ad-hoc) agents carry no profile. Persistent agents keep the
+        author-provided ``FlowAgent.profile`` — only Hermes uses it today (it
+        also binds identity via ``-p``; see __init__). Claude/Codex/Cursor are
+        temporary-only (no persistent management platform), so they fall through
+        to ``None`` and spawn against the operator's own default CLI config.
         """
-        # Temporary (ad-hoc) agents are not managed: no config-home env profile
-        # and no author-provided profile binding.
         if self.agent.is_temporary:
             return None
-        from app.scheduler import managed_runtime
-        kind = self.agent.kind.value
-        if managed_runtime.is_managed_kind(kind):
-            return managed_runtime.ensure_profile(kind, self.agent.id)
         return self.agent.profile
 
     async def _do_spawn(self) -> None:

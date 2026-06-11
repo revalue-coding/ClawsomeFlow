@@ -621,32 +621,6 @@ class HermesAgent(_SQLBase, table=True):
     created_at: datetime = SQLField(default_factory=_now, nullable=False)
 
 
-class ManagedAgent(_SQLBase, table=True):
-    """A user-managed env-home TUI agent (Claude Code / Codex / Cursor).
-
-    Unlike OpenClaw (session-id) and Hermes (``-p`` profile), these platforms
-    carry their identity/skills/MCP in a relocatable config home selected via an
-    environment variable (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` /
-    ``CURSOR_CONFIG_DIR``). That env is injected at spawn through a ClawTeam
-    runtime profile (``clawteam profile set --env``), so tools follow the agent
-    regardless of the per-task working directory.
-
-    ``id`` is BOTH the canonical agent id AND the :class:`FlowAgent.id` used when
-    this agent participates in a Flow (one canonical id per managed agent).
-    """
-
-    id: str = SQLField(primary_key=True)  # = FlowAgent.id
-    kind: str = SQLField(index=True)  # "claude" | "codex" | "cursor"
-    name: str
-    description: str = ""
-    team_id: str = SQLField(default="", index=True)
-    config_home: str  # = ~/.clawsomeflow/agents/{id}/{kind}-home
-    clawteam_profile: str  # = csflow-{kind}-{id}
-    created_by_user: str = SQLField(index=True)
-    nl_prompt: str = ""
-    created_at: datetime = SQLField(default_factory=_now, nullable=False)
-
-
 class AgentStoreOwnership(_SQLBase, table=True):
     """One user entitlement for one Agent Store listing."""
 
@@ -767,7 +741,6 @@ __all__ = [
     "OpenclawAgent",
     "OpenclawTeam",
     "HermesAgent",
-    "ManagedAgent",
     "AgentStoreOwnership",
     "AgentStoreOrder",
     "OpenclawAgentRequest",
