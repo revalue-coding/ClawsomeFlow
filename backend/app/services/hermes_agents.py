@@ -358,6 +358,35 @@ def _seed_profile_inference_config(agent_id: str) -> None:
             )
 
 
+def backfill_hermes_inference_config(
+    *, storage: StorageBackend | None = None, config: Config | None = None
+) -> int:
+    """Ensure every managed Hermes profile has inference config (config.yaml/.env).
+
+    Hermes profiles read ONLY their own config — there is no global/root config
+    they can reference live — so a profile created before the seed existed (or
+    before the operator configured a provider) is stranded with "No inference
+    provider configured". This backfills them from the operator's active/root
+    profile. Idempotent and ABSENT-ONLY (``_seed_profile_inference_config`` never
+    overwrites an existing file), so it never clobbers a user's per-agent edits.
+    Returns the number of profiles that gained config. Best-effort.
+    """
+    cfg = config or load_config()
+    storage = storage or get_storage(cfg)
+    seeded = 0
+    for row in storage.hermes_list():
+        dest = hermes_profile_root(row.id) / "config.yaml"
+        had = dest.is_file()
+        try:
+            _seed_profile_inference_config(row.id)
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.warning("hermes_backfill_failed", agent_id=row.id, error=str(exc))
+            continue
+        if not had and dest.is_file():
+            seeded += 1
+    return seeded
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Create cancellation (the bootstrap `hermes -z` can run up to 10 min; the
 # UI must be able to abort it). We track the live bootstrap subprocess per
@@ -559,19 +588,32 @@ def claim_profile(
     user: str,
     storage: StorageBackend | None = None,
     config: Config | None = None,
+    known_profiles: set[str] | None = None,
+    probe_description: bool = True,
 ) -> HermesAgent:
-    """Register an EXISTING Hermes profile into management (DB row only)."""
+    """Register an EXISTING Hermes profile into management (DB row only).
+
+    ``known_profiles`` / ``probe_description`` exist for the bulk reconcile path
+    (:func:`_reconcile_managed_profiles`): pass the already-fetched profile-name
+    set to skip a redundant ``hermes profile list`` subprocess, and set
+    ``probe_description=False`` to skip the per-profile ``hermes profile
+    describe`` subprocess. Both default to the safe standalone behaviour.
+    """
     cfg = config or load_config()
     storage = storage or get_storage(cfg)
     aid = _validate_agent_id(profile_name)
     if storage.hermes_get(aid) is not None:
         raise AgentAlreadyExists(f"hermes agent {aid!r} is already managed")
-    if aid not in list_profile_names():
+    available = known_profiles if known_profiles is not None else set(list_profile_names())
+    if aid not in available:
         raise AgentNotFound(f"no Hermes profile named {aid!r} to claim")
+    desc = description.strip()
+    if not desc and probe_description:
+        desc = read_profile_description(aid)
     row = HermesAgent(
         id=aid,
         name=(name.strip() or aid),
-        description=(description.strip() or read_profile_description(aid)),
+        description=desc,
         team_id=team_id or "",
         profile_root=str(hermes_profile_root(aid)),
         created_by_user=user,
@@ -637,7 +679,16 @@ def _reconcile_managed_profiles(
     for name in on_disk:  # adopt newcomers
         if name not in managed:
             try:
-                claim_profile(profile_name=name, user=user, storage=storage)
+                # Reuse the names we already fetched and skip the per-profile
+                # `hermes profile describe` so adoption adds no extra subprocess
+                # on this hot list path (was O(N) `hermes` invocations).
+                claim_profile(
+                    profile_name=name,
+                    user=user,
+                    storage=storage,
+                    known_profiles=on_disk_set,
+                    probe_description=False,
+                )
             except HermesAgentError:
                 continue
     for aid in managed:  # prune ghosts whose profile no longer exists
@@ -1192,4 +1243,5 @@ __all__ = [
     "cron_action",
     "create_cron",
     "chat_once",
+    "backfill_hermes_inference_config",
 ]

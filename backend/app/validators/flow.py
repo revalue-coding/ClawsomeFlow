@@ -31,12 +31,6 @@ ERROR_INVALID_LEADER = "INVALID_LEADER"
 ERROR_MISSING_LEADER_SUMMARY = "MISSING_LEADER_SUMMARY"
 ERROR_OPENCLAW_AGENT_NOT_FOUND = "OPENCLAW_AGENT_NOT_FOUND"
 ERROR_HERMES_AGENT_NOT_FOUND = "HERMES_AGENT_NOT_FOUND"
-ERROR_MANAGED_AGENT_NOT_FOUND = "MANAGED_AGENT_NOT_FOUND"
-
-# Env-home kinds that must be created in the management module before use in a
-# Flow (parallel to OpenClaw/Hermes). Cursor is intentionally NOT enforced yet —
-# its management page is not built, so leaving it unenforced keeps cursor usable.
-_ENFORCED_MANAGED_KINDS = frozenset({AgentKind.claude, AgentKind.codex})
 ERROR_MISSING_AGENT_REPO = "MISSING_AGENT_REPO"
 ERROR_INVALID_REPO = "INVALID_REPO"
 ERROR_DUPLICATE_AGENT_ID = "DUPLICATE_AGENT_ID"
@@ -268,7 +262,9 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
             # Temporary (ad-hoc) agents are not registered in any managed store,
             # so skip the existence lookups for them — they still need a valid
             # working-directory ``repo`` (checked below). OpenClaw cannot be
-            # temporary (rejected at the model level).
+            # temporary (rejected at the model level). Claude/Codex/Cursor have no
+            # persistent management platform, so they are only ever ad-hoc (no
+            # existence check) — just like Cursor.
             if (
                 a.kind == AgentKind.hermes
                 and not a.is_temporary
@@ -281,16 +277,6 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
                     "in the management module first.",
                     {"agent_id": a.id},
                 )
-            if a.kind in _ENFORCED_MANAGED_KINDS and not a.is_temporary:
-                row = storage.managed_get(a.id)
-                if row is None or row.kind != a.kind.value:
-                    raise FlowValidationError(
-                        ERROR_MANAGED_AGENT_NOT_FOUND,
-                        f"agent {a.id!r}: kind={a.kind.value}, but no managed "
-                        f"{a.kind.value} agent with that id is registered. Create "
-                        "it in the management module first.",
-                        {"agent_id": a.id, "kind": a.kind.value},
-                    )
             if not a.repo:
                 raise FlowValidationError(
                     ERROR_MISSING_AGENT_REPO,

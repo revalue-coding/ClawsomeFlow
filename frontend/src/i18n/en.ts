@@ -65,8 +65,6 @@ const en = {
     clawsomeAssistant: "ClawsomeFlow Assistant",
     chat: "OpenClaw Agent",
     hermes: "Hermes Agent",
-    claude: "Claude Agent",
-    codex: "Codex Agent",
     profiles: "Profile",
     groupResources: "Resources",
     agentStore: "Agent Store",
@@ -847,6 +845,12 @@ const en = {
   hermes: {
     title: "Hermes Agents",
     pickerTitle: "Chat with your Hermes Agents",
+    modelNote:
+      "Create Hermes Agents here, each with its own persona, memory, and accumulated " +
+      "experience. Note: each Hermes Agent's model configuration is independent — a new " +
+      "agent inherits the root profile's model at creation, but does NOT track it " +
+      "afterward. To change it, use the agent's Settings → Model, or configure it in the " +
+      "native Hermes service.",
     listEmpty: "No Hermes agents yet. Create one to get started.",
     notInstalledTitle: "Hermes is not available",
     notInstalled:
@@ -917,13 +921,17 @@ const en = {
       save: "Save",
       saved: "Saved",
       model: {
+        hint: "These are passed straight to the Hermes CLI — any OpenAI-compatible provider works. Make sure the matching API key is set below.",
         modelLabel: "Model",
+        modelPlaceholder: "e.g. Claude-Sonnet-4.5 or gpt-4o",
         providerLabel: "Provider",
+        providerPlaceholder: "e.g. poe, openai, anthropic, or a custom name",
         baseUrlLabel: "Base URL",
+        baseUrlPlaceholder: "e.g. https://api.poe.com/v1",
         apiKeys: "API keys (.env)",
         addKey: "Add key",
-        keyName: "KEY",
-        keyValue: "value",
+        keyName: "e.g. POE_API_KEY",
+        keyValue: "e.g. sk-...",
         noKeys: "No API keys set.",
         set: "set",
       },
@@ -950,37 +958,6 @@ const en = {
         pause: "Pause",
         resume: "Resume",
         remove: "Remove",
-      },
-    },
-  },
-  managed: {
-    title: "{{platform}} Agents",
-    pickerTitle: "Chat with your {{platform}} agents",
-    listEmpty: "No agents yet. Create one to get started.",
-    notInstalledTitle: "{{platform}} is not available",
-    notInstalled:
-      "The {{platform}} CLI is not installed or not usable on this host. " +
-      "Install it ({{install}}) and refresh.",
-    openHome: "config home",
-    openHomeFailed: "Failed to open the config home: {{message}}",
-    create: {
-      title: "Create a {{platform}} agent",
-      idHint: "Lowercase letters/numbers/'-' only. Used directly as the agent profile id.",
-    },
-    remove: {
-      title: "Remove agent",
-      warning: "This permanently deletes the agent's config home (role, skills, MCP). This cannot be undone.",
-    },
-    settingsModal: {
-      title: "{{platform}} Agent Settings",
-      tabs: { role: "{{file}}", mcp: "MCP", skills: "Skills" },
-      roleHint: "The agent's identity/instructions (user-level memory in its config home).",
-      mcp: {
-        empty: "No MCP servers.",
-        add: "Add MCP server",
-        name: "Server name",
-        command: "Command (e.g. npx -y @scope/server)",
-        addBtn: "Add",
       },
     },
   },

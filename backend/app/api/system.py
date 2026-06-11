@@ -672,7 +672,7 @@ async def trigger_upgrade(_user: UserDep = "") -> TriggerUpgradeResponse:
             status_code=409,
         )
 
-    via = _launch_self_upgrade(status.upgrade_script_url)
+    via = await asyncio.to_thread(_launch_self_upgrade, status.upgrade_script_url)
     logger.info(
         "self_upgrade_triggered",
         via=via,

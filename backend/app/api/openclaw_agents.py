@@ -592,7 +592,10 @@ async def _remove_hook_entry_fallback(*, hook_name: str) -> None:
 async def _set_hook_enabled(*, hook_name: str, enabled: bool, workspace: FsPath) -> None:
     cmd = "enable" if enabled else "disable"
     try:
-        _run_openclaw_cli(
+        # Blocking CLI subprocess — keep it off the event loop so hook toggles
+        # don't freeze other tabs.
+        await asyncio.to_thread(
+            _run_openclaw_cli,
             args=["hooks", cmd, hook_name],
             cwd=str(workspace),
             expect_json=False,
@@ -1580,7 +1583,8 @@ async def create_agent(
         )
         _raise_if_agent_create_cancelled(agent_id=created.id)
         bootstrap_text = _normalize_assistant_text(_extract_chunk_text(bootstrap_reply))
-        commit_sha = _commit_bootstrap_workspace(
+        commit_sha = await asyncio.to_thread(
+            _commit_bootstrap_workspace,
             workspace_path=created.workspace_path,
             agent_id=created.id,
         )
@@ -2665,7 +2669,8 @@ async def _run_import_optimization_chat(
         timeout_sec=_chat_cli_timeout_seconds(),
     )
     optimize_text = _normalize_assistant_text(_extract_chunk_text(completion))
-    commit_sha = _commit_bootstrap_workspace(
+    commit_sha = await asyncio.to_thread(
+        _commit_bootstrap_workspace,
         workspace_path=workspace_path,
         agent_id=agent_id,
     )
@@ -3177,7 +3182,9 @@ async def _chat_completion_via_cli(
                     detail=detail[:240],
                 )
                 try:
-                    repaired = repair_pending_scope_upgrades()
+                    # Helper does blocking subprocess + time.sleep retries —
+                    # keep it off the event loop.
+                    repaired = await asyncio.to_thread(repair_pending_scope_upgrades)
                     logger.info(
                         "openclaw_cli_scope_repair_result",
                         agent_id=agent_id,
@@ -3297,7 +3304,9 @@ async def chat_with_agent(
     # Verify the agent exists (and is ours) BEFORE we open a bridge.
     row = _ensure_chat_target_access(agent_id, user, storage)
     try:
-        _best_effort_pre_chat_workspace_commit(agent=row)
+        # Runs git on every chat turn — offload so a busy chat tab doesn't
+        # stall the rest of the UI.
+        await asyncio.to_thread(_best_effort_pre_chat_workspace_commit, agent=row)
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning(
             "chat_precommit_unexpected_error",

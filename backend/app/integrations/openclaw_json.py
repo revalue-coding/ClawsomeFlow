@@ -19,6 +19,7 @@ so we never write unknown keys into OpenClaw's schema.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -373,7 +374,7 @@ async def update_openclaw_json(
         result = mutator(data)
         if result is not None:
             await result  # awaitable mutator
-        save_openclaw_json_unlocked(data, config=cfg)
+        await asyncio.to_thread(save_openclaw_json_unlocked, data, config=cfg)
         logging_setup.openclaw_json_modify(
             operation=operation,
             agent_id=agent_id,
@@ -409,7 +410,7 @@ async def sanitize_managed_agent_entries(
                 removed_by_agent[aid] = removed
         if not removed_by_agent:
             return {}
-        save_openclaw_json_unlocked(data, config=cfg)
+        await asyncio.to_thread(save_openclaw_json_unlocked, data, config=cfg)
         logging_setup.openclaw_json_modify(
             operation="sanitize_managed_agent_entries",
             agent_id=None,
@@ -475,7 +476,7 @@ async def append_managed_agent(
         entry_copy = dict(agent_entry)
         _strip_invalid_managed_agent_keys(entry_copy)
         agents.append(entry_copy)
-        save_openclaw_json_unlocked(data, config=cfg)
+        await asyncio.to_thread(save_openclaw_json_unlocked, data, config=cfg)
         with file_locked(managed_registry_path()):
             managed_ids = _load_managed_agent_ids_unlocked()
             managed_ids.add(aid)
@@ -514,7 +515,7 @@ async def remove_managed_agent(
                 continue
             new_list.append(a)
         data.setdefault("agents", {})["list"] = new_list
-        save_openclaw_json_unlocked(data, config=cfg)
+        await asyncio.to_thread(save_openclaw_json_unlocked, data, config=cfg)
         with file_locked(managed_registry_path()):
             managed_ids = _load_managed_agent_ids_unlocked()
             managed_ids.discard(agent_id)
@@ -550,7 +551,7 @@ async def remove_all_managed_agents(
                 continue
             kept.append(a)
         data.setdefault("agents", {})["list"] = kept
-        save_openclaw_json_unlocked(data, config=cfg)
+        await asyncio.to_thread(save_openclaw_json_unlocked, data, config=cfg)
         with file_locked(managed_registry_path()):
             _save_managed_agent_ids_unlocked(set())
         logging_setup.openclaw_json_modify(

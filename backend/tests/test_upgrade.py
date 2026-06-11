@@ -457,7 +457,7 @@ def test_run_upgrade_creates_hermes_agent_table(
 ) -> None:
     """Upgrade-parity: the HermesAgent table is created on the upgrade path so an
     upgrade-only user reaches the same schema as a fresh deploy."""
-    from app.models import HermesAgent, ManagedAgent
+    from app.models import HermesAgent
     from app.storage import get_storage
 
     monkeypatch.setattr(upgrade, "MIGRATIONS", [])
@@ -473,63 +473,6 @@ def test_run_upgrade_creates_hermes_agent_table(
         HermesAgent(id="probe", name="P", profile_root="x", created_by_user="alice")
     )
     assert storage.hermes_get("probe") is not None
-    assert storage.managed_list() == []
-    storage.managed_create(ManagedAgent(
-        id="mprobe", kind="claude", name="M", config_home="x",
-        clawteam_profile="csflow-claude-mprobe", created_by_user="alice",
-    ))
-    assert storage.managed_get("mprobe") is not None
-
-
-def test_migration_provisions_managed_agents_for_existing_flows(
-    tmp_clawsomeflow_home: Path,
-    fake_config: Config,
-) -> None:
-    """Back-compat migration: existing Flows referencing Hermes/Claude/Codex
-    agents get managed records (+ runtime profiles) created idempotently."""
-    import shutil
-    import subprocess
-
-    from app.models import AgentKind, Flow, FlowAgent, FlowSpec, FlowTask
-    from app.scheduler import managed_runtime
-    from app.storage import get_storage
-
-    storage = get_storage(fake_config)
-    storage.flow_create(
-        Flow(name="legacy", description="g", owner_user="alice").with_spec(
-            FlowSpec(
-                agents=[
-                    FlowAgent(id="oldhermes", kind=AgentKind.hermes, repo="/tmp/r", is_leader=True),
-                    FlowAgent(id="oldclaude", kind=AgentKind.claude, repo="/tmp/r", is_leader=False),
-                ],
-                tasks=[
-                    FlowTask(id="t0", owner_agent_id="oldclaude", subject="w"),
-                    FlowTask(id="t1", owner_agent_id="oldhermes", subject="x",
-                             depends_on=["t0"], is_leader_summary=True),
-                ],
-            )
-        )
-    )
-    try:
-        upgrade._provision_managed_agents_for_existing_flows(fake_config)
-        # Claude managed row is always created (ensure_profile is best-effort).
-        claude_row = storage.managed_get("oldclaude")
-        assert claude_row is not None and claude_row.kind == "claude"
-        assert "CLAUDE_CONFIG_DIR" in subprocess.run(
-            ["clawteam", "profile", "show", "csflow-claude-oldclaude"],
-            capture_output=True, text=True,
-        ).stdout
-        # Hermes row requires the hermes CLI.
-        if shutil.which("hermes"):
-            assert storage.hermes_get("oldhermes") is not None
-        # Idempotent: a second run is a safe no-op.
-        upgrade._provision_managed_agents_for_existing_flows(fake_config)
-        assert len(storage.managed_list(kind="claude")) == 1
-    finally:
-        managed_runtime.remove_profile("claude", "oldclaude")
-        if shutil.which("hermes"):
-            subprocess.run(["hermes", "profile", "delete", "oldhermes", "-y"],
-                           capture_output=True, text=True)
 
 
 # ── stable ↔ beta switching: ledger gate + high-watermark marker ──────
@@ -667,53 +610,3 @@ def test_critical_migration_failure_still_runs_schema_keeps_marker(
     assert "0.1.12" not in (upgrade.read_applied_migrations() or set())
 
 
-def test_provision_repair_idempotent_when_already_fixed(
-    tmp_clawsomeflow_home: Path, fake_config: Config,
-) -> None:
-    """If the data is already in target state (rows exist), re-running the
-    repair must be a silent no-op: no exception, no reported failures, no CLI
-    calls (so it works even without hermes/clawteam installed)."""
-    from app.models import (
-        AgentKind, Flow, FlowAgent, FlowSpec, FlowTask, HermesAgent, ManagedAgent,
-    )
-    from app.storage import get_storage
-
-    storage = get_storage(fake_config)
-    # Pre-seed rows = "already fixed".
-    storage.hermes_create(HermesAgent(
-        id="fixedh", name="fixedh", profile_root="x", created_by_user="alice",
-    ))
-    storage.managed_create(ManagedAgent(
-        id="fixedc", kind="claude", name="fixedc", config_home="x",
-        clawteam_profile="csflow-claude-fixedc", created_by_user="alice",
-    ))
-    storage.flow_create(
-        Flow(name="f", description="g", owner_user="alice").with_spec(
-            FlowSpec(
-                agents=[
-                    FlowAgent(id="fixedh", kind=AgentKind.hermes, repo="/tmp/r", is_leader=True),
-                    FlowAgent(id="fixedc", kind=AgentKind.claude, repo="/tmp/r", is_leader=False),
-                ],
-                tasks=[
-                    FlowTask(id="t0", owner_agent_id="fixedc", subject="w"),
-                    FlowTask(id="t1", owner_agent_id="fixedh", subject="x",
-                             depends_on=["t0"], is_leader_summary=True),
-                ],
-            )
-        )
-    )
-    # Must not raise; must report zero failures (already fixed → success).
-    failures = upgrade._provision_managed_agents_for_existing_flows(fake_config)
-    assert failures == []
-
-
-def test_real_provision_migration_runs_for_latest_released_users() -> None:
-    """Guard: the bundled provision migration MUST be tagged above the highest
-    released version so a current user's ledger seed does NOT mark it applied
-    (else existing Hermes/Claude/Codex Flows would break, unprovisioned)."""
-    real_ids = {m.version for m in upgrade.MIGRATIONS}
-    assert "0.1.13b1" in real_ids
-    # marker = latest released (0.1.12): the migration must NOT be pre-applied.
-    assert "0.1.13b1" not in upgrade._seed_applied_from_marker("0.1.12")
-    # a fresh 0.1.13b1 install (seed-all) WOULD have it applied (no re-run).
-    assert "0.1.13b1" in {m.version for m in upgrade.MIGRATIONS}

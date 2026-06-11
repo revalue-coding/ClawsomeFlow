@@ -32,7 +32,6 @@ import {
   FlowSummary,
   FlowTask,
   HermesAgentSummary,
-  ManagedAgentSummary,
   OpenclawAgentSummary,
   api,
 } from "@/lib/api";
@@ -44,7 +43,11 @@ import {
   getRunInputFields,
   setRunInputFields,
 } from "@/lib/flowRuntime";
-import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
+import {
+  clearSessionBackedKeys,
+  useSessionBackedModalFlag,
+  useSessionBackedState,
+} from "@/lib/sessionState";
 
 type NonOpenclawOwnerKind = "claude" | "codex" | "cursor" | "hermes";
 type OwnerKind = "openclaw" | NonOpenclawOwnerKind;
@@ -159,10 +162,12 @@ function blankRow(): TaskRow {
   };
 }
 
-// Owner-kind option sets, split by source. "Existing" picks a persistent /
-// managed agent (OpenClaw + managed Claude/Codex/Hermes). "New" creates a
-// temporary ad-hoc agent of any non-OpenClaw kind.
-const EXISTING_OWNER_KINDS: OwnerKind[] = ["openclaw", "claude", "codex", "hermes"];
+// Owner-kind option sets, split by source. "Existing" offers EVERY supported
+// CLI kind — besides agents already registered in a kind's management platform,
+// an "existing" owner also includes temporary agents the user created earlier in
+// THIS flow (surfaced via buildExistingOwnerOptions), which can be any kind
+// (incl. cursor). "New" creates a temporary ad-hoc agent of any non-OpenClaw kind.
+const EXISTING_OWNER_KINDS: OwnerKind[] = ["openclaw", "claude", "codex", "cursor", "hermes"];
 const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = ["claude", "codex", "cursor", "hermes"];
 
 /** Detect whether the SPA is served to a non-loopback host. The native
@@ -183,23 +188,20 @@ function isNonOpenclawKind(kind: OwnerKind): kind is NonOpenclawOwnerKind {
 }
 
 // Kinds whose agent id must be picked from a managed-agent dropdown (not free
-// text). Unlike OpenClaw, these KEEP their repo/branch (working dir is per-task).
-const MANAGED_PICK_KINDS = new Set<OwnerKind>(["hermes", "claude", "codex"]);
+// text). Only Hermes has a persistent management platform; Claude/Codex/Cursor
+// are temporary/ad-hoc (free-text), like Cursor. KEEP their repo/branch.
+const MANAGED_PICK_KINDS = new Set<OwnerKind>(["hermes"]);
 
 function isManagedPickKind(kind: OwnerKind): boolean {
   return MANAGED_PICK_KINDS.has(kind);
 }
 
-/** Combined managed-agent picklist for a kind (Hermes + Claude/Codex). */
+/** Managed-agent picklist for a kind (Hermes only). */
 function pickAgentsForKind(
   kind: OwnerKind,
   hermes: HermesAgentSummary[],
-  managed: ManagedAgentSummary[],
 ): { id: string; name: string }[] {
   if (kind === "hermes") return hermes.map((a) => ({ id: a.id, name: a.name }));
-  if (kind === "claude" || kind === "codex") {
-    return managed.filter((a) => a.kind === kind).map((a) => ({ id: a.id, name: a.name }));
-  }
   return [];
 }
 
@@ -328,29 +330,56 @@ export function FlowEditor() {
   const isNew = !id || id === "new";
   const navigate = useNavigate();
 
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [leaderId, setLeaderId] = useState("");
-  const [leaderKind, setLeaderKind] = useState<OwnerKind>("openclaw");
+  // Editable fields are mirrored to sessionStorage (keyed per flow id) so a
+  // user's in-progress edits survive switching to another sidebar tab and
+  // returning — the editor unmounts on navigation, and plain useState would be
+  // lost. The draft is seeded from the server exactly once (see `hydrated`
+  // below) and cleared on a successful save (`clearFlowEditorDraft`).
+  const idKey = id ?? "new";
+  const draftKey = (field: string) => `flow-editor:${idKey}:${field}`;
+  const clearFlowEditorDraft = () => clearSessionBackedKeys(`flow-editor:${idKey}:`);
+
+  const [name, setName] = useSessionBackedState(draftKey("name"), "");
+  const [description, setDescription] = useSessionBackedState(draftKey("description"), "");
+  const [leaderId, setLeaderId] = useSessionBackedState(draftKey("leaderId"), "");
+  const [leaderKind, setLeaderKind] = useSessionBackedState<OwnerKind>(
+    draftKey("leaderKind"),
+    "openclaw",
+  );
   // Leader source: false = existing/persistent agent, true = temporary ad-hoc.
   // OpenClaw default → existing.
-  const [leaderIsTemporary, setLeaderIsTemporary] = useState(false);
-  const [leaderRepo, setLeaderRepo] = useState("");
-  const [leaderTargetBranch, setLeaderTargetBranch] = useState(DEFAULT_TARGET_BRANCH);
+  const [leaderIsTemporary, setLeaderIsTemporary] = useSessionBackedState(
+    draftKey("leaderIsTemporary"),
+    false,
+  );
+  const [leaderRepo, setLeaderRepo] = useSessionBackedState(draftKey("leaderRepo"), "");
+  const [leaderTargetBranch, setLeaderTargetBranch] = useSessionBackedState(
+    draftKey("leaderTargetBranch"),
+    DEFAULT_TARGET_BRANCH,
+  );
   const [leaderBranchOptions, setLeaderBranchOptions] = useState<string[]>([
     DEFAULT_TARGET_BRANCH,
   ]);
   const [leaderBranchEditable, setLeaderBranchEditable] = useState(false);
   const [leaderBranchLoading, setLeaderBranchLoading] = useState(false);
   const [leaderPickingRepo, setLeaderPickingRepo] = useState(false);
-  const [runInputFields, setRunInputFieldsState] = useState<string[]>([]);
+  const [runInputFields, setRunInputFieldsState] = useSessionBackedState<string[]>(
+    draftKey("runInputFields"),
+    [],
+  );
   const [runInputFieldDraft, setRunInputFieldDraft] = useState("");
   const [runInputFieldError, setRunInputFieldError] = useState<string | null>(null);
-  const [version, setVersion] = useState<number | null>(null);
-  const [tasks, setTasks] = useState<TaskRow[]>([]);
+  const [version, setVersion] = useSessionBackedState<number | null>(draftKey("version"), null);
+  const [tasks, setTasks] = useSessionBackedState<TaskRow[]>(draftKey("tasks"), []);
+  // Seed-from-server guard: true once the existing flow has been loaded into
+  // the draft, so remounts (tab switches) never re-fetch over unsaved edits.
+  const [hydrated, setHydrated] = useSessionBackedState<boolean>(
+    draftKey("hydrated"),
+    false,
+    { isClosed: (v) => !v },
+  );
   const [openclawOptions, setOpenclawOptions] = useState<OpenclawAgentSummary[]>([]);
   const [hermesOptions, setHermesOptions] = useState<HermesAgentSummary[]>([]);
-  const [managedOptions, setManagedOptions] = useState<ManagedAgentSummary[]>([]);
   const [deploymentMode, setDeploymentMode] = useState<DeploymentMode>("local");
   const [workspaceDirOptions, setWorkspaceDirOptions] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -400,10 +429,6 @@ export function FlowEditor() {
       .then((r) => setHermesOptions(r.items))
       .catch(() => {});
     api
-      .listManagedAgents()
-      .then((r) => setManagedOptions(r.items))
-      .catch(() => {});
-    api
       .listWorkspaceDirectories()
       .then((r) => {
         setDeploymentMode(r.deploymentMode);
@@ -412,9 +437,11 @@ export function FlowEditor() {
       .catch(() => {});
   }, []);
 
-  // Load existing flow when editing.
+  // Load existing flow when editing — but only once per flow. If a draft has
+  // already been hydrated (e.g. the user is returning to this tab with unsaved
+  // edits), skip the fetch so we never clobber their in-progress changes.
   useEffect(() => {
-    if (isNew) return;
+    if (isNew || hydrated) return;
     api
       .getFlow(id!)
       .then((flow) => {
@@ -434,11 +461,12 @@ export function FlowEditor() {
             summary.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
           );
         }
+        setHydrated(true);
       })
       .catch((e) => {
         setError(e instanceof ApiError ? e.message : String(e));
       });
-  }, [id, isNew]);
+  }, [id, isNew, hydrated]);
 
   // Keep the summary task in sync with leader fields.
   // Important: when leader fields are in an intermediate state (for example
@@ -620,6 +648,11 @@ export function FlowEditor() {
   }, [tasks]);
 
   const decomposeDisabledReason = useMemo(() => {
+    // The leader Agent NAME (leaderId) is ALWAYS required to run "AI 拆解",
+    // regardless of source — a new/temporary leader and an existing one both
+    // need it. Keep this as the unconditional first guard; never gate it behind
+    // leaderIsTemporary. (For a temporary leader the only thing we relax below
+    // is the managed-picklist *membership* check, not the name requirement.)
     if (!leaderId.trim()) {
       return t("flowEditor.validation.pickLeader");
     }
@@ -632,9 +665,12 @@ export function FlowEditor() {
       }
       return null;
     }
-    if (isManagedPickKind(leaderKind)) {
+    // A temporary (ad-hoc / "new") leader is typed as free text and never
+    // appears in the managed-agent picklist, so only require picklist
+    // membership for existing/persistent leaders.
+    if (!leaderIsTemporary && isManagedPickKind(leaderKind)) {
       // Managed agent required (no ad-hoc creation), plus a working dir.
-      const opts = pickAgentsForKind(leaderKind, hermesOptions, managedOptions);
+      const opts = pickAgentsForKind(leaderKind, hermesOptions);
       if (!opts.some((a) => a.id === leaderId.trim())) {
         return t("flowEditor.validation.pickLeader");
       }
@@ -643,7 +679,15 @@ export function FlowEditor() {
       return t("flowEditor.decompose.leaderRepoRequired");
     }
     return null;
-  }, [leaderId, leaderKind, leaderRepo, openclawOptions, hermesOptions, managedOptions, t]);
+  }, [
+    leaderId,
+    leaderKind,
+    leaderIsTemporary,
+    leaderRepo,
+    openclawOptions,
+    hermesOptions,
+    t,
+  ]);
 
   const editingRow: TaskRow | null = (() => {
     if (!editing) return null;
@@ -769,8 +813,7 @@ export function FlowEditor() {
     if (conflicting) {
       const agent =
         openclawOptions.find((a) => a.id === normalized) ??
-        hermesOptions.find((a) => a.id === normalized) ??
-        managedOptions.find((a) => a.id === normalized);
+        hermesOptions.find((a) => a.id === normalized);
       window.alert(
         t("flowEditor.leaderInUseByTask", {
           name: agent ? `${agent.name} (${agent.id})` : normalized,
@@ -969,6 +1012,7 @@ export function FlowEditor() {
       setRepoIssue(null);
       setPendingSavePayload(null);
       notifySaveWarnings(result.warnings);
+      clearFlowEditorDraft();
       navigate("/flows");
     } catch (e) {
       if (e instanceof ApiError) {
@@ -1038,6 +1082,7 @@ export function FlowEditor() {
       const result = await persistFlow(payload);
       notifySaveWarnings(result.warnings);
       // Saving always returns the user to the Flow list (per UX spec).
+      clearFlowEditorDraft();
       navigate("/flows");
     } catch (e) {
       if (e instanceof ApiError) {
@@ -1170,8 +1215,9 @@ export function FlowEditor() {
       }
     } else {
       if (
+        !leaderIsTemporary &&
         isManagedPickKind(leaderKind) &&
-        !pickAgentsForKind(leaderKind, hermesOptions, managedOptions).some(
+        !pickAgentsForKind(leaderKind, hermesOptions).some(
           (a) => a.id === leaderId.trim(),
         )
       ) {
@@ -1221,7 +1267,13 @@ export function FlowEditor() {
         <div className="flex gap-2">
           <button
             className="btn-outline"
-            onClick={() => navigate("/flows")}
+            onClick={() => {
+              // Cancel discards the in-progress edits: drop the persisted draft
+              // so returning to the editor shows the saved server state, not the
+              // abandoned changes.
+              clearFlowEditorDraft();
+              navigate("/flows");
+            }}
             disabled={submitting}
           >
             {t("common.cancel")}
@@ -1356,13 +1408,13 @@ export function FlowEditor() {
                       onChange={(e) => tryChangeLeader(e.target.value)}
                     >
                       <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
-                      {pickAgentsForKind(leaderKind, hermesOptions, managedOptions).map((a) => (
+                      {pickAgentsForKind(leaderKind, hermesOptions).map((a) => (
                         <option key={a.id} value={a.id}>
                           {a.name} ({a.id})
                         </option>
                       ))}
                     </select>
-                    {pickAgentsForKind(leaderKind, hermesOptions, managedOptions).length === 0 && (
+                    {pickAgentsForKind(leaderKind, hermesOptions).length === 0 && (
                       <div className="text-xs text-ink-500 mt-1">
                         {t("flowEditor.hermesAgentEmpty")}
                       </div>
@@ -1690,7 +1742,6 @@ export function FlowEditor() {
           tasks={tasks}
           openclawOptions={openclawOptions}
           hermesOptions={hermesOptions}
-          managedOptions={managedOptions}
           leaderKind={leaderKind}
           leaderId={leaderId.trim()}
           leaderRepo={leaderRepo.trim()}
@@ -1928,7 +1979,6 @@ function TaskEditModal({
   tasks,
   openclawOptions,
   hermesOptions,
-  managedOptions,
   leaderKind,
   leaderId,
   leaderRepo,
@@ -1943,7 +1993,6 @@ function TaskEditModal({
   tasks: TaskRow[];
   openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
-  managedOptions: ManagedAgentSummary[];
   leaderKind: OwnerKind;
   /** Currently-selected leader id. Excluded from sub-task agent picker
    *  (leader can only own the auto-summary task). */
@@ -2219,7 +2268,6 @@ function TaskEditModal({
         ownerMode={ownerMode}
         openclawOptions={openclawOptions}
         hermesOptions={hermesOptions}
-        managedOptions={managedOptions}
         deploymentMode={deploymentMode}
         workspaceDirOptions={workspaceDirOptions}
         branchOptions={branchOptions}
@@ -2285,7 +2333,6 @@ function TaskFormBody({
   ownerMode,
   openclawOptions,
   hermesOptions,
-  managedOptions,
   deploymentMode,
   workspaceDirOptions,
   branchOptions,
@@ -2302,7 +2349,6 @@ function TaskFormBody({
   ownerMode: OwnerMode;
   openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
-  managedOptions: ManagedAgentSummary[];
   deploymentMode: DeploymentMode;
   workspaceDirOptions: string[];
   branchOptions: string[];
@@ -2504,13 +2550,13 @@ function TaskFormBody({
               onChange={(e) => onChange({ ownerId: e.target.value })}
             >
               <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
-              {pickAgentsForKind(row.ownerKind, hermesOptions, managedOptions).map((a) => (
+              {pickAgentsForKind(row.ownerKind, hermesOptions).map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name} ({a.id})
                 </option>
               ))}
             </select>
-            {pickAgentsForKind(row.ownerKind, hermesOptions, managedOptions).length === 0 && (
+            {pickAgentsForKind(row.ownerKind, hermesOptions).length === 0 && (
               <div className="text-xs text-ink-500 mt-1">
                 {t("flowEditor.hermesAgentEmpty")}
               </div>

@@ -38,6 +38,27 @@ function persistSessionValue<T>(
   }
 }
 
+/**
+ * Remove every session-backed key whose suffix (after the shared
+ * ``csflow:ui-state:`` prefix) starts with ``keyPrefix``. Use this to drop a
+ * whole draft once it has been committed — e.g. after a Flow is saved, clear
+ * ``flow-editor:<id>:`` so a later visit shows the persisted server state
+ * rather than a stale draft.
+ */
+export function clearSessionBackedKeys(keyPrefix: string): void {
+  try {
+    const fullPrefix = `${SESSION_KEY_PREFIX}${keyPrefix}`;
+    const toRemove: string[] = [];
+    for (let i = 0; i < window.sessionStorage.length; i += 1) {
+      const k = window.sessionStorage.key(i);
+      if (k && k.startsWith(fullPrefix)) toRemove.push(k);
+    }
+    toRemove.forEach((k) => window.sessionStorage.removeItem(k));
+  } catch {
+    /* sessionStorage disabled / quota — ignore */
+  }
+}
+
 export function useSessionBackedState<T>(
   key: string,
   initialValue: T,

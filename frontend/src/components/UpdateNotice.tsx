@@ -173,6 +173,11 @@ export function UpgradeModal({
       }}
       title={t("shell.updateModalTitle")}
       dismissible={dismissible}
+      // While the upgrade is actually running (and during the post-upgrade
+      // restart wait), fully mask everything behind the modal so the user can't
+      // interact with a backend that is restarting. The idle "update available"
+      // notice keeps the normal modeless dim.
+      fullscreenBackdrop={phase === "upgrading" || phase === "done"}
     >
       <div className="space-y-4 text-sm text-ink-700">
         <p>{t("shell.updateIntro")}</p>

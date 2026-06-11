@@ -22,6 +22,7 @@ import {
 } from "@/components/UpdateNotice";
 import { Modal, MODAL_ROOT_ID } from "@/components/ui";
 import type { UpdateStatus } from "@/lib/api";
+import { agentIconImgClass, agentIconSrc, type AgentPlatform } from "@/lib/agentIconSizing";
 import { cn } from "@/lib/cn";
 
 interface NavItem {
@@ -60,12 +61,12 @@ function writeLastModuleRoute(moduleBase: string, route: string): void {
   }
 }
 
-function NavAgentIcon({ src, compact = false }: { src: string; compact?: boolean }) {
+function NavAgentIcon({ platform }: { platform: AgentPlatform }) {
   return (
     <img
-      src={src}
+      src={agentIconSrc(platform)}
       alt=""
-      className={cn("object-contain", compact ? "h-6 w-6" : "h-8 w-8")}
+      className={cn("object-contain", agentIconImgClass(platform, "sidebar"))}
     />
   );
 }
@@ -82,10 +83,8 @@ const NAV: NavGroup[] = [
   {
     titleKey: "nav.groupAgents",
     items: [
-      { to: "/chat", labelKey: "nav.chat", icon: <NavAgentIcon src="/agent-icons/openclaw.png" /> },
-      { to: "/hermes", labelKey: "nav.hermes", icon: <NavAgentIcon src="/agent-icons/hermes.png" /> },
-      { to: "/claude", labelKey: "nav.claude", icon: <NavAgentIcon src="/agent-icons/claude.png" compact /> },
-      { to: "/codex", labelKey: "nav.codex", icon: <NavAgentIcon src="/agent-icons/codex.png" compact /> },
+      { to: "/chat", labelKey: "nav.chat", icon: <NavAgentIcon platform="openclaw" /> },
+      { to: "/hermes", labelKey: "nav.hermes", icon: <NavAgentIcon platform="hermes" /> },
     ],
   },
   // ── Settings group temporarily hidden (Profile module).
