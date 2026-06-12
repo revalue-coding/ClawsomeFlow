@@ -72,6 +72,14 @@ from app.models import (
     iso_utc,
 )
 from app.scheduler.compiler import CompileResult
+from app.scheduler.prompts import (
+    DispatchContext,
+    UpstreamOutput,
+    WorkerReport,
+    build_leader_dispatch,
+    build_openclaw_self_merge,
+    build_worker_dispatch,
+)
 from app.scheduler.failure import (
     FailureRecord,
     TaskSnapshot,

@@ -18,13 +18,13 @@ import {
 } from "@/components/ui";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import {
+  AgentManagementHeader,
   AgentPageToolbar,
-  AgentToolbarButton,
-  AgentToolbarDivider,
   AgentToolbarIconButton,
+  AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
 import { ChatBubble } from "@/components/ChatBubble";
-import { DesktopIcon, ExternalLinkIcon, PlusIcon, RefreshIcon, SettingsIcon, TrashIcon } from "@/components/icons";
+import { DesktopIcon, ExternalLinkIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
@@ -159,7 +159,6 @@ function Picker() {
   const [teams, setTeams] = useState<OpenclawTeam[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [dashboardBusy, setDashboardBusy] = useState(false);
   const [showCreate, setShowCreate] = useSessionBackedModalFlag("hermes:picker:create");
   const [removeTarget, setRemoveTarget] = useSessionBackedState<HermesAgentSummary | null>(
     "hermes:picker:removeTarget", null, { isClosed: (v) => v === null },
@@ -200,56 +199,27 @@ function Picker() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-ink-900">{t("hermes.title")}</h1>
-          <p className="text-sm text-ink-500">{t("hermes.modelNote")}</p>
-        </div>
-        <AgentPageToolbar
-          primary={
-            <button
-              type="button"
-              className="btn-primary inline-flex h-9 items-center gap-1.5 px-4"
-              onClick={() => setShowCreate(true)}
-            >
-              <PlusIcon className="h-4 w-4" />
-              {t("hermes.createAgent")}
-            </button>
-          }
-        >
-          <AgentToolbarIconButton
-            label={t("hermes.refresh")}
-            icon={<RefreshIcon className="h-4 w-4" />}
-            onClick={() => void reload()}
+      <AgentManagementHeader
+        title={t("hermes.title")}
+        description={t("hermes.modelNote")}
+        leading={
+          <AgentViewModeToggle
+            viewMode={viewMode}
+            onChange={setViewMode}
+            cardLabel={t("chat.viewCard")}
+            listLabel={t("chat.viewList")}
           />
-          <AgentToolbarDivider />
-          <AgentToolbarButton
-            icon={<ExternalLinkIcon className="h-4 w-4" />}
-            disabled={dashboardBusy}
-            onClick={() => void openHermesDashboard(t, () => window.alert(t("hermes.remoteUnavailable")), setDashboardBusy)}
-          >
-            {dashboardBusy ? t("hermes.openingDashboard") : t("hermes.toHermes")}
-          </AgentToolbarButton>
-        </AgentPageToolbar>
-      </div>
-
-      <div className="inline-flex rounded-lg border border-brand-200 bg-brand-50/60 p-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
-        {(["card", "list"] as const).map((m) => (
+        }
+        actions={
           <button
-            key={m}
             type="button"
-            className={cn(
-              "min-w-[52px] rounded-md px-2 py-1 text-xs font-semibold transition-all duration-200",
-              viewMode === m
-                ? "bg-gradient-to-r from-brand-600 to-brand-400 text-white"
-                : "text-ink-600 hover:bg-white/70 hover:text-brand-700",
-            )}
-            onClick={() => setViewMode(m)}
+            className="btn-primary inline-flex h-9 items-center gap-1.5 px-4"
+            onClick={() => setShowCreate(true)}
           >
-            {m === "card" ? t("chat.viewCard") : t("chat.viewList")}
+            {t("hermes.createAgent")}
           </button>
-        ))}
-      </div>
+        }
+      />
 
       {error && <ErrorBox>{error}</ErrorBox>}
       {loading ? (
@@ -892,7 +862,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
                          hover:-translate-y-0.5
                          transition-all"
                 disabled={dashboardBusy}
-                onClick={() => void openHermesDashboard(t, () => window.alert(t("hermes.remoteUnavailable")), setDashboardBusy)}
+                onClick={() => void openHermesDashboard(t, () => window.alert(t("hermes.dashboardRemoteUnavailable")), setDashboardBusy)}
               >
                 <ExternalLinkIcon className="h-4 w-4" />
                 {dashboardBusy ? t("hermes.openingDashboard") : t("hermes.toHermes")}

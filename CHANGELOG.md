@@ -19,6 +19,22 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 ### Added
 ### Changed
 ### Fixed
+- **"to Hermes" dashboard launch** (`backend/app/services/hermes_dashboard.py`) — replaced the
+  bare TCP port probe with an **HTTP health check** that confirms the listener is actually the
+  Hermes dashboard (matches its index-HTML markers), so an unrelated service squatting on
+  `127.0.0.1:9119` is no longer mistaken for Hermes (which sent the jump to the wrong page).
+  When the default port is held by a foreign service the launcher now **auto-switches** to the
+  next free port in `9119–9128` (the returned URL follows), and raises a clear error if none is
+  free. The WebUI is unchanged — it opens whatever URL the backend returns.
+- **"to OpenClaw" / "to Hermes" from a remote browser** (`frontend/src/pages/OpenclawChat.tsx`,
+  `HermesChat.tsx`) — both runtimes live on the server's local machine, so opening them from a
+  remote/SSH browser session never works. "to OpenClaw" was an unguarded link that opened a dead
+  tab; it now rejects up front (mirroring "to Hermes") with a message explaining the runtime is
+  local-only and suggesting SSH local port forwarding. "to Hermes" no longer shows the unrelated
+  "cannot open local folder" string — it uses a dashboard-specific reason
+  (`hermes.dashboardRemoteUnavailable` / `chat.toOpenclawRemoteUnavailable`, en + zh). Detection
+  covers direct-IP remote access; an `ssh -L` tunnel that presents as `localhost` is
+  indistinguishable from a local browser and cannot be guarded client-side.
 ### Removed
 ### Deprecated
 ### Security

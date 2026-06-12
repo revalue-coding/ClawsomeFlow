@@ -41,12 +41,10 @@ import {
 import { ChatMarkdown } from "@/components/ChatMarkdown";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import {
-  AgentPageToolbar,
-  AgentToolbarButton,
-  AgentToolbarDivider,
-  AgentToolbarIconButton,
+  AgentManagementHeader,
+  AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
-import { DesktopIcon, EditIcon, PlusIcon, RefreshIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
+import { DesktopIcon, EditIcon, PlusIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
@@ -1264,61 +1262,36 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-ink-900">{t("chat.title")}</h1>
-          <p className="text-sm text-ink-500">{t("chat.pageNote")}</p>
-        </div>
-        <AgentPageToolbar
-          primary={
-            <button type="button" className="btn-primary inline-flex h-9 items-center gap-1.5 px-4" onClick={actions.openCreate}>
+      <AgentManagementHeader
+        title={t("chat.title")}
+        description={t("chat.pageNote")}
+        leading={
+          <AgentViewModeToggle
+            viewMode={viewMode}
+            onChange={setViewMode}
+            cardLabel={t("chat.viewCard")}
+            listLabel={t("chat.viewList")}
+          />
+        }
+        actions={
+          <>
+            <button type="button" className="btn-outline h-9 px-3 text-sm" onClick={actions.openRestore}>
+              {t("assistant.askRestore")}
+            </button>
+            <button type="button" className="btn-outline h-9 px-3 text-sm" onClick={actions.openImport}>
+              {t("assistant.askImport")}
+            </button>
+            <button
+              type="button"
+              className="btn-primary inline-flex h-9 items-center gap-1.5 px-4"
+              onClick={actions.openCreate}
+            >
               <PlusIcon className="h-4 w-4" />
               {t("assistant.askCreate")}
             </button>
-          }
-        >
-          <AgentToolbarIconButton
-            label={t("hermes.refresh")}
-            icon={<RefreshIcon className="h-4 w-4" />}
-            onClick={() => void loadAgents()}
-          />
-          <AgentToolbarDivider />
-          <AgentToolbarButton onClick={actions.openRestore}>
-            {t("assistant.askRestore")}
-          </AgentToolbarButton>
-          <AgentToolbarButton onClick={actions.openImport}>
-            {t("assistant.askImport")}
-          </AgentToolbarButton>
-        </AgentPageToolbar>
-      </div>
-      <div className="inline-flex rounded-lg border border-brand-200 bg-brand-50/60 p-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
-        <button
-          type="button"
-          className={cn(
-            "min-w-[52px] rounded-md px-2 py-1 text-xs font-semibold transition-all duration-200",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300",
-            viewMode === "card"
-              ? "bg-gradient-to-r from-brand-600 to-brand-400 text-white shadow-[0_8px_18px_-10px_theme(colors.brand.700)]"
-              : "text-ink-600 hover:bg-white/70 hover:text-brand-700",
-          )}
-          onClick={() => setViewMode("card")}
-        >
-          {t("chat.viewCard")}
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "min-w-[52px] rounded-md px-2 py-1 text-xs font-semibold transition-all duration-200",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300",
-            viewMode === "list"
-              ? "bg-gradient-to-r from-brand-600 to-brand-400 text-white shadow-[0_8px_18px_-10px_theme(colors.brand.700)]"
-              : "text-ink-600 hover:bg-white/70 hover:text-brand-700",
-          )}
-          onClick={() => setViewMode("list")}
-        >
-          {t("chat.viewList")}
-        </button>
-      </div>
+          </>
+        }
+      />
       {error && <ErrorBox>{error}</ErrorBox>}
       {!items && !error && <Loading />}
       {items && items.length === 0 && (
@@ -1878,6 +1851,17 @@ function ChatRoom({
             href={openclawUrl}
             target="_blank"
             rel="noreferrer"
+            onClick={(e) => {
+              // The OpenClaw runtime listens on the server's local machine; a
+              // remote/SSH browser session cannot reach it, so reject up front
+              // instead of opening a dead tab.
+              if (isRemoteBrowser()) {
+                e.preventDefault();
+                if (typeof window !== "undefined") {
+                  window.alert(t("chat.toOpenclawRemoteUnavailable"));
+                }
+              }
+            }}
             className="inline-flex h-10 items-center justify-center rounded-full
                      bg-gradient-to-r from-brand-500 via-brand-400 to-orange-500
                      px-5 py-0 text-sm font-semibold tracking-wide text-white

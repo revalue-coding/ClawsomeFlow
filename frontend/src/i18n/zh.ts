@@ -683,6 +683,8 @@ const zh = {
     pageNote:
       "为您创建的智能体将模仿真实的人类工作：它将拥有自己的工作桌面与资料区，围绕职责持续整理工作资料，实现自我管理。在这里，执行单Agent任务，或提出不满与改善意见",
     toOpenclaw: "to OpenClaw",
+    toOpenclawRemoteUnavailable:
+      "OpenClaw 运行时在服务器本机，无法从远程 / SSH 浏览器会话打开。请在服务器本机操作，或使用 SSH 本地端口转发后再访问。",
     runtimeUnavailableMessage: "您的系统中尚未检测到正在运行的Openclaw服务，请启动服务后重试",
     runtimeRetry: "重试",
     runtimeChecking: "检查中…",
@@ -861,6 +863,8 @@ const zh = {
     toHermes: "to Hermes",
     openingDashboard: "正在打开…",
     dashboardOpenFailed: "无法打开 Hermes 控制台：{{message}}",
+    dashboardRemoteUnavailable:
+      "Hermes 控制台运行在服务器本机（127.0.0.1），无法从远程 / SSH 浏览器会话打开。请在服务器本机操作，或使用 SSH 本地端口转发后再访问。",
     opening: "打开中…",
     remoteUnavailable: "当前为 SSH/远程浏览器会话，无法打开本地文件夹。",
     openFailed: "打开 profile 目录失败：{{message}}",

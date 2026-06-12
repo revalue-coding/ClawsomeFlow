@@ -692,6 +692,8 @@ const en = {
     pageNote:
       "Agents created for you emulate real human work: each has its own workspace desktop and materials area, continuously organizes work assets around responsibilities, and supports self-management. Use this page for single-agent tasks or to share complaints and improvement feedback.",
     toOpenclaw: "to OpenClaw",
+    toOpenclawRemoteUnavailable:
+      "The OpenClaw runtime runs on the server's local machine and is not reachable from a remote/SSH browser session. Open it on the host machine, or use SSH local port forwarding to reach it.",
     runtimeUnavailableMessage:
       "No running Openclaw service was detected on your system. Start the service and try again.",
     runtimeRetry: "Retry",
@@ -875,6 +877,8 @@ const en = {
     toHermes: "to Hermes",
     openingDashboard: "Opening…",
     dashboardOpenFailed: "Could not open Hermes dashboard: {{message}}",
+    dashboardRemoteUnavailable:
+      "The Hermes dashboard runs on the server's local machine (127.0.0.1) and cannot be opened from a remote/SSH browser session. Open it on the host machine, or use SSH local port forwarding to reach it.",
     opening: "Opening…",
     remoteUnavailable:
       "This is an SSH/remote browser session; opening local folders is unavailable.",
