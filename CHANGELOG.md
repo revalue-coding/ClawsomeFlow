@@ -21,6 +21,12 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 ### Added
 ### Changed
 ### Fixed
+- **Removed the extra "clean baseline required" precheck for self-merge**
+  (`backend/app/integrations/clawteam_cli.py`, `backend/tests/test_clawteam_cli.py`) —
+  `workspace_merge` no longer rejects merges just because `git status --porcelain`
+  is non-empty. We now defer to Git's native merge behavior (allow when safe, fail
+  only when Git itself cannot proceed), while keeping `MERGE_HEAD` protection and
+  conflict/abort handling.
 - **Duplicate / concurrent agent creates could destroy the just-created agent**
   (`backend/app/services/hermes_agents.py`, `backend/app/services/openclaw_agents.py`,
   `backend/app/api/hermes_agents.py`, `frontend/src/pages/HermesChat.tsx`,
