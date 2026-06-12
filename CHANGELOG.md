@@ -4,6 +4,7 @@
 
 
 
+
 # Changelog
 
 All notable changes to **ClawsomeFlow** are documented here.
@@ -20,6 +21,30 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 ### Added
 ### Changed
 ### Fixed
+- **Duplicate / concurrent agent creates could destroy the just-created agent**
+  (`backend/app/services/hermes_agents.py`, `backend/app/services/openclaw_agents.py`,
+  `backend/app/api/hermes_agents.py`, `frontend/src/pages/HermesChat.tsx`,
+  `frontend/src/pages/OpenclawChat.tsx`) — two `POST /api/{hermes,openclaw}/agents`
+  for the same id raced past the existence check (TOCTOU). The winner built the
+  profile + row; the loser's `UNIQUE`-violation rollback deleted the **winner's**
+  profile/workspace, and the orphan-prune then dropped its row, so the agent card
+  vanished (for Hermes, with no SOUL.md / conversation, because the row is written
+  only after the ~minutes-long bootstrap — a wide race window). Creates are now
+  serialized per id (a duplicate fails fast with `AGENT_ALREADY_EXISTS`); a rollback
+  never deletes a profile/workspace already owned by an existing row; the Hermes
+  create form validates id format/length/reserved/duplicate **on the spot and keeps
+  the modal open**; duplicate submits are blocked client-side; and a backend
+  `AGENT_ALREADY_EXISTS` / `INVALID_PAYLOAD` reopens the form with the message
+  instead of burying it in the progress popup. Derived agent ids also keep ASCII
+  `[a-z0-9]` only, so a Chinese display name no longer yields an invalid id.
+### Removed
+### Deprecated
+### Security
+
+## [0.1.13b12] — 2026-06-12
+
+
+### Fixed
 - **Leader final reply cited dead worktree paths in scheduled runs**
   (`backend/app/scheduler/prompts.py`) — in 省心/auto-merge (`is_scheduled`) runs the leader
   summary self-merges into the baseline branch before reporting, yet the prompt let it cite
@@ -32,9 +57,6 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
   binary, so the agent self-merge silently errored (the host in run-ac4ec5fbfe7b was macOS). The
   command is now cross-platform/unified: `flock` when present (Linux), atomic `mkdir` spinlock
   fallback otherwise (macOS). Identical git steps on both.
-### Removed
-### Deprecated
-### Security
 
 ## [0.1.13b11] — 2026-06-12
 
@@ -1183,7 +1205,7 @@ Initial alpha release. Brings the full MVP architecture online:
   OpenClaw workspace; `POST /api/flows/decompose` async pipeline.
 - 379 backend tests, frontend tsc + vite build clean.
 
-[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b11...HEAD
+[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b12...HEAD
 [0.1.10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.10
 [0.1.0]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.0
 [0.1.1b1]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.1b1
@@ -1230,3 +1252,4 @@ Initial alpha release. Brings the full MVP architecture online:
 [0.1.13b9]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b9
 [0.1.13b10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b10
 [0.1.13b11]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b11
+[0.1.13b12]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b12
