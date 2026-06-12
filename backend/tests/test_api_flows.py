@@ -153,6 +153,17 @@ def test_list(client: TestClient, repo: str) -> None:
     assert {f["name"] for f in body["items"]} == {"F1", "F2", "F3"}
 
 
+def test_list_includes_easy_mode_flag(client: TestClient, repo: str) -> None:
+    payload = _flow_payload(repo, name="easy-flow")
+    payload["spec"]["variables"] = {"csflow.easy_mode": "true"}
+    client.post("/api/flows", json=payload)
+    payload2 = _flow_payload(repo, name="normal-flow")
+    client.post("/api/flows", json=payload2)
+    items = {f["name"]: f for f in client.get("/api/flows").json()["items"]}
+    assert items["easy-flow"]["easyMode"] is True
+    assert items["normal-flow"]["easyMode"] is False
+
+
 def test_list_q_filter(client: TestClient, repo: str) -> None:
     client.post("/api/flows", json=_flow_payload(repo, name="customer-flow"))
     client.post("/api/flows", json=_flow_payload(repo, name="risk-flow"))

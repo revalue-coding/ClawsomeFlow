@@ -264,6 +264,16 @@ export function FlowList() {
                       >
                         {f.name}
                       </Link>
+                      {f.easyMode && (
+                        <span
+                          className="mt-1 inline-flex items-center gap-1 rounded-full border border-emerald-200/80
+                                     bg-emerald-50/80 px-2 py-0.5 text-[11px] font-medium text-emerald-700"
+                          title={t("flowEditor.easyModeSub")}
+                        >
+                          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" aria-hidden="true" />
+                          {t("flowList.easyModeBadge")}
+                        </span>
+                      )}
                       <div className="text-[11px] text-ink-400 font-mono mt-0.5">
                         {f.id}
                       </div>
@@ -298,9 +308,13 @@ export function FlowList() {
                           <RunIcon className="h-4 w-4" />
                           {inflight ? t("flowList.runningButton") : t("flowList.runButton")}
                         </button>
-                        <Link to={`/flows/${f.id}`} className="btn-outline">
+                        <button
+                          type="button"
+                          className="btn-outline"
+                          onClick={() => navigate(`/flows/${f.id}`)}
+                        >
                           {t("common.edit")}
-                        </Link>
+                        </button>
                         <button
                           className="btn-danger"
                           disabled={inflight}

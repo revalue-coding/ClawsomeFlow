@@ -40,7 +40,13 @@ import {
 } from "@/components/ui";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
-import { DesktopIcon, EditIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
+import {
+  AgentPageToolbar,
+  AgentToolbarButton,
+  AgentToolbarDivider,
+  AgentToolbarIconButton,
+} from "@/components/AgentPageToolbar";
+import { DesktopIcon, EditIcon, PlusIcon, RefreshIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
@@ -609,19 +615,8 @@ function AgentQuickActions({
     setRemoveError(null);
     setRemoveMode("unregister");
     setRemoveTargetId(agent.id);
-    setRemoveLoading(true);
-    try {
-      const r = await api.listOpenclawAgents();
-      const items = r.items.some((item) => item.id === agent.id)
-        ? r.items
-        : [...r.items, agent];
-      setRemoveTargets(items);
-    } catch (e) {
-      setRemoveError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-      setRemoveTargets([agent]);
-    } finally {
-      setRemoveLoading(false);
-    }
+    setRemoveTargets([agent]);
+    setRemoveLoading(false);
   }
 
   async function openRestoreModal() {
@@ -855,21 +850,6 @@ function AgentQuickActions({
                 <div className="text-sm text-ink-500">{t("assistant.removeModal.empty")}</div>
               ) : (
                 <>
-                  <div>
-                    <label className="label">{t("assistant.removeModal.targetLabel")}</label>
-                    <select
-                      className="select"
-                      value={removeTargetId}
-                      onChange={(e) => setRemoveTargetId(e.target.value)}
-                      disabled={removeSubmitting}
-                    >
-                      {removeTargets.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.name} ({item.id})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
                   <div>
                     <label className="label">{t("assistant.removeModal.modeLabel")}</label>
                     <select
@@ -1289,20 +1269,27 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
           <h1 className="text-xl font-semibold text-ink-900">{t("chat.title")}</h1>
           <p className="text-sm text-ink-500">{t("chat.pageNote")}</p>
         </div>
-        <div className="flex shrink-0 flex-wrap justify-end gap-2">
-          <button type="button" className="btn-outline" onClick={() => void loadAgents()}>
-            {t("hermes.refresh")}
-          </button>
-          <button type="button" className="btn-outline" onClick={actions.openRestore}>
+        <AgentPageToolbar
+          primary={
+            <button type="button" className="btn-primary inline-flex h-9 items-center gap-1.5 px-4" onClick={actions.openCreate}>
+              <PlusIcon className="h-4 w-4" />
+              {t("assistant.askCreate")}
+            </button>
+          }
+        >
+          <AgentToolbarIconButton
+            label={t("hermes.refresh")}
+            icon={<RefreshIcon className="h-4 w-4" />}
+            onClick={() => void loadAgents()}
+          />
+          <AgentToolbarDivider />
+          <AgentToolbarButton onClick={actions.openRestore}>
             {t("assistant.askRestore")}
-          </button>
-          <button type="button" className="btn-outline" onClick={actions.openImport}>
+          </AgentToolbarButton>
+          <AgentToolbarButton onClick={actions.openImport}>
             {t("assistant.askImport")}
-          </button>
-          <button type="button" className="btn-primary" onClick={actions.openCreate}>
-            {t("assistant.askCreate")}
-          </button>
-        </div>
+          </AgentToolbarButton>
+        </AgentPageToolbar>
       </div>
       <div className="inline-flex rounded-lg border border-brand-200 bg-brand-50/60 p-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
         <button

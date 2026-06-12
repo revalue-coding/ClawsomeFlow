@@ -17,8 +17,14 @@ import {
   Modal,
 } from "@/components/ui";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
+import {
+  AgentPageToolbar,
+  AgentToolbarButton,
+  AgentToolbarDivider,
+  AgentToolbarIconButton,
+} from "@/components/AgentPageToolbar";
 import { ChatBubble } from "@/components/ChatBubble";
-import { DesktopIcon, SettingsIcon, TrashIcon } from "@/components/icons";
+import { DesktopIcon, ExternalLinkIcon, PlusIcon, RefreshIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
@@ -153,6 +159,7 @@ function Picker() {
   const [teams, setTeams] = useState<OpenclawTeam[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [dashboardBusy, setDashboardBusy] = useState(false);
   const [showCreate, setShowCreate] = useSessionBackedModalFlag("hermes:picker:create");
   const [removeTarget, setRemoveTarget] = useSessionBackedState<HermesAgentSummary | null>(
     "hermes:picker:removeTarget", null, { isClosed: (v) => v === null },
@@ -198,14 +205,32 @@ function Picker() {
           <h1 className="text-xl font-semibold text-ink-900">{t("hermes.title")}</h1>
           <p className="text-sm text-ink-500">{t("hermes.modelNote")}</p>
         </div>
-        <div className="flex shrink-0 gap-2">
-          <button type="button" className="btn-outline" onClick={() => void reload()}>
-            {t("hermes.refresh")}
-          </button>
-          <button type="button" className="btn-primary" onClick={() => setShowCreate(true)}>
-            {t("hermes.createAgent")}
-          </button>
-        </div>
+        <AgentPageToolbar
+          primary={
+            <button
+              type="button"
+              className="btn-primary inline-flex h-9 items-center gap-1.5 px-4"
+              onClick={() => setShowCreate(true)}
+            >
+              <PlusIcon className="h-4 w-4" />
+              {t("hermes.createAgent")}
+            </button>
+          }
+        >
+          <AgentToolbarIconButton
+            label={t("hermes.refresh")}
+            icon={<RefreshIcon className="h-4 w-4" />}
+            onClick={() => void reload()}
+          />
+          <AgentToolbarDivider />
+          <AgentToolbarButton
+            icon={<ExternalLinkIcon className="h-4 w-4" />}
+            disabled={dashboardBusy}
+            onClick={() => void openHermesDashboard(t, () => window.alert(t("hermes.remoteUnavailable")), setDashboardBusy)}
+          >
+            {dashboardBusy ? t("hermes.openingDashboard") : t("hermes.toHermes")}
+          </AgentToolbarButton>
+        </AgentPageToolbar>
       </div>
 
       <div className="inline-flex rounded-lg border border-brand-200 bg-brand-50/60 p-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
@@ -654,6 +679,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const [error, setError] = useState("");
   const [showSettings, setShowSettings] = useSessionBackedModalFlag(`hermes:${agentId}:settings:open`);
   const [opening, setOpening] = useState(false);
+  const [dashboardBusy, setDashboardBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -852,30 +878,33 @@ function ChatRoom({ agentId }: { agentId: string }) {
           >
             {t("common.back")}
           </button>
-          <button
-            type="button"
-            className="btn-outline inline-flex h-10 items-center justify-center gap-2 px-4 py-0 text-sm font-medium"
-            onClick={() => setShowSettings(true)}
+          <AgentPageToolbar
+            primary={
+              <button
+                type="button"
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-full
+                         bg-gradient-to-r from-brand-500 via-brand-400 to-orange-500
+                         px-5 py-0 text-sm font-semibold tracking-wide text-white
+                         shadow-[0_0_24px_-4px_theme(colors.brand.400)]
+                         ring-1 ring-brand-300/60
+                         hover:from-brand-600 hover:to-orange-600
+                         hover:shadow-[0_0_32px_-2px_theme(colors.brand.400)]
+                         hover:-translate-y-0.5
+                         transition-all"
+                disabled={dashboardBusy}
+                onClick={() => void openHermesDashboard(t, () => window.alert(t("hermes.remoteUnavailable")), setDashboardBusy)}
+              >
+                <ExternalLinkIcon className="h-4 w-4" />
+                {dashboardBusy ? t("hermes.openingDashboard") : t("hermes.toHermes")}
+              </button>
+            }
           >
-            <SettingsIcon className="h-4 w-4" />
-            {t("hermes.settings")}
-          </button>
-          <a
-            href={buildHermesDashboardUrl()}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-10 items-center justify-center rounded-full
-                     bg-gradient-to-r from-brand-500 via-brand-400 to-orange-500
-                     px-5 py-0 text-sm font-semibold tracking-wide text-white
-                     shadow-[0_0_24px_-4px_theme(colors.brand.400)]
-                     ring-1 ring-brand-300/60
-                     hover:from-brand-600 hover:to-orange-600
-                     hover:shadow-[0_0_32px_-2px_theme(colors.brand.400)]
-                     hover:-translate-y-0.5
-                     transition-all"
-          >
-            {t("hermes.toHermes")}
-          </a>
+            <AgentToolbarIconButton
+              label={t("hermes.settings")}
+              icon={<SettingsIcon className="h-4 w-4" />}
+              onClick={() => setShowSettings(true)}
+            />
+          </AgentPageToolbar>
         </div>
       </div>
 
@@ -1557,10 +1586,22 @@ function CronTab({ agentId }: { agentId: string }) {
   );
 }
 
-function buildHermesDashboardUrl(): string {
-  const suffix = "/chat";
-  if (typeof window === "undefined") return `http://127.0.0.1:9119${suffix}`;
-  const protocol = window.location.protocol;
-  const hostname = window.location.hostname;
-  return `${protocol}//${hostname}:9119${suffix}`;
+async function openHermesDashboard(
+  t: (key: string, opts?: Record<string, string>) => string,
+  onRemote: () => void,
+  setBusy?: (busy: boolean) => void,
+): Promise<void> {
+  if (isRemoteBrowser()) {
+    onRemote();
+    return;
+  }
+  setBusy?.(true);
+  try {
+    const { url } = await api.openHermesDashboard();
+    window.open(url, "_blank", "noopener,noreferrer");
+  } catch (e) {
+    window.alert(t("hermes.dashboardOpenFailed", { message: errText(e) }));
+  } finally {
+    setBusy?.(false);
+  }
 }

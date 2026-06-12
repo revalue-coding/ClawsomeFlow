@@ -13,6 +13,7 @@ Endpoints (prefix ``/api``):
 * ``PATCH  /hermes/agents/{id}``                  — update metadata
 * ``DELETE /hermes/agents/{id}``                  — delete (permanent)
 * ``GET    /hermes/agents/runtime/status``        — is the Hermes CLI usable
+* ``POST   /hermes/agents/dashboard/open``        — ensure dashboard running; return URL
 * ``GET    /hermes/agents/claimable``             — existing unmanaged profiles
 * ``POST   /hermes/agents/claim``                 — register an existing profile
 * ``*      /hermes/agents/{id}/settings/...``     — soul / model / secrets / skills / cron
@@ -41,6 +42,7 @@ from app.logging_setup import get_logger
 from app.models import HermesAgent, iso_utc
 from app.scheduler.naming import hermes_user_chat_session_id
 from app.services import hermes_agents as svc
+from app.services import hermes_dashboard as dash_svc
 from app.services import openclaw_agents as oc_svc
 from app.services import openclaw_chat_history as chat_history
 from app.storage import StorageBackend, get_storage
@@ -90,6 +92,10 @@ class HermesAgentListResponse(_CamelModel):
 class HermesRuntimeStatusResponse(_CamelModel):
     running: bool
     reason: str
+
+
+class HermesDashboardOpenResponse(_CamelModel):
+    url: str
 
 
 class HermesClaimableAgent(_CamelModel):
@@ -273,6 +279,16 @@ def runtime_status(
     level = svc.PROBE_FAST if mode == svc.PROBE_FAST else svc.PROBE_FULL
     running, reason = svc.probe_runtime_running(level=level)
     return HermesRuntimeStatusResponse(running=running, reason=reason)
+
+
+@router.post("/dashboard/open", response_model=HermesDashboardOpenResponse)
+def open_dashboard(user: UserDep) -> HermesDashboardOpenResponse:
+    del user
+    try:
+        url = dash_svc.ensure_hermes_dashboard_url()
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return HermesDashboardOpenResponse(url=url)
 
 
 @router.get("/claimable", response_model=HermesClaimableListResponse)

@@ -207,6 +207,8 @@ export interface FlowSummary {
   agentKinds?: string[];
   leaderAgentId?: string | null;
   leaderKind?: string | null;
+  /** True when spec.variables csflow.easy_mode is enabled (省心模式). */
+  easyMode?: boolean;
 }
 
 export interface FlowDetail extends FlowSummary {
@@ -1049,6 +1051,8 @@ export const api = {
       undefined,
       { cache: "no-store" },
     ),
+  openHermesDashboard: () =>
+    request<{ url: string }>("POST", "/api/hermes/agents/dashboard/open"),
   createHermesAgent: (
     payload: { id?: string; name?: string; responsibility?: string; teamId?: string },
     init?: RequestInit,

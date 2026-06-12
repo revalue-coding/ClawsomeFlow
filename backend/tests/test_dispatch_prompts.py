@@ -320,11 +320,12 @@ def test_self_merge_dispatch_includes_main_repo_block_and_steps() -> None:
         worktree=_wt(),
     )
     msg = prompts.build_openclaw_self_merge(ctx)
-    assert "## Baseline Workspace Context (self-merge)" in msg
+    assert "## Baseline Workspace (self-merge)" in msg
     assert "git merge --no-ff" in msg
-    assert "If conflicts occur" in msg
-    assert "VERY IMPORTANT: you MUST execute" in msg
-    assert "7. **End this turn**" in msg
+    assert "flock -x" in msg
+    assert "resolve conflicts yourself" in msg
+    assert "VERY IMPORTANT:" in msg
+    assert "5. **End this turn**" in msg
 
 
 # ── scheduled runs (self-merge in-task) ───────────────────────────────
@@ -341,15 +342,13 @@ def test_worker_dispatch_non_scheduled_omits_self_merge() -> None:
 def test_worker_dispatch_scheduled_includes_self_merge_and_post_merge_paths() -> None:
     ctx = _ctx(is_scheduled=True)
     msg = prompts.build_worker_dispatch(ctx)
-    assert "Self-merge into the baseline branch yourself" in msg
-    assert "you must resolve them yourself" in msg
+    assert "**Self-merge:**" in msg
+    assert "resolve conflicts yourself" in msg
+    assert "flock -x" in msg
     assert "git merge --no-ff clawteam/csflow-x/alice" in msg
-    assert "git checkout main" in msg
     # Post-merge absolute path requirement points at the baseline workspace.
-    assert "post-merge absolute path under `/tmp/main`" in msg
-    assert "never a worktree path under `/tmp/wt/alice`" in msg
-    # Self-merge must precede the inbox-send and final task update.
-    merge_pos = msg.find("Self-merge into the baseline branch yourself")
+    assert "Cite paths under `/tmp/main`" in msg or "paths under `/tmp/main`" in msg
+    merge_pos = msg.find("**Self-merge:**")
     inbox_pos = msg.find("clawteam inbox send")
     update_pos = msg.find("clawteam task update")
     assert 0 < merge_pos < inbox_pos < update_pos
@@ -364,12 +363,11 @@ def test_leader_dispatch_scheduled_includes_self_merge() -> None:
         is_scheduled=True,
     )
     msg = prompts.build_leader_dispatch(ctx)
-    assert "Self-merge into the baseline branch yourself" in msg
-    assert "you must resolve them yourself" in msg
+    assert "**Self-merge:**" in msg
+    assert "resolve conflicts yourself" in msg
     assert "git merge --no-ff clawteam/csflow-x/leader" in msg
-    assert "post-merge absolute path under `/tmp/main`" in msg
-    # The self-merge block sits after the commit step, before the final reply.
-    merge_pos = msg.find("Self-merge into the baseline branch yourself")
+    assert "paths under `/tmp/main`" in msg
+    merge_pos = msg.find("**Self-merge:**")
     reply_pos = msg.find("leader final reply:")
     assert 0 < merge_pos < reply_pos
 

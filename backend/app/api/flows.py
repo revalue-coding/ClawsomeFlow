@@ -62,6 +62,8 @@ class FlowSummary(_CamelModel):
     # enforced; FE renders a dash in that case.
     leader_agent_id: str | None = None
     leader_kind: str | None = None
+    # True when spec.variables["csflow.easy_mode"] is "true" (省心模式).
+    easy_mode: bool = False
 
 
 class FlowDetail(_CamelModel):
@@ -183,6 +185,16 @@ class FlowImportResponse(_CamelModel):
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _spec_easy_mode(flow: Flow) -> bool:
+    try:
+        variables = (flow.spec or {}).get("variables") or {}
+        if not isinstance(variables, dict):
+            return False
+        return str(variables.get("csflow.easy_mode", "")).strip().lower() == "true"
+    except Exception:
+        return False
+
+
 def _to_summary(flow: Flow) -> FlowSummary:
     # Cheapest path: read agent kinds + leader straight out of the JSON-
     # stored spec without re-validating through the strict FlowSpec model
@@ -222,6 +234,7 @@ def _to_summary(flow: Flow) -> FlowSummary:
         agent_kinds=kinds,
         leader_agent_id=leader_id,
         leader_kind=leader_kind,
+        easy_mode=_spec_easy_mode(flow),
     )
 
 

@@ -110,6 +110,7 @@ const en = {
     columnUpdated: "Updated",
     columnVersion: "Version",
     columnAgentKinds: "Agent source",
+    easyModeBadge: "Easy",
     goalEmpty: "(overall goal not set)",
     leaderEmpty: "—",
     deleteModalTitle: "Delete Flow",
@@ -872,6 +873,8 @@ const en = {
     open: "Open",
     myProfile: "my-profile",
     toHermes: "to Hermes",
+    openingDashboard: "Opening…",
+    dashboardOpenFailed: "Could not open Hermes dashboard: {{message}}",
     opening: "Opening…",
     remoteUnavailable:
       "This is an SSH/remote browser session; opening local folders is unavailable.",
@@ -1117,7 +1120,7 @@ const en = {
     },
     removeModal: {
       title: "Remove Agent",
-      hint: "Choose the target Agent and select a removal mode.",
+      hint: "Choose a removal mode.",
       targetLabel: "Target Agent",
       modeLabel: "Removal mode",
       modeUnregister: "Unregister only (keep agent data for later restore)",

@@ -84,14 +84,7 @@ from app.scheduler.finalize import (
     run_terminal_tail_cleanup,
 )
 from app.scheduler.naming import openclaw_session_id_for_run, team_name_for_run
-from app.scheduler.prompts import (
-    DispatchContext,
-    UpstreamOutput,
-    WorkerReport,
-    build_leader_dispatch,
-    build_openclaw_self_merge,
-    build_worker_dispatch,
-)
+from app.repo_merge_lock import self_merge_instruction
 from app.scheduler.providers import DispatchClock
 from app.scheduler.sessions.base import (
     DispatchOutcome,
@@ -2893,19 +2886,18 @@ class RunController:
             repo_root = wt.repo_root if wt else "<baseline-workspace>"
             branch = wt.branch_name if wt else "<branch>"
             base = wt.base_branch if wt else "<base>"
+            merge_line = self_merge_instruction(
+                repo_root=repo_root,
+                base_branch=base,
+                feature_branch=branch,
+                merge_message=f"csflow: scheduled merge {branch}",
+            )
             self_merge_block = (
-                "2) **Commit and self-merge your changes into the baseline branch "
-                "yourself** (there is no user merge review):\n"
+                "2) Commit worktree changes, then self-merge (no user merge review):\n"
                 f"   `cd {wt_path} && git add -A && git commit -m "
                 f"'checkpoint rerun {upstream_item.task_id}'`\n"
-                f"   `cd {repo_root} && git checkout {base} && git pull --ff-only || true "
-                f"&& git merge --no-ff {branch} -m 'csflow: scheduled merge {branch}'`. "
-                "If the merge hits conflicts, **you must resolve them yourself** (keep your "
-                "intended changes plus any unrelated baseline changes), then finish with "
-                "`git add -A && git commit`.\n"
-                f"   After merging, every output path you mention MUST be the post-merge "
-                f"absolute path under `{repo_root}` — never a worktree path under "
-                f"`{wt_path}`.\n"
+                f"   {merge_line}\n"
+                f"   Cite paths under `{repo_root}` only — not `{wt_path}`.\n"
             )
         # Number the inbox/update steps after the optional self-merge block.
         inbox_no, update_no, fail_no = (3, 4, 5) if is_scheduled else (2, 3, 4)
@@ -3223,23 +3215,25 @@ class RunController:
         reason: str,
     ) -> str:
         repo_root, base_branch, merge_branch = await self._resolve_merge_context(agent=agent)
+        merge_line = self_merge_instruction(
+            repo_root=repo_root,
+            base_branch=base_branch,
+            feature_branch=merge_branch,
+            merge_message=f"[csflow] merge {merge_branch} after run {self.run.id}",
+        )
         return (
             "## ClawsomeFlow Merge Requirement\n"
             f"- team: `{self.team_name}`\n"
             f"- merge_task_id: `{task_id}`\n"
             f"- agent: `{agent.id}`\n"
             f"- reason: `{reason}`\n\n"
-            "Perform merge actions only. Do not add unrelated operations. Execute in order:\n"
-            f"1) `cd {repo_root}`\n"
-            f"2) `git checkout {base_branch} && git pull --ff-only || true`\n"
-            f"3) `git merge --no-ff {merge_branch} -m '[csflow] merge {merge_branch} after run {self.run.id}'`\n"
-            "4) **If merge conflicts occur, you must resolve them yourself** and finish the merge commit before continuing.\n"
-            "5) Verify merge persistence with `git log --oneline | head -5`.\n"
-            f"6) VERY IMPORTANT! you MUST execute `clawteam task update {self.team_name} {task_id} --status completed`.\n"
-            "7) If merge still cannot be completed, send a failure note to leader inbox first, "
-            "then still execute the completed command in step 6:\n"
+            "Merge only:\n"
+            f"1) {merge_line}\n"
+            "2) `git log --oneline | head -5`\n"
+            f"3) `clawteam task update {self.team_name} {task_id} --status completed`\n"
+            "4) On failure: inbox leader, then still run step 3:\n"
             f"   `clawteam inbox send {self.team_name} {self._leader_id} "
-            f"\"merge request {agent.id} failed: <reason>\" --from {agent.id}`."
+            f"\"merge request {agent.id} failed: <reason>\" --from {agent.id}`"
         )
 
     async def _resolve_merge_context(

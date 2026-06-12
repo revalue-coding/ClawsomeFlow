@@ -29,6 +29,7 @@ from typing import Sequence
 from app import logging_setup
 from app.concurrency import LockManager, get_lock_manager
 from app.config import Config, load_config
+from app.repo_merge_lock import async_main_repo_file_lock
 from app.user_context import get_request_user
 
 
@@ -483,57 +484,139 @@ class ClawTeamCli:
             )
             return False, msg
 
+        repo_root = _expand_repo(repo_root)
         env = self._env()
         async with self._locks.lock(f"clawteam_main_repo:{repo_root}"):
-            checkout_argv = ["git", "checkout", target_branch]
-            checkout_code, checkout_out, checkout_err = await _run_in_cwd(
-                checkout_argv,
-                cwd=repo_root,
-                env=env,
-            )
-            if checkout_code != 0:
-                combined = (
-                    (checkout_out or "")
-                    + (checkout_err or "")
-                    or f"git checkout failed: {' '.join(checkout_argv)}"
-                )
-                logging_setup.workspace_merge(
-                    agent_id=agent,
-                    team=team,
-                    success=False,
-                    stderr=combined,
-                )
-                return False, combined
-
-            merge_argv = ["git", "merge", "--no-ff", branch_name]
-            merge_code, merge_out, merge_err = await _run_in_cwd(
-                merge_argv,
-                cwd=repo_root,
-                env=env,
-            )
-            if merge_code != 0:
-                abort_argv = ["git", "merge", "--abort"]
-                abort_code, abort_out, abort_err = await _run_in_cwd(
-                    abort_argv,
+            async with async_main_repo_file_lock(repo_root):
+                merge_head_code, _, _ = await _run_in_cwd(
+                    ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
                     cwd=repo_root,
                     env=env,
                 )
-                combined = (merge_out or "") + (merge_err or "")
-                if abort_code != 0:
-                    combined += (
-                        "\n\n[csflow] git merge --abort failed:\n"
-                        + (abort_out or "")
-                        + (abort_err or "")
+                if merge_head_code == 0:
+                    msg = (
+                        f"baseline repo {repo_root!r} has an in-progress merge "
+                        "(MERGE_HEAD exists); resolve or abort it before merging"
                     )
-                logging_setup.workspace_merge(
-                    agent_id=agent,
-                    team=team,
-                    success=False,
-                    stderr=combined,
-                )
-                return False, combined
+                    logging_setup.workspace_merge(
+                        agent_id=agent,
+                        team=team,
+                        success=False,
+                        stderr=msg,
+                    )
+                    return False, msg
 
-            combined = (merge_out or "") + (merge_err or "")
+                checkout_argv = ["git", "checkout", target_branch]
+                checkout_code, checkout_out, checkout_err = await _run_in_cwd(
+                    checkout_argv,
+                    cwd=repo_root,
+                    env=env,
+                )
+                if checkout_code != 0:
+                    combined = (
+                        (checkout_out or "")
+                        + (checkout_err or "")
+                        or f"git checkout failed: {' '.join(checkout_argv)}"
+                    )
+                    logging_setup.workspace_merge(
+                        agent_id=agent,
+                        team=team,
+                        success=False,
+                        stderr=combined,
+                    )
+                    return False, combined
+
+                head_code, head_out, head_err = await _run_in_cwd(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=repo_root,
+                    env=env,
+                )
+                current_branch = (head_out or "").strip()
+                if head_code != 0 or current_branch != target_branch:
+                    combined = (
+                        f"after checkout expected branch {target_branch!r}, "
+                        f"got {current_branch!r}"
+                    )
+                    if head_err:
+                        combined += f"\n{head_err}"
+                    logging_setup.workspace_merge(
+                        agent_id=agent,
+                        team=team,
+                        success=False,
+                        stderr=combined,
+                    )
+                    return False, combined
+
+                status_code, status_out, status_err = await _run_in_cwd(
+                    ["git", "status", "--porcelain"],
+                    cwd=repo_root,
+                    env=env,
+                )
+                if status_code != 0:
+                    combined = (status_err or status_out or "git status failed").strip()
+                    logging_setup.workspace_merge(
+                        agent_id=agent,
+                        team=team,
+                        success=False,
+                        stderr=combined,
+                    )
+                    return False, combined
+                if status_out.strip():
+                    msg = (
+                        f"baseline branch {target_branch!r} in {repo_root!r} has "
+                        f"uncommitted changes; commit or stash before merge:\n"
+                        f"{status_out.strip()}"
+                    )
+                    logging_setup.workspace_merge(
+                        agent_id=agent,
+                        team=team,
+                        success=False,
+                        stderr=msg,
+                    )
+                    return False, msg
+
+                await _run_in_cwd(
+                    ["git", "pull", "--ff-only"],
+                    cwd=repo_root,
+                    env=env,
+                )
+
+                merge_argv = [
+                    "git",
+                    "merge",
+                    "--no-ff",
+                    branch_name,
+                    "-m",
+                    f"[csflow] merge {branch_name} for {team}/{agent}",
+                ]
+                merge_code, merge_out, merge_err = await _run_in_cwd(
+                    merge_argv,
+                    cwd=repo_root,
+                    env=env,
+                )
+                if merge_code != 0:
+                    abort_argv = ["git", "merge", "--abort"]
+                    abort_code, abort_out, abort_err = await _run_in_cwd(
+                        abort_argv,
+                        cwd=repo_root,
+                        env=env,
+                    )
+                    combined = (merge_out or "") + (merge_err or "")
+                    if abort_code != 0:
+                        combined += (
+                            "\n\n[csflow] git merge --abort failed:\n"
+                            + (abort_out or "")
+                            + (abort_err or "")
+                        )
+                    logging_setup.workspace_merge(
+                        agent_id=agent,
+                        team=team,
+                        success=False,
+                        stderr=combined,
+                    )
+                    return False, combined
+
+                combined = (merge_out or "") + (merge_err or "")
             if cleanup:
                 cleaned = await self.workspace_cleanup(
                     team=team,

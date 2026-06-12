@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from app.models import AgentKind, FlowAgent, FlowTask
+from app.repo_merge_lock import self_merge_instruction
 from app.worktree.lookup import WorktreeInfo
 
 
@@ -324,17 +325,16 @@ def _scheduled_self_merge_steps(
     repo_root = ctx.worktree.repo_root if ctx.worktree else "<baseline-workspace>"
     branch = ctx.worktree.branch_name if ctx.worktree else "<branch>"
     base = ctx.worktree.base_branch if ctx.worktree else "<base>"
+    merge_line = self_merge_instruction(
+        repo_root=repo_root,
+        base_branch=base,
+        feature_branch=branch,
+        merge_message=f"csflow: scheduled merge {branch}",
+    )
     steps = [
-        f"{start_no}. **Self-merge into the baseline branch yourself**: "
-        f"`cd {repo_root} && git checkout {base} && git pull --ff-only || true && "
-        f"git merge --no-ff {branch} -m 'csflow: scheduled merge {branch}'`. "
-        "If the merge hits conflicts, **you must resolve them yourself** (keep your "
-        "intended changes plus any unrelated baseline changes), then finish with "
-        "`git add -A && git commit`.",
-        f"{start_no + 1}. After merging, your deliverables live under the baseline "
-        f"workspace `{repo_root}` on `{base}`. **Every output path you mention MUST "
-        f"be the post-merge absolute path under `{repo_root}` — never a worktree "
-        f"path under `{wt}`.**",
+        f"{start_no}. **Self-merge:** {merge_line}",
+        f"{start_no + 1}. After merge, cite paths under `{repo_root}` on `{base}` only — "
+        f"not under worktree `{wt}`.",
     ]
     return steps, start_no + 2
 
@@ -610,25 +610,17 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
 
 
 def _openclaw_main_repo_block(ctx: DispatchContext) -> str:
-    """For self-merge: the baseline workspace IS the OpenClaw agent's workspace_path.
-
-    For OpenClaw agents managed by ClawsomeFlow, ``ctx.worktree.repo_root``
-    is exactly ``~/.clawsomeflow/agents/{id}/workspace/``.
-    """
     return (
-        "## Baseline Workspace Context (self-merge)\n"
-        f"- baseline workspace: `{ctx.worktree.repo_root}` (registered workspace in openclaw.json)\n"
-        f"- base branch: `{ctx.worktree.base_branch}`\n"
-        f"- your worktree: `{ctx.worktree.worktree_path}` (branch `{ctx.worktree.branch_name}`)\n"
-        "Goal: merge all commits from the worktree branch into the base branch."
+        "## Baseline Workspace (self-merge)\n"
+        f"- repo: `{ctx.worktree.repo_root}` branch `{ctx.worktree.base_branch}`\n"
+        f"- worktree: `{ctx.worktree.worktree_path}` branch `{ctx.worktree.branch_name}`"
     )
 
 
 def _self_merge_task_block(ctx: DispatchContext) -> str:
     return (
         f"## Task #{ctx.task.id}: Self-merge wrap-up\n"
-        "Merge all commits produced in this run's worktree branch into the baseline branch. "
-        "If conflicts occur due to new unrelated commits on the baseline branch, resolve them yourself."
+        "Merge this run's worktree branch into the baseline branch."
     )
 
 
@@ -640,19 +632,20 @@ def _self_merge_completion_steps(ctx: DispatchContext) -> str:
     baseline_workspace = ctx.worktree.repo_root
     branch = ctx.worktree.branch_name
     base = ctx.worktree.base_branch
+    merge_line = self_merge_instruction(
+        repo_root=baseline_workspace,
+        base_branch=base,
+        feature_branch=branch,
+        merge_message=f"csflow: merge {branch} after run",
+    )
     return (
         "## Completion Checklist\n"
-        f"1. `cd {wt} && git status` to ensure all changes are committed; if needed, "
-        f"run `git add -A && git commit -m 'task {task_id}: final checkpoint'`.\n"
-        f"2. `cd {baseline_workspace} && git checkout {base} && git pull --ff-only || true`.\n"
-        f"3. `cd {baseline_workspace} && git merge --no-ff {branch} -m 'csflow: merge {branch} after run'`.\n"
-        "4. **If conflicts occur**: resolve files by preserving your intended changes plus "
-        "unrelated baseline-branch changes, then `git add <file>` and `git commit`.\n"
-        "5. Verify with `git log --oneline | head -5` to confirm task + merge commits.\n"
-        f"6. **VERY IMPORTANT: you MUST execute** "
-        f"`clawteam task update {team} {ct_task_id} --status completed` "
-        "on success; otherwise use `--status blocked` and inbox the leader with the blocker.\n"
-        "7. **End this turn**"
+        f"1. `cd {wt} && git add -A && git commit -m 'task {task_id}: final checkpoint'` if needed.\n"
+        f"2. {merge_line}\n"
+        f"3. `git log --oneline | head -5`\n"
+        f"4. **VERY IMPORTANT:** `clawteam task update {team} {ct_task_id} --status completed` "
+        "(or `--status blocked` + inbox leader on failure).\n"
+        "5. **End this turn**"
     )
 
 

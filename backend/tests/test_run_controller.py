@@ -520,6 +520,7 @@ def test_checkpoint_rerun_prompt_includes_self_merge_when_scheduled(fake_lookup)
     run.is_scheduled = True
     prompt = _rerun_prompt_for(run, spec, fake_lookup)
     assert "self-merge" in prompt
+    assert "flock -x" in prompt
     assert "git merge --no-ff clawteam/t/alice" in prompt
     assert "please fix the chart" in prompt  # user feedback still embedded
 

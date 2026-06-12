@@ -383,8 +383,16 @@ async def test_workspace_merge_runs_git_and_cleanup(monkeypatch: pytest.MonkeyPa
         del env
         seen.append(argv)
         assert cwd == "/tmp/repo"
+        if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+            return 1, "", ""
         if argv[:2] == ["git", "checkout"]:
             return 0, "Switched", ""
+        if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
+            return 0, "test", ""
+        if argv[:3] == ["git", "status", "--porcelain"]:
+            return 0, "", ""
+        if argv[:3] == ["git", "pull", "--ff-only"]:
+            return 0, "Already up to date.", ""
         if argv[:3] == ["git", "merge", "--no-ff"]:
             return 0, "Merge made by the 'ort' strategy.", ""
         raise AssertionError(f"unexpected argv: {argv}")
@@ -401,10 +409,9 @@ async def test_workspace_merge_runs_git_and_cleanup(monkeypatch: pytest.MonkeyPa
     )
     assert ok is True
     assert "Merge made by the 'ort' strategy." in output
-    assert seen == [
-        ["git", "checkout", "test"],
-        ["git", "merge", "--no-ff", "clawteam/csflow-x/alice"],
-    ]
+    assert seen[0][:4] == ["git", "rev-parse", "-q", "--verify"]
+    assert ["git", "checkout", "test"] in seen
+    assert ["git", "merge", "--no-ff", "clawteam/csflow-x/alice", "-m", "[csflow] merge clawteam/csflow-x/alice for csflow-x/alice"] in seen
     assert cleanup_calls == [("csflow-x", "alice", "/tmp/repo")]
 
 
@@ -438,7 +445,15 @@ async def test_workspace_merge_conflict_runs_abort(monkeypatch: pytest.MonkeyPat
     async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):
         del cwd, env
         seen.append(argv)
+        if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+            return 1, "", ""
         if argv[:2] == ["git", "checkout"]:
+            return 0, "", ""
+        if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
+            return 0, "main", ""
+        if argv[:3] == ["git", "status", "--porcelain"]:
+            return 0, "", ""
+        if argv[:3] == ["git", "pull", "--ff-only"]:
             return 0, "", ""
         if argv[:3] == ["git", "merge", "--no-ff"] and argv[-1] != "--abort":
             return 1, "", "CONFLICT (content): Merge conflict in README.md"

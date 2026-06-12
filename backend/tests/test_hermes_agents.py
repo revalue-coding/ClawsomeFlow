@@ -249,6 +249,19 @@ def test_api_runtime_status(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     assert r.json()["running"] is True
 
 
+def test_api_open_dashboard(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import hermes_dashboard as dash_svc
+
+    monkeypatch.setattr(
+        dash_svc,
+        "ensure_hermes_dashboard_url",
+        lambda **kw: "http://127.0.0.1:9119/chat",
+    )
+    r = client.post("/api/hermes/agents/dashboard/open")
+    assert r.status_code == 200, r.text
+    assert r.json()["url"] == "http://127.0.0.1:9119/chat"
+
+
 def test_api_runtime_status_mode_passthrough(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
