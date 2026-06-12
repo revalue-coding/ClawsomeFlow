@@ -372,6 +372,37 @@ def test_leader_dispatch_scheduled_includes_self_merge() -> None:
     assert 0 < merge_pos < reply_pos
 
 
+def test_leader_scheduled_final_reply_must_cite_baseline_paths() -> None:
+    """Scheduled leader summary: MUST self-check that reported paths are the
+    post-merge baseline paths (run-ac4ec5fbfe7b), with a cross-platform check."""
+    ctx = _ctx(
+        agent=_agent(id="leader", leader=True),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+        worktree=_wt(agent="leader", branch="clawteam/csflow-x/leader",
+                     path="/tmp/wt/leader", main="/tmp/main", base="main"),
+        is_scheduled=True,
+    )
+    msg = prompts.build_leader_dispatch(ctx)
+    assert "MUST self-check" in msg
+    assert "post-merge path under the baseline workspace `/tmp/main` on `main`" in msg
+    assert "test -f <baseline-absolute-path>" in msg
+    assert "identical command on Linux and macOS" in msg
+    assert "<concise summary + post-merge baseline absolute paths>" in msg
+
+
+def test_leader_non_scheduled_final_reply_keeps_worktree_path_check() -> None:
+    """Manual (non-scheduled) leader summary stays unchanged: no baseline wording
+    (merge happens later via review), worktree-path verification preserved."""
+    msg = prompts.build_leader_dispatch(_ctx(
+        agent=_agent(id="leader", leader=True),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+    ))
+    assert "exists before sending (e.g. `test -f <absolute-path>`)." in msg
+    assert "<concise summary + absolute paths>" in msg
+    assert "MUST self-check" not in msg
+    assert "baseline" not in msg.lower()
+
+
 # ── upstream-outputs block ────────────────────────────────────────────
 
 

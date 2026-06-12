@@ -893,6 +893,18 @@ const zh = {
       creating: "创建中…",
       cancelCreate: "取消创建",
       cancelling: "取消中…",
+      workPopup: {
+        title: "Agent 创建进度",
+        running:
+          "请求已收到！正在为你创建一个拥有独立人格与记忆的 Hermes Agent，通常需要几分钟，请耐心等待…",
+        created: "你的 Hermes Agent 已就绪：{{id}}，开始让它工作吧。",
+        failed: "创建已结束，但存在问题，请查看结果详情。",
+        cancelRunning: "正在取消创建并回滚残留文件…",
+        cancelVerifying: "已接受取消请求，正在确认该 Agent 已不再可见…",
+        cancelAgentStillVisible: "取消清理仍在收敛，该 Agent 仍出现在列表中。",
+        cancelFailed: "取消请求失败：{{message}}",
+        close: "关闭",
+      },
     },
     claim: {
       title: "纳管已有的 Hermes profile",

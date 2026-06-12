@@ -410,6 +410,11 @@ function Sidebar({
   );
 }
 
+/** Display labels for URL segments whose raw path differs from the desired breadcrumb text. */
+const CRUMB_LABELS: Record<string, string> = {
+  chat: "Openclaw",
+};
+
 function TopBar({
   location,
 }: {
@@ -424,7 +429,9 @@ function TopBar({
           {crumbs.map((c, i) => (
             <span key={`${c}-${i}`} className="flex items-center gap-2">
               <span className="text-ink-300">›</span>
-              <span className="text-ink-600 capitalize">{c.replace(/-/g, " ")}</span>
+              <span className="text-ink-600 capitalize">
+                {CRUMB_LABELS[c] ?? c.replace(/-/g, " ")}
+              </span>
             </span>
           ))}
         </div>

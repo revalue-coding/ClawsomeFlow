@@ -3,6 +3,7 @@
 
 
 
+
 # Changelog
 
 All notable changes to **ClawsomeFlow** are documented here.
@@ -17,6 +18,27 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 ## [Unreleased]
 
 ### Added
+### Changed
+### Fixed
+- **Leader final reply cited dead worktree paths in scheduled runs**
+  (`backend/app/scheduler/prompts.py`) — in 省心/auto-merge (`is_scheduled`) runs the leader
+  summary self-merges into the baseline branch before reporting, yet the prompt let it cite
+  worktree paths that are deleted at run end, so users saw a dead path and assumed "not merged"
+  (run-ac4ec5fbfe7b). The leader-summary checklist now **MUST** report post-merge baseline
+  absolute paths and self-validates each with `test -f` before sending. Manual (non-scheduled)
+  runs are unchanged (their merge happens later via review, so worktree paths remain correct).
+- **`flock`-based self-merge command failed on macOS** (`backend/app/repo_merge_lock.py`) —
+  `build_flocked_baseline_merge_command` emitted a bare `flock -x …`, but macOS ships no `flock`
+  binary, so the agent self-merge silently errored (the host in run-ac4ec5fbfe7b was macOS). The
+  command is now cross-platform/unified: `flock` when present (Linux), atomic `mkdir` spinlock
+  fallback otherwise (macOS). Identical git steps on both.
+### Removed
+### Deprecated
+### Security
+
+## [0.1.13b11] — 2026-06-12
+
+
 ### Changed
 - **Agent management headers** (`frontend/src/pages/OpenclawChat.tsx`, `HermesChat.tsx`,
   `frontend/src/components/AgentPageToolbar.tsx`) — list pages now use a two-row
@@ -42,9 +64,6 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
   (`hermes.dashboardRemoteUnavailable` / `chat.toOpenclawRemoteUnavailable`, en + zh). Detection
   covers direct-IP remote access; an `ssh -L` tunnel that presents as `localhost` is
   indistinguishable from a local browser and cannot be guarded client-side.
-### Removed
-### Deprecated
-### Security
 
 ## [0.1.13b10] — 2026-06-12
 
@@ -1164,7 +1183,7 @@ Initial alpha release. Brings the full MVP architecture online:
   OpenClaw workspace; `POST /api/flows/decompose` async pipeline.
 - 379 backend tests, frontend tsc + vite build clean.
 
-[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b10...HEAD
+[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b11...HEAD
 [0.1.10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.10
 [0.1.0]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.0
 [0.1.1b1]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.1b1
@@ -1210,3 +1229,4 @@ Initial alpha release. Brings the full MVP architecture online:
 [0.1.13b8]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b8
 [0.1.13b9]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b9
 [0.1.13b10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b10
+[0.1.13b11]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b11

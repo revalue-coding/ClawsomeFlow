@@ -43,6 +43,22 @@ import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionS
 
 const CREATE_TEAM_SENTINEL = "__create_team__";
 const DEFAULT_WORKDIR = "~";
+// Cancel only unlocks once the backend confirms rollback; mirror OpenClaw's
+// verify-by-list loop so the popup doesn't close before the agent is gone.
+const CREATE_CANCEL_VERIFY_TIMEOUT_MS = 30 * 1000;
+const CREATE_CANCEL_VERIFY_POLL_MS = 800;
+// While the build popup is open we quietly re-poll the agent list so a create
+// that finishes *after* the user switched tabs and came back still resolves.
+const CREATE_POLL_MS = 3000;
+
+type CreateCancelState = {
+  agentId: string;
+  cancelling: boolean;
+};
+
+function isAbortError(value: unknown): boolean {
+  return value instanceof Error && value.name === "AbortError";
+}
 
 function isRemoteBrowser(): boolean {
   if (typeof window === "undefined") return false;
@@ -165,6 +181,42 @@ function Picker() {
   );
   const [viewMode, setViewMode] = useState<"card" | "list">("card");
 
+  // ── Create form (lifted out of CreateModal so the build keeps running after
+  // the form modal closes, and so all state survives a tab switch via session
+  // storage). The actual create request is awaited here in the Picker, which
+  // stays mounted while the form modal comes and goes.
+  const [createName, setCreateName] = useSessionBackedState("hermes:create:name", "");
+  const [createProfileId, setCreateProfileId] = useSessionBackedState("hermes:create:profileId", "");
+  const [createResponsibility, setCreateResponsibility] = useSessionBackedState(
+    "hermes:create:responsibility", "",
+  );
+  const [createTeamChoice, setCreateTeamChoice] = useSessionBackedState("hermes:create:teamChoice", "");
+  const [createNewTeamName, setCreateNewTeamName] = useSessionBackedState("hermes:create:newTeamName", "");
+  const [createError, setCreateError] = useState("");
+
+  // ── Build-progress popup (mirrors OpenClaw's work popup). `workPopupText`
+  // and `createCancelState` are session-backed so the popup restores on return;
+  // `workPopupRunning`/`workPopupSuccess` are transient (recomputed from
+  // createCancelState after a remount).
+  const [workPopupOpen, setWorkPopupOpen] = useSessionBackedModalFlag("hermes:create:workPopupOpen");
+  const [workPopupRunning, setWorkPopupRunning] = useState(false);
+  // Session-backed (unlike OpenClaw's transient flag) so a *failed* build that
+  // finishes while we're unmounted restores in red, not just as green text:
+  // useSessionBackedState's setter writes to storage synchronously even after
+  // unmount, so the failure outcome survives a tab switch. Only persist the
+  // failure (false); success is the default and clears the key.
+  const [workPopupSuccess, setWorkPopupSuccess] = useSessionBackedState(
+    "hermes:create:workPopupSuccess", true, { isClosed: (v) => v === true },
+  );
+  const [workPopupText, setWorkPopupText] = useSessionBackedState(
+    "hermes:create:workPopupText", "", { isClosed: (v) => v.trim() === "" },
+  );
+  const [createCancelState, setCreateCancelState] = useSessionBackedState<CreateCancelState | null>(
+    "hermes:create:cancelState", null, { isClosed: (v) => v === null },
+  );
+  const createAbortRef = useRef<AbortController | null>(null);
+  const createCancelRequestedRef = useRef(false);
+
   const reload = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -182,9 +234,161 @@ function Picker() {
     }
   }, []);
 
+  // Quiet refetch (no loading spinner) used by the build-progress poll.
+  const refreshAgents = useCallback(async () => {
+    try {
+      const a = await api.listHermesAgents();
+      setAgents(a.items);
+    } catch {
+      /* ignore poll errors — the next tick retries */
+    }
+  }, []);
+
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  const workPopupBusy = workPopupRunning || createCancelState !== null;
+  const showCreateCancelAction = createCancelState !== null;
+  const createCancelEnabled =
+    showCreateCancelAction && !(createCancelState?.cancelling ?? false);
+  const workPopupDisplayText =
+    workPopupText || (workPopupOpen ? t("hermes.create.workPopup.running") : "");
+
+  const resetCreateForm = useCallback(() => {
+    setCreateName("");
+    setCreateProfileId("");
+    setCreateResponsibility("");
+    setCreateTeamChoice("");
+    setCreateNewTeamName("");
+  }, [setCreateName, setCreateProfileId, setCreateResponsibility, setCreateTeamChoice, setCreateNewTeamName]);
+
+  const resetCreateCancelState = useCallback(() => {
+    setCreateCancelState(null);
+    createAbortRef.current = null;
+    createCancelRequestedRef.current = false;
+  }, [setCreateCancelState]);
+
+  const resetWorkPopupDisplayState = useCallback(() => {
+    setWorkPopupRunning(false);
+    setWorkPopupSuccess(true);
+    setWorkPopupText("");
+  }, [setWorkPopupText]);
+
+  const openWorkPopup = useCallback(() => {
+    setWorkPopupOpen(true);
+    setWorkPopupRunning(true);
+    setWorkPopupSuccess(true);
+    setWorkPopupText(t("hermes.create.workPopup.running"));
+  }, [setWorkPopupOpen, setWorkPopupText, t]);
+
+  const finishWorkPopup = useCallback(
+    (success: boolean, detail?: string) => {
+      setWorkPopupRunning(false);
+      setWorkPopupSuccess(success);
+      setWorkPopupText(
+        success
+          ? detail || t("hermes.create.workPopup.created", { id: "" })
+          : detail || t("hermes.create.workPopup.failed"),
+      );
+      resetCreateCancelState();
+    },
+    [setWorkPopupText, resetCreateCancelState, t],
+  );
+
+  const submitCreate = useCallback(async () => {
+    const profileId = createProfileId.trim();
+    const name = createName.trim();
+    const responsibility = createResponsibility.trim();
+    if (!name || !profileId) return;
+    const teamReady =
+      createTeamChoice !== CREATE_TEAM_SENTINEL || createNewTeamName.trim().length > 0;
+    if (!teamReady) return;
+    let teamId: string | undefined;
+    try {
+      teamId = await resolveTeamId(createTeamChoice, createNewTeamName);
+    } catch (e) {
+      setCreateError(errText(e));
+      return;
+    }
+    setShowCreate(false);
+    setCreateError("");
+    const ac = new AbortController();
+    createAbortRef.current = ac;
+    createCancelRequestedRef.current = false;
+    setCreateCancelState({ agentId: profileId, cancelling: false });
+    openWorkPopup();
+    try {
+      const created = await api.createHermesAgent(
+        { id: profileId, name, responsibility, teamId },
+        { signal: ac.signal },
+      );
+      finishWorkPopup(true, t("hermes.create.workPopup.created", { id: created.id }));
+      resetCreateForm();
+      await reload();
+    } catch (e) {
+      // Cancelled (or unmounted mid-flight) → handled by cancelCreate / reconcile.
+      if (createCancelRequestedRef.current || isAbortError(e)) return;
+      finishWorkPopup(false, errText(e));
+    } finally {
+      if (createAbortRef.current === ac) createAbortRef.current = null;
+    }
+  }, [
+    createProfileId, createName, createResponsibility, createTeamChoice, createNewTeamName,
+    setShowCreate, setCreateCancelState, openWorkPopup, finishWorkPopup, resetCreateForm,
+    reload, t,
+  ]);
+
+  const cancelCreate = useCallback(async () => {
+    if (createCancelState === null || createCancelState.cancelling) return;
+    const agentId = createCancelState.agentId;
+    createCancelRequestedRef.current = true;
+    createAbortRef.current?.abort();
+    setCreateCancelState((prev) => (prev === null ? prev : { ...prev, cancelling: true }));
+    setWorkPopupText(t("hermes.create.workPopup.cancelRunning"));
+    try {
+      await api.cancelHermesAgentCreate(agentId);
+      setWorkPopupText(t("hermes.create.workPopup.cancelVerifying"));
+      const deadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
+      for (;;) {
+        const listed = await api.listHermesAgents();
+        if (!listed.items.some((item) => item.id === agentId)) break;
+        if (Date.now() >= deadline) {
+          throw new Error(t("hermes.create.workPopup.cancelAgentStillVisible"));
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, CREATE_CANCEL_VERIFY_POLL_MS));
+      }
+      setWorkPopupOpen(false);
+      resetWorkPopupDisplayState();
+      resetCreateCancelState();
+      void refreshAgents();
+    } catch (e) {
+      finishWorkPopup(false, t("hermes.create.workPopup.cancelFailed", { message: errText(e) }));
+    }
+  }, [
+    createCancelState, setCreateCancelState, setWorkPopupText, setWorkPopupOpen,
+    resetWorkPopupDisplayState, resetCreateCancelState, finishWorkPopup, refreshAgents, t,
+  ]);
+
+  // Reconcile-on-return: if a create finished while we were unmounted, the
+  // (re)loaded list now contains the agent → resolve the still-open popup.
+  useEffect(() => {
+    const cs = createCancelState;
+    if (!cs || cs.cancelling) return;
+    if (agents.some((a) => a.id === cs.agentId)) {
+      finishWorkPopup(true, t("hermes.create.workPopup.created", { id: cs.agentId }));
+      resetCreateForm();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents]);
+
+  // While a build is in flight (incl. after a tab switch), keep polling the list
+  // quietly so the reconcile effect above can fire when it completes.
+  useEffect(() => {
+    if (!workPopupBusy || createCancelState?.cancelling) return;
+    const handle = window.setInterval(() => void refreshAgents(), CREATE_POLL_MS);
+    return () => window.clearInterval(handle);
+  }, [workPopupBusy, createCancelState?.cancelling, refreshAgents]);
 
   const grouped = useMemo(() => {
     const m = new Map<string, HermesAgentSummary[]>();
@@ -214,7 +418,11 @@ function Picker() {
           <button
             type="button"
             className="btn-primary inline-flex h-9 items-center gap-1.5 px-4"
-            onClick={() => setShowCreate(true)}
+            onClick={() => {
+              setCreateError("");
+              setShowCreate(true);
+            }}
+            disabled={workPopupBusy}
           >
             {t("hermes.createAgent")}
           </button>
@@ -307,15 +515,79 @@ function Picker() {
       {showCreate && (
         <CreateModal
           teams={teams}
-          agents={agents}
+          name={createName}
+          onNameChange={setCreateName}
+          profileId={createProfileId}
+          onProfileIdChange={setCreateProfileId}
+          responsibility={createResponsibility}
+          onResponsibilityChange={setCreateResponsibility}
+          teamChoice={createTeamChoice}
+          onTeamChoiceChange={setCreateTeamChoice}
+          newTeamName={createNewTeamName}
+          onNewTeamNameChange={setCreateNewTeamName}
+          error={createError}
           onClose={() => setShowCreate(false)}
-          onDone={(created) => {
-            setShowCreate(false);
-            void reload();
-            navigate(`/hermes/${created.id}`);
-          }}
+          onSubmit={() => void submitCreate()}
         />
       )}
+
+      <Modal
+        open={workPopupOpen}
+        onClose={() => {
+          if (workPopupBusy) return;
+          setWorkPopupOpen(false);
+          resetWorkPopupDisplayState();
+          resetCreateCancelState();
+        }}
+        title={t("hermes.create.workPopup.title")}
+        width="max-w-xl"
+        dismissible={!workPopupBusy}
+      >
+        <div className="space-y-4">
+          <p
+            className={
+              workPopupBusy
+                ? "text-sm text-ink-700"
+                : workPopupSuccess
+                ? "text-sm text-emerald-700"
+                : "text-sm text-rose-700"
+            }
+          >
+            {workPopupDisplayText}
+          </p>
+          {workPopupBusy && <Loading />}
+          {showCreateCancelAction && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="btn-outline"
+                onClick={() => void cancelCreate()}
+                disabled={!createCancelEnabled}
+              >
+                {createCancelState?.cancelling
+                  ? t("hermes.create.cancelling")
+                  : t("hermes.create.cancelCreate")}
+              </button>
+            </div>
+          )}
+          {!workPopupBusy && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  setWorkPopupOpen(false);
+                  resetWorkPopupDisplayState();
+                  resetCreateCancelState();
+                }}
+              >
+                {t("hermes.create.workPopup.close")}
+              </button>
+            </div>
+          )}
+        </div>
+      </Modal>
+
       {removeTarget && (
         <RemoveModal
           agent={removeTarget}
@@ -387,98 +659,45 @@ async function resolveTeamId(
   return choice || undefined;
 }
 
+/** Presentational create form. The build lifecycle (request, work popup,
+ *  cancel) is owned by the Picker so it survives this modal closing on submit
+ *  and a tab switch — see Picker's submitCreate/cancelCreate. */
 function CreateModal({
   teams,
-  agents,
+  name,
+  onNameChange,
+  profileId,
+  onProfileIdChange,
+  responsibility,
+  onResponsibilityChange,
+  teamChoice,
+  onTeamChoiceChange,
+  newTeamName,
+  onNewTeamNameChange,
+  error,
   onClose,
-  onDone,
+  onSubmit,
 }: {
   teams: OpenclawTeam[];
-  agents: HermesAgentSummary[];
+  name: string;
+  onNameChange: (v: string) => void;
+  profileId: string;
+  onProfileIdChange: (v: string) => void;
+  responsibility: string;
+  onResponsibilityChange: (v: string) => void;
+  teamChoice: string;
+  onTeamChoiceChange: (v: string) => void;
+  newTeamName: string;
+  onNewTeamNameChange: (v: string) => void;
+  error: string;
   onClose: () => void;
-  onDone: (created: { id: string }) => void;
+  onSubmit: () => void;
 }) {
   const { t } = useTranslation();
-  // ``name`` is the human-friendly Agent Name (shown as the card title and
-  // injected into the bootstrap prompt). ``profileId`` is the Hermes profile id.
-  // Session-backed so switching modules mid-create keeps the form + busy state.
-  const [name, setName] = useSessionBackedState("hermes:create:name", "");
-  const [profileId, setProfileId] = useSessionBackedState("hermes:create:profileId", "");
-  const [responsibility, setResponsibility] = useSessionBackedState("hermes:create:responsibility", "");
-  const [teamChoice, setTeamChoice] = useSessionBackedState("hermes:create:teamChoice", "");
-  const [newTeamName, setNewTeamName] = useSessionBackedState("hermes:create:newTeamName", "");
-  const [busy, setBusy] = useSessionBackedState("hermes:create:busy", false);
-  const [cancelling, setCancelling] = useState(false);
-  const [error, setError] = useState("");
-  const abortRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef(true);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  const resetForm = () => {
-    setName(""); setProfileId(""); setResponsibility("");
-    setTeamChoice(""); setNewTeamName(""); setBusy(false);
-  };
-
-  // Reconcile-on-return: if we navigated away mid-create and the agent finished
-  // while unmounted, the freshly-reloaded list now contains it → treat as done.
-  useEffect(() => {
-    if (!busy) return;
-    const created = profileId.trim();
-    if (created && agents.some((a) => a.id === created)) {
-      setBusy(false);
-      onDone({ id: created });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agents]);
-
-  const submit = async () => {
-    setBusy(true);
-    setError("");
-    const ac = new AbortController();
-    abortRef.current = ac;
-    try {
-      const teamId = await resolveTeamId(teamChoice, newTeamName);
-      const created = await api.createHermesAgent(
-        {
-          id: profileId.trim(),
-          name: name.trim(),
-          responsibility: responsibility.trim(),
-          teamId,
-        },
-        { signal: ac.signal },
-      );
-      if (!mountedRef.current) return; // returned via reconcile instead
-      resetForm();
-      onDone(created);
-    } catch (e) {
-      if (ac.signal.aborted) return; // cancelled — handled by cancelCreate
-      if (!mountedRef.current) return;
-      setError(errText(e));
-      setBusy(false);
-    }
-  };
-
-  // Bootstrap can run for minutes; let the user abort it. We abort the request
-  // AND tell the backend to kill the bootstrap + roll back the half-built agent.
-  const cancelCreate = async () => {
-    setCancelling(true);
-    abortRef.current?.abort();
-    try {
-      await api.cancelHermesAgentCreate(profileId.trim());
-    } catch {
-      /* best-effort — closing anyway */
-    }
-    resetForm();
-    onClose();
-  };
-
   const teamReady = teamChoice !== CREATE_TEAM_SENTINEL || newTeamName.trim().length > 0;
 
   return (
-    <Modal open onClose={onClose} title={t("hermes.create.title")} dismissible={!busy} width="max-w-2xl">
+    <Modal open onClose={onClose} title={t("hermes.create.title")} width="max-w-2xl">
       <div className="space-y-3">
         {error && <ErrorBox>{error}</ErrorBox>}
         <div>
@@ -487,7 +706,7 @@ function CreateModal({
             className="input"
             value={name}
             placeholder={t("hermes.create.namePlaceholder")}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => onNameChange(e.target.value)}
           />
         </div>
         <div>
@@ -496,7 +715,7 @@ function CreateModal({
             className="input font-mono"
             value={profileId}
             placeholder={t("hermes.create.idPlaceholder")}
-            onChange={(e) => setProfileId(e.target.value)}
+            onChange={(e) => onProfileIdChange(e.target.value)}
           />
           <div className="mt-1 text-xs text-ink-400">{t("hermes.create.idHint")}</div>
         </div>
@@ -506,7 +725,7 @@ function CreateModal({
             className="textarea h-24"
             value={responsibility}
             placeholder={t("hermes.create.responsibilityPlaceholder")}
-            onChange={(e) => setResponsibility(e.target.value)}
+            onChange={(e) => onResponsibilityChange(e.target.value)}
           />
         </div>
         <div>
@@ -514,31 +733,22 @@ function CreateModal({
           <TeamSelect
             teams={teams}
             value={teamChoice}
-            onChange={setTeamChoice}
+            onChange={onTeamChoiceChange}
             newTeamName={newTeamName}
-            onNewTeamNameChange={setNewTeamName}
+            onNewTeamNameChange={onNewTeamNameChange}
           />
         </div>
         <div className="flex justify-end gap-2 pt-2">
-          <button
-            type="button"
-            className="btn-outline"
-            onClick={busy ? () => void cancelCreate() : onClose}
-            disabled={cancelling}
-          >
-            {busy
-              ? cancelling
-                ? t("hermes.create.cancelling")
-                : t("hermes.create.cancelCreate")
-              : t("common.cancel")}
+          <button type="button" className="btn-outline" onClick={onClose}>
+            {t("common.cancel")}
           </button>
           <button
             type="button"
             className="btn-primary"
-            onClick={() => void submit()}
-            disabled={busy || !name.trim() || !profileId.trim() || !teamReady}
+            onClick={onSubmit}
+            disabled={!name.trim() || !profileId.trim() || !teamReady}
           >
-            {busy ? t("hermes.create.creating") : t("hermes.create.submit")}
+            {t("hermes.create.submit")}
           </button>
         </div>
       </div>

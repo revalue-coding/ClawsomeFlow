@@ -333,8 +333,9 @@ def _scheduled_self_merge_steps(
     )
     steps = [
         f"{start_no}. **Self-merge:** {merge_line}",
-        f"{start_no + 1}. After merge, cite paths under `{repo_root}` on `{base}` only — "
-        f"not under worktree `{wt}`.",
+        f"{start_no + 1}. **MUST:** after the merge, cite paths under `{repo_root}` on `{base}` "
+        f"ONLY — NEVER the worktree `{wt}` (it is deleted when the run ends, so worktree paths "
+        f"become dead links).",
     ]
     return steps, start_no + 2
 
@@ -520,6 +521,8 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     # See _worker_completion_steps for why we must pass the ClawTeam id.
     ct_task_id = ctx.clawteam_task_id or ctx.task.id
     wt = ctx.worktree.worktree_path if ctx.worktree else "<your-worktree>"
+    repo_root = ctx.worktree.repo_root if ctx.worktree else "<baseline-workspace>"
+    base = ctx.worktree.base_branch if ctx.worktree else "<base>"
 
     # Step 2 — produce + place the deliverable. The ONLY kind-specific difference
     # is the `my-desktop/` convention: it is an OpenClaw-workspace thing. A TUI
@@ -563,15 +566,26 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
         merge_steps, next_no = _scheduled_self_merge_steps(ctx, next_no)
         steps.extend(merge_steps)
 
-    steps.append(
-        f"{next_no}. Verify every absolute path you plan to mention in final reply actually "
-        "exists before sending (e.g. `test -f <absolute-path>`)."
-    )
+    if ctx.is_scheduled:
+        steps.append(
+            f"{next_no}. **MUST self-check:** every absolute path in your final reply MUST be a "
+            f"post-merge path under the baseline workspace `{repo_root}` on `{base}` (NEVER the "
+            f"worktree). Confirm each one exists with `test -f <baseline-absolute-path>` "
+            "(identical command on Linux and macOS) before sending."
+        )
+    else:
+        steps.append(
+            f"{next_no}. Verify every absolute path you plan to mention in final reply actually "
+            "exists before sending (e.g. `test -f <absolute-path>`)."
+        )
     next_no += 1
 
+    reply_paths = (
+        "post-merge baseline absolute paths" if ctx.is_scheduled else "absolute paths"
+    )
     steps.append(
         f"{next_no}. `clawteam inbox send {team} {ctx.agent.id} "
-        "\"leader final reply: <concise summary + absolute paths>\"` "
+        f"\"leader final reply: <concise summary + {reply_paths}>\"` "
         "(required — keep the literal prefix `leader final reply:`.)"
     )
     next_no += 1

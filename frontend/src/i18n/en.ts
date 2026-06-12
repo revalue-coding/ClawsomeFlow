@@ -908,6 +908,19 @@ const en = {
       creating: "Creating…",
       cancelCreate: "Cancel creation",
       cancelling: "Cancelling…",
+      workPopup: {
+        title: "Agent Build Progress",
+        running:
+          "Request received! We are building a Hermes agent with its own persona and memory for you. This usually takes a couple of minutes — please wait patiently…",
+        created: "Your Hermes agent is ready: {{id}}. Start putting it to work.",
+        failed: "Creation finished with issues. Please check the result details.",
+        cancelRunning: "Cancelling creation and rolling back residual files…",
+        cancelVerifying: "Cancellation accepted. Verifying that this agent is no longer visible…",
+        cancelAgentStillVisible:
+          "Cancellation cleanup is still converging. This agent is still visible in the list.",
+        cancelFailed: "Cancel request failed: {{message}}",
+        close: "Close",
+      },
     },
     claim: {
       title: "Claim an existing Hermes profile",

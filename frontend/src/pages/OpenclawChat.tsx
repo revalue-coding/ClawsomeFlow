@@ -290,7 +290,16 @@ function AgentQuickActions({
     "openclaw-chat:quick-actions:work-popup-open",
   );
   const [workPopupRunning, setWorkPopupRunning] = useState(false);
-  const [workPopupSuccess, setWorkPopupSuccess] = useState(true);
+  // Session-backed so a *failed* operation that finishes while we're unmounted
+  // restores in red, not just as green text: useSessionBackedState's setter
+  // writes to storage synchronously even after unmount, so the failure outcome
+  // survives a tab switch. Only persist the failure (false); success is the
+  // default and clears the key.
+  const [workPopupSuccess, setWorkPopupSuccess] = useSessionBackedState(
+    "openclaw-chat:quick-actions:work-popup-success",
+    true,
+    { isClosed: (value) => value === true },
+  );
   const [workPopupText, setWorkPopupText] = useSessionBackedState(
     "openclaw-chat:quick-actions:work-popup-text",
     "",

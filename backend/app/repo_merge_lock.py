@@ -8,7 +8,8 @@ on-disk ``flock`` file so baseline ``git checkout``/``git merge`` on a shared
 Public helpers:
 * :func:`main_repo_lock_path` — stable lock file path for a main repo.
 * :func:`main_repo_lock_explanation` — prompt text for agent self-merge steps.
-* :func:`build_flocked_baseline_merge_command` — ``flock -x … bash -c '…'`` one-liner.
+* :func:`build_flocked_baseline_merge_command` — cross-platform locked merge
+  one-liner (``flock`` on Linux, ``mkdir`` spinlock fallback on macOS).
 * :func:`main_repo_file_lock` — sync context manager (used from async via wrapper).
 * :func:`async_main_repo_file_lock` — async context manager for scheduler paths.
 """
@@ -84,7 +85,14 @@ def build_flocked_baseline_merge_command(
     feature_branch: str,
     merge_message: str,
 ) -> str:
-    """Shell one-liner: acquire repo lock, checkout base, merge feature branch."""
+    """Shell one-liner: acquire repo lock, checkout base, merge feature branch.
+
+    Cross-platform by design (Linux + macOS, unified): uses the ``flock`` binary
+    when present (Linux), and falls back to an atomic ``mkdir`` spinlock on hosts
+    that ship no ``flock`` (macOS). The git steps are identical on both, so the
+    same instruction text is safe to hand any agent regardless of host OS — a
+    bare ``flock -x`` would simply error out on macOS and leave the merge unrun.
+    """
     repo = _expand_repo(repo_root)
     lock = main_repo_lock_path(repo)
     inner = (
@@ -94,7 +102,23 @@ def build_flocked_baseline_merge_command(
         f"git merge --no-ff {shlex.quote(feature_branch)} "
         f"-m {shlex.quote(merge_message)}"
     )
-    return f"flock -x {shlex.quote(str(lock))} bash -c {shlex.quote(inner)}"
+    lock_q = shlex.quote(str(lock))
+    lockdir_q = shlex.quote(str(lock) + ".d")
+    parent_q = shlex.quote(str(lock.parent))
+    inner_q = shlex.quote(inner)
+    script = (
+        f"mkdir -p {parent_q}; "
+        f"if command -v flock >/dev/null 2>&1; then "
+        f"flock -x {lock_q} bash -c {inner_q}; "
+        f"else "
+        f"d={lockdir_q}; n=0; "
+        f'while ! mkdir "$d" 2>/dev/null; do '
+        f'sleep 0.2; n=$((n+1)); [ "$n" -ge 600 ] && break; done; '
+        f"trap 'rmdir \"$d\" 2>/dev/null || true' EXIT INT TERM; "
+        f"bash -c {inner_q}; "
+        f"fi"
+    )
+    return f"bash -c {shlex.quote(script)}"
 
 
 @contextmanager
