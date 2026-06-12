@@ -11,7 +11,7 @@
  * can choose any of their OpenClaw agents.
  */
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
@@ -40,7 +40,7 @@ import {
 } from "@/components/ui";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
-import { DesktopIcon, EditIcon, SettingsIcon, StoreIcon } from "@/components/icons";
+import { DesktopIcon, EditIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
@@ -211,17 +211,27 @@ export function OpenclawChat() {
 
   if (id) return <ChatRoom agentId={id} runtimeGatewayUrl={runtimeGatewayUrl} />;
   return (
-    <div className="space-y-5">
-      <AgentQuickActions />
-      <ChatPicker />
-    </div>
+    <AgentQuickActions>
+      {(actions) => <ChatPicker actions={actions} />}
+    </AgentQuickActions>
   );
 }
+
+type OpenclawPickerActions = {
+  openCreate: () => void;
+  openRestore: () => void;
+  openImport: () => void;
+  openRemoveFor: (agent: OpenclawAgentSummary) => void;
+};
 
 // ──────────────────────────────────────────────────────────────────────
 
 
-function AgentQuickActions() {
+function AgentQuickActions({
+  children,
+}: {
+  children?: (actions: OpenclawPickerActions) => ReactNode;
+}) {
   const { t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
@@ -594,21 +604,21 @@ function AgentQuickActions() {
     }
   }
 
-  async function openRemoveModal() {
+  async function openRemoveForAgent(agent: OpenclawAgentSummary) {
     setRemoveModalOpen(true);
     setRemoveError(null);
     setRemoveMode("unregister");
+    setRemoveTargetId(agent.id);
     setRemoveLoading(true);
     try {
       const r = await api.listOpenclawAgents();
-      const items = r.items;
+      const items = r.items.some((item) => item.id === agent.id)
+        ? r.items
+        : [...r.items, agent];
       setRemoveTargets(items);
-      setRemoveTargetId((prev) => {
-        if (prev && items.some((x) => x.id === prev)) return prev;
-        return items[0]?.id ?? "";
-      });
     } catch (e) {
       setRemoveError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      setRemoveTargets([agent]);
     } finally {
       setRemoveLoading(false);
     }
@@ -712,77 +722,22 @@ function AgentQuickActions() {
     showCreateCancelAction && !(createCancelState?.cancelling ?? false);
   const workPopupDisplayText =
     workPopupText || (workPopupOpen ? t("assistant.workPopup.running") : "");
-  const heroTitle = t("assistant.toOpenclaw");
-  const heroHighlight = t("assistant.toOpenclawHighlight");
-  const highlightIndex = heroTitle.indexOf(heroHighlight);
-  const heroTitleFont = {
-    fontFamily:
-      '"Inter","SF Pro Display","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Helvetica Neue",Arial,sans-serif',
-  } as const;
+  const pickerActions: OpenclawPickerActions = {
+    openCreate: onOpenCreateModal,
+    openRestore: () => {
+      void openRestoreModal();
+    },
+    openImport: () => {
+      void openImportModal();
+    },
+    openRemoveFor: (agent) => {
+      void openRemoveForAgent(agent);
+    },
+  };
 
   return (
     <>
-      <Card className="relative overflow-hidden border-brand-200/80 bg-gradient-to-br from-brand-50 via-rose-50 to-orange-50 p-0">
-        <div className="pointer-events-none absolute -left-16 -top-16 h-52 w-52 rounded-full bg-brand-300/25 blur-3xl" />
-        <div className="pointer-events-none absolute -right-20 bottom-0 h-56 w-56 rounded-full bg-rose-300/20 blur-3xl" />
-        <div className="relative space-y-4 px-5 py-5 text-center md:px-8 md:py-7">
-          <div className="space-y-1.5">
-            <h2
-              className="text-xl font-black tracking-tight text-slate-700 md:text-2xl"
-              style={heroTitleFont}
-            >
-              {highlightIndex >= 0 ? (
-                <>
-                  {heroTitle.slice(0, highlightIndex)}
-                  <span className="bg-gradient-to-r from-brand-500 via-fuchsia-500 to-indigo-500 bg-clip-text text-transparent">
-                    {heroHighlight}
-                  </span>
-                  {heroTitle.slice(highlightIndex + heroHighlight.length)}
-                </>
-              ) : (
-                <span className="bg-gradient-to-r from-brand-600 via-fuchsia-500 to-indigo-500 bg-clip-text text-transparent">
-                  {heroTitle}
-                </span>
-              )}
-            </h2>
-            <p
-              className="mx-auto max-w-4xl text-xs leading-5 text-ink-600 md:text-sm"
-              style={heroTitleFont}
-            >
-              {t("assistant.hint")}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center justify-center gap-2.5">
-            <button
-              className="btn inline-flex rounded-full border border-brand-500 bg-brand-500 px-4 py-1.5 text-sm font-semibold text-white shadow-glow-sm hover:bg-brand-600"
-              onClick={onOpenCreateModal}
-            >
-              {t("assistant.askCreate")}
-            </button>
-            <button
-              className="btn inline-flex rounded-full border border-brand-200 bg-white/85 px-4 py-1.5 text-sm font-semibold text-brand-700 hover:bg-brand-50"
-              onClick={() => void openRemoveModal()}
-            >
-              {t("assistant.askRemove")}
-            </button>
-            <button
-              className="btn inline-flex rounded-full border border-brand-200 bg-white/85 px-4 py-1.5 text-sm font-semibold text-brand-700 hover:bg-brand-50"
-              onClick={() => void openRestoreModal()}
-            >
-              {t("assistant.askRestore")}
-            </button>
-            <button
-              className="btn inline-flex rounded-full border border-brand-200 bg-white/85 px-4 py-1.5 text-sm font-semibold text-brand-700 hover:bg-brand-50"
-              onClick={() => void openImportModal()}
-              disabled={importing}
-            >
-              {t("assistant.askImport")}
-            </button>
-            {/* Agent Store moved out of My Team → it's now its own module under
-                the "Resources" nav group (see AppShell). */}
-          </div>
-        </div>
-      </Card>
+      {children?.(pickerActions)}
 
       <Modal
         open={createModalOpen}
@@ -795,21 +750,21 @@ function AgentQuickActions() {
       >
         <div className="space-y-3">
           <div>
-            <label className="label">{t("assistant.createModal.agentIdLabel")}</label>
-            <input
-              className="input"
-              value={createAgentId}
-              onChange={(e) => setCreateAgentId(e.target.value)}
-              placeholder={t("assistant.createModal.agentIdPlaceholder")}
-            />
-          </div>
-          <div>
             <label className="label">{t("assistant.createModal.agentNameLabel")}</label>
             <input
               className="input"
               value={createAgentName}
               onChange={(e) => setCreateAgentName(e.target.value)}
               placeholder={t("assistant.createModal.agentNamePlaceholder")}
+            />
+          </div>
+          <div>
+            <label className="label">{t("assistant.createModal.agentIdLabel")}</label>
+            <input
+              className="input"
+              value={createAgentId}
+              onChange={(e) => setCreateAgentId(e.target.value)}
+              placeholder={t("assistant.createModal.agentIdPlaceholder")}
             />
           </div>
           <div>
@@ -1224,7 +1179,7 @@ function agentCardTitle(agent: { id: string; name: string }): string {
   return agentCardShowsIdLine(agent) ? name : agent.id;
 }
 
-function ChatPicker() {
+function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
   const { t } = useTranslation();
   const [items, setItems] = useState<OpenclawAgentSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1329,9 +1284,25 @@ function ChatPicker() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold text-ink-900">{t("chat.title")}</h1>
-        <p className="text-sm text-ink-500">{t("chat.pickerLabel")}</p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-ink-900">{t("chat.title")}</h1>
+          <p className="text-sm text-ink-500">{t("chat.pageNote")}</p>
+        </div>
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          <button type="button" className="btn-outline" onClick={() => void loadAgents()}>
+            {t("hermes.refresh")}
+          </button>
+          <button type="button" className="btn-outline" onClick={actions.openRestore}>
+            {t("assistant.askRestore")}
+          </button>
+          <button type="button" className="btn-outline" onClick={actions.openImport}>
+            {t("assistant.askImport")}
+          </button>
+          <button type="button" className="btn-primary" onClick={actions.openCreate}>
+            {t("assistant.askCreate")}
+          </button>
+        </div>
       </div>
       <div className="inline-flex rounded-lg border border-brand-200 bg-brand-50/60 p-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
         <button
@@ -1409,9 +1380,24 @@ function ChatPicker() {
                   <Link
                     key={a.id}
                     to={`/chat/${a.id}`}
-                    className="group card p-5 hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)] transition-all"
+                    className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)]"
                   >
-                    <AgentCardAvatar platform="openclaw" />
+                    <div className="flex items-start justify-between">
+                      <AgentCardAvatar platform="openclaw" />
+                      <button
+                        type="button"
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-rose-500 hover:bg-rose-50 hover:text-rose-700"
+                        title={t("assistant.askRemove")}
+                        aria-label={t("assistant.askRemove")}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          actions.openRemoveFor(a);
+                        }}
+                      >
+                        <TrashIcon className="h-5 w-5" />
+                      </button>
+                    </div>
                     <div className="font-semibold text-ink-900">{agentCardTitle(a)}</div>
                     {agentCardShowsIdLine(a) && (
                       <div className="mt-0.5 font-mono text-xs text-ink-500">{a.id}</div>
@@ -1452,9 +1438,20 @@ function ChatPicker() {
                     {a.description || t("common.none")}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <Link className="btn-primary" to={`/chat/${a.id}`}>
-                      {t("agents.chatLink")}
-                    </Link>
+                    <div className="inline-flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-rose-500 hover:bg-rose-50 hover:text-rose-700"
+                        title={t("assistant.askRemove")}
+                        aria-label={t("assistant.askRemove")}
+                        onClick={() => actions.openRemoveFor(a)}
+                      >
+                        <TrashIcon className="h-5 w-5" />
+                      </button>
+                      <Link className="btn-primary" to={`/chat/${a.id}`}>
+                        {t("agents.chatLink")}
+                      </Link>
+                    </div>
                   </td>
                 </tr>
               ))}

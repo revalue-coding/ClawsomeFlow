@@ -196,7 +196,7 @@ function Picker() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-ink-900">{t("hermes.title")}</h1>
-          <p className="text-sm text-rose-600">{t("hermes.modelNote")}</p>
+          <p className="text-sm text-ink-500">{t("hermes.modelNote")}</p>
         </div>
         <div className="flex shrink-0 gap-2">
           <button type="button" className="btn-outline" onClick={() => void reload()}>
@@ -258,7 +258,7 @@ function Picker() {
                           setRemoveTarget(a);
                         }}
                       >
-                        <TrashIcon className="h-4 w-4" />
+                        <TrashIcon className="h-5 w-5" />
                       </button>
                     </div>
                     <div className="font-semibold text-ink-900">{agentCardTitle(a)}</div>
@@ -860,6 +860,22 @@ function ChatRoom({ agentId }: { agentId: string }) {
             <SettingsIcon className="h-4 w-4" />
             {t("hermes.settings")}
           </button>
+          <a
+            href={buildHermesDashboardUrl()}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-10 items-center justify-center rounded-full
+                     bg-gradient-to-r from-brand-500 via-brand-400 to-orange-500
+                     px-5 py-0 text-sm font-semibold tracking-wide text-white
+                     shadow-[0_0_24px_-4px_theme(colors.brand.400)]
+                     ring-1 ring-brand-300/60
+                     hover:from-brand-600 hover:to-orange-600
+                     hover:shadow-[0_0_32px_-2px_theme(colors.brand.400)]
+                     hover:-translate-y-0.5
+                     transition-all"
+          >
+            {t("hermes.toHermes")}
+          </a>
         </div>
       </div>
 
@@ -1539,4 +1555,12 @@ function CronTab({ agentId }: { agentId: string }) {
       </div>
     </div>
   );
+}
+
+function buildHermesDashboardUrl(): string {
+  const suffix = "/chat";
+  if (typeof window === "undefined") return `http://127.0.0.1:9119${suffix}`;
+  const protocol = window.location.protocol;
+  const hostname = window.location.hostname;
+  return `${protocol}//${hostname}:9119${suffix}`;
 }

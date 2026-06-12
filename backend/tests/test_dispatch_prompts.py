@@ -341,14 +341,15 @@ def test_worker_dispatch_non_scheduled_omits_self_merge() -> None:
 def test_worker_dispatch_scheduled_includes_self_merge_and_post_merge_paths() -> None:
     ctx = _ctx(is_scheduled=True)
     msg = prompts.build_worker_dispatch(ctx)
-    assert "Scheduled run — self-merge into the baseline branch yourself" in msg
+    assert "Self-merge into the baseline branch yourself" in msg
+    assert "you must resolve them yourself" in msg
     assert "git merge --no-ff clawteam/csflow-x/alice" in msg
     assert "git checkout main" in msg
     # Post-merge absolute path requirement points at the baseline workspace.
     assert "post-merge absolute path under `/tmp/main`" in msg
     assert "never a worktree path under `/tmp/wt/alice`" in msg
     # Self-merge must precede the inbox-send and final task update.
-    merge_pos = msg.find("Scheduled run — self-merge")
+    merge_pos = msg.find("Self-merge into the baseline branch yourself")
     inbox_pos = msg.find("clawteam inbox send")
     update_pos = msg.find("clawteam task update")
     assert 0 < merge_pos < inbox_pos < update_pos
@@ -363,11 +364,12 @@ def test_leader_dispatch_scheduled_includes_self_merge() -> None:
         is_scheduled=True,
     )
     msg = prompts.build_leader_dispatch(ctx)
-    assert "Scheduled run — self-merge into the baseline branch yourself" in msg
+    assert "Self-merge into the baseline branch yourself" in msg
+    assert "you must resolve them yourself" in msg
     assert "git merge --no-ff clawteam/csflow-x/leader" in msg
     assert "post-merge absolute path under `/tmp/main`" in msg
     # The self-merge block sits after the commit step, before the final reply.
-    merge_pos = msg.find("Scheduled run — self-merge")
+    merge_pos = msg.find("Self-merge into the baseline branch yourself")
     reply_pos = msg.find("leader final reply:")
     assert 0 < merge_pos < reply_pos
 

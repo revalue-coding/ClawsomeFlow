@@ -325,11 +325,12 @@ def _scheduled_self_merge_steps(
     branch = ctx.worktree.branch_name if ctx.worktree else "<branch>"
     base = ctx.worktree.base_branch if ctx.worktree else "<base>"
     steps = [
-        f"{start_no}. **Scheduled run — self-merge into the baseline branch yourself**: "
+        f"{start_no}. **Self-merge into the baseline branch yourself**: "
         f"`cd {repo_root} && git checkout {base} && git pull --ff-only || true && "
         f"git merge --no-ff {branch} -m 'csflow: scheduled merge {branch}'`. "
-        "If conflicts occur, resolve them (keep your changes plus unrelated "
-        "baseline changes), then `git add -A && git commit`.",
+        "If the merge hits conflicts, **you must resolve them yourself** (keep your "
+        "intended changes plus any unrelated baseline changes), then finish with "
+        "`git add -A && git commit`.",
         f"{start_no + 1}. After merging, your deliverables live under the baseline "
         f"workspace `{repo_root}` on `{base}`. **Every output path you mention MUST "
         f"be the post-merge absolute path under `{repo_root}` — never a worktree "

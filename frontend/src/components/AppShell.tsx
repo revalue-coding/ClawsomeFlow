@@ -75,7 +75,7 @@ function NavTimerIcon() {
     <img
       src="/timer-icon.png"
       alt=""
-      className="h-8 w-8 object-contain"
+      className="h-6 w-6 object-contain"
     />
   );
 }
