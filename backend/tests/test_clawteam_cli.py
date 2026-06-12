@@ -389,8 +389,6 @@ async def test_workspace_merge_runs_git_and_cleanup(monkeypatch: pytest.MonkeyPa
             return 0, "Switched", ""
         if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
             return 0, "test", ""
-        if argv[:3] == ["git", "status", "--porcelain"]:
-            return 0, "", ""
         if argv[:3] == ["git", "pull", "--ff-only"]:
             return 0, "Already up to date.", ""
         if argv[:3] == ["git", "merge", "--no-ff"]:
@@ -411,8 +409,54 @@ async def test_workspace_merge_runs_git_and_cleanup(monkeypatch: pytest.MonkeyPa
     assert "Merge made by the 'ort' strategy." in output
     assert seen[0][:4] == ["git", "rev-parse", "-q", "--verify"]
     assert ["git", "checkout", "test"] in seen
+    assert not any(argv[:3] == ["git", "status", "--porcelain"] for argv in seen)
     assert ["git", "merge", "--no-ff", "clawteam/csflow-x/alice", "-m", "[csflow] merge clawteam/csflow-x/alice for csflow-x/alice"] in seen
     assert cleanup_calls == [("csflow-x", "alice", "/tmp/repo")]
+
+
+@pytest.mark.asyncio
+async def test_workspace_merge_does_not_precheck_dirty_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    async def _fake_workspace_list(self, *, team: str, repo: str | None = None):
+        del self, team, repo
+        return [{
+            "team_name": "csflow-x",
+            "agent_name": "alice",
+            "repo_root": "/tmp/repo",
+            "branch_name": "clawteam/csflow-x/alice",
+            "base_branch": "main",
+        }]
+
+    async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):
+        del cwd, env
+        seen.append(argv)
+        if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+            return 1, "", ""
+        if argv[:2] == ["git", "checkout"]:
+            return 0, "", ""
+        if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
+            return 0, "main", ""
+        if argv[:3] == ["git", "status", "--porcelain"]:
+            raise AssertionError("workspace_merge must not precheck baseline dirty state")
+        if argv[:3] == ["git", "pull", "--ff-only"]:
+            return 0, "", ""
+        if argv[:3] == ["git", "merge", "--no-ff"]:
+            return 0, "ok", ""
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(ClawTeamCli, "workspace_list", _fake_workspace_list)
+    monkeypatch.setattr(cli_mod, "_run_in_cwd", _fake_run_in_cwd)
+
+    ok, _output = await ClawTeamCli().workspace_merge(
+        team="csflow-x",
+        agent="alice",
+        repo="/tmp/repo",
+        target="main",
+        cleanup=False,
+    )
+    assert ok is True
+    assert not any(argv[:3] == ["git", "status", "--porcelain"] for argv in seen)
 
 
 @pytest.mark.asyncio
@@ -451,8 +495,6 @@ async def test_workspace_merge_conflict_runs_abort(monkeypatch: pytest.MonkeyPat
             return 0, "", ""
         if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
             return 0, "main", ""
-        if argv[:3] == ["git", "status", "--porcelain"]:
-            return 0, "", ""
         if argv[:3] == ["git", "pull", "--ff-only"]:
             return 0, "", ""
         if argv[:3] == ["git", "merge", "--no-ff"] and argv[-1] != "--abort":
@@ -474,6 +516,7 @@ async def test_workspace_merge_conflict_runs_abort(monkeypatch: pytest.MonkeyPat
     assert ok is False
     assert "CONFLICT" in output
     assert ["git", "merge", "--abort"] in seen
+    assert not any(argv[:3] == ["git", "status", "--porcelain"] for argv in seen)
     assert cleanup_called is False
 
 

@@ -547,34 +547,6 @@ class ClawTeamCli:
                     )
                     return False, combined
 
-                status_code, status_out, status_err = await _run_in_cwd(
-                    ["git", "status", "--porcelain"],
-                    cwd=repo_root,
-                    env=env,
-                )
-                if status_code != 0:
-                    combined = (status_err or status_out or "git status failed").strip()
-                    logging_setup.workspace_merge(
-                        agent_id=agent,
-                        team=team,
-                        success=False,
-                        stderr=combined,
-                    )
-                    return False, combined
-                if status_out.strip():
-                    msg = (
-                        f"baseline branch {target_branch!r} in {repo_root!r} has "
-                        f"uncommitted changes; commit or stash before merge:\n"
-                        f"{status_out.strip()}"
-                    )
-                    logging_setup.workspace_merge(
-                        agent_id=agent,
-                        team=team,
-                        success=False,
-                        stderr=msg,
-                    )
-                    return False, msg
-
                 await _run_in_cwd(
                     ["git", "pull", "--ff-only"],
                     cwd=repo_root,
