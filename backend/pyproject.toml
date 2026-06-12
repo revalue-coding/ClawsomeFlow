@@ -1,6 +1,6 @@
 [project]
 name = "clawsomeflow"
-version = "0.1.13b9"
+version = "0.1.13b10"
 description = "Vertical agent workflow orchestration platform on top of ClawTeam and OpenClaw"
 readme = "../readme.md"
 requires-python = ">=3.10"
