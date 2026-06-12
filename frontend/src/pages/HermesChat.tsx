@@ -18,7 +18,7 @@ import {
 } from "@/components/ui";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import { ChatBubble } from "@/components/ChatBubble";
-import { DesktopIcon, SettingsIcon } from "@/components/icons";
+import { DesktopIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
@@ -51,7 +51,7 @@ function agentCardShowsIdLine(agent: { id: string; name: string }): boolean {
 
 function agentCardTitle(agent: { id: string; name: string }): string {
   const name = agent.name.trim();
-  return agentCardShowsIdLine(agent) ? name : agent.id;
+  return name || agent.id;
 }
 
 function errText(e: unknown): string {
@@ -249,14 +249,16 @@ function Picker() {
                       <AgentCardAvatar platform="hermes" />
                       <button
                         type="button"
-                        className="text-xs text-rose-500 hover:text-rose-700"
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-rose-500 hover:bg-rose-50 hover:text-rose-700"
+                        title={t("hermes.removeAgent")}
+                        aria-label={t("hermes.removeAgent")}
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
                           setRemoveTarget(a);
                         }}
                       >
-                        {t("hermes.removeAgent")}
+                        <TrashIcon className="h-4 w-4" />
                       </button>
                     </div>
                     <div className="font-semibold text-ink-900">{agentCardTitle(a)}</div>

@@ -135,6 +135,18 @@ export function ExternalLinkIcon(props: IconProps) {
   );
 }
 
+export function TrashIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M4.5 7h15" />
+      <path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7" />
+      <path d="M7 7l.8 11.2a1 1 0 0 0 1 .9h6.4a1 1 0 0 0 1-.9L17 7" />
+      <path d="M10 10.5v5.5" />
+      <path d="M14 10.5v5.5" />
+    </IconBase>
+  );
+}
+
 export function EditIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -153,20 +165,6 @@ export function BackIcon(props: IconProps) {
         fill="currentColor"
         stroke="none"
       />
-    </IconBase>
-  );
-}
-
-export function AlarmIcon(props: IconProps) {
-  return (
-    <IconBase {...props}>
-      <circle cx="12" cy="13" r="6.5" />
-      <path d="M12 13V9.8" />
-      <path d="m12 13 2.4 1.6" />
-      <path d="m7 5.2-1.8-1.8" />
-      <path d="m17 5.2 1.8-1.8" />
-      <path d="M9 19.5 7.5 21" />
-      <path d="M15 19.5 16.5 21" />
     </IconBase>
   );
 }

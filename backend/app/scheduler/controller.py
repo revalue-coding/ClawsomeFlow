@@ -3376,6 +3376,7 @@ class RunController:
             worker_worktrees=worker_worktrees,
             worker_reports=worker_reports,
             upstream_outputs=upstream_outputs,
+            is_scheduled=bool(getattr(self.run, "is_scheduled", False)),
         )
 
     def _render_report_summary(self, report: WorkerReport | None) -> str | None:

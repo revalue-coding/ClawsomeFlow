@@ -240,6 +240,7 @@ def _start_run_for_flow(
         status=RunStatus.pending,
         inputs=inputs or {},
         user=user,
+        is_scheduled=True,
     )
     saved = storage.run_create(run)
 

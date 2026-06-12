@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import {
-  AlarmIcon,
   DocsIcon,
   ExternalLinkIcon,
   FlowIcon,
@@ -71,13 +70,23 @@ function NavAgentIcon({ platform }: { platform: AgentPlatform }) {
   );
 }
 
+function NavTimerIcon() {
+  return (
+    <img
+      src="/timer-icon.png"
+      alt=""
+      className="h-8 w-8 object-contain"
+    />
+  );
+}
+
 const NAV: NavGroup[] = [
   {
     titleKey: "nav.groupOrchestration",
     items: [
       { to: "/flows", labelKey: "nav.flows", icon: <FlowIcon className="h-8 w-8" /> },
       { to: "/runs", labelKey: "nav.runs", icon: <RunIcon className="h-8 w-8" /> },
-      { to: "/scheduled-flows", labelKey: "nav.scheduledFlows", icon: <AlarmIcon className="h-8 w-8" /> },
+      { to: "/scheduled-flows", labelKey: "nav.scheduledFlows", icon: <NavTimerIcon /> },
     ],
   },
   {

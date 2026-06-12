@@ -113,6 +113,12 @@ class DispatchContext:
     # see ``RunController._compose_dispatch_context``. **First-level only.**
     upstream_outputs: list[UpstreamOutput] = field(default_factory=list)
 
+    # True for runs triggered by a timed schedule. Scheduled runs require every
+    # task (worker + leader) to self-merge into the baseline branch and to
+    # report deliverables using post-merge absolute paths; the user merge-review
+    # and complaint phases are skipped (see scheduler/finalize.py).
+    is_scheduled: bool = False
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Public builders
@@ -303,6 +309,35 @@ def _task_block(ctx: DispatchContext) -> str:
     )
 
 
+def _scheduled_self_merge_steps(
+    ctx: DispatchContext, start_no: int,
+) -> tuple[list[str], int]:
+    """Self-merge + post-merge-path steps for scheduled runs (whole block).
+
+    Scheduled runs are unattended: there is no user merge-review or complaint
+    phase, so every task must merge its own worktree branch into the baseline
+    branch itself, and must reference deliverables by their post-merge absolute
+    path under the baseline workspace (not the worktree). Inserted as one
+    cohesive block so it never tangles with the non-scheduled wording.
+    """
+    wt = ctx.worktree.worktree_path if ctx.worktree else "<worktree-path>"
+    repo_root = ctx.worktree.repo_root if ctx.worktree else "<baseline-workspace>"
+    branch = ctx.worktree.branch_name if ctx.worktree else "<branch>"
+    base = ctx.worktree.base_branch if ctx.worktree else "<base>"
+    steps = [
+        f"{start_no}. **Scheduled run — self-merge into the baseline branch yourself**: "
+        f"`cd {repo_root} && git checkout {base} && git pull --ff-only || true && "
+        f"git merge --no-ff {branch} -m 'csflow: scheduled merge {branch}'`. "
+        "If conflicts occur, resolve them (keep your changes plus unrelated "
+        "baseline changes), then `git add -A && git commit`.",
+        f"{start_no + 1}. After merging, your deliverables live under the baseline "
+        f"workspace `{repo_root}` on `{base}`. **Every output path you mention MUST "
+        f"be the post-merge absolute path under `{repo_root}` — never a worktree "
+        f"path under `{wt}`.**",
+    ]
+    return steps, start_no + 2
+
+
 def _worker_completion_steps(ctx: DispatchContext) -> str:
     """Worker completion checklist.
 
@@ -347,6 +382,10 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
         f"{next_no}. `cd {wt} && git add -A && git commit -m 'task {task_id}: {subject}'`"
     )
     next_no += 1
+
+    if ctx.is_scheduled:
+        merge_steps, next_no = _scheduled_self_merge_steps(ctx, next_no)
+        steps.extend(merge_steps)
 
     if not ctx.task.is_leader_summary:
         steps.append(
@@ -518,6 +557,10 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
         f"git commit -m 'task {task_id}: leader summary'`.",
     ]
     next_no = 3
+
+    if ctx.is_scheduled:
+        merge_steps, next_no = _scheduled_self_merge_steps(ctx, next_no)
+        steps.extend(merge_steps)
 
     steps.append(
         f"{next_no}. Verify every absolute path you plan to mention in final reply actually "

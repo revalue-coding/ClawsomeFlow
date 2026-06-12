@@ -316,7 +316,7 @@ const en = {
       summaryDescriptionHint: "This description is embedded into the leader's dispatch prompt under \"## Task\".",
       ownerSource: "Owner source *",
       ownerSourceExisting: "Choose existing agent",
-      ownerSourceNew: "Create new agent",
+      ownerSourceNew: "Temporary agent",
       existingAgent: "Existing agent *",
       existingAgentPlaceholder: "— pick an existing agent —",
       existingAgentEmpty: "No available agent. Create one first.",
@@ -455,6 +455,8 @@ const en = {
   },
   scheduledFlows: {
     title: "Timed Flows",
+    description:
+      "Timed Flow runs automatically merge their changes into the local baseline branch and skip the user-complaint phase.",
     createButton: "+ Timed Task",
     createTitle: "Create Timed Task",
     editTitle: "Edit Timed Task",
@@ -618,7 +620,7 @@ const en = {
     },
     checkpoint: {
       title: "Manual checkpoint",
-      hint: "This panel reviews completed tasks. Approve to move to the next checkpoint; while rerun is in progress, no other checkpoint is processed.",
+      hint: "",
       targetTask: "Blocked downstream task",
       targetOwner: "Blocked owner",
       itemTask: "Current checkpoint task",
