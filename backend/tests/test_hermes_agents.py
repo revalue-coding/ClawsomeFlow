@@ -96,6 +96,56 @@ def test_commit_agent_rejects_duplicate(
         svc.commit_agent(svc.CommitInput(id="dup", name="Dup"), user="alice")
 
 
+def test_commit_agent_lost_race_preserves_winner_profile(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A duplicate/concurrent create that loses the insert race (UNIQUE
+    violation) must raise AgentAlreadyExists and NOT delete the winner's
+    profile — the bug behind the vanishing agent card."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    storage = get_storage()
+    # Pre-check sees no row, but the insert hits a UNIQUE violation because the
+    # winner already inserted, and the row then exists (TOCTOU race).
+    seq = {"n": 0}
+
+    def fake_get(aid: str):  # noqa: ANN202
+        seq["n"] += 1
+        if seq["n"] == 1:
+            return None
+        return HermesAgent(id=aid, name="winner", profile_root="x", created_by_user="alice")
+
+    def boom(_row):  # noqa: ANN001, ANN202
+        raise RuntimeError("UNIQUE constraint failed: hermesagent.id")
+
+    monkeypatch.setattr(storage, "hermes_get", fake_get)
+    monkeypatch.setattr(storage, "hermes_create", boom)
+    with pytest.raises(svc.AgentAlreadyExists):
+        svc.commit_agent(svc.CommitInput(id="racer", name="语文"), user="alice", storage=storage)
+    assert not any(c[:2] == ["profile", "delete"] for c in calls), (
+        "loser must not delete the winner's profile"
+    )
+
+
+def test_commit_agent_fails_fast_when_create_in_progress(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While a create for an id holds the per-id lock, a second create of the
+    same id fails fast (no CLI work) instead of racing the in-flight one."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    lock = svc._create_id_lock("inflight")
+    assert lock.acquire(blocking=False)
+    try:
+        with pytest.raises(svc.AgentAlreadyExists):
+            svc.commit_agent(svc.CommitInput(id="inflight", name="X"), user="alice")
+    finally:
+        lock.release()
+    assert calls == []  # fail-fast: nothing touched the CLI
+
+
 def test_delete_agent_permanent(hermes_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))

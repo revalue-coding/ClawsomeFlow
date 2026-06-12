@@ -325,9 +325,12 @@ async def create_agent(
     if not display_name:
         raise ApiError("INVALID_PAYLOAD", "name is required", status_code=400)
     agent_id = (payload.id or payload.name or "").strip().lower()
-    # Best-effort derive an id from the name if not provided: keep [a-z0-9].
+    # Best-effort derive an id from the name if not provided: keep ASCII [a-z0-9]
+    # only. `str.isalnum()` is True for CJK/Unicode letters too, so it must be
+    # paired with `isascii()` or a Chinese name would yield an invalid id that
+    # then fails `_validate_agent_id`.
     if not payload.id:
-        agent_id = "".join(ch for ch in agent_id if ch.isalnum())
+        agent_id = "".join(ch for ch in agent_id if ch.isascii() and ch.isalnum())
     cmd = svc.CommitInput(
         id=agent_id,
         name=display_name,

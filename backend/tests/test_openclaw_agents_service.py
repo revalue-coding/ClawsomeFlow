@@ -175,6 +175,47 @@ def test_reindex_skips_when_workspace_path_missing(
 
 
 @pytest.mark.asyncio
+async def test_commit_agent_fails_fast_when_create_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate/concurrent create of the same id fails fast (no side effects)
+    instead of racing into the shared workspace — whose files the loser's
+    rollback would otherwise wipe. Stubs the heavy setup so no CLI runs."""
+
+    async def _noop(*_a, **_k):  # noqa: ANN001, ANN202
+        return None
+
+    monkeypatch.setattr(svc, "reindex_registered_agents", lambda *_a, **_k: None)
+    monkeypatch.setattr(svc.oj, "sanitize_managed_agent_entries", _noop)
+    monkeypatch.setattr(svc, "ensure_runtime_timeout_defaults", _noop)
+    monkeypatch.setattr(svc, "_resolve_default_source_agent_id", lambda **_k: None)
+    monkeypatch.setattr(svc, "_validate_agent_id", lambda x: x)
+
+    ran: list[str] = []
+
+    async def _reserved(_cmd, aid, **_k):  # noqa: ANN001, ANN202
+        ran.append(aid)
+        assert aid in svc._CREATE_IN_PROGRESS  # reserved while the body runs
+        return "ok"
+
+    monkeypatch.setattr(svc, "_commit_agent_reserved", _reserved)
+    cmd = svc.CommitInput(id="dupe", name="Dupe")
+
+    # Normal create runs the body and releases the reservation afterwards.
+    assert await svc.commit_agent(cmd, user="u", storage=object(), config=object()) == "ok"
+    assert "dupe" not in svc._CREATE_IN_PROGRESS
+
+    # While a create for the id is in flight, a second one fails fast.
+    svc._CREATE_IN_PROGRESS.add("dupe")
+    try:
+        with pytest.raises(svc.AgentAlreadyExists):
+            await svc.commit_agent(cmd, user="u", storage=object(), config=object())
+    finally:
+        svc._CREATE_IN_PROGRESS.discard("dupe")
+    assert ran == ["dupe"]  # the body ran exactly once (the first, valid create)
+
+
+@pytest.mark.asyncio
 async def test_commit_creates_workspace_skill_json_and_db(fake_openclaw_home: Path) -> None:
     if not _has_git():
         pytest.skip("git not available")

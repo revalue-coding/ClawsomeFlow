@@ -60,6 +60,34 @@ function isAbortError(value: unknown): boolean {
   return value instanceof Error && value.name === "AbortError";
 }
 
+// Mirror of the backend Hermes id rules (services/hermes_agents.py): lowercase
+// alphanumeric, length 2–40, "default" reserved. Kept in sync so the form can
+// reject bad input on the spot instead of after a round-trip.
+const HERMES_ID_RE = /^[a-z0-9]+$/;
+
+/** Returns an i18n error key for the first failing create-form rule, or null
+ *  when the input is valid. Duplicate check is against the loaded agent list. */
+function createFieldError(opts: {
+  name: string;
+  profileId: string;
+  teamChoice: string;
+  newTeamName: string;
+  existingIds: string[];
+}): string | null {
+  const name = opts.name.trim();
+  const id = opts.profileId.trim();
+  if (!name) return "hermes.create.errors.nameRequired";
+  if (!id) return "hermes.create.errors.idRequired";
+  if (!HERMES_ID_RE.test(id)) return "hermes.create.errors.idFormat";
+  if (id.length < 2 || id.length > 40) return "hermes.create.errors.idLength";
+  if (id === "default") return "hermes.create.errors.idReserved";
+  if (opts.teamChoice === CREATE_TEAM_SENTINEL && !opts.newTeamName.trim()) {
+    return "hermes.create.errors.teamRequired";
+  }
+  if (opts.existingIds.includes(id)) return "hermes.create.errors.idDuplicate";
+  return null;
+}
+
 function isRemoteBrowser(): boolean {
   if (typeof window === "undefined") return false;
   const h = window.location.hostname;
@@ -216,6 +244,10 @@ function Picker() {
   );
   const createAbortRef = useRef<AbortController | null>(null);
   const createCancelRequestedRef = useRef(false);
+  // Guards against a double-submit (e.g. a fast double-click in the window
+  // before the modal closes) firing two POST /hermes/agents for the same id —
+  // which on the backend would race and could clobber the winner's profile.
+  const createInFlightRef = useRef(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -297,45 +329,82 @@ function Picker() {
   );
 
   const submitCreate = useCallback(async () => {
+    if (createInFlightRef.current) return;
     const profileId = createProfileId.trim();
     const name = createName.trim();
     const responsibility = createResponsibility.trim();
-    if (!name || !profileId) return;
-    const teamReady =
-      createTeamChoice !== CREATE_TEAM_SENTINEL || createNewTeamName.trim().length > 0;
-    if (!teamReady) return;
-    let teamId: string | undefined;
-    try {
-      teamId = await resolveTeamId(createTeamChoice, createNewTeamName);
-    } catch (e) {
-      setCreateError(errText(e));
+    // Validate on the spot: show the problem IN the form and keep it open —
+    // never close the modal or fire a request for invalid input or a duplicate
+    // id. (The flag is set only after this passes, so a corrected resubmit is
+    // not locked out.)
+    const errKey = createFieldError({
+      name,
+      profileId,
+      teamChoice: createTeamChoice,
+      newTeamName: createNewTeamName,
+      existingIds: agents.map((a) => a.id),
+    });
+    if (errKey) {
+      setCreateError(t(errKey, { id: profileId }));
       return;
     }
-    setShowCreate(false);
-    setCreateError("");
-    const ac = new AbortController();
-    createAbortRef.current = ac;
-    createCancelRequestedRef.current = false;
-    setCreateCancelState({ agentId: profileId, cancelling: false });
-    openWorkPopup();
+
+    createInFlightRef.current = true;
     try {
-      const created = await api.createHermesAgent(
-        { id: profileId, name, responsibility, teamId },
-        { signal: ac.signal },
-      );
-      finishWorkPopup(true, t("hermes.create.workPopup.created", { id: created.id }));
-      resetCreateForm();
-      await reload();
-    } catch (e) {
-      // Cancelled (or unmounted mid-flight) → handled by cancelCreate / reconcile.
-      if (createCancelRequestedRef.current || isAbortError(e)) return;
-      finishWorkPopup(false, errText(e));
+      let teamId: string | undefined;
+      try {
+        teamId = await resolveTeamId(createTeamChoice, createNewTeamName);
+      } catch (e) {
+        setCreateError(errText(e)); // keep modal open
+        return;
+      }
+      setShowCreate(false);
+      setCreateError("");
+      const ac = new AbortController();
+      createAbortRef.current = ac;
+      createCancelRequestedRef.current = false;
+      setCreateCancelState({ agentId: profileId, cancelling: false });
+      openWorkPopup();
+      try {
+        const created = await api.createHermesAgent(
+          { id: profileId, name, responsibility, teamId },
+          { signal: ac.signal },
+        );
+        finishWorkPopup(true, t("hermes.create.workPopup.created", { id: created.id }));
+        resetCreateForm();
+        await reload();
+      } catch (e) {
+        // Cancelled (or unmounted mid-flight) → handled by cancelCreate / reconcile.
+        if (createCancelRequestedRef.current || isAbortError(e)) return;
+        // A user-input rejection (duplicate id lost a race vs a stale list, or
+        // invalid payload) belongs back IN the form, not buried in the progress
+        // popup — reopen it with the message.
+        if (
+          e instanceof ApiError &&
+          (e.code === "AGENT_ALREADY_EXISTS" || e.code === "INVALID_PAYLOAD")
+        ) {
+          setWorkPopupOpen(false);
+          resetWorkPopupDisplayState();
+          resetCreateCancelState();
+          setCreateError(
+            e.code === "AGENT_ALREADY_EXISTS"
+              ? t("hermes.create.errors.idDuplicate", { id: profileId })
+              : errText(e),
+          );
+          setShowCreate(true);
+          return;
+        }
+        finishWorkPopup(false, errText(e));
+      } finally {
+        if (createAbortRef.current === ac) createAbortRef.current = null;
+      }
     } finally {
-      if (createAbortRef.current === ac) createAbortRef.current = null;
+      createInFlightRef.current = false;
     }
   }, [
     createProfileId, createName, createResponsibility, createTeamChoice, createNewTeamName,
-    setShowCreate, setCreateCancelState, openWorkPopup, finishWorkPopup, resetCreateForm,
+    agents, setShowCreate, setCreateCancelState, openWorkPopup, finishWorkPopup,
+    resetCreateForm, resetWorkPopupDisplayState, resetCreateCancelState, setWorkPopupOpen,
     reload, t,
   ]);
 
