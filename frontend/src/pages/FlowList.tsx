@@ -258,22 +258,21 @@ export function FlowList() {
                 return (
                   <tr key={f.id} className="table-row align-top">
                     <td className="px-4 py-3 max-w-[220px] align-top">
-                      <Link
-                        to={`/flows/${f.id}`}
-                        className="font-medium text-ink-900 hover:text-brand-600"
-                      >
-                        {f.name}
-                      </Link>
-                      {f.easyMode && (
-                        <span
-                          className="mt-1 inline-flex items-center gap-1 rounded-full border border-emerald-200/80
-                                     bg-emerald-50/80 px-2 py-0.5 text-[11px] font-medium text-emerald-700"
-                          title={t("flowEditor.easyModeSub")}
+                      <div className="flex items-center gap-1.5">
+                        <Link
+                          to={`/flows/${f.id}`}
+                          className="font-medium text-ink-900 hover:text-brand-600"
                         >
-                          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" aria-hidden="true" />
-                          {t("flowList.easyModeBadge")}
-                        </span>
-                      )}
+                          {f.name}
+                        </Link>
+                        {f.easyMode && (
+                          <span
+                            className="h-2 w-2 shrink-0 rounded-full bg-emerald-500"
+                            title={t("flowEditor.easyModeSub")}
+                            aria-label={t("flowEditor.easyMode")}
+                          />
+                        )}
+                      </div>
                       <div className="text-[11px] text-ink-400 font-mono mt-0.5">
                         {f.id}
                       </div>

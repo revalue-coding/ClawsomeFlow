@@ -2,6 +2,7 @@
 
 
 
+
 # Changelog
 
 All notable changes to **ClawsomeFlow** are documented here.
@@ -17,13 +18,18 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 
 ### Added
 ### Changed
-- **`scripts/release.sh`** — beta / `--skip-tests` releases now run `vite build`
-  immediately before the wheel step so `frontend/dist` bundled into the artifact
-  matches current source (beta no longer skips the SPA build).
 ### Fixed
 ### Removed
 ### Deprecated
 ### Security
+
+## [0.1.13b10] — 2026-06-12
+
+
+### Changed
+- **`scripts/release.sh`** — beta / `--skip-tests` releases now run `vite build`
+  immediately before the wheel step so `frontend/dist` bundled into the artifact
+  matches current source (beta no longer skips the SPA build).
 
 ## [0.1.13b9] — 2026-06-12
 
@@ -1135,7 +1141,7 @@ Initial alpha release. Brings the full MVP architecture online:
   OpenClaw workspace; `POST /api/flows/decompose` async pipeline.
 - 379 backend tests, frontend tsc + vite build clean.
 
-[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b9...HEAD
+[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b10...HEAD
 [0.1.10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.10
 [0.1.0]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.0
 [0.1.1b1]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.1b1
@@ -1180,3 +1186,4 @@ Initial alpha release. Brings the full MVP architecture online:
 [0.1.13b6]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b6
 [0.1.13b8]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b8
 [0.1.13b9]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b9
+[0.1.13b10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b10
