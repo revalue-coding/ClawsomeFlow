@@ -611,7 +611,7 @@ const zh = {
     },
     checkpoint: {
       title: "人工检查点",
-      hint: "当前展示的是已完成任务的检查点。点击通过会进入下一个待检查点；重跑期间不会切换到其他检查点。",
+      hint: "",
       targetTask: "被阻塞下游任务",
       targetOwner: "被阻塞Owner",
       itemTask: "当前检查任务",

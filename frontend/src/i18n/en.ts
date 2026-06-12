@@ -618,7 +618,7 @@ const en = {
     },
     checkpoint: {
       title: "Manual checkpoint",
-      hint: "This panel reviews completed tasks. Approve to move to the next checkpoint; while rerun is in progress, no other checkpoint is processed.",
+      hint: "",
       targetTask: "Blocked downstream task",
       targetOwner: "Blocked owner",
       itemTask: "Current checkpoint task",
