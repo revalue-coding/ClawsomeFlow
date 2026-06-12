@@ -18,7 +18,14 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 
 ### Added
 ### Changed
+- **Agent management headers** (`frontend/src/pages/OpenclawChat.tsx`, `HermesChat.tsx`,
+  `frontend/src/components/AgentPageToolbar.tsx`) — list pages now use a two-row
+  header card (title/description separated from actions), with Hermes list keeping
+  only the "创建 Agent" action and OpenClaw list removing the refresh button.
 ### Fixed
+- **Scheduler dispatch import regression** (`backend/app/scheduler/controller.py`) —
+  restored `app.scheduler.prompts` imports (`DispatchContext` / `WorkerReport` /
+  `build_worker_dispatch` etc.) that are required at runtime by dispatch paths.
 - **"to Hermes" dashboard launch** (`backend/app/services/hermes_dashboard.py`) — replaced the
   bare TCP port probe with an **HTTP health check** that confirms the listener is actually the
   Hermes dashboard (matches its index-HTML markers), so an unrelated service squatting on
