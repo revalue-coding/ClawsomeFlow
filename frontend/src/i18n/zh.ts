@@ -315,7 +315,7 @@ const zh = {
       summaryDescriptionHint: "该说明将作为 dispatch Prompt 中 \"## Task\" 区块下发给 leader。",
       ownerSource: "Owner 来源 *",
       ownerSourceExisting: "选择已有 Agent",
-      ownerSourceNew: "新建 Agent",
+      ownerSourceNew: "临时 Agent",
       existingAgent: "已有 Agent *",
       existingAgentPlaceholder: "— 选择一个已有 Agent —",
       existingAgentEmpty: "暂无可选 Agent，请先新建。",
@@ -449,6 +449,7 @@ const zh = {
   },
   scheduledFlows: {
     title: "定时Flows",
+    description: "定时执行的任务流将自动合入修改至本地基线分支，并且跳过用户投诉环节。",
     createButton: "+定时任务",
     createTitle: "新建定时任务",
     editTitle: "编辑定时任务",
@@ -673,7 +674,7 @@ const zh = {
     title: "我的团队",
     pickerTitle: "在这里，和 Agent 畅聊！",
     toOpenclaw: "to OpenClaw",
-    pickerLabel: "在这里，和Agent畅聊！通过自然语言为Agent增加专家技能和定时任务，或提出不满与改善意见",
+    pickerLabel: "在这里，执行单Agent任务，或提出不满与改善意见",
     runtimeUnavailableMessage: "您的系统中尚未检测到正在运行的Openclaw服务，请启动服务后重试",
     runtimeRetry: "重试",
     runtimeChecking: "检查中…",
@@ -834,7 +835,7 @@ const zh = {
     title: "Hermes Agent",
     pickerTitle: "和你的 Hermes Agent 对话",
     modelNote:
-      "您可以在此创建拥有独立人格、记忆与经验的 Hermes Agent。注意：各 Hermes Agent 的模型配置彼此" +
+      "您可以在此创建拥有独立人格、记忆与经验的 持久化Hermes Agent。注意：各 Hermes Agent 的模型配置彼此" +
       "独立——新建时默认沿用根 profile 的模型，但此后不会随根配置自动更新；如需调整，请在该 Agent 的" +
       "「设置 → 模型」中，或通过 Hermes 原生服务手动配置。",
     listEmpty: "还没有 Hermes Agent，先创建一个吧。",
@@ -1049,7 +1050,7 @@ const zh = {
     askCreate: "创建智能体",
     askRemove: "移除智能体",
     askRestore: "恢复智能体",
-    askImport: "导入并优化我的 OpenClaw Agent",
+    askImport: "导入我的 OpenClaw Agent",
     promptCreate:
       "请帮我创建一个Agent，要求如下：\nAgent ID：\nAgent name：\n职责：\n其他要求或设定：",
     promptRemove: "请帮我移除 OpenClaw 智能体：",
@@ -1129,7 +1130,7 @@ const zh = {
       close: "关闭",
     },
     importAgents: {
-      title: "导入并优化我的 OpenClaw Agent",
+      title: "导入我的 OpenClaw Agent",
       hint: "",
       refresh: "刷新候选",
       importAll: "导入全部",

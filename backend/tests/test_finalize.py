@@ -527,6 +527,38 @@ async def test_failed_run_with_pending_merges_skips_merge_and_forces_cleanup() -
 
 
 @pytest.mark.asyncio
+async def test_scheduled_run_skips_review_and_complaint_completes_directly() -> None:
+    """Scheduled runs self-merge in-task → straight to completed, no pending
+    merges, no merge calls, never awaiting_user_review/awaiting_user_complaint."""
+    run, flow, spec = _make_run_and_spec(agents_kw=[
+        {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": False, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+        {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": True, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+    ])
+    run.is_scheduled = True
+    cli = _StubCli()
+    # Non-empty diff would normally create a pending merge for a manual agent.
+    mcp = _StubMcp(diffs={"alice": {"files": 3}})
+    out = await fin.finalize_run(
+        fin.FinalizeInput(run=run, flow=flow, agents=spec.agents,
+                          leader_agent_id="leader", has_failed_tasks=False),
+        storage=get_storage(), cli=cli, mcp=mcp,
+        worktree_lookup=_StubLookup(items=[_wt("alice")]),
+    )
+    assert out.final_status == RunStatus.completed
+    assert run.status == RunStatus.completed
+    assert out.pending_merges == []
+    assert run.pending_merges is None
+    assert cli.merge_calls == []
+    assert run.finished_at is not None
+    assert (run.inputs or {}).get("_csflow_post_complaint_final_status") is None
+    assert (run.inputs or {}).get("_csflow_post_review_terminal_status") is None
+
+
+@pytest.mark.asyncio
 async def test_aborted_run_status_overrides_all() -> None:
     run, flow, spec = _make_run_and_spec(agents_kw=[
         {"id": "alice", "kind": AgentKind.claude, "repo": "/r",

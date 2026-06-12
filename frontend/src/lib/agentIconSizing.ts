@@ -26,7 +26,7 @@ const PLATFORM_SCALE: Record<AgentPlatform, IconScale> = {
 /** Image span as a fraction of the sidebar's 9-unit slot (numerator / 9). */
 const SCALE_NUMERATOR: Record<IconScale, number> = {
   default: 8,
-  large: 10,
+  large: 11,
   compact: 6,
   compactSm: 5,
 };

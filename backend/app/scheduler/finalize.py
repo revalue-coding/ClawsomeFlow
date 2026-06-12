@@ -166,6 +166,39 @@ async def finalize_run(
             )
             return out
 
+        # Scheduled (unattended) runs: every task self-merges into the baseline
+        # branch in-task (see scheduler/prompts.py). There is no human in the
+        # loop, so skip both the user merge-review (awaiting_user_review) and the
+        # user complaint (awaiting_user_complaint) phases entirely and go straight
+        # to terminal ``completed``.
+        if getattr(ipt.run, "is_scheduled", False):
+            out.final_status = RunStatus.completed
+            out.detail = "scheduled run: in-task self-merge; review + complaint skipped"
+            ipt.run.status = RunStatus.completed
+            ipt.run.pending_merges = None
+            merged_inputs = dict(ipt.run.inputs or {})
+            merged_inputs.pop(_POST_COMPLAINT_STATUS_KEY, None)
+            merged_inputs.pop(_POST_REVIEW_TERMINAL_STATUS_KEY, None)
+            ipt.run.inputs = merged_inputs
+            if ipt.run.finished_at is None:
+                ipt.run.finished_at = datetime.now(timezone.utc)
+            tail_out = await run_terminal_tail_cleanup(
+                run=ipt.run,
+                flow=ipt.flow,
+                agents=ipt.agents,
+                storage=storage,
+                cli=cli,
+                worktree_lookup=worktree_lookup,
+            )
+            out.team_cleaned = tail_out.team_cleaned
+            logger.info(
+                "finalize_run_scheduled_autocomplete",
+                run_id=ipt.run.id,
+                team=ipt.run.team_name,
+                team_cleaned=out.team_cleaned,
+            )
+            return out
+
         # Snapshot every agent's current worktree info for diff/UI consumption.
         agent_worktrees = await _gather_worktrees(
             ipt.run.team_name, non_openclaw_agents, worktree_lookup,

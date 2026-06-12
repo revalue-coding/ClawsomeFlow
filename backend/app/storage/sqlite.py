@@ -81,6 +81,7 @@ class SqliteStorage:
     def init_schema(self) -> None:
         SQLModel.metadata.create_all(self._engine)
         self._ensure_openclaw_agent_team_column()
+        self._ensure_flowrun_is_scheduled_column()
         # Product baseline (May 2026): cleanup_team_on_finish is always enabled.
         # Backfill legacy rows created before this baseline.
         with self._session() as s:
@@ -112,6 +113,18 @@ class SqliteStorage:
             conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_openclawagent_team_id "
                 "ON openclawagent(team_id)"
+            )
+
+    def _ensure_flowrun_is_scheduled_column(self) -> None:
+        """Add ``flowrun.is_scheduled`` for legacy DBs created pre-schedule flag."""
+        with self._engine.begin() as conn:
+            rows = conn.exec_driver_sql("PRAGMA table_info('flowrun')").fetchall()
+            columns = {str(r[1]) for r in rows}
+            if "is_scheduled" in columns:
+                return
+            conn.exec_driver_sql(
+                "ALTER TABLE flowrun "
+                "ADD COLUMN is_scheduled BOOLEAN NOT NULL DEFAULT 0"
             )
 
     # ---- Flows ----

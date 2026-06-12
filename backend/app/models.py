@@ -511,6 +511,11 @@ class FlowRun(_SQLBase, table=True):
     pending_merges: list[dict[str, Any]] | None = SQLField(
         sa_column=Column(JSON, nullable=True), default=None
     )
+    # True when this Run was triggered by a timed schedule. Scheduled runs
+    # self-merge in-task and skip the user merge-review + complaint phases
+    # (see scheduler/finalize.py + scheduler/prompts.py). Safe default keeps
+    # legacy rows / upgrade-only DBs valid (missing column → False).
+    is_scheduled: bool = SQLField(default=False)
 
 
 class FlowRunSchedule(_SQLBase, table=True):

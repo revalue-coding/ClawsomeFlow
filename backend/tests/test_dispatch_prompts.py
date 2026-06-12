@@ -327,6 +327,51 @@ def test_self_merge_dispatch_includes_main_repo_block_and_steps() -> None:
     assert "7. **End this turn**" in msg
 
 
+# ── scheduled runs (self-merge in-task) ───────────────────────────────
+
+
+def test_worker_dispatch_non_scheduled_omits_self_merge() -> None:
+    """Default (manual) runs must NOT carry self-merge steps (zero regression)."""
+    msg = prompts.build_worker_dispatch(_ctx())
+    assert "Scheduled run — self-merge" not in msg
+    assert "git merge --no-ff" not in msg
+    assert "post-merge absolute path" not in msg
+
+
+def test_worker_dispatch_scheduled_includes_self_merge_and_post_merge_paths() -> None:
+    ctx = _ctx(is_scheduled=True)
+    msg = prompts.build_worker_dispatch(ctx)
+    assert "Scheduled run — self-merge into the baseline branch yourself" in msg
+    assert "git merge --no-ff clawteam/csflow-x/alice" in msg
+    assert "git checkout main" in msg
+    # Post-merge absolute path requirement points at the baseline workspace.
+    assert "post-merge absolute path under `/tmp/main`" in msg
+    assert "never a worktree path under `/tmp/wt/alice`" in msg
+    # Self-merge must precede the inbox-send and final task update.
+    merge_pos = msg.find("Scheduled run — self-merge")
+    inbox_pos = msg.find("clawteam inbox send")
+    update_pos = msg.find("clawteam task update")
+    assert 0 < merge_pos < inbox_pos < update_pos
+
+
+def test_leader_dispatch_scheduled_includes_self_merge() -> None:
+    ctx = _ctx(
+        agent=_agent(id="leader", leader=True),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+        worktree=_wt(agent="leader", branch="clawteam/csflow-x/leader",
+                     path="/tmp/wt/leader", main="/tmp/main", base="main"),
+        is_scheduled=True,
+    )
+    msg = prompts.build_leader_dispatch(ctx)
+    assert "Scheduled run — self-merge into the baseline branch yourself" in msg
+    assert "git merge --no-ff clawteam/csflow-x/leader" in msg
+    assert "post-merge absolute path under `/tmp/main`" in msg
+    # The self-merge block sits after the commit step, before the final reply.
+    merge_pos = msg.find("Scheduled run — self-merge")
+    reply_pos = msg.find("leader final reply:")
+    assert 0 < merge_pos < reply_pos
+
+
 # ── upstream-outputs block ────────────────────────────────────────────
 
 

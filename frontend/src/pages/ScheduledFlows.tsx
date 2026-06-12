@@ -470,6 +470,8 @@ export function ScheduledFlows() {
         </button>
       </div>
 
+      <p className="text-sm text-ink-500">{t("scheduledFlows.description")}</p>
+
       {error && <ErrorBox>{error}</ErrorBox>}
       {loading && <Loading />}
 
