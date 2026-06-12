@@ -53,6 +53,19 @@ class TestSpawnArgvBuilder:
         assert "--repo" in argv
         assert "/tmp/r" in argv
 
+    def test_repo_tilde_expanded_in_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # macOS regression: a leading ``~`` must be expanded so neither the
+        # ``--repo`` argv nor the git branch-check cwd receives a literal tilde.
+        monkeypatch.setenv("HOME", "/tmp/fakehome")
+        args = _SpawnArgs(
+            backend="tmux", command=["hermes"],
+            team="csflow-x", agent_name="alice", repo="~/342test",
+        )
+        assert args.repo == "/tmp/fakehome/342test"
+        argv = args.to_argv()
+        assert "/tmp/fakehome/342test" in argv
+        assert "~/342test" not in argv
+
     def test_resume_argv_uses_no_workspace(self) -> None:
         args = _SpawnArgs(
             backend="tmux", command=["claude", "--continue"],
@@ -172,6 +185,30 @@ async def test_ensure_repo_on_target_branch_no_switch(monkeypatch: pytest.Monkey
     assert current == "main"
     assert switched is False
     assert seen == [["git", "symbolic-ref", "--quiet", "--short", "HEAD"]]
+
+
+@pytest.mark.asyncio
+async def test_run_in_cwd_expands_tilde(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Defensive chokepoint: a ``~`` cwd must be expanded before reaching the
+    # shell-less subprocess (otherwise FileNotFoundError on macOS/Linux).
+    monkeypatch.setenv("HOME", "/tmp/fakehome")
+    seen: dict[str, str | None] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def _fake_exec(*argv: str, cwd: str | None = None, env=None, stdout=None, stderr=None):
+        del argv, env, stdout, stderr
+        seen["cwd"] = cwd
+        return _FakeProc()
+
+    monkeypatch.setattr(cli_mod.asyncio, "create_subprocess_exec", _fake_exec)
+    code, _out, _err = await cli_mod._run_in_cwd(["git", "status"], cwd="~/342test", env={})
+    assert code == 0
+    assert seen["cwd"] == "/tmp/fakehome/342test"
 
 
 @pytest.mark.asyncio

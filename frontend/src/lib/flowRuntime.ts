@@ -5,6 +5,12 @@ export const DEFAULT_TARGET_BRANCH = "master";
 
 export const FLOW_RUNTIME_REQUIREMENT_KEY = "csflow.runtime.requirement";
 export const FLOW_RUNTIME_PARAM_FIELDS_KEY = "csflow.runtime.param_fields";
+// "省心模式" (easy mode). Stored in the spec's ``variables`` dict (not a typed
+// FlowSpec field) so it survives round-trips through an un-upgraded backend, like
+// the run-input-field keys above. When ON, a manual run is created as a scheduled
+// run (self-merge in-task, skip user review + complaint). See backend
+// app/api/runs.py::trigger_run.
+export const FLOW_EASY_MODE_KEY = "csflow.easy_mode";
 
 function normalizeFields(fields: string[]): string[] {
   const seen = new Set<string>();
@@ -28,6 +34,20 @@ export function setRunInputRequirement(spec: FlowSpec, requirement: string): Flo
   const nextVariables: Record<string, string> = { ...(spec.variables ?? {}) };
   if (cleaned) nextVariables[FLOW_RUNTIME_REQUIREMENT_KEY] = cleaned;
   else delete nextVariables[FLOW_RUNTIME_REQUIREMENT_KEY];
+  return {
+    ...spec,
+    variables: Object.keys(nextVariables).length > 0 ? nextVariables : {},
+  };
+}
+
+export function getEasyMode(spec: FlowSpec | null | undefined): boolean {
+  return String(spec?.variables?.[FLOW_EASY_MODE_KEY] ?? "").trim().toLowerCase() === "true";
+}
+
+export function setEasyMode(spec: FlowSpec, on: boolean): FlowSpec {
+  const nextVariables: Record<string, string> = { ...(spec.variables ?? {}) };
+  if (on) nextVariables[FLOW_EASY_MODE_KEY] = "true";
+  else delete nextVariables[FLOW_EASY_MODE_KEY];
   return {
     ...spec,
     variables: Object.keys(nextVariables).length > 0 ? nextVariables : {},

@@ -398,6 +398,56 @@ async def test_start_dispatches_non_openclaw_leader_via_direct_cli(
 
 
 @pytest.mark.asyncio
+async def test_non_openclaw_leader_dispatch_expands_tilde_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS regression: a leader repo like ``~/342test`` must be expanded before
+    it becomes the (shell-less) subprocess cwd."""
+    from app.models import AgentKind
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "342test").mkdir()
+    seen: dict[str, Any] = {}
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            payload = {
+                "agents": [{
+                    "id": "L", "kind": "claude",
+                    "repo": str(tmp_path / "342test"),
+                    "targetBranch": "main", "isLeader": True,
+                }],
+                "tasks": [{
+                    "id": "s", "ownerAgentId": "L", "subject": "x",
+                    "description": "d", "dependsOn": [], "isLeaderSummary": True,
+                }],
+            }
+            return json.dumps(payload).encode("utf-8"), b""
+
+        def kill(self):
+            return None
+
+    async def _fake_spawn(*argv, **kwargs):
+        del argv
+        seen["cwd"] = kwargs.get("cwd")
+        return _Proc()
+
+    monkeypatch.setattr(svc.asyncio, "create_subprocess_exec", _fake_spawn)
+
+    await svc._dispatch_to_non_openclaw_leader_via_cli(
+        request_id="req-tilde",
+        leader_target=svc._LeaderTarget(
+            id="L", kind=AgentKind.claude, repo="~/342test", target_branch="main",
+        ),
+        message="decompose this",
+    )
+    assert seen["cwd"] == str(tmp_path / "342test")
+
+
+@pytest.mark.asyncio
 async def test_start_dispatches_cursor_leader_with_force_flags(
     fake_openclaw_home: Path,
     monkeypatch: pytest.MonkeyPatch,

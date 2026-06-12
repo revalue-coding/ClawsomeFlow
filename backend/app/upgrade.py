@@ -266,14 +266,102 @@ def _applies(m: Migration, marker: str | None) -> bool:
     return True
 
 
+def _backfill_is_temporary(cfg: Config) -> list[str] | None:
+    """Repair: backfill ``FlowAgent.is_temporary`` on legacy Flow specs.
+
+    Issue fixed: 0.1.13 added ``FlowAgent.is_temporary`` (default ``False``;
+    see ``models.py``). Specs authored before 0.1.13 have no such key, so on load
+    every non-OpenClaw agent becomes ``is_temporary=False`` = "managed/persistent".
+    Consequences for an upgrade-only user:
+      * Hermes — the editor's managed-agent picklist can't find the id (it isn't
+        in the ``hermesagent`` table) → the leader dropdown renders blank; the
+        runtime appends ``hermes -p <id>`` (``tmux_live.py``) → binds a
+        non-existent profile.
+      * claude/codex/cursor — these lost their persistent management platform in
+        0.1.13, so a non-temporary value can bind a stale ``profile`` at spawn.
+
+    This migration normalizes every agent in every stored Flow spec:
+      * ``kind == "openclaw"``                       → untouched (never temporary)
+      * registered Hermes (``hermes_get`` is not None) → ``is_temporary=False``
+      * everything else non-OpenClaw                 → ``is_temporary=True``
+
+    Target versions: specs written by ``<= 0.1.13b6`` (key absent or wrong).
+    Removal baseline: safe to delete once the minimum upgrade baseline is raised
+    past ``0.1.13b7``.
+
+    Idempotent: only flows whose agents actually change value are re-saved; a
+    second run is a no-op. Best-effort (``critical=False``): a per-flow failure is
+    collected as a warning and never aborts the batch or the upgrade.
+    """
+    from app.storage import get_storage
+
+    st = get_storage(cfg)
+
+    # Collect ALL flows up front. flow_update bumps updated_at and flow_list
+    # orders by updated_at desc, so mutating mid-pagination would reorder the
+    # result window and risk revisiting/skipping rows.
+    flows: list = []
+    offset = 0
+    page = 100
+    while True:
+        items, total = st.flow_list(owner_user=None, limit=page, offset=offset)
+        flows.extend(items)
+        offset += len(items)
+        if not items or offset >= total:
+            break
+
+    warnings: list[str] = []
+    repaired = 0
+    for flow in flows:
+        spec = flow.spec if isinstance(flow.spec, dict) else {}
+        agents = spec.get("agents")
+        if not isinstance(agents, list):
+            continue
+        changed = False
+        for a in agents:
+            if not isinstance(a, dict):
+                continue
+            kind = a.get("kind")
+            if kind == "openclaw":
+                continue
+            aid = str(a.get("id") or "")
+            registered_hermes = (
+                kind == "hermes" and bool(aid) and st.hermes_get(aid) is not None
+            )
+            desired = not registered_hermes
+            if a.get("is_temporary") != desired:
+                a["is_temporary"] = desired
+                changed = True
+        if not changed:
+            continue
+        try:
+            st.flow_update(flow, expected_version=flow.version)
+            repaired += 1
+        except Exception as exc:  # best-effort: one bad flow must not abort the rest
+            warnings.append(f"could not repair flow {flow.id}: {exc}")
+            logger.warning(
+                "upgrade_is_temporary_repair_failed",
+                flow_id=flow.id, error=str(exc),
+            )
+
+    logger.info("upgrade_is_temporary_backfill", flows=len(flows), repaired=repaired)
+    return warnings or None
+
+
 # Register migrations in chronological order. Newer entries come last.
-# Each ``apply`` MUST be idempotent (re-runnable). A migration runs only when
-# the user's version marker is below the migration ``version`` (minimal,
-# baseline-aware compatibility).
+# Each ``apply`` MUST be idempotent (re-runnable). A migration runs once ever,
+# gated by the applied-migrations ledger (see module docstring).
 MIGRATIONS: list[Migration] = [
-    # No active DB migrations. (The 0.1.13b1 "provision managed agents for
-    # existing flows" migration was removed: Claude/Codex no longer have a
-    # persistent management platform — non-OpenClaw agents are temporary/ad-hoc.)
+    # 0.1.13b7: backfill FlowAgent.is_temporary on pre-0.1.13 specs (the key was
+    # absent → loaded as managed, breaking the Hermes leader picklist + runtime
+    # profile binding). Targets specs written by <= 0.1.13b6. Best-effort so a
+    # single malformed flow never blocks the upgrade. See _backfill_is_temporary.
+    Migration(
+        version="0.1.13b7",
+        description="backfill FlowAgent.is_temporary on legacy specs",
+        apply=_backfill_is_temporary,
+        critical=False,
+    ),
 ]
 
 

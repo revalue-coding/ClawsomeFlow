@@ -151,6 +151,11 @@ const en = {
     titleNew: "New Flow",
     titleEdit: "Edit Flow",
     flowBasics: "Flow basics",
+    easyMode: "Easy mode",
+    easyModeSub: "Agent auto-merges all changes and skips the complaint phase",
+    easyModeNotice:
+      "Easy mode lets the agent intelligently merge all changes (including when multiple tasks run in parallel) and skips the user complaint phase. Human checkpoints in the flow are still reviewed by you.",
+    easyModeAck: "Got it",
     flowName: "Flow name",
     name: "Flow name",
     namePlaceholder: "e.g. customer-research v2",
@@ -681,11 +686,11 @@ const en = {
     },
   },
   chat: {
-    title: "My Teams",
+    title: "OpenClaw Agent",
     pickerTitle: "Chat with Agents Here!",
+    pageNote:
+      "Agents created for you emulate real human work: each has its own workspace desktop and materials area, continuously organizes work assets around responsibilities, and supports self-management. Use this page for single-agent tasks or to share complaints and improvement feedback.",
     toOpenclaw: "to OpenClaw",
-    pickerLabel:
-      "Chat with Agents here! Use natural language to add expert skills and scheduled tasks, or share complaints and improvement suggestions.",
     runtimeUnavailableMessage:
       "No running Openclaw service was detected on your system. Start the service and try again.",
     runtimeRetry: "Retry",
@@ -866,6 +871,7 @@ const en = {
     ungrouped: "Ungrouped",
     open: "Open",
     myProfile: "my-profile",
+    toHermes: "to Hermes",
     opening: "Opening…",
     remoteUnavailable:
       "This is an SSH/remote browser session; opening local folders is unavailable.",

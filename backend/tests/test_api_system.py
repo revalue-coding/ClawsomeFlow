@@ -6,8 +6,10 @@ from types import SimpleNamespace
 from pathlib import Path
 import subprocess
 
+import pytest
 from fastapi.testclient import TestClient
 
+import app.api.system as system
 from app.main import create_app
 
 
@@ -53,6 +55,47 @@ def test_pick_directory_runtime_error_mapped(monkeypatch) -> None:
         r = client.post("/api/system/pick-directory", json={})
     assert r.status_code == 503
     assert r.json()["error"] == "DIRECTORY_PICKER_UNAVAILABLE"
+
+
+def test_pick_directory_macos_uses_osascript(monkeypatch, tmp_path: Path) -> None:
+    # macOS regression: must NOT require DISPLAY/WAYLAND_DISPLAY (Aqua/Cocoa) and
+    # should drive the native folder chooser via `osascript choose folder`.
+    monkeypatch.setattr(system.sys, "platform", "darwin")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    seen: dict[str, list[str]] = {}
+
+    def _fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return SimpleNamespace(returncode=0, stdout=f"{tmp_path}/\n", stderr="")
+
+    monkeypatch.setattr(system.subprocess, "run", _fake_run)
+    result = system._pick_directory_native(title="pick", initial_path=str(tmp_path))
+    assert result == str(tmp_path.resolve())
+    assert seen["argv"][0] == "osascript"
+    assert any("choose folder" in part for part in seen["argv"])
+
+
+def test_pick_directory_macos_cancel_returns_none(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(system.sys, "platform", "darwin")
+
+    def _fake_run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=1, stdout="", stderr="execution error: User canceled. (-128)",
+        )
+
+    monkeypatch.setattr(system.subprocess, "run", _fake_run)
+    assert system._pick_directory_native(title="x", initial_path=str(tmp_path)) is None
+
+
+def test_pick_directory_linux_without_display_raises(monkeypatch) -> None:
+    # Non-macOS path is unchanged: no X11 display -> clear error.
+    monkeypatch.setattr(system.sys, "platform", "linux")
+    monkeypatch.setattr(system.os, "name", "posix")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    with pytest.raises(RuntimeError, match="No GUI display"):
+        system._pick_directory_native(title="x", initial_path=None)
 
 
 def test_open_directory_success(monkeypatch, tmp_path: Path) -> None:

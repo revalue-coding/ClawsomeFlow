@@ -153,6 +153,11 @@ const zh = {
     titleNew: "新建 Flow",
     titleEdit: "编辑 Flow",
     flowBasics: "Flow 基础信息",
+    easyMode: "省心模式",
+    easyModeSub: "由 Agent 智能合入全部修改，并跳过用户投诉环节",
+    easyModeNotice:
+      "省心模式将由 Agent 智能合入全部修改（多任务并行仍然适用），并跳过用户投诉环节。任务流中的人工检查点依然由您来审核。",
+    easyModeAck: "我知道了",
     flowName: "Flow 名称",
     name: "Flow 名称",
     namePlaceholder: "如：客户调研 v2",
@@ -449,7 +454,8 @@ const zh = {
   },
   scheduledFlows: {
     title: "定时Flows",
-    description: "定时执行的任务流将自动合入修改至本地基线分支，并且跳过用户投诉环节。",
+    description:
+      "定时执行的任务流将进入省心模式：即便是多任务并行，Agent也能智能合入全部修改，同时会跳过用户投诉环节。注意，任务流中插入的人工检查点依然由您来审核",
     createButton: "+定时任务",
     createTitle: "新建定时任务",
     editTitle: "编辑定时任务",
@@ -671,10 +677,11 @@ const zh = {
     },
   },
   chat: {
-    title: "我的团队",
+    title: "OpenClaw Agent",
     pickerTitle: "在这里，和 Agent 畅聊！",
+    pageNote:
+      "为您创建的智能体将模仿真实的人类工作：它将拥有自己的工作桌面与资料区，围绕职责持续整理工作资料，实现自我管理。在这里，执行单Agent任务，或提出不满与改善意见",
     toOpenclaw: "to OpenClaw",
-    pickerLabel: "在这里，执行单Agent任务，或提出不满与改善意见",
     runtimeUnavailableMessage: "您的系统中尚未检测到正在运行的Openclaw服务，请启动服务后重试",
     runtimeRetry: "重试",
     runtimeChecking: "检查中…",
@@ -850,6 +857,7 @@ const zh = {
     ungrouped: "未分组",
     open: "打开",
     myProfile: "my-profile",
+    toHermes: "to Hermes",
     opening: "打开中…",
     remoteUnavailable: "当前为 SSH/远程浏览器会话，无法打开本地文件夹。",
     openFailed: "打开 profile 目录失败：{{message}}",

@@ -2328,14 +2328,29 @@ class RunController:
                     ) from exc
             elif sess.state == SessionState.Crashed:
                 sess.set_tmux_target_override(None)
-                try:
-                    await sess.resume()
-                except Exception as exc:
-                    raise SessionStartupError(
-                        agent_id=agent.id,
-                        phase="resume",
-                        detail=str(exc),
-                    ) from exc
+                if sess.worktree is None:
+                    # The initial spawn never produced a worktree (e.g. prewarm
+                    # spawn failed before _refresh_worktree ran). Resume is
+                    # impossible — it hard-fails with "cannot resume without
+                    # recorded worktree" — so do a FRESH spawn, which recreates
+                    # the worktree, instead of dead-ending the task.
+                    try:
+                        await sess.spawn()
+                    except Exception as exc:
+                        raise SessionStartupError(
+                            agent_id=agent.id,
+                            phase="spawn_after_crash_without_worktree",
+                            detail=str(exc),
+                        ) from exc
+                else:
+                    try:
+                        await sess.resume()
+                    except Exception as exc:
+                        raise SessionStartupError(
+                            agent_id=agent.id,
+                            phase="resume",
+                            detail=str(exc),
+                        ) from exc
                 try:
                     await self._refresh_worktree(sess)
                 except Exception as exc:
@@ -2864,6 +2879,36 @@ class RunController:
             if previous_summary
             else "(no previously matched inbox summary)"
         )
+        # In "省心/auto-merge" mode (is_scheduled), every task self-merges into the
+        # baseline branch in-task — there is no user merge review. A re-executed
+        # checkpoint task must self-merge too, otherwise its corrected output never
+        # reaches the baseline. In normal (manual-merge) runs we omit this so the
+        # user still merges via the UI. Mirrors prompts._scheduled_self_merge_steps.
+        is_scheduled = bool(getattr(self.run, "is_scheduled", False))
+        self_merge_block = ""
+        if is_scheduled:
+            sess = self._sessions.get(upstream_item.owner_agent_id)
+            wt = sess.worktree if sess else None
+            wt_path = wt.worktree_path if wt else "<worktree-path>"
+            repo_root = wt.repo_root if wt else "<baseline-workspace>"
+            branch = wt.branch_name if wt else "<branch>"
+            base = wt.base_branch if wt else "<base>"
+            self_merge_block = (
+                "2) **Commit and self-merge your changes into the baseline branch "
+                "yourself** (there is no user merge review):\n"
+                f"   `cd {wt_path} && git add -A && git commit -m "
+                f"'checkpoint rerun {upstream_item.task_id}'`\n"
+                f"   `cd {repo_root} && git checkout {base} && git pull --ff-only || true "
+                f"&& git merge --no-ff {branch} -m 'csflow: scheduled merge {branch}'`. "
+                "If the merge hits conflicts, **you must resolve them yourself** (keep your "
+                "intended changes plus any unrelated baseline changes), then finish with "
+                "`git add -A && git commit`.\n"
+                f"   After merging, every output path you mention MUST be the post-merge "
+                f"absolute path under `{repo_root}` — never a worktree path under "
+                f"`{wt_path}`.\n"
+            )
+        # Number the inbox/update steps after the optional self-merge block.
+        inbox_no, update_no, fail_no = (3, 4, 5) if is_scheduled else (2, 3, 4)
         return (
             "## ClawsomeFlow Manual Checkpoint Rerun\n"
             f"- team: `{self.team_name}`\n"
@@ -2876,7 +2921,8 @@ class RunController:
             f"{previous_block}\n\n"
             "Execution requirements:\n"
             "1) Re-execute this upstream task according to the feedback.\n"
-            "2) After rerun completes, you MUST send the new output to leader inbox "
+            f"{self_merge_block}"
+            f"{inbox_no}) After rerun completes, you MUST send the new output to leader inbox "
             "using the exact prefix:\n"
             f"   `task {upstream_item.task_id} done: <new summary>`\n"
             "   The `<new summary>` MUST include a concise work summary and absolute "
@@ -2884,10 +2930,10 @@ class RunController:
             f"   via `clawteam inbox send {self.team_name} {self._leader_id} "
             f"\"task {upstream_item.task_id} done: <new summary>\" "
             f"--from {upstream_item.owner_agent_id}`.\n"
-            "3) VERY IMPORTANT! you MUST execute:\n"
+            f"{update_no}) VERY IMPORTANT! you MUST execute:\n"
             f"   `clawteam task update {self.team_name} {ct_task_id} --status completed`.\n"
-            "4) If rerun fails, still send an inbox message with the same prefix and "
-            "include `FAILED:` details, then still execute the same completed command in step 3."
+            f"{fail_no}) If rerun fails, still send an inbox message with the same prefix and "
+            f"include `FAILED:` details, then still execute the same completed command in step {update_no}."
         )
 
     async def _wait_for_clawteam_tasks_completed(
@@ -3027,7 +3073,9 @@ class RunController:
                 "Execution requirements:\n"
                 "1) Implement fixes based on the complaint and leader feedback.\n"
                 "2) Make changes in this task worktree. After finishing the fixes and updating "
-                "the workspace, immediately perform branch merge in this task (merge into baseline branch).\n"
+                "the workspace, merge your worktree branch into the baseline branch in this task. "
+                "If the merge hits conflicts, **you must resolve them yourself** and finish the "
+                "merge commit — do not leave the merge incomplete.\n"
                 "3) No inbox send is needed. After completion, **VERY IMPORTANT! you MUST execute**:\n"
                 f"`clawteam task update {self.team_name} {task_id} --status completed`."
             )
@@ -3185,7 +3233,7 @@ class RunController:
             f"1) `cd {repo_root}`\n"
             f"2) `git checkout {base_branch} && git pull --ff-only || true`\n"
             f"3) `git merge --no-ff {merge_branch} -m '[csflow] merge {merge_branch} after run {self.run.id}'`\n"
-            "4) If conflicts occur, resolve them yourself and finish the merge commit.\n"
+            "4) **If merge conflicts occur, you must resolve them yourself** and finish the merge commit before continuing.\n"
             "5) Verify merge persistence with `git log --oneline | head -5`.\n"
             f"6) VERY IMPORTANT! you MUST execute `clawteam task update {self.team_name} {task_id} --status completed`.\n"
             "7) If merge still cannot be completed, send a failure note to leader inbox first, "

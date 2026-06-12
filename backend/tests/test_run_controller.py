@@ -419,6 +419,121 @@ async def test_initial_dispatch_then_completion(fake_lookup) -> None:
     assert rc._terminal_check() is True
 
 
+@pytest.mark.asyncio
+async def test_crashed_without_worktree_does_fresh_spawn(fake_lookup) -> None:
+    """Regression: an agent whose initial (prewarm) spawn failed sits in Crashed
+    with NO recorded worktree. Startup must FRESH-spawn (recreating the worktree)
+    instead of calling resume(), which hard-fails 'cannot resume without recorded
+    worktree' and dead-ends the task."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+
+    sessions: dict[str, _RecordingSession] = {}
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        s = _RecordingSession(agent=agent, team_name=run.team_name, run_id=run.id)
+        sessions[agent.id] = s
+        return s
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup, session_factory=factory,
+        snapshot_provider=None, leader_inbox_provider=None,
+    )
+    agent = next(a for a in spec.agents if a.id == "alice")
+    sess = rc._ensure_session_handle(agent)
+    # Simulate a failed prewarm: Crashed, no worktree recorded.
+    await sess.spawn()
+    sess.mark_crashed()
+    assert sess.state == SessionState.Crashed
+    assert sess.worktree is None
+    sess.spawned = 0
+    sess.resumed = 0
+
+    await rc._run_startup_sequence(agent=agent, source="test")
+
+    assert sess.spawned == 1          # fresh spawn
+    assert sess.resumed == 0          # NOT resume
+    assert sess.state == SessionState.Idle
+    assert sess.worktree is not None  # _refresh_worktree populated it
+
+
+@pytest.mark.asyncio
+async def test_crashed_with_worktree_resumes(fake_lookup) -> None:
+    """A genuinely-crashed session that DID record a worktree still resumes."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        return _RecordingSession(agent=agent, team_name=run.team_name, run_id=run.id)
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup, session_factory=factory,
+        snapshot_provider=None, leader_inbox_provider=None,
+    )
+    agent = next(a for a in spec.agents if a.id == "alice")
+    sess = rc._ensure_session_handle(agent)
+    await sess.spawn()
+    sess.worktree = WorktreeInfo(
+        agent_name="alice", branch_name="b", worktree_path="/tmp/wt/alice",
+        repo_root="/tmp/main", base_branch="main",
+    )
+    sess.mark_crashed()
+    sess.spawned = 0
+    sess.resumed = 0
+
+    await rc._run_startup_sequence(agent=agent, source="test")
+
+    assert sess.resumed == 1          # resume (worktree present)
+    assert sess.spawned == 0
+    assert sess.state == SessionState.Idle
+
+
+def _rerun_prompt_for(run, spec, fake_lookup) -> str:
+    from app.scheduler.controller import _CheckpointItem
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=None, leader_inbox_provider=None,
+    )
+    agent = next(a for a in spec.agents if a.id == "alice")
+    sess = rc._ensure_session_handle(agent)
+    sess.worktree = WorktreeInfo(
+        agent_name="alice", branch_name="clawteam/t/alice",
+        worktree_path="/tmp/wt/alice", repo_root="/tmp/main", base_branch="main",
+    )
+    item = _CheckpointItem(task_id="t1", subject="x", owner_agent_id="alice")
+    return rc._build_checkpoint_rerun_prompt(
+        downstream_task_id="ts", upstream_item=item, feedback="please fix the chart",
+    )
+
+
+def test_checkpoint_rerun_prompt_includes_self_merge_when_scheduled(fake_lookup) -> None:
+    """省心/auto-merge run: a checkpoint rerun must self-merge to baseline."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    run.is_scheduled = True
+    prompt = _rerun_prompt_for(run, spec, fake_lookup)
+    assert "self-merge" in prompt
+    assert "git merge --no-ff clawteam/t/alice" in prompt
+    assert "please fix the chart" in prompt  # user feedback still embedded
+
+
+def test_checkpoint_rerun_prompt_omits_self_merge_when_not_scheduled(fake_lookup) -> None:
+    """Normal (manual-merge) run: rerun prompt must NOT self-merge (user merges)."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)  # is_scheduled defaults False
+    prompt = _rerun_prompt_for(run, spec, fake_lookup)
+    assert "git merge --no-ff" not in prompt
+    assert "self-merge" not in prompt
+    assert "please fix the chart" in prompt
+
+
 def test_summary_dispatch_gated_until_all_tasks_completed(fake_lookup) -> None:
     """The leader summary waits for ALL non-summary tasks, even ones it does
     not depend on (depends_on now only selects which outputs feed the summary)."""
@@ -2651,7 +2766,8 @@ def test_agent_complaint_prompt_merge_only_for_openclaw(fake_lookup) -> None:
         task_id="ct-2", user_complaint="输出不完整",
         leader_feedback="请补全边界条件", merge_required=True,
     )
-    assert "immediately perform branch merge in this task" in oc_prompt
+    assert "immediately perform branch merge in this task" not in oc_prompt
+    assert "you must resolve them yourself" in oc_prompt
     assert "VERY IMPORTANT! you MUST execute" in oc_prompt
     # Hermes / other → MUST NOT mention merge at all.
     hermes_prompt = rc._build_agent_complaint_prompt(

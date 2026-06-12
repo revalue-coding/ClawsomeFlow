@@ -756,7 +756,10 @@ async def _dispatch_to_non_openclaw_leader_via_cli(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if leader_target.repo is None:
         raise RuntimeError("non-openclaw leader dispatch requires repo")
-    if not os.path.isdir(leader_target.repo):
+    # Expand a leading ``~``: this subprocess runs without a shell, so a raw
+    # ``~/foo`` cwd would FileNotFoundError (common on macOS agent repos).
+    repo = os.path.expanduser(leader_target.repo)
+    if not os.path.isdir(repo):
         raise RuntimeError(f"leader repo does not exist: {leader_target.repo}")
     argv = _non_openclaw_dispatch_argv(
         kind=leader_target.kind,
@@ -767,7 +770,7 @@ async def _dispatch_to_non_openclaw_leader_via_cli(
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
-            cwd=leader_target.repo,
+            cwd=repo,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

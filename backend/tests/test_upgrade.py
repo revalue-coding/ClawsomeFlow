@@ -610,3 +610,90 @@ def test_critical_migration_failure_still_runs_schema_keeps_marker(
     assert "0.1.12" not in (upgrade.read_applied_migrations() or set())
 
 
+# ── 0.1.13b7: backfill FlowAgent.is_temporary on legacy specs ─────────
+
+
+def _legacy_agent(agent_id: str, kind: str) -> dict:
+    """A non-OpenClaw agent dict as a pre-0.1.13 spec stored it: no
+    ``is_temporary`` key (snake_case, by_alias=False — see Flow.with_spec)."""
+    return {
+        "id": agent_id,
+        "kind": kind,
+        "repo": "/tmp/repo",
+        "target_branch": "main",
+        "is_leader": kind == "hermes",
+    }
+
+
+def _seed_legacy_flow(storage, agents: list[dict]) -> str:
+    from app.models import Flow
+
+    spec = {"agents": agents, "tasks": []}
+    flow = Flow(name="legacy", description="d", owner_user="alice", spec=spec)
+    return storage.flow_create(flow).id
+
+
+def test_backfill_is_temporary_marks_legacy_agents(
+    tmp_clawsomeflow_home: Path, fake_config: Config,
+) -> None:
+    """Pre-state → migration → expected state. Legacy specs lack is_temporary;
+    unregistered Hermes + claude/codex/cursor become temporary, a registered
+    Hermes is normalized to non-temporary, and OpenClaw is left untouched."""
+    from app.models import HermesAgent
+    from app.storage import get_storage
+
+    storage = get_storage(fake_config)
+    # A genuinely registered (managed) Hermes agent.
+    storage.hermes_create(
+        HermesAgent(id="managed1", name="M", profile_root="x", created_by_user="alice")
+    )
+
+    flow_id = _seed_legacy_flow(
+        storage,
+        [
+            _legacy_agent("11111", "hermes"),     # unregistered → temporary
+            _legacy_agent("managed1", "hermes"),  # registered   → NOT temporary
+            _legacy_agent("c1", "claude"),        # no platform  → temporary
+            _legacy_agent("x1", "codex"),         # no platform  → temporary
+            {"id": "oc1", "kind": "openclaw", "is_leader": False},  # untouched
+        ],
+    )
+
+    warnings = upgrade._backfill_is_temporary(fake_config)
+    assert warnings is None
+
+    agents = {a["id"]: a for a in get_storage(fake_config).flow_get(flow_id).spec["agents"]}
+    assert agents["11111"]["is_temporary"] is True
+    assert agents["managed1"]["is_temporary"] is False
+    assert agents["c1"]["is_temporary"] is True
+    assert agents["x1"]["is_temporary"] is True
+    # OpenClaw is never given an is_temporary value by the migration.
+    assert "is_temporary" not in agents["oc1"]
+
+
+def test_backfill_is_temporary_is_idempotent(
+    tmp_clawsomeflow_home: Path, fake_config: Config,
+) -> None:
+    """A second run changes nothing and does not bump the flow version again."""
+    from app.storage import get_storage
+
+    storage = get_storage(fake_config)
+    flow_id = _seed_legacy_flow(storage, [_legacy_agent("11111", "hermes")])
+
+    upgrade._backfill_is_temporary(fake_config)
+    v1 = get_storage(fake_config).flow_get(flow_id).version
+    upgrade._backfill_is_temporary(fake_config)
+    v2 = get_storage(fake_config).flow_get(flow_id).version
+    assert v1 == v2  # no-op second pass (no further version bump)
+
+
+def test_backfill_is_temporary_registered_in_migrations() -> None:
+    """The migration must be wired into the real registry at version 0.1.13b7 so
+    upgrade-only users (b6 → b7) actually run it."""
+    by_version = {m.version: m for m in upgrade.MIGRATIONS}
+    assert "0.1.13b7" in by_version
+    m = by_version["0.1.13b7"]
+    assert m.apply is upgrade._backfill_is_temporary
+    assert m.critical is False  # best-effort: never blocks the upgrade
+
+

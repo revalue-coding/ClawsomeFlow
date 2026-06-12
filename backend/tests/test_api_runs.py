@@ -130,6 +130,55 @@ def test_trigger_creates_run_and_calls_scheduler(
     assert run_row.inputs == {"goal": "x"}
 
 
+def _stub_start_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_start_run(self, *, run, spec, flow=None, **kw):
+        from app.scheduler.controller import RunController
+        return RunController(run=run, spec=spec)
+    monkeypatch.setattr(engine_mod.FlowScheduler, "start_run", fake_start_run)
+
+
+def test_trigger_easy_mode_marks_run_scheduled(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """省心模式: a manual run for an easy-mode flow is created as is_scheduled
+    (reusing the self-merge + skip review/complaint path)."""
+    storage = get_storage()
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(id="alice", kind=AgentKind.claude, repo="/tmp/r", is_leader=False),
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/r", is_leader=True),
+        ],
+        tasks=[
+            FlowTask(id="t1", owner_agent_id="alice", subject="x", description="", depends_on=[]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="y", description="",
+                     depends_on=["t1"], is_leader_summary=True),
+        ],
+        variables={"csflow.easy_mode": "true"},
+    )
+    flow = storage.flow_create(
+        Flow(name="t", description="", owner_user="alice").with_spec(spec)
+    )
+    _stub_start_run(monkeypatch)
+
+    r = app_client.post(f"/api/flows/{flow.id}/runs", json={})
+    assert r.status_code == 202, r.text
+    run_row = get_storage().run_get(r.json()["id"])
+    assert run_row is not None
+    assert run_row.is_scheduled is True
+
+
+def test_trigger_without_easy_mode_run_not_scheduled(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow(owner="alice")  # no csflow.easy_mode variable
+    _stub_start_run(monkeypatch)
+    r = app_client.post(f"/api/flows/{flow.id}/runs", json={})
+    assert r.status_code == 202, r.text
+    run_row = get_storage().run_get(r.json()["id"])
+    assert run_row is not None
+    assert run_row.is_scheduled is False
+
+
 def test_trigger_backfills_flow_cleanup_policy(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

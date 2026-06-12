@@ -639,6 +639,17 @@ async def trigger_run(
                 error=str(exc),
             )
 
+    # "省心模式" (easy mode): a per-Flow toggle persisted in the spec's
+    # ``variables`` dict (see frontend flowRuntime.ts ``csflow.easy_mode``).
+    # When ON, a MANUALLY triggered run behaves exactly like a scheduled run —
+    # agents self-merge in-task and the user review + complaint phases are
+    # skipped — by reusing the existing ``is_scheduled`` machinery. Human
+    # checkpoints are unaffected (the checkpoint gate does not read is_scheduled).
+    # Stored under ``variables`` (not a typed field) so it survives round-trips
+    # through an un-upgraded CF, like the run-input-fields codec.
+    spec_variables = (flow.spec or {}).get("variables") or {}
+    easy_mode = str(spec_variables.get("csflow.easy_mode", "")).strip().lower() == "true"
+
     # Pre-generate the Run id so we can derive team_name **before** insert
     # (storage.run_update is intentionally narrow — it only refreshes the
     # mutable scheduler fields, never team_name).
@@ -651,6 +662,7 @@ async def trigger_run(
         status=RunStatus.pending,
         inputs=payload.inputs or {},
         user=user,
+        is_scheduled=easy_mode,
     )
     saved = storage.run_create(run)
 

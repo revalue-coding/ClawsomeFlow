@@ -305,8 +305,55 @@ def repo_branches(
     )
 
 
+def _pick_directory_macos(*, title: str, initial_dir: Path) -> str | None:
+    """macOS native folder picker via AppleScript ``choose folder``.
+
+    macOS uses Aqua/Cocoa, NOT X11, so it has no ``DISPLAY``/``WAYLAND_DISPLAY``
+    and tkinter is unreliable under a LaunchAgent-backed service. ``osascript``
+    drives the system folder chooser directly. A user cancel surfaces as
+    AppleScript error -128, which we map to ``None`` (no selection).
+    """
+    prompt = (title or "Select workspace directory").replace("\\", "\\\\").replace('"', '\\"')
+    default = str(initial_dir).replace("\\", "\\\\").replace('"', '\\"')
+    script = (
+        f'set _default to POSIX file "{default}"\n'
+        f'set _folder to choose folder with prompt "{prompt}" default location _default\n'
+        "POSIX path of _folder"
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:  # osascript missing / not launchable
+        raise RuntimeError(
+            f"failed to launch native directory picker: {exc}"
+        ) from exc
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        # User cancelled the dialog -> not an error, just "no selection".
+        if "-128" in err or "User canceled" in err or "User cancelled" in err:
+            return None
+        raise RuntimeError(err or "native directory picker failed")
+    selected = (proc.stdout or "").strip()
+    if not selected:
+        return None
+    return str(Path(selected).expanduser().resolve())
+
+
 def _pick_directory_native(*, title: str, initial_path: str | None) -> str | None:
-    # No GUI display -> a native picker cannot be shown.
+    initial_dir = Path(initial_path).expanduser() if initial_path else Path.home()
+    if not initial_dir.exists():
+        initial_dir = Path.home()
+
+    # macOS uses Aqua/Cocoa (no DISPLAY/WAYLAND_DISPLAY); use AppleScript instead
+    # of the X11 display check + tkinter below.
+    if sys.platform == "darwin":
+        return _pick_directory_macos(title=title, initial_dir=initial_dir)
+
+    # No GUI display -> a native picker cannot be shown (Linux X11/Wayland).
     if os.name != "nt" and not (
         os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
     ):
@@ -319,10 +366,6 @@ def _pick_directory_native(*, title: str, initial_path: str | None) -> str | Non
         raise RuntimeError(
             "tkinter is unavailable; cannot open a native directory picker."
         ) from exc
-
-    initial_dir = Path(initial_path).expanduser() if initial_path else Path.home()
-    if not initial_dir.exists():
-        initial_dir = Path.home()
 
     root = tk.Tk()
     root.withdraw()

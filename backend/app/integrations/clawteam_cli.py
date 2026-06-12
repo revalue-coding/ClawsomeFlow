@@ -23,6 +23,7 @@ import json
 import os
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Sequence
 
 from app import logging_setup
@@ -95,6 +96,21 @@ class WorkspaceCleanupResult:
     attempts: list[WorkspaceCleanupAttempt] = field(default_factory=list)
 
 
+def _expand_repo(path: str) -> str:
+    """Expand a leading ``~`` in a filesystem path.
+
+    Subprocesses are launched without a shell (``create_subprocess_exec``), so a
+    ``~`` is NOT expanded automatically — passing a raw ``~/foo`` as a ``cwd`` or
+    as ``clawteam --repo`` fails with ``FileNotFoundError`` (notably on macOS,
+    where agent repos like ``~/342test`` are common). We only ``expanduser`` here,
+    never ``resolve``: canonicalizing symlinks (e.g. macOS ``/tmp``→``/private/tmp``)
+    would break worktree-path matching elsewhere. Empty input is returned as-is.
+    """
+    if not path:
+        return path
+    return str(Path(path).expanduser())
+
+
 @dataclass(slots=True)
 class _SpawnArgs:
     """Internal: the immutable, post-defence-check argv builder."""
@@ -114,6 +130,12 @@ class _SpawnArgs:
     #   - no --task
     #   - no --skill clawteam (validated against BANNED_SKILLS)
     #   - --no-keepalive
+
+    def __post_init__(self) -> None:
+        # Normalize the repo path once so BOTH the ``--repo`` argv (to_argv) and
+        # the ``cwd=args.repo`` git branch-check (see _ensure_repo_on_target_branch)
+        # receive an expanded absolute path. See _expand_repo.
+        self.repo = _expand_repo(self.repo)
 
     def to_argv(self) -> list[str]:
         # clawteam v0.3.0's `spawn` typer command parses any agent-side flags
@@ -229,6 +251,10 @@ class ClawTeamCli:
     ) -> SpawnResult:
         """Common spawn path: enforce defences, take locks, run, parse, log."""
         _enforce_anti_loop(args)
+        # Keep the per-main-repo lock key aligned with the expanded repo that
+        # _SpawnArgs already normalized, so concurrent runs sharing a repo
+        # serialize correctly regardless of ``~`` usage.
+        main_repo_for_lock = _expand_repo(main_repo_for_lock)
         argv = args.to_argv()
         env = self._env()
 
@@ -829,6 +855,10 @@ async def _run_in_cwd(
     cwd: str,
     env: dict[str, str],
 ) -> tuple[int, str, str]:
+    # Defensive: expand ``~`` so a tilde cwd never reaches the (shell-less)
+    # subprocess as a literal path. Covers git ops in _ensure_repo_on_target_branch
+    # plus workspace merge / uncommitted-check cwds. See _expand_repo.
+    cwd = _expand_repo(cwd)
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
