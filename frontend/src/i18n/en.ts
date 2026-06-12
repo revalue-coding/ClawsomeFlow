@@ -908,6 +908,15 @@ const en = {
       creating: "Creating…",
       cancelCreate: "Cancel creation",
       cancelling: "Cancelling…",
+      errors: {
+        nameRequired: "Agent Name is required.",
+        idRequired: "Profile ID is required.",
+        idFormat: "Profile ID must be lowercase letters and digits only ([a-z0-9]).",
+        idLength: "Profile ID must be 2–40 characters.",
+        idReserved: "That Profile ID is reserved and cannot be used.",
+        idDuplicate: "An agent with Profile ID \"{{id}}\" already exists. Pick a different ID.",
+        teamRequired: "Enter a name for the new team.",
+      },
       workPopup: {
         title: "Agent Build Progress",
         running:

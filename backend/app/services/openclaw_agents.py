@@ -1999,6 +1999,14 @@ def reindex_registered_agents(
 # ──────────────────────────────────────────────────────────────────────
 
 
+# Ids with an in-flight create. A duplicate / concurrent create of the same id
+# fails fast instead of racing the in-flight one — the two share one id-keyed
+# workspace, and the loser's rollback (``_safe_rmtree``) would otherwise wipe
+# it, taking the winner's agent down with it. The backend runs one event loop,
+# so a check-then-add with no await in between is race-free.
+_CREATE_IN_PROGRESS: set[str] = set()
+
+
 async def commit_agent(
     cmd: CommitInput,
     *,
@@ -2045,6 +2053,42 @@ async def commit_agent(
     aid = _validate_agent_id(cmd.id)
     if not cmd.name:
         raise OpenclawAgentError("name is required")
+
+    # Reserve the id for the whole create so a duplicate / concurrent request
+    # fails fast instead of racing into the shared, id-keyed workspace below —
+    # whose files the loser's rollback (``_safe_rmtree``) would otherwise wipe,
+    # taking the winner's agent with it. Check-then-add is race-free on the
+    # single event loop (no await between).
+    if aid in _CREATE_IN_PROGRESS:
+        raise AgentAlreadyExists(f"a create for {aid!r} is already in progress")
+    _CREATE_IN_PROGRESS.add(aid)
+    try:
+        return await _commit_agent_reserved(
+            cmd,
+            aid,
+            user=user,
+            team_id=team_id,
+            storage=storage,
+            config=cfg,
+            auth_seed_source_agent_id=auth_seed_source_agent_id,
+        )
+    finally:
+        _CREATE_IN_PROGRESS.discard(aid)
+
+
+async def _commit_agent_reserved(
+    cmd: CommitInput,
+    aid: str,
+    *,
+    user: str,
+    team_id: str | None,
+    storage: StorageBackend,
+    config: Config,
+    auth_seed_source_agent_id: str | None,
+) -> OpenclawAgent:
+    """Body of :func:`commit_agent`, run while *aid* is reserved in
+    ``_CREATE_IN_PROGRESS`` so duplicate creates can't race the side effects."""
+    cfg = config
     runtime_agent_dir = _runtime_agent_dir(agent_id=aid, config=cfg)
     resolved_team_id = _resolve_team_id_for_user(
         user=user,

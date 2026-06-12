@@ -893,6 +893,15 @@ const zh = {
       creating: "创建中…",
       cancelCreate: "取消创建",
       cancelling: "取消中…",
+      errors: {
+        nameRequired: "请填写 Agent 名称。",
+        idRequired: "请填写 Profile ID。",
+        idFormat: "Profile ID 只能包含小写字母和数字（[a-z0-9]）。",
+        idLength: "Profile ID 长度必须为 2–40 个字符。",
+        idReserved: "该 Profile ID 为保留名，不能使用。",
+        idDuplicate: "已存在 Profile ID 为「{{id}}」的 Agent，请换一个 ID。",
+        teamRequired: "请填写新团队的名称。",
+      },
       workPopup: {
         title: "Agent 创建进度",
         running:

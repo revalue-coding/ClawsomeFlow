@@ -397,6 +397,20 @@ def backfill_hermes_inference_config(
 _CREATE_LOCK = threading.Lock()
 _BOOTSTRAP_PROCS: dict[str, subprocess.Popen] = {}
 _CANCELLED_CREATES: set[str] = set()
+# One lock per agent id: serializes creates of the SAME id so a duplicate /
+# concurrent POST can't race past the existence check (TOCTOU) and corrupt the
+# winner. Distinct ids use distinct locks, so unrelated agents still create in
+# parallel. Guarded by _CREATE_LOCK for get-or-create.
+_CREATE_ID_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _create_id_lock(aid: str) -> threading.Lock:
+    with _CREATE_LOCK:
+        lock = _CREATE_ID_LOCKS.get(aid)
+        if lock is None:
+            lock = threading.Lock()
+            _CREATE_ID_LOCKS[aid] = lock
+        return lock
 
 
 def _is_create_cancelled(aid: str) -> bool:
@@ -502,11 +516,31 @@ def commit_agent(
     storage: StorageBackend | None = None,
     config: Config | None = None,
 ) -> HermesAgent:
-    """Create a Hermes profile + bootstrap self-definition + persist the row."""
+    """Create a Hermes profile + bootstrap self-definition + persist the row.
+
+    Creates of the same id are serialized by a per-id lock: a duplicate /
+    concurrent request (e.g. a double-submit) would otherwise both pass the
+    existence check below and race to ``hermes_create``; the loser's
+    IntegrityError rollback would then delete the WINNER's freshly-built
+    profile. We acquire the lock non-blocking so the loser fails fast with
+    AgentAlreadyExists instead of tying up a worker for the whole bootstrap.
+    """
     cfg = config or load_config()
     storage = storage or get_storage(cfg)
     aid = _validate_agent_id(cmd.id)
 
+    lock = _create_id_lock(aid)
+    if not lock.acquire(blocking=False):
+        raise AgentAlreadyExists(f"a create for {aid!r} is already in progress")
+    try:
+        return _commit_agent_locked(cmd, aid, user=user, storage=storage)
+    finally:
+        lock.release()
+
+
+def _commit_agent_locked(
+    cmd: CommitInput, aid: str, *, user: str, storage: StorageBackend
+) -> HermesAgent:
     if storage.hermes_get(aid) is not None:
         raise AgentAlreadyExists(f"hermes agent {aid!r} already exists")
     if aid in list_profile_names():
@@ -571,7 +605,18 @@ def commit_agent(
     try:
         return storage.hermes_create(row)
     except Exception:
-        # Roll back the freshly-created profile so we don't strand it.
+        # If a row already exists for this id (we lost a create race / hit a
+        # duplicate request — e.g. a UNIQUE-constraint IntegrityError), the
+        # profile belongs to the WINNER: never delete it, and surface a clean
+        # AgentAlreadyExists instead of a raw 500. Only roll back a profile we
+        # genuinely orphaned (no row exists).
+        existing = None
+        try:
+            existing = storage.hermes_get(aid)
+        except Exception:  # noqa: BLE001 — best-effort probe
+            existing = None
+        if existing is not None:
+            raise AgentAlreadyExists(f"hermes agent {aid!r} already exists")
         try:
             _run_hermes(["profile", "delete", aid, "-y"])
         except HermesAgentError:

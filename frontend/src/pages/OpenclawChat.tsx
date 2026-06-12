@@ -312,6 +312,10 @@ function AgentQuickActions({
   );
   const createRequestAbortRef = useRef<AbortController | null>(null);
   const createCancelRequestedRef = useRef(false);
+  // Guards against a double-submit firing two POST /openclaw/agents for the same
+  // id — which on the backend would race into one shared workspace and the
+  // loser's rollback could wipe the winner's files.
+  const createRequestInFlightRef = useRef(false);
   const [storeComingSoonOpen, setStoreComingSoonOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:store-coming-soon-open",
   );
@@ -573,6 +577,10 @@ function AgentQuickActions({
     const description = [responsibility, extra ? `Additional requirements: ${extra}` : ""]
       .filter(Boolean)
       .join("\n\n");
+    // Single-flight from here on (no await before this point sets it): a second
+    // click can't fire a duplicate create. Reset in the finally below.
+    if (createRequestInFlightRef.current) return;
+    createRequestInFlightRef.current = true;
     setCreateModalOpen(false);
     setCreateError(null);
     const abortController = new AbortController();
@@ -608,9 +616,23 @@ function AgentQuickActions({
       notifyOpenclawAgentsUpdated();
     } catch (e) {
       if (createCancelRequestedRef.current || isAbortError(e)) return;
+      // A user-input rejection (id already taken / invalid) belongs back IN the
+      // form, not buried in the progress popup — reopen it with the message.
+      if (
+        e instanceof ApiError &&
+        (e.code === "AGENT_ALREADY_EXISTS" || e.code === "INVALID_PAYLOAD")
+      ) {
+        setWorkPopupOpen(false);
+        resetWorkPopupDisplayState();
+        resetCreateCancelState();
+        setCreateError(`${e.code}: ${e.message}`);
+        setCreateModalOpen(true);
+        return;
+      }
       const err = e instanceof Error ? e.message : String(e);
       finishWorkPopup(false, err);
     } finally {
+      createRequestInFlightRef.current = false;
       if (createRequestAbortRef.current === abortController) {
         createRequestAbortRef.current = null;
       }
