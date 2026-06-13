@@ -176,6 +176,14 @@ function blankRow(): TaskRow {
 const EXISTING_OWNER_KINDS: OwnerKind[] = ["openclaw", "claude", "codex", "cursor", "hermes"];
 const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = ["claude", "codex", "cursor", "hermes"];
 
+// The LEADER's "existing" source only offers kinds that have a real persistent
+// management platform: OpenClaw + Hermes. claude/codex/cursor have no such
+// platform, and a leader can never reuse an in-flow temporary worker agent (it
+// may own only its summary task), so those kinds must be created via the "new"
+// (temporary) source instead. Worker tasks keep EXISTING_OWNER_KINDS — they CAN
+// pick an existing in-flow temporary agent of any kind (buildExistingOwnerOptions).
+const EXISTING_LEADER_KINDS: OwnerKind[] = ["openclaw", "hermes"];
+
 /** Detect whether the SPA is served to a non-loopback host. The native
  *  directory picker only works when backend and browser run on the same
  *  machine, so we surface a friendlier hint for remote access. */
@@ -1450,7 +1458,10 @@ export function FlowEditor() {
                       if (leaderKind === "openclaw") setLeaderKind("claude");
                     } else {
                       setLeaderIsTemporary(false);
-                      if (leaderKind === "cursor") {
+                      // Existing leader only supports the persistent platforms
+                      // (OpenClaw + Hermes); fall back from any temporary-only
+                      // kind (claude/codex/cursor) to OpenClaw.
+                      if (!EXISTING_LEADER_KINDS.includes(leaderKind)) {
                         setLeaderKind("openclaw");
                         setLeaderRepo("");
                         setLeaderTargetBranch(DEFAULT_TARGET_BRANCH);
@@ -1477,7 +1488,7 @@ export function FlowEditor() {
                     }
                   }}
                 >
-                  {(leaderIsTemporary ? NEW_OWNER_KINDS : EXISTING_OWNER_KINDS).map((k) => (
+                  {(leaderIsTemporary ? NEW_OWNER_KINDS : EXISTING_LEADER_KINDS).map((k) => (
                     <option key={k} value={k}>
                       {ownerKindLabel(k, (key) => t(key))}
                     </option>
