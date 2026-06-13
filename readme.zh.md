@@ -1,14 +1,12 @@
 <div align="center">
 
-<h1>⚡ ClawsomeFlow ⚡</h1>
+<p>
+  <img src="./docs/assets/title.png" alt="ClawsomeFlow" width="960" />
+</p>
 
 <p>
   🌐 <a href="https://clawsomeflow.com"><b>clawsomeflow.com</b></a> ·
   📖 <a href="https://clawsomeflow.com/docs/"><b>Docs</b></a>
-</p>
-
-<p>
-  <img src="./docs/assets/readme-hero.svg" alt="Make your Multi-agent Workflow Clawsome" width="960" />
 </p>
 
 <p>
