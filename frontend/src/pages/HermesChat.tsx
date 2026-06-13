@@ -475,14 +475,28 @@ function Picker() {
   // poll + list-presence reconcile effect.
 
   const grouped = useMemo(() => {
-    const m = new Map<string, HermesAgentSummary[]>();
+    const UNGROUPED = "__ungrouped__";
+    const m = new Map<string, { label: string; list: HermesAgentSummary[] }>();
     for (const a of agents) {
-      const key = a.teamName || t("hermes.ungrouped");
-      const arr = m.get(key) ?? [];
-      arr.push(a);
-      m.set(key, arr);
+      const key = a.teamId || UNGROUPED;
+      const label = a.teamName || t("hermes.ungrouped");
+      const entry = m.get(key) ?? { label, list: [] };
+      entry.list.push(a);
+      m.set(key, entry);
     }
-    return Array.from(m.entries());
+    // Mirror OpenClaw: "ungrouped" first, then teams alphabetically by name,
+    // agents within a group alphabetically by name.
+    return Array.from(m.entries())
+      .sort(([ka, va], [kb, vb]) => {
+        if (ka === UNGROUPED && kb !== UNGROUPED) return -1;
+        if (ka !== UNGROUPED && kb === UNGROUPED) return 1;
+        return va.label.localeCompare(vb.label);
+      })
+      .map(([key, entry]) => ({
+        key,
+        label: entry.label,
+        list: entry.list.slice().sort((a, b) => a.name.localeCompare(b.name)),
+      }));
   }, [agents, t]);
 
   return (
@@ -520,10 +534,10 @@ function Picker() {
         <EmptyState title={t("hermes.title")} hint={t("hermes.listEmpty")} />
       ) : viewMode === "card" ? (
         <div className="space-y-5">
-          {grouped.map(([team, list]) => (
-            <div key={team} className="space-y-3">
+          {grouped.map(({ key, label, list }) => (
+            <div key={key} className="space-y-3">
               <div className="inline-flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700">
-                {t("hermes.team")}: {team}
+                {t("hermes.team")}: {label}
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {list.map((a) => (

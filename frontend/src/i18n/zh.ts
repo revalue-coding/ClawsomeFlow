@@ -1116,6 +1116,7 @@ const zh = {
       extraPlaceholder: "例如：语气风格、偏好工具、协作方式等",
       invalidAgentIdNoSpaces: "Agent ID 不能包含空格。",
       invalidAgentIdNoChinese: "Agent ID 不能包含中文字符。",
+      idDuplicate: 'Agent ID “{{id}}” 已存在，请换一个 ID。',
       invalidAgentNameNoSpaces: "Agent name 不能包含空格。",
       submit: "提交创建",
     },

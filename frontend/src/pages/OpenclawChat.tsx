@@ -610,6 +610,20 @@ function AgentQuickActions({
       setCreateError(t("assistant.createModal.invalidAgentIdNoChinese"));
       return;
     }
+    // Reject a duplicate id on the spot \u2014 keep the modal open and tell the user
+    // why, instead of closing it, firing the long-running create, and only
+    // surfacing the collision after the backend round-trip. (The backend's
+    // AGENT_ALREADY_EXISTS check below stays as the authoritative guard against
+    // a race.)
+    try {
+      const existing = await api.listOpenclawAgents();
+      if (existing.items.some((a) => a.id === agentId)) {
+        setCreateError(t("assistant.createModal.idDuplicate", { id: agentId }));
+        return;
+      }
+    } catch {
+      /* list unavailable \u2014 fall through; backend still rejects duplicates */
+    }
     let teamId: string | null = null;
     try {
       teamId = await resolveCreateTeamId();

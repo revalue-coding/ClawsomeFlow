@@ -596,6 +596,30 @@ def test_list_teams_excludes_orphaned_teams(fake_openclaw_home: Path) -> None:
     assert svc.list_teams(user="alice", storage=storage) == []
 
 
+def test_list_teams_counts_hermes_membership(fake_openclaw_home: Path) -> None:
+    """A team holding only Hermes agents is shared (OpenClaw + Hermes) and must
+    still be listed — else a freshly-assigned Hermes agent falls back to
+    'ungrouped' and its new group never appears (issue: change-team no-op)."""
+    from app.models import HermesAgent
+    from app.storage import get_storage
+
+    storage = get_storage()
+    team = svc.create_team("纯Hermes团队", user="alice", storage=storage)
+    # No OpenClaw agent references it, only a Hermes agent does.
+    assert svc.list_teams(user="alice", storage=storage) == []
+    storage.hermes_create(
+        HermesAgent(
+            id="hteam",
+            name="H Member",
+            profile_root="x",
+            team_id=team.id,
+            created_by_user="alice",
+        )
+    )
+    listed = svc.list_teams(user="alice", storage=storage)
+    assert [item.id for item in listed] == [team.id]
+
+
 @pytest.mark.asyncio
 async def test_update_agent_can_change_team(fake_openclaw_home: Path) -> None:
     if not _has_git():

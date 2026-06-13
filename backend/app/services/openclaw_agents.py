@@ -208,9 +208,19 @@ def list_teams(
     teams = storage.openclaw_team_list(owner_user=user)
     if not teams:
         return []
+    # OpenclawTeam is a ClawsomeFlow grouping shared across agent platforms
+    # (OpenClaw + Hermes), so a team is "active" if *any* platform's agent
+    # references it. Counting only OpenClaw agents here would wrongly hide a
+    # team that holds only Hermes agents — making a freshly-assigned Hermes
+    # agent fall back to "ungrouped" and its new group never appear.
     active_team_ids = {
         row.team_id
         for row in storage.openclaw_list(owner_user=user)
+        if isinstance(row.team_id, str) and row.team_id.strip()
+    }
+    active_team_ids |= {
+        row.team_id
+        for row in storage.hermes_list(owner_user=user)
         if isinstance(row.team_id, str) and row.team_id.strip()
     }
     return [team for team in teams if team.id in active_team_ids]

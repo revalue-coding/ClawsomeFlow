@@ -1135,6 +1135,7 @@ const en = {
       extraPlaceholder: "e.g. tone, preferred tools, collaboration style",
       invalidAgentIdNoSpaces: "Agent ID cannot contain spaces.",
       invalidAgentIdNoChinese: "Agent ID cannot contain Chinese characters.",
+      idDuplicate: 'Agent ID "{{id}}" already exists. Please choose a different ID.',
       invalidAgentNameNoSpaces: "Agent name cannot contain spaces.",
       submit: "Submit creation",
     },

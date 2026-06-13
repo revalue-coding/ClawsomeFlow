@@ -23,7 +23,21 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 
 ### Added
 ### Changed
+- **Hermes picker grouping is now keyed by `teamId` and stably ordered**
+  (`frontend/src/pages/HermesChat.tsx`) — avoids accidental group collisions when
+  team display names match, keeps "ungrouped" first, and sorts groups/agents
+  alphabetically for a deterministic list view.
 ### Fixed
+- **Cross-platform team visibility in OpenClaw team APIs**  
+  (`backend/app/services/openclaw_agents.py`, `backend/tests/test_openclaw_agents_service.py`) —
+  `list_teams` now treats OpenClaw teams as shared across OpenClaw/Hermes
+  membership, so teams referenced only by Hermes agents are still returned
+  (prevents "change team" appearing to no-op back to ungrouped).
+- **OpenClaw create modal duplicate-id UX**  
+  (`frontend/src/pages/OpenclawChat.tsx`, `frontend/src/i18n/{en,zh}.ts`) —
+  duplicate Agent IDs are detected and shown inline before dispatching the
+  long-running create request; backend `AGENT_ALREADY_EXISTS` remains the
+  authoritative race-safe guard.
 ### Removed
 ### Deprecated
 ### Security
