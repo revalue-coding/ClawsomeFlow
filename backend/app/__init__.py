@@ -1,3 +1,3 @@
 """ClawsomeFlow — vertical agent workflow orchestration platform."""
 
-__version__ = "0.1.13b13"
+__version__ = "0.1.13b14"
