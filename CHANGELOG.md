@@ -7,6 +7,7 @@
 
 
 
+
 # Changelog
 
 All notable changes to **ClawsomeFlow** are documented here.
@@ -21,6 +22,15 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 ## [Unreleased]
 
 ### Added
+### Changed
+### Fixed
+### Removed
+### Deprecated
+### Security
+
+## [0.1.13b15] — 2026-06-13
+
+
 ### Changed
 - **Hermes create/chat completion is now disconnect-safe**
   (`backend/app/api/hermes_agents.py`) — long-running executor work is wrapped in
@@ -39,9 +49,6 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
   against server history; if the last turn is still a user message (detached
   stream), the UI enters bounded recovery polling and adopts the real assistant
   reply once persisted server-side.
-### Removed
-### Deprecated
-### Security
 
 ## [0.1.13b14] — 2026-06-13
 
@@ -1273,7 +1280,7 @@ Initial alpha release. Brings the full MVP architecture online:
   OpenClaw workspace; `POST /api/flows/decompose` async pipeline.
 - 379 backend tests, frontend tsc + vite build clean.
 
-[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b14...HEAD
+[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b15...HEAD
 [0.1.10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.10
 [0.1.0]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.0
 [0.1.1b1]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.1b1
@@ -1323,3 +1330,4 @@ Initial alpha release. Brings the full MVP architecture online:
 [0.1.13b12]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b12
 [0.1.13b13]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b13
 [0.1.13b14]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b14
+[0.1.13b15]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b15
