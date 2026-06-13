@@ -22,7 +22,23 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 
 ### Added
 ### Changed
+- **Hermes create/chat completion is now disconnect-safe**
+  (`backend/app/api/hermes_agents.py`) — long-running executor work is wrapped in
+  detached, shielded tasks so a client disconnect no longer cancels the event-loop
+  completion path. Operation status transitions and assistant-turn persistence now
+  still land even if the request stream is interrupted.
+- **Self-merge lock command quoting was flattened for agent safety**
+  (`backend/app/repo_merge_lock.py`) — replaced nested `bash -c` quote pyramids
+  with single-level compound commands (`flock` fd-lock branch + mkdir-spinlock
+  fallback branch). This keeps merge-message quoting readable/stable for LLM
+  agents while preserving the same lock and git semantics.
 ### Fixed
+- **OpenClaw/Hermes chat no longer get stuck with stale empty assistant bubbles**
+  (`frontend/src/lib/chatHistory.ts`, `frontend/src/pages/OpenclawChat.tsx`,
+  `frontend/src/pages/HermesChat.tsx`) — on mount, local transcript is reconciled
+  against server history; if the last turn is still a user message (detached
+  stream), the UI enters bounded recovery polling and adopts the real assistant
+  reply once persisted server-side.
 ### Removed
 ### Deprecated
 ### Security
