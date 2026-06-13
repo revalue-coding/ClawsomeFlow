@@ -5,6 +5,7 @@
 
 
 
+
 # Changelog
 
 All notable changes to **ClawsomeFlow** are documented here.
@@ -19,7 +20,47 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 ## [Unreleased]
 
 ### Added
+- **Long-running-operation status recovery** so create/install UIs survive a page
+  refresh and tab close+reopen (previously only `RunDetail` did). A new in-memory
+  operation registry (`backend/app/operations.py`) records `running/succeeded/failed`
+  and is queried on mount via `GET /api/operations/{op_id}` (4-layer recovery:
+  registry → entity-exists → in-flight → not_found) and streamed live over
+  `/ws/op/{op_id}` (reuses the existing `EventBroadcaster`). Wired into Hermes /
+  OpenClaw agent create, OpenClaw import (batch op), and Agent Store load. Frontend
+  adds `useLocalStorageBackedState`, `openOpStream`, `getOperationStatus`, and a
+  shared `useOpRecovery` hook; the Hermes create flow's 3s list-poll + list-presence
+  reconcile are removed in favour of it, and OpenClaw create — which previously had
+  no recovery and got stuck "running" on remount — now recovers too. A create/install
+  that **fails** while the page is unmounted now surfaces its error on return instead
+  of spinning forever.
+- **Hermes direct-chat transcript is persisted to `localStorage`** (mirrors OpenClaw),
+  so a partial streaming reply survives a refresh / tab close (the dead SSE stream
+  itself is not resumable — partial text is preserved, then server history backfills).
+
 ### Changed
+- **Same agent id used by two different platforms in one Flow is now an explicit
+  error**, not a silent merge. The backend validator (`backend/app/validators/flow.py`)
+  returns `DUPLICATE_AGENT_ID` with a bilingual message naming both platforms, and the
+  Flow editor (`frontend/src/pages/FlowEditor.tsx`) — plus log-portal's ported
+  `validateRows` — now flag it inline instead of `rowsToSpec` collapsing the two rows
+  into one agent by id.
+### Fixed
+- **Hermes create falsely reporting "Profile ID already exists" for a brand-new id.**
+  `hermes profile create` lands the profile on disk before the (minutes-long) bootstrap,
+  and the create page polled `list_agents` meanwhile; the reconcile path adopted the
+  half-created profile into a DB row, which the create's own `hermes_create` then
+  collided with → false `AGENT_ALREADY_EXISTS` (and a nameless card). The reconcile
+  adopt-loop now skips ids with a create in flight (`_CREATES_IN_FLIGHT`).
+- **`FlowEditor.tsx` contained a raw NUL byte** in the temp-agent separator constant,
+  making tooling treat the file as binary; replaced with a `\u001f` escape (behavior
+  identical — still a control char that can't appear in an id/repo/branch).
+### Removed
+### Deprecated
+### Security
+
+## [0.1.13b13] — 2026-06-12
+
+
 ### Fixed
 - **Removed the extra "clean baseline required" precheck for self-merge**
   (`backend/app/integrations/clawteam_cli.py`, `backend/tests/test_clawteam_cli.py`) —
@@ -43,9 +84,6 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
   `AGENT_ALREADY_EXISTS` / `INVALID_PAYLOAD` reopens the form with the message
   instead of burying it in the progress popup. Derived agent ids also keep ASCII
   `[a-z0-9]` only, so a Chinese display name no longer yields an invalid id.
-### Removed
-### Deprecated
-### Security
 
 ## [0.1.13b12] — 2026-06-12
 
@@ -1211,7 +1249,7 @@ Initial alpha release. Brings the full MVP architecture online:
   OpenClaw workspace; `POST /api/flows/decompose` async pipeline.
 - 379 backend tests, frontend tsc + vite build clean.
 
-[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b12...HEAD
+[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b13...HEAD
 [0.1.10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.10
 [0.1.0]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.0
 [0.1.1b1]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.1b1
@@ -1259,3 +1297,4 @@ Initial alpha release. Brings the full MVP architecture online:
 [0.1.13b10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b10
 [0.1.13b11]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b11
 [0.1.13b12]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b12
+[0.1.13b13]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b13
