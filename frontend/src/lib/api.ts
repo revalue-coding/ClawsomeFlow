@@ -275,6 +275,15 @@ export interface RunEventView {
   payload: Record<string, unknown>;
 }
 
+export interface OperationStatus {
+  opId: string;
+  state: "running" | "succeeded" | "failed" | "not_found";
+  kind: string;
+  detail: string;
+  result: Record<string, unknown>;
+  source: string;
+}
+
 export interface RunScheduleItem {
   flowId: string;
   inputs: Record<string, unknown>;
@@ -860,6 +869,7 @@ export const api = {
     agentIds?: string[];
     importAll?: boolean;
     teamId?: string | null;
+    batchId?: string;
   }) =>
     request<{
       requestedCount: number;
@@ -1059,6 +1069,13 @@ export const api = {
   ) => request<HermesAgentDetail>("POST", "/api/hermes/agents", payload, init),
   cancelHermesAgentCreate: (id: string) =>
     request<void>("POST", `/api/hermes/agents/${id}/cancel-create`),
+  getOperationStatus: (opId: string) =>
+    request<OperationStatus>(
+      "GET",
+      `/api/operations/${encodeURIComponent(opId)}`,
+      undefined,
+      { cache: "no-store" },
+    ),
   patchHermesAgent: (
     id: string,
     payload: { name?: string; description?: string; teamId?: string },

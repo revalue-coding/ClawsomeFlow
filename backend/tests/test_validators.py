@@ -366,6 +366,28 @@ class TestUniqueness:
             validate_flow_spec(spec)
         assert exc.value.code == ERROR_DUPLICATE_AGENT_ID
 
+    def test_duplicate_agent_id_cross_platform(self) -> None:
+        # An OpenClaw "alice" and a Hermes "alice" are genuinely distinct agents
+        # but still collide on FlowAgent.id (which is global within a Flow). The
+        # error must call out the cross-platform clash, not just "appears twice".
+        spec = FlowSpec(
+            agents=[
+                FlowAgent(id="alice", kind=AgentKind.openclaw, is_leader=True),
+                FlowAgent(id="alice", kind=AgentKind.hermes, repo="/r"),
+            ],
+            tasks=[
+                FlowTask(id="t1", owner_agent_id="alice", subject="x", is_leader_summary=True)
+            ],
+        )
+        with pytest.raises(FlowValidationError) as exc:
+            validate_flow_spec(spec)
+        assert exc.value.code == ERROR_DUPLICATE_AGENT_ID
+        assert exc.value.details.get("kinds") == ["openclaw", "hermes"]
+        # message names both platforms (English + Chinese halves present)
+        assert "openclaw" in exc.value.message and "hermes" in exc.value.message
+        assert "platforms" in exc.value.message  # English half
+        assert "跨平台" in exc.value.message  # Chinese half
+
     def test_duplicate_task_id(self) -> None:
         spec = FlowSpec(
             agents=[FlowAgent(id="a", kind=AgentKind.claude, repo="/r", is_leader=True)],

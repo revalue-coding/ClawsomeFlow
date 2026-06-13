@@ -20,6 +20,7 @@ from app.api import (
     flows,
     hermes_agents,
     openclaw_agents,
+    operations,
     profiles,
     runs,
     system,
@@ -38,6 +39,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(runs.router, prefix="/api")
     app.include_router(profiles.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
+    app.include_router(operations.router, prefix="/api")
     app.include_router(task_decompose.public_router, prefix="/api")
     app.include_router(task_decompose.internal_router, prefix="/api")
     app.include_router(ws.router)  # /ws/{run_id} (no /api prefix)

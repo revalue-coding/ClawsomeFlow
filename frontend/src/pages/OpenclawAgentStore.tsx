@@ -14,6 +14,7 @@ import { Card, EmptyState, ErrorBox, Loading, Modal } from "@/components/ui";
 import { StoreIcon } from "@/components/icons";
 import { cn } from "@/lib/cn";
 import { useSessionBackedModalFlag } from "@/lib/sessionState";
+import { useOpRecovery } from "@/lib/useOpRecovery";
 
 type ActionPhase = "join" | "purchase" | "load";
 const STORE_TOKEN_KEY = "csflow-agent-store-token";
@@ -36,6 +37,23 @@ export function OpenclawAgentStore() {
   const [storeToken, setStoreToken] = useState("");
   const [account, setAccount] = useState<AgentStoreAccount | null>(null);
   const [pendingAcquire, setPendingAcquire] = useState<AgentStoreCatalogItem | null>(null);
+
+  // Recover an in-flight "load to local" install across refresh / close+reopen
+  // (the per-listing spinner + outcome are otherwise in-memory only). The
+  // pointer's agentId field carries the listingId.
+  const { track: trackLoadOp, clear: clearLoadOp } = useOpRecovery("openclaw-store:load:op", {
+    onRunning: (p) => setRunning(p.agentId, "load"),
+    onSucceeded: (p, result) => {
+      setRunning(p.agentId, null);
+      const count = Array.isArray(result.loadedAgentIds) ? result.loadedAgentIds.length : 0;
+      setNotice(t("store.notice.loadRecovered", { count }));
+      if (storeToken) void loadOwned(storeToken);
+    },
+    onFailed: (p, detail) => {
+      setRunning(p.agentId, null);
+      setActionError(detail);
+    },
+  });
 
   const [loginOpen, setLoginOpen] = useSessionBackedModalFlag("agent-store:login-open");
   const [registerOpen, setRegisterOpen] = useSessionBackedModalFlag("agent-store:register-open");
@@ -171,11 +189,14 @@ export function OpenclawAgentStore() {
       return;
     }
     setRunning(item.listingId, "load");
+    trackLoadOp({ opId: `store_load:${item.listingId}`, agentId: item.listingId });
     try {
       const out = await api.loadAgentStoreListing(item.listingId, storeToken);
+      clearLoadOp();
       setNotice(t("store.notice.loadSuccess", { title: item.title, count: out.loadedAgentIds.length }));
       await loadOwned(storeToken);
     } catch (e) {
+      clearLoadOp();
       const text = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
       setActionError(text);
     } finally {

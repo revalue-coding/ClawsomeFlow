@@ -397,6 +397,12 @@ def backfill_hermes_inference_config(
 _CREATE_LOCK = threading.Lock()
 _BOOTSTRAP_PROCS: dict[str, subprocess.Popen] = {}
 _CANCELLED_CREATES: set[str] = set()
+# Ids whose create is currently between `hermes profile create` (profile lands
+# on disk) and the final `storage.hermes_create` (row committed). The list /
+# reconcile path must NOT adopt these on-disk-but-not-yet-rowed profiles, or the
+# adopt inserts a row the create then collides with → false "already exists".
+# Guarded by _CREATE_LOCK.
+_CREATES_IN_FLIGHT: set[str] = set()
 # One lock per agent id: serializes creates of the SAME id so a duplicate /
 # concurrent POST can't race past the existence check (TOCTOU) and corrupt the
 # winner. Distinct ids use distinct locks, so unrelated agents still create in
@@ -416,6 +422,17 @@ def _create_id_lock(aid: str) -> threading.Lock:
 def _is_create_cancelled(aid: str) -> bool:
     with _CREATE_LOCK:
         return aid in _CANCELLED_CREATES
+
+
+def is_create_in_flight(aid: str) -> bool:
+    """True while a create for *aid* is between profile-create and row-commit.
+
+    Used by the operation-status recovery layer (``GET /api/operations``) to
+    report ``running`` when the registry entry was missed/evicted. Hermes holds
+    this across the WHOLE create (incl. bootstrap), so it is accurate here.
+    """
+    with _CREATE_LOCK:
+        return aid in _CREATES_IN_FLIGHT
 
 
 def _run_bootstrap(aid: str, args: list[str], *, cwd: str, timeout: float) -> int:
@@ -549,79 +566,91 @@ def _commit_agent_locked(
         )
 
     # Fresh attempt: clear any stale cancel flag from a previous create of the
-    # same id (the user may retry an id whose earlier create they cancelled).
+    # same id (the user may retry an id whose earlier create they cancelled), and
+    # publish this id as in-flight. The in-flight marker stops the list/reconcile
+    # path (list_agents → _reconcile_managed_profiles) from *adopting* the
+    # profile we are about to write to disk before our own row is committed: a
+    # poll landing between `hermes profile create` below and the final
+    # `storage.hermes_create` would otherwise insert a (nameless) DB row, and our
+    # own create would then collide with it and raise a false "already exists".
     with _CREATE_LOCK:
         _CANCELLED_CREATES.discard(aid)
-
-    def _abort_if_cancelled() -> None:
-        if _is_create_cancelled(aid):
-            _rollback_create(aid, storage=storage)
-            with _CREATE_LOCK:
-                _CANCELLED_CREATES.discard(aid)
-            raise AgentCreateCancelled(f"creation of {aid!r} cancelled by user")
-
-    description = (cmd.description or "").strip()
-    create_args = ["profile", "create", aid]
-    if description:
-        create_args += ["--description", description]
-    rc, out, err = _run_hermes(create_args)
-    if rc != 0:
-        raise ProfileOpFailed(
-            f"`hermes profile create {aid}` failed: {(_strip_ansi(err) or _strip_ansi(out)).strip()}"
-        )
-
-    profile_root = str(hermes_profile_root(aid))
-
-    # Seed model + API keys so the new profile can actually run (bootstrap +
-    # later chat/task dispatch all go through `hermes -p <id>` and need them).
-    _seed_profile_inference_config(aid)
-
-    _abort_if_cancelled()  # cancelled during profile create → roll back now
-
-    # Bootstrap self-definition (best-effort: keep the agent even if it fails,
-    # but honour a cancel that lands while the up-to-10-min `hermes -z` runs).
-    if not cmd.skip_bootstrap:
-        try:
-            _run_bootstrap(
-                aid,
-                ["-p", aid, "--yolo", "-z", _bootstrap_prompt(cmd.name, description)],
-                cwd=profile_root,
-                timeout=_BOOTSTRAP_TIMEOUT_SEC,
-            )
-        except HermesAgentError as exc:
-            logger.warning("hermes_bootstrap_error", agent_id=aid, error=str(exc))
-
-    _abort_if_cancelled()  # cancelled during bootstrap → roll back, don't persist
-
-    row = HermesAgent(
-        id=aid,
-        name=cmd.name.strip() or aid,
-        description=description,
-        team_id=cmd.team_id or "",
-        profile_root=profile_root,
-        created_by_user=user,
-        nl_prompt=cmd.nl_prompt or description,
-    )
+        _CREATES_IN_FLIGHT.add(aid)
     try:
-        return storage.hermes_create(row)
-    except Exception:
-        # If a row already exists for this id (we lost a create race / hit a
-        # duplicate request — e.g. a UNIQUE-constraint IntegrityError), the
-        # profile belongs to the WINNER: never delete it, and surface a clean
-        # AgentAlreadyExists instead of a raw 500. Only roll back a profile we
-        # genuinely orphaned (no row exists).
-        existing = None
+
+        def _abort_if_cancelled() -> None:
+            if _is_create_cancelled(aid):
+                _rollback_create(aid, storage=storage)
+                with _CREATE_LOCK:
+                    _CANCELLED_CREATES.discard(aid)
+                raise AgentCreateCancelled(f"creation of {aid!r} cancelled by user")
+
+        description = (cmd.description or "").strip()
+        create_args = ["profile", "create", aid]
+        if description:
+            create_args += ["--description", description]
+        rc, out, err = _run_hermes(create_args)
+        if rc != 0:
+            raise ProfileOpFailed(
+                f"`hermes profile create {aid}` failed: "
+                f"{(_strip_ansi(err) or _strip_ansi(out)).strip()}"
+            )
+
+        profile_root = str(hermes_profile_root(aid))
+
+        # Seed model + API keys so the new profile can actually run (bootstrap +
+        # later chat/task dispatch all go through `hermes -p <id>` and need them).
+        _seed_profile_inference_config(aid)
+
+        _abort_if_cancelled()  # cancelled during profile create → roll back now
+
+        # Bootstrap self-definition (best-effort: keep the agent even if it fails,
+        # but honour a cancel that lands while the up-to-10-min `hermes -z` runs).
+        if not cmd.skip_bootstrap:
+            try:
+                _run_bootstrap(
+                    aid,
+                    ["-p", aid, "--yolo", "-z", _bootstrap_prompt(cmd.name, description)],
+                    cwd=profile_root,
+                    timeout=_BOOTSTRAP_TIMEOUT_SEC,
+                )
+            except HermesAgentError as exc:
+                logger.warning("hermes_bootstrap_error", agent_id=aid, error=str(exc))
+
+        _abort_if_cancelled()  # cancelled during bootstrap → roll back, don't persist
+
+        row = HermesAgent(
+            id=aid,
+            name=cmd.name.strip() or aid,
+            description=description,
+            team_id=cmd.team_id or "",
+            profile_root=profile_root,
+            created_by_user=user,
+            nl_prompt=cmd.nl_prompt or description,
+        )
         try:
-            existing = storage.hermes_get(aid)
-        except Exception:  # noqa: BLE001 — best-effort probe
+            return storage.hermes_create(row)
+        except Exception:
+            # If a row already exists for this id (we lost a create race / hit a
+            # duplicate request — e.g. a UNIQUE-constraint IntegrityError), the
+            # profile belongs to the WINNER: never delete it, and surface a clean
+            # AgentAlreadyExists instead of a raw 500. Only roll back a profile we
+            # genuinely orphaned (no row exists).
             existing = None
-        if existing is not None:
-            raise AgentAlreadyExists(f"hermes agent {aid!r} already exists")
-        try:
-            _run_hermes(["profile", "delete", aid, "-y"])
-        except HermesAgentError:
-            pass
-        raise
+            try:
+                existing = storage.hermes_get(aid)
+            except Exception:  # noqa: BLE001 — best-effort probe
+                existing = None
+            if existing is not None:
+                raise AgentAlreadyExists(f"hermes agent {aid!r} already exists")
+            try:
+                _run_hermes(["profile", "delete", aid, "-y"])
+            except HermesAgentError:
+                pass
+            raise
+    finally:
+        with _CREATE_LOCK:
+            _CREATES_IN_FLIGHT.discard(aid)
 
 
 def claim_profile(
@@ -720,9 +749,14 @@ def _reconcile_managed_profiles(
     if not query_ok:
         return  # hermes unavailable — trust the DB as-is, do not mutate
     on_disk_set = set(on_disk)
+    # Never adopt a profile whose create is still in flight: its row will be
+    # committed by the create itself, and adopting here would make that create
+    # collide with our row → false "already exists" (the create races bug).
+    with _CREATE_LOCK:
+        in_flight = set(_CREATES_IN_FLIGHT)
     managed = {r.id: r for r in storage.hermes_list(owner_user=user)}
     for name in on_disk:  # adopt newcomers
-        if name not in managed:
+        if name not in managed and name not in in_flight:
             try:
                 # Reuse the names we already fetched and skip the per-profile
                 # `hermes profile describe` so adoption adds no extra subprocess
@@ -1257,6 +1291,7 @@ __all__ = [
     "ProfileOpFailed",
     "AgentCreateCancelled",
     "cancel_create_agent",
+    "is_create_in_flight",
     "PROBE_FAST",
     "PROBE_FULL",
     "hermes_home",

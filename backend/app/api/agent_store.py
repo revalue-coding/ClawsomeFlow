@@ -13,6 +13,7 @@ from app.api.errors import ApiError
 from app.config import load_config
 from app.integrations.github_store_repo import StoreListingType
 from app.models import iso_utc
+from app.operations import get_op_registry
 from app.services import agent_store as svc
 from app.storage import StorageBackend, get_storage
 
@@ -338,6 +339,9 @@ async def load_store_listing_to_local(
     store_token: StoreTokenDep,
 ) -> StoreLoadResponse:
     token = _require_store_token(store_token)
+    op_id = f"store_load:{listing_id}"
+    reg = get_op_registry()
+    reg.start(op_id=op_id, user=user, kind="store_load")
     try:
         out = await svc.load_owned_listing_to_local(
             listing_id,
@@ -347,7 +351,9 @@ async def load_store_listing_to_local(
             config=load_config(),
         )
     except svc.AgentStoreError as exc:
+        reg.fail(op_id, detail=f"{exc.code}: {exc.message}")
         _raise_store_error(exc)
+    reg.succeed(op_id, result={"loadedAgentIds": out.loaded_agent_ids, "teamId": out.team_id})
     return StoreLoadResponse(
         listing_id=out.listing_id,
         listing_type=out.listing_type.value,

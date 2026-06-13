@@ -32,14 +32,14 @@ Concurrency:
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
-from datetime import datetime, timezone
 import json
 import os
 import shutil
 import socket
 import subprocess
+from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -49,7 +49,6 @@ from urllib.request import Request, urlopen
 from app import paths
 from app.config import Config, load_config
 from app.integrations import openclaw_json as oj
-from app.integrations.openclaw_cli import resolve_openclaw_executable
 from app.integrations.openclaw_agent_source import (
     AGENTS_USER_CUSTOM_SECTION_END,
     AGENTS_USER_CUSTOM_SECTION_START,
@@ -57,6 +56,7 @@ from app.integrations.openclaw_agent_source import (
     deploy_common_agent_workspace,
     load_common_rules_text,
 )
+from app.integrations.openclaw_cli import resolve_openclaw_executable
 from app.integrations.openclaw_install import ensure_runtime_timeout_defaults
 from app.integrations.openclaw_skills import (
     SkillInstaller,
@@ -2007,6 +2007,19 @@ def reindex_registered_agents(
 _CREATE_IN_PROGRESS: set[str] = set()
 
 
+def is_create_in_flight(aid: str) -> bool:
+    """True while a create for *aid* is registering side effects.
+
+    Used by the operation-status recovery layer (``GET /api/operations``).
+    NOTE: this set is held only across ``commit_agent``'s registration, NOT the
+    subsequent bootstrap chat (which the API handler runs after commit_agent
+    returns) — so it under-reports during bootstrap. The op registry is the
+    authoritative ``running`` source; this is a restart-only fallback. Read on
+    the event loop only (the set is mutated loop-side without a lock).
+    """
+    return aid in _CREATE_IN_PROGRESS
+
+
 async def commit_agent(
     cmd: CommitInput,
     *,
@@ -2139,6 +2152,17 @@ async def _commit_agent_reserved(
     # Critical section: openclaw.json edit + DB insert.
     # We DON'T hold the json lock during DB write (DB is independent),
     # but if either step fails we roll back the other.
+    #
+    # INVARIANT — do NOT introduce an `await` between append_managed_agent()
+    # below and openclaw_create() further down. reindex_registered_agents()
+    # (run by a concurrent list_agents/get_agent) ADOPTS any openclaw.json entry
+    # that has no DB row yet. The entry is visible the instant append returns; if
+    # the event loop could yield before the row is committed, that reconcile
+    # would insert a row our own openclaw_create then collides with — the exact
+    # create-vs-reconcile race that bit Hermes (see hermes_agents._CREATES_IN_
+    # FLIGHT). Keeping this stretch await-free makes it atomic on the single
+    # loop. If a future change must await here, add an in-flight-adopt guard
+    # mirroring the Hermes fix.
     try:
         await oj.append_managed_agent(entry, config=cfg)
     except oj.OpenclawJsonError as exc:
@@ -2957,6 +2981,7 @@ __all__ = [
     "UpdateInput",
     "create_team",
     "commit_agent",
+    "is_create_in_flight",
     "delete_agent",
     "get_team",
     "get_agent",

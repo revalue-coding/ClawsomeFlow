@@ -146,6 +146,47 @@ def test_commit_agent_fails_fast_when_create_in_progress(
     assert calls == []  # fail-fast: nothing touched the CLI
 
 
+def test_reconcile_skips_in_flight_create(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A list/reconcile poll landing mid-bootstrap must NOT adopt the profile
+    whose create is still in flight.
+
+    Regression for the "已存在 Profile ID 为「math」的 Agent" bug on a brand-new
+    id: `hermes profile create` lands the profile on disk *before* the long
+    bootstrap, and the frontend polls `list_agents` every few seconds during the
+    create. Without the in-flight guard, that poll's reconcile adopts the
+    half-created profile into a (nameless) DB row, and the create's own
+    `hermes_create` then collides with it → false AgentAlreadyExists.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    # Pre-check (list_profile_names) sees nothing → create proceeds; the reconcile
+    # path (list_profile_names_checked) sees the profile on disk post-`create`.
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (True, ["math"]))
+    storage = get_storage()
+
+    # Simulate the frontend poll firing DURING bootstrap: list_agents runs the
+    # reconcile while "math" is still in flight.
+    def boot_then_poll(_aid, _args, **_kw):  # noqa: ANN001, ANN202
+        svc.list_agents(user="alice", storage=storage)
+        return 0
+
+    monkeypatch.setattr(svc, "_run_bootstrap", boot_then_poll)
+
+    row = svc.commit_agent(
+        svc.CommitInput(id="math", name="Math"), user="alice", storage=storage
+    )
+    assert row.id == "math"
+    rows = storage.hermes_list(owner_user="alice")
+    assert [r.id for r in rows] == ["math"], "exactly one row; no ghost adopt"
+    # The surviving row is the real create's (proper display name), not a
+    # nameless adopt (which would have name == id).
+    assert rows[0].name == "Math"
+    assert "math" not in svc._CREATES_IN_FLIGHT, "in-flight marker cleaned up"
+
+
 def test_delete_agent_permanent(hermes_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))

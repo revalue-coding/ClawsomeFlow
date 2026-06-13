@@ -298,6 +298,8 @@ const zh = {
       newAgentNameDuplicated: "新建 Agent 名称「{{agentId}}」已存在，请换一个。",
       ownerRepoBranchMismatch:
         "Agent「{{agentId}}」在不同子任务中的仓库/分支配置不一致。每个 Agent 只能绑定一套仓库+分支，如需其他配置请新建 Agent。",
+      duplicateAgentIdCrossKind:
+        "Agent id「{{agentId}}」在同一 Flow 内被两个不同平台同时使用；同一 Flow 内 Agent id 必须跨平台全局唯一，请将其中一个改名。",
       leaderCannotOwnNonSummary: "Leader 不能拥有非 summary 任务。",
       summaryNeedsDependency:
         "Summary 任务必须至少依赖一个需要审查和汇总上报的上游任务。",
@@ -912,6 +914,7 @@ const zh = {
         cancelVerifying: "已接受取消请求，正在确认该 Agent 已不再可见…",
         cancelAgentStillVisible: "取消清理仍在收敛，该 Agent 仍出现在列表中。",
         cancelFailed: "取消请求失败：{{message}}",
+        cancelled: "创建已取消。",
         close: "关闭",
       },
     },
@@ -1030,6 +1033,7 @@ const zh = {
       joinSuccess: "已加入商品：{{title}}",
       purchaseSuccess: "购买成功并已加入：{{title}}",
       loadSuccess: "已加载到本地：{{title}}（共 {{count}} 个Agent）",
+      loadRecovered: "加载完成（共 {{count}} 个Agent）。",
     },
     auth: {
       login: "登录",

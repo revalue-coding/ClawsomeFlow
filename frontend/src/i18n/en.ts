@@ -299,6 +299,8 @@ const en = {
       newAgentNameDuplicated: "New agent name \"{{agentId}}\" already exists. Pick another.",
       ownerRepoBranchMismatch:
         "Agent \"{{agentId}}\" has inconsistent workspace repo/target branch across tasks. Keep one repo+branch per Agent, or create a new Agent.",
+      duplicateAgentIdCrossKind:
+        "Agent id \"{{agentId}}\" is used by two different platforms in this flow. An agent id must be globally unique across platforms — rename one.",
       leaderCannotOwnNonSummary: "Leader cannot own a non-summary task.",
       summaryNeedsDependency:
         "The summary task must depend on at least one upstream task to review and report on.",
@@ -928,6 +930,7 @@ const en = {
         cancelAgentStillVisible:
           "Cancellation cleanup is still converging. This agent is still visible in the list.",
         cancelFailed: "Cancel request failed: {{message}}",
+        cancelled: "Creation was cancelled.",
         close: "Close",
       },
     },
@@ -1046,6 +1049,7 @@ const en = {
       joinSuccess: "Joined listing: {{title}}",
       purchaseSuccess: "Purchase succeeded and listing added: {{title}}",
       loadSuccess: "Loaded locally: {{title}} ({{count}} agents)",
+      loadRecovered: "Load completed ({{count}} agents).",
     },
     auth: {
       login: "Store Sign In",

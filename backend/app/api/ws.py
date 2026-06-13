@@ -38,8 +38,9 @@ from starlette.websockets import WebSocketState
 from app.api._auth import resolve_current_user
 from app.api.errors import ApiError
 from app.events import get_event_broadcaster
-from app.models import iso_utc
 from app.logging_setup import get_logger
+from app.models import iso_utc
+from app.operations import get_op_registry, op_channel
 from app.storage import StorageBackend, get_storage
 
 logger = get_logger("api.ws")
@@ -112,6 +113,70 @@ async def run_event_stream(
             logger.warning(
                 "ws_unexpected_error", run_id=run_id, error=str(exc),
             )
+        finally:
+            send_task.cancel()
+            try:
+                await send_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.close()
+
+
+@router.websocket("/ws/op/{op_id}")
+async def op_event_stream(
+    websocket: WebSocket,
+    op_id: Annotated[str, Path()],
+) -> None:
+    """Live status stream for a long-running operation (create/import/load).
+
+    Mirrors :func:`run_event_stream` but for the operation registry: on connect
+    we send the current registry snapshot (if any) so a late subscriber gets
+    state immediately, then stream live transitions published on the
+    ``op:{op_id}`` channel. Live-only — no backfill/replay (the frontend queries
+    ``GET /api/operations/{op_id}`` on mount for terminal recovery).
+
+    Ownership cannot be enforced pre-accept (the op may not exist yet — a client
+    can connect before ``start()`` runs), so we gate only via the snapshot's
+    owner check. In local single-user mode this matches the cancel-create
+    endpoint's stance. TODO(server-mode): include ``user`` in published frames
+    and filter per-frame for multi-tenant isolation.
+    """
+    try:
+        user = resolve_current_user(websocket)
+    except ApiError:
+        await websocket.close(code=4401, reason="unauthenticated")
+        return
+
+    await websocket.accept()
+    bus = get_event_broadcaster()
+    reg = get_op_registry()
+    logger.info("ws_op_subscribed", op_id=op_id, user=user)
+
+    # Subscribe BEFORE snapshotting so a transition landing in the gap isn't
+    # lost (the client may then see a duplicate frame — idempotent on the
+    # frontend, which keys on terminal state).
+    async with bus.subscribe(op_channel(op_id)) as queue:
+        snap = reg.get(op_id, user=user)
+        if snap is not None:
+            await websocket.send_json({"type": "op_status", **snap.to_frame()})
+
+        send_task = asyncio.create_task(
+            _drain_to_socket(websocket, queue), name=f"ws-op-send-{op_id}",
+        )
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+        except WebSocketDisconnect:
+            logger.info("ws_op_disconnected", op_id=op_id, user=user)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("ws_op_unexpected_error", op_id=op_id, error=str(exc))
         finally:
             send_task.cancel()
             try:

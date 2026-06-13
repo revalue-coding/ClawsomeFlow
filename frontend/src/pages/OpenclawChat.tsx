@@ -53,6 +53,7 @@ import {
   saveChatHistory,
 } from "@/lib/chatHistory";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
+import { useOpRecovery } from "@/lib/useOpRecovery";
 
 interface Message {
   role: "user" | "assistant" | "system";
@@ -320,6 +321,38 @@ function AgentQuickActions({
     "openclaw-chat:quick-actions:store-coming-soon-open",
   );
 
+  // Durable recovery across refresh / tab close+reopen (OpenClaw create
+  // previously had NO recovery — a remount mid-build left the popup stuck). A
+  // localStorage pointer + on-mount status query (+ WS for the terminal frame).
+  const { track: trackOp, clear: clearOp } = useOpRecovery("openclaw:create:op", {
+    onRunning: (p) => {
+      setCreateCancelState({ agentId: p.agentId, cancelling: false });
+      openWorkPopup();
+    },
+    onSucceeded: (p) => {
+      finishWorkPopup(true, t("assistant.workPopup.createdWithId", { id: p.agentId }));
+      notifyOpenclawAgentsUpdated();
+    },
+    onFailed: (_p, detail) => {
+      finishWorkPopup(
+        false,
+        detail === "cancelled" ? t("assistant.workPopup.cancelled") : detail,
+      );
+    },
+  });
+
+  // Import is a batch op (one server op covering the whole import); recover its
+  // popup across refresh / close+reopen via a client-generated batch id.
+  const { track: trackImportOp, clear: clearImportOp } = useOpRecovery("openclaw:import:op", {
+    onRunning: () => openWorkPopup(),
+    onSucceeded: (_p, result) => {
+      finishWorkPopup((Number(result.failedCount) || 0) === 0);
+      void loadImportCandidates();
+      notifyOpenclawAgentsUpdated();
+    },
+    onFailed: (_p, detail) => finishWorkPopup(false, detail),
+  });
+
   function openStoreComingSoon() {
     setStoreComingSoonOpen(true);
   }
@@ -428,6 +461,7 @@ function AgentQuickActions({
         }
         await new Promise((resolve) => window.setTimeout(resolve, CREATE_CANCEL_VERIFY_POLL_MS));
       }
+      clearOp();
       notifyOpenclawAgentsUpdated();
       setWorkPopupOpen(false);
       resetWorkPopupDisplayState();
@@ -501,15 +535,19 @@ function AgentQuickActions({
     }
     setImporting(true);
     setImportError(null);
+    const batchId = crypto.randomUUID();
+    trackImportOp({ opId: `openclaw_import_batch:${batchId}`, agentId: batchId });
     openWorkPopup();
     try {
-      const out = await api.importOpenclawAgents({ agentIds: selectedImportIds, teamId });
+      const out = await api.importOpenclawAgents({ agentIds: selectedImportIds, teamId, batchId });
+      clearImportOp();
       setLastImportResult(out);
       setSelectedImportIds([]);
       await loadImportCandidates();
       if (out.imported.length > 0) notifyOpenclawAgentsUpdated();
       finishWorkPopup(out.failed.length === 0);
     } catch (e) {
+      clearImportOp();
       const err = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
       setImportError(err);
       finishWorkPopup(false, err);
@@ -529,15 +567,19 @@ function AgentQuickActions({
     }
     setImporting(true);
     setImportError(null);
+    const batchId = crypto.randomUUID();
+    trackImportOp({ opId: `openclaw_import_batch:${batchId}`, agentId: batchId });
     openWorkPopup();
     try {
-      const out = await api.importOpenclawAgents({ importAll: true, teamId });
+      const out = await api.importOpenclawAgents({ importAll: true, teamId, batchId });
+      clearImportOp();
       setLastImportResult(out);
       setSelectedImportIds([]);
       await loadImportCandidates();
       if (out.imported.length > 0) notifyOpenclawAgentsUpdated();
       finishWorkPopup(out.failed.length === 0);
     } catch (e) {
+      clearImportOp();
       const err = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
       setImportError(err);
       finishWorkPopup(false, err);
@@ -590,6 +632,7 @@ function AgentQuickActions({
       agentId,
       cancelling: false,
     });
+    trackOp({ opId: `openclaw_create:${agentId}`, agentId });
     openWorkPopup();
     try {
       const created = await api.createOpenclawAgent(
@@ -602,6 +645,7 @@ function AgentQuickActions({
         },
         { signal: abortController.signal },
       );
+      clearOp();
       finishWorkPopup(
         true,
         t("assistant.workPopup.createdWithPath", {
@@ -622,6 +666,7 @@ function AgentQuickActions({
         e instanceof ApiError &&
         (e.code === "AGENT_ALREADY_EXISTS" || e.code === "INVALID_PAYLOAD")
       ) {
+        clearOp();
         setWorkPopupOpen(false);
         resetWorkPopupDisplayState();
         resetCreateCancelState();
@@ -629,6 +674,7 @@ function AgentQuickActions({
         setCreateModalOpen(true);
         return;
       }
+      clearOp();
       const err = e instanceof Error ? e.message : String(e);
       finishWorkPopup(false, err);
     } finally {

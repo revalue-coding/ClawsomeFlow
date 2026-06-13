@@ -25,6 +25,7 @@ import {
 } from "@/components/AgentPageToolbar";
 import { ChatBubble } from "@/components/ChatBubble";
 import { DesktopIcon, ExternalLinkIcon, SettingsIcon, TrashIcon } from "@/components/icons";
+import { clearChatHistory, loadChatHistory, saveChatHistory } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
@@ -40,6 +41,7 @@ import {
   type OpenclawTeam,
 } from "@/lib/api";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
+import { useOpRecovery } from "@/lib/useOpRecovery";
 
 const CREATE_TEAM_SENTINEL = "__create_team__";
 const DEFAULT_WORKDIR = "~";
@@ -47,9 +49,6 @@ const DEFAULT_WORKDIR = "~";
 // verify-by-list loop so the popup doesn't close before the agent is gone.
 const CREATE_CANCEL_VERIFY_TIMEOUT_MS = 30 * 1000;
 const CREATE_CANCEL_VERIFY_POLL_MS = 800;
-// While the build popup is open we quietly re-poll the agent list so a create
-// that finishes *after* the user switched tabs and came back still resolves.
-const CREATE_POLL_MS = 3000;
 
 type CreateCancelState = {
   agentId: string;
@@ -328,6 +327,28 @@ function Picker() {
     [setWorkPopupText, resetCreateCancelState, t],
   );
 
+  // Durable recovery across refresh / tab close+reopen: a localStorage pointer
+  // to the in-flight create op + on-mount status query (+ WS for the terminal
+  // transition). The in-page awaited POST still drives the happy path; this only
+  // fires when the awaiting closure is gone (the page was reloaded/reopened).
+  const { track: trackOp, clear: clearOp } = useOpRecovery("hermes:create:op", {
+    onRunning: (p) => {
+      setCreateCancelState({ agentId: p.agentId, cancelling: false });
+      openWorkPopup();
+    },
+    onSucceeded: (p) => {
+      finishWorkPopup(true, t("hermes.create.workPopup.created", { id: p.agentId }));
+      resetCreateForm();
+      void reload();
+    },
+    onFailed: (_p, detail) => {
+      finishWorkPopup(
+        false,
+        detail === "cancelled" ? t("hermes.create.workPopup.cancelled") : detail,
+      );
+    },
+  });
+
   const submitCreate = useCallback(async () => {
     if (createInFlightRef.current) return;
     const profileId = createProfileId.trim();
@@ -364,17 +385,19 @@ function Picker() {
       createAbortRef.current = ac;
       createCancelRequestedRef.current = false;
       setCreateCancelState({ agentId: profileId, cancelling: false });
+      trackOp({ opId: `hermes_create:${profileId}`, agentId: profileId });
       openWorkPopup();
       try {
         const created = await api.createHermesAgent(
           { id: profileId, name, responsibility, teamId },
           { signal: ac.signal },
         );
+        clearOp();
         finishWorkPopup(true, t("hermes.create.workPopup.created", { id: created.id }));
         resetCreateForm();
         await reload();
       } catch (e) {
-        // Cancelled (or unmounted mid-flight) → handled by cancelCreate / reconcile.
+        // Cancelled (or unmounted mid-flight) → handled by cancelCreate / op recovery.
         if (createCancelRequestedRef.current || isAbortError(e)) return;
         // A user-input rejection (duplicate id lost a race vs a stale list, or
         // invalid payload) belongs back IN the form, not buried in the progress
@@ -383,6 +406,7 @@ function Picker() {
           e instanceof ApiError &&
           (e.code === "AGENT_ALREADY_EXISTS" || e.code === "INVALID_PAYLOAD")
         ) {
+          clearOp();
           setWorkPopupOpen(false);
           resetWorkPopupDisplayState();
           resetCreateCancelState();
@@ -394,6 +418,7 @@ function Picker() {
           setShowCreate(true);
           return;
         }
+        clearOp();
         finishWorkPopup(false, errText(e));
       } finally {
         if (createAbortRef.current === ac) createAbortRef.current = null;
@@ -405,7 +430,7 @@ function Picker() {
     createProfileId, createName, createResponsibility, createTeamChoice, createNewTeamName,
     agents, setShowCreate, setCreateCancelState, openWorkPopup, finishWorkPopup,
     resetCreateForm, resetWorkPopupDisplayState, resetCreateCancelState, setWorkPopupOpen,
-    reload, t,
+    reload, trackOp, clearOp, t,
   ]);
 
   const cancelCreate = useCallback(async () => {
@@ -427,6 +452,7 @@ function Picker() {
         }
         await new Promise((resolve) => window.setTimeout(resolve, CREATE_CANCEL_VERIFY_POLL_MS));
       }
+      clearOp();
       setWorkPopupOpen(false);
       resetWorkPopupDisplayState();
       resetCreateCancelState();
@@ -436,28 +462,12 @@ function Picker() {
     }
   }, [
     createCancelState, setCreateCancelState, setWorkPopupText, setWorkPopupOpen,
-    resetWorkPopupDisplayState, resetCreateCancelState, finishWorkPopup, refreshAgents, t,
+    resetWorkPopupDisplayState, resetCreateCancelState, finishWorkPopup, refreshAgents, clearOp, t,
   ]);
 
-  // Reconcile-on-return: if a create finished while we were unmounted, the
-  // (re)loaded list now contains the agent → resolve the still-open popup.
-  useEffect(() => {
-    const cs = createCancelState;
-    if (!cs || cs.cancelling) return;
-    if (agents.some((a) => a.id === cs.agentId)) {
-      finishWorkPopup(true, t("hermes.create.workPopup.created", { id: cs.agentId }));
-      resetCreateForm();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agents]);
-
-  // While a build is in flight (incl. after a tab switch), keep polling the list
-  // quietly so the reconcile effect above can fire when it completes.
-  useEffect(() => {
-    if (!workPopupBusy || createCancelState?.cancelling) return;
-    const handle = window.setInterval(() => void refreshAgents(), CREATE_POLL_MS);
-    return () => window.clearInterval(handle);
-  }, [workPopupBusy, createCancelState?.cancelling, refreshAgents]);
+  // Recovery across refresh / close+reopen is handled by useOpRecovery above
+  // (durable localStorage pointer + GET status + WS), replacing the old 3s list
+  // poll + list-presence reconcile effect.
 
   const grouped = useMemo(() => {
     const m = new Map<string, HermesAgentSummary[]>();
@@ -931,8 +941,16 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const [dashboardBusy, setDashboardBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // localStorage scope for the transcript cache. Namespaced under `hermes:` so
+  // it can't collide with an OpenClaw agent's cache for the same id.
+  const chatScope = `hermes:${agentId}`;
+
   useEffect(() => {
     void (async () => {
+      // Prefer the localStorage cache (it includes any partial streaming text
+      // that a refresh/close interrupted); fall back to server history.
+      const cached = loadChatHistory(chatScope);
+      if (cached.length > 0) setMessages(cached.map((m) => ({ role: m.role, content: m.content })));
       try {
         const [detail, hist, teamList] = await Promise.all([
           api.getHermesAgent(agentId),
@@ -944,12 +962,22 @@ function ChatRoom({ agentId }: { agentId: string }) {
         setTeamId(detail.teamId);
         setTeams(teamList.items);
         setProfileRoot(detail.profileRoot);
-        setMessages(hist.messages.map((m: ChatHistoryMessage) => ({ role: m.role, content: m.content })));
+        if (cached.length === 0) {
+          setMessages(hist.messages.map((m: ChatHistoryMessage) => ({ role: m.role, content: m.content })));
+        }
       } catch (e) {
         setError(errText(e));
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
+
+  // Persist the transcript (incl. partial streaming text) on every change so a
+  // refresh / tab close+reopen doesn't lose an in-flight assistant turn.
+  useEffect(() => {
+    if (messages.length === 0) return;
+    saveChatHistory(chatScope, messages);
+  }, [chatScope, messages]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -1078,6 +1106,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
     setError("");
     try {
       await api.resetHermesAgentChat(agentId);
+      clearChatHistory(chatScope);
       setMessages([]);
       setInput("");
     } catch (e) {

@@ -40,6 +40,7 @@ from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.logging_setup import get_logger
 from app.models import HermesAgent, iso_utc
+from app.operations import get_op_registry
 from app.scheduler.naming import hermes_user_chat_session_id
 from app.services import hermes_agents as svc
 from app.services import hermes_dashboard as dash_svc
@@ -338,6 +339,9 @@ async def create_agent(
         nl_prompt=payload.responsibility,
         team_id=payload.team_id,
     )
+    op_id = f"hermes_create:{agent_id}"
+    reg = get_op_registry()
+    reg.start(op_id=op_id, user=user, kind="hermes_create")
     loop = asyncio.get_running_loop()
     try:
         row = await loop.run_in_executor(
@@ -345,7 +349,11 @@ async def create_agent(
             lambda: svc.commit_agent(cmd, user=user, storage=storage),
         )
     except svc.HermesAgentError as exc:
+        # AgentCreateCancelled is a HermesAgentError subclass, so cancel flows here.
+        detail = "cancelled" if isinstance(exc, svc.AgentCreateCancelled) else f"{type(exc).__name__}: {exc}"
+        reg.fail(op_id, detail=detail)
         raise _map_service_error(exc) from exc
+    reg.succeed(op_id, result={"agentId": row.id})
     team_names = _team_name_map(storage=storage, user=user)
     return _to_detail(row, team_name=team_names.get(row.team_id, ""))
 

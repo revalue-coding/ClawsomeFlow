@@ -92,6 +92,88 @@ export function openRunStream(runId: string, opts: RunWsOptions): RunWsHandle {
   };
 }
 
+// ── Operation-status stream (`/ws/op/{op_id}`) ──────────────────────────
+// Live-only sibling of openRunStream: no sinceId/backfill. The server sends a
+// snapshot frame on connect (current state) then one frame per transition.
+
+export type OpStatusFrame = {
+  type: "op_status";
+  opId: string;
+  kind: string;
+  state: "running" | "succeeded" | "failed";
+  detail: string;
+  result: Record<string, unknown>;
+  ts: number;
+};
+
+export interface OpStreamHandle {
+  close: () => void;
+}
+
+export interface OpStreamOptions {
+  onStatus: (frame: OpStatusFrame) => void;
+  onConn?: (status: "connecting" | "open" | "closed" | "error") => void;
+}
+
+export function openOpStream(opId: string, opts: OpStreamOptions): OpStreamHandle {
+  let socket: WebSocket | null = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let backoff = 1000;
+  let closedByUser = false;
+
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = `${proto}//${window.location.host}/ws/op/${encodeURIComponent(opId)}`;
+
+  function connect() {
+    if (closedByUser) return;
+    opts.onConn?.("connecting");
+    socket = new WebSocket(url);
+
+    socket.onopen = () => {
+      backoff = 1000;
+      opts.onConn?.("open");
+      pingTimer = setInterval(() => {
+        if (socket?.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 30_000);
+    };
+
+    socket.onmessage = (msg) => {
+      try {
+        const data = JSON.parse(msg.data);
+        if (data?.type === "op_status") opts.onStatus(data as OpStatusFrame);
+      } catch {
+        /* ignore parse errors */
+      }
+    };
+
+    socket.onerror = () => opts.onConn?.("error");
+
+    socket.onclose = () => {
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = null;
+      socket = null;
+      opts.onConn?.("closed");
+      if (closedByUser) return;
+      reconnectTimer = setTimeout(connect, backoff);
+      backoff = Math.min(backoff * 2, 8000);
+    };
+  }
+
+  connect();
+
+  return {
+    close: () => {
+      closedByUser = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pingTimer) clearInterval(pingTimer);
+      if (socket && socket.readyState <= WebSocket.OPEN) socket.close();
+    },
+  };
+}
+
 /** Convenience: convert REST `RunEventView` → `RunWsEvent` (same shape). */
 export function eventViewToWs(e: RunEventView): RunWsEvent {
   return {

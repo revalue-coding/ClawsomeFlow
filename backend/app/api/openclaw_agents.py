@@ -18,8 +18,6 @@ All create/update/delete operations are executed directly by backend services.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 import json
 import os
 import re
@@ -28,6 +26,8 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path as FsPath
 from typing import Annotated, Any, Literal
 
@@ -41,22 +41,23 @@ from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.config import load_config
 from app.deployment import get_deployment_capabilities
+from app.integrations import openclaw_json as oj
+from app.integrations.openclaw_agent_source import (
+    AGENTS_USER_CUSTOM_SECTION_END,
+    AGENTS_USER_CUSTOM_SECTION_START,
+)
 from app.integrations.openclaw_cli import resolve_openclaw_executable
 from app.integrations.openclaw_install import (
     looks_like_pending_scope_approval,
     repair_pending_scope_upgrades,
 )
-from app.integrations.openclaw_agent_source import (
-    AGENTS_USER_CUSTOM_SECTION_END,
-    AGENTS_USER_CUSTOM_SECTION_START,
-)
 from app.integrations.openclaw_skills import (
     discover_user_agent_skills,
     seed_skills_source,
 )
-from app.integrations import openclaw_json as oj
 from app.logging_setup import get_logger
 from app.models import OpenclawAgent, iso_utc
+from app.operations import get_op_registry
 from app.scheduler.naming import openclaw_user_chat_session_id
 from app.services import openclaw_agents as svc
 from app.services import openclaw_chat_history as chat_history
@@ -750,6 +751,9 @@ class ImportExternalAgentsPayload(_CamelModel):
     agent_ids: list[str] = Field(default_factory=list)
     import_all: bool = False
     team_id: str | None = None
+    # Optional client-generated batch id so the UI can recover the import popup
+    # across a refresh / tab close+reopen (op_id ``openclaw_import_batch:{id}``).
+    batch_id: str = ""
 
 
 class ImportedExternalAgentView(_CamelModel):
@@ -1563,6 +1567,13 @@ async def create_agent(
         team_id=payload.team_id,
         storage=storage,
     )
+    # Op-status tracking starts once registration succeeds (the pre-registration
+    # window is short and covered by the GET in-flight layer); op_id uses the
+    # canonical created.id. The DB row already exists here, but bootstrap (below)
+    # is the long part the frontend recovers across refresh/close.
+    op_id = f"openclaw_create:{created.id}"
+    reg = get_op_registry()
+    reg.start(op_id=op_id, user=user, kind="openclaw_create")
     cancellation_event = _register_agent_create_cancellation(created.id)
     bootstrap_prompt = _build_create_self_define_prompt(
         agent_id=created.id,
@@ -1600,6 +1611,7 @@ async def create_agent(
                 error=cleanup_error,
             )
         if isinstance(exc, ApiError) and exc.code == "AGENT_CREATE_CANCELLED":
+            reg.fail(op_id, detail="cancelled", result={"agentId": created.id})
             raise ApiError(
                 "AGENT_CREATE_CANCELLED",
                 f'agent creation cancelled for "{created.id}"',
@@ -1613,6 +1625,7 @@ async def create_agent(
         message = str(exc)
         if isinstance(exc, ApiError):
             message = f"{exc.code}: {exc.message}"
+        reg.fail(op_id, detail=message)
         raise ApiError(
             "AGENT_BOOTSTRAP_FAILED",
             f"agent bootstrap failed after registration: {message}",
@@ -1636,6 +1649,7 @@ async def create_agent(
         bootstrap_reply_excerpt=bootstrap_text[:280],
         workspace_commit=commit_sha,
     )
+    reg.succeed(op_id, result={"agentId": created.id})
     team_name = _team_name_map(storage=storage, user=user).get(created.team_id, "")
     return _to_detail(created, team_name=team_name)
 
@@ -1776,7 +1790,13 @@ async def import_external_agents(
 
     imported: list[ImportedExternalAgentView] = []
     failed: list[ImportExternalAgentFailure] = []
+    reg = get_op_registry()
+    batch_op = f"openclaw_import_batch:{payload.batch_id}" if payload.batch_id else None
+    if batch_op:
+        reg.start(op_id=batch_op, user=user, kind="openclaw_import_batch")
     for source_agent_id in requested_ids:
+        op_id = f"openclaw_import:{source_agent_id}"
+        reg.start(op_id=op_id, user=user, kind="openclaw_import")
         imported_item: svc.ImportedExternalAgent | None = None
         try:
             imported_item = await svc.import_external_agent(
@@ -1791,6 +1811,7 @@ async def import_external_agents(
                 imported_item.target_workspace_path,
             )
         except svc.OpenclawAgentError as exc:
+            reg.fail(op_id, detail=f"{exc.code}: {exc.message}")
             failed.append(
                 ImportExternalAgentFailure(
                     source_agent_id=source_agent_id,
@@ -1824,6 +1845,7 @@ async def import_external_agents(
                 message = str(exc) or "import optimization failed"
             if cleanup_error:
                 message = f"{message} (cleanup_error={cleanup_error})"
+            reg.fail(op_id, detail=f"{code}: {message}")
             failed.append(
                 ImportExternalAgentFailure(
                     source_agent_id=source_agent_id,
@@ -1832,7 +1854,15 @@ async def import_external_agents(
                 ),
             )
             continue
+        reg.succeed(op_id, result={"targetAgentId": imported_item.target_agent_id})
         imported.append(_to_imported_external_agent_view(imported_item))
+    if batch_op:
+        # The batch "succeeds" as a whole (per-item failures are in `failed`);
+        # the UI shows success iff failed == 0, matching the in-page path.
+        reg.succeed(
+            batch_op,
+            result={"importedCount": len(imported), "failedCount": len(failed)},
+        )
     return ImportExternalAgentsResponse(
         requested_count=len(requested_ids),
         imported=imported,

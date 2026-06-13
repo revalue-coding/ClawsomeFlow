@@ -78,15 +78,41 @@ def validate_flow_spec(spec: FlowSpec) -> None:
 
 
 def _check_unique_agent_ids(spec: FlowSpec) -> None:
-    seen: set[str] = set()
+    # A FlowAgent.id must be globally unique within a Flow, regardless of
+    # platform: every downstream key (the controller's worker-session map, the
+    # ``clawteam-<team>:<id>`` tmux window, the ClawTeam member name, ``hermes -p
+    # <id>``) is keyed by id ALONE — kind never participates. So two genuinely
+    # distinct agents that merely share a name across platforms (e.g. an OpenClaw
+    # ``alice`` and a Hermes ``alice``) still collide and must be rejected. We
+    # track the first-seen kind so the cross-platform case gets a message that
+    # actually tells the user *why* (the raw "appears more than once" reads as a
+    # bug when the two pickers clearly showed two different agents).
+    seen: dict[str, AgentKind] = {}
     for a in spec.agents:
-        if a.id in seen:
+        prev_kind = seen.get(a.id)
+        if prev_kind is not None:
+            if prev_kind != a.kind:
+                raise FlowValidationError(
+                    ERROR_DUPLICATE_AGENT_ID,
+                    (
+                        f"agent id {a.id!r} is used by two different platforms "
+                        f"({prev_kind.value} and {a.kind.value}); a Flow agent id "
+                        f"must be globally unique across platforms — rename one. / "
+                        f"Agent id {a.id!r} 被两个不同平台（{prev_kind.value} 与 "
+                        f"{a.kind.value}）同时使用；同一 Flow 内 Agent id 必须跨平台全局"
+                        f"唯一，请将其中一个改名。"
+                    ),
+                    {"agent_id": a.id, "kinds": [prev_kind.value, a.kind.value]},
+                )
             raise FlowValidationError(
                 ERROR_DUPLICATE_AGENT_ID,
-                f"agent id {a.id!r} appears more than once",
+                (
+                    f"agent id {a.id!r} appears more than once. / "
+                    f"Agent id {a.id!r} 重复出现。"
+                ),
                 {"agent_id": a.id},
             )
-        seen.add(a.id)
+        seen[a.id] = a.kind
 
 
 def _check_unique_task_ids(spec: FlowSpec) -> None:
