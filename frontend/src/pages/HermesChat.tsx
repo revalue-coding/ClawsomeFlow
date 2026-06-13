@@ -25,7 +25,12 @@ import {
 } from "@/components/AgentPageToolbar";
 import { ChatBubble } from "@/components/ChatBubble";
 import { DesktopIcon, ExternalLinkIcon, SettingsIcon, TrashIcon } from "@/components/icons";
-import { clearChatHistory, loadChatHistory, saveChatHistory } from "@/lib/chatHistory";
+import {
+  clearChatHistory,
+  loadChatHistory,
+  reconcileTranscript,
+  saveChatHistory,
+} from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
@@ -934,6 +939,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
     else localStorage.removeItem(`hermes-workdir-${agentId}`);
   };
   const [sending, setSending] = useState(false);
+  // True while polling for an assistant reply whose stream was detached by a tab
+  // switch (the answer is still landing in server history). Drives a pending
+  // bubble without persisting an empty placeholder to the cache.
+  const [recovering, setRecovering] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
   const [showSettings, setShowSettings] = useSessionBackedModalFlag(`hermes:${agentId}:settings:open`);
@@ -947,10 +956,13 @@ function ChatRoom({ agentId }: { agentId: string }) {
 
   useEffect(() => {
     void (async () => {
-      // Prefer the localStorage cache (it includes any partial streaming text
-      // that a refresh/close interrupted); fall back to server history.
-      const cached = loadChatHistory(chatScope);
-      if (cached.length > 0) setMessages(cached.map((m) => ({ role: m.role, content: m.content })));
+      // Show the cache immediately (it may hold an in-flight partial), then
+      // reconcile against server history once it loads.
+      const cached: ChatMsg[] = loadChatHistory(chatScope).map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+      if (cached.length > 0) setMessages(cached);
       try {
         const [detail, hist, teamList] = await Promise.all([
           api.getHermesAgent(agentId),
@@ -962,9 +974,19 @@ function ChatRoom({ agentId }: { agentId: string }) {
         setTeamId(detail.teamId);
         setTeams(teamList.items);
         setProfileRoot(detail.profileRoot);
-        if (cached.length === 0) {
-          setMessages(hist.messages.map((m: ChatHistoryMessage) => ({ role: m.role, content: m.content })));
-        }
+        // Server is authoritative: a tab switch can leave the cache holding a
+        // stale empty assistant bubble while the real answer sits on the server.
+        const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const merged = reconcileTranscript(cached, server);
+        setMessages(merged);
+        if (merged.length > 0) saveChatHistory(chatScope, merged);
+        // A trailing user turn means a reply is still being produced server-side
+        // (its stream was detached); poll for it instead of showing "no reply".
+        const last = merged[merged.length - 1];
+        if (last && last.role === "user") setRecovering(true);
       } catch (e) {
         setError(errText(e));
       }
@@ -981,7 +1003,51 @@ function ChatRoom({ agentId }: { agentId: string }) {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages]);
+  }, [messages, recovering]);
+
+  // Recover a reply whose stream was detached by a tab switch: poll server
+  // history until the assistant turn lands (the backend persists it even after a
+  // client disconnect), then adopt it. Bounded so a genuinely answerless turn
+  // (e.g. a prior error) doesn't poll forever.
+  useEffect(() => {
+    if (!recovering) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    let tries = 0;
+    const MAX_TRIES = 30; // ~60s at 2s intervals
+    const tick = async () => {
+      tries += 1;
+      try {
+        const hist = await api.getHermesAgentChatHistory(agentId);
+        if (cancelled) return;
+        const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const last = server[server.length - 1];
+        if (last && last.role === "assistant" && last.content.trim() !== "") {
+          setMessages(server);
+          saveChatHistory(chatScope, server);
+          setRecovering(false);
+          return;
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+      if (cancelled) return;
+      if (tries >= MAX_TRIES) {
+        setRecovering(false);
+        return;
+      }
+      timer = window.setTimeout(() => void tick(), 2000);
+    };
+    timer = window.setTimeout(() => void tick(), 2000);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recovering, agentId, chatScope]);
 
   const pickWorkdir = async () => {
     if (isRemoteBrowser()) {
@@ -1049,6 +1115,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
       return;
     }
     setError("");
+    setRecovering(false); // a fresh send supersedes any in-flight recovery poll
     setSending(true);
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: message }, { role: "assistant", content: "" }]);
@@ -1107,6 +1174,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
     try {
       await api.resetHermesAgentChat(agentId);
       clearChatHistory(chatScope);
+      setRecovering(false);
       setMessages([]);
       setInput("");
     } catch (e) {
@@ -1193,14 +1261,18 @@ function ChatRoom({ agentId }: { agentId: string }) {
           ref={scrollRef}
           className="min-h-[280px] flex-1 space-y-4 overflow-auto bg-ink-50/40 px-5 py-4"
         >
-          {messages
+          {(recovering &&
+          messages.length > 0 &&
+          messages[messages.length - 1].role === "user"
+            ? [...messages, { role: "assistant" as const, content: "" }]
+            : messages)
             .filter((m) => m.role !== "system")
             .map((m, i, list) => (
               <ChatBubble
                 key={i}
                 msg={m}
                 pending={
-                  sending &&
+                  (sending || recovering) &&
                   i === list.length - 1 &&
                   m.role === "assistant" &&
                   !m.content

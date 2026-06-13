@@ -53,6 +53,26 @@ logger = get_logger("api.hermes_agents")
 
 _CHAT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hermes-chat")
 
+# Strong refs to detached completion tasks so an orphaned (post-disconnect) task
+# isn't garbage-collected before it records its result. See create_agent / chat.
+_DETACHED_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_detached(coro) -> asyncio.Task:
+    """Run *coro* as a task whose lifecycle is independent of the request.
+
+    Callers ``await asyncio.shield(task)`` so the happy path still propagates the
+    result/exception, while a client disconnect (which cancels the request
+    coroutine) leaves the task running to completion. This matters because the
+    executor thread keeps running regardless, but the completion side effects (op
+    registry transition, chat-history append) live on the event loop and would
+    otherwise be skipped when the awaiting coroutine is cancelled.
+    """
+    task = asyncio.ensure_future(coro)
+    _DETACHED_TASKS.add(task)
+    task.add_done_callback(_DETACHED_TASKS.discard)
+    return task
+
 
 def _storage_dep() -> StorageBackend:
     return get_storage()
@@ -343,17 +363,32 @@ async def create_agent(
     reg = get_op_registry()
     reg.start(op_id=op_id, user=user, kind="hermes_create")
     loop = asyncio.get_running_loop()
+
+    async def _commit():
+        # Records the op's terminal state on the event loop. Detached from the
+        # request (shield below) so a client disconnect mid-create still marks
+        # the op succeeded/failed — otherwise the recovery UI is stuck "running".
+        try:
+            row = await loop.run_in_executor(
+                _CHAT_EXECUTOR,
+                lambda: svc.commit_agent(cmd, user=user, storage=storage),
+            )
+        except svc.HermesAgentError as exc:
+            # AgentCreateCancelled is a HermesAgentError subclass, so cancel flows here.
+            detail = (
+                "cancelled"
+                if isinstance(exc, svc.AgentCreateCancelled)
+                else f"{type(exc).__name__}: {exc}"
+            )
+            reg.fail(op_id, detail=detail)
+            raise
+        reg.succeed(op_id, result={"agentId": row.id})
+        return row
+
     try:
-        row = await loop.run_in_executor(
-            _CHAT_EXECUTOR,
-            lambda: svc.commit_agent(cmd, user=user, storage=storage),
-        )
+        row = await asyncio.shield(_spawn_detached(_commit()))
     except svc.HermesAgentError as exc:
-        # AgentCreateCancelled is a HermesAgentError subclass, so cancel flows here.
-        detail = "cancelled" if isinstance(exc, svc.AgentCreateCancelled) else f"{type(exc).__name__}: {exc}"
-        reg.fail(op_id, detail=detail)
         raise _map_service_error(exc) from exc
-    reg.succeed(op_id, result={"agentId": row.id})
     team_names = _team_name_map(storage=storage, user=user)
     return _to_detail(row, team_name=team_names.get(row.team_id, ""))
 
@@ -649,17 +684,26 @@ async def chat_with_agent(
 
     async def _stream():
         loop = asyncio.get_running_loop()
-        try:
-            answer = await loop.run_in_executor(
+
+        async def _answer() -> str:
+            # Detached from the SSE request (shield below): if the client
+            # disconnects mid-generation, this task still finishes and persists
+            # the assistant turn to chat_history, so the next page load recovers
+            # the real reply instead of a stale empty bubble.
+            text = await loop.run_in_executor(
                 _CHAT_EXECUTOR,
                 lambda: svc.chat_once(agent_id, message=message, workdir=workdir, resume=resume),
             )
+            await chat_history.append_message(session_key, role="assistant", content=text)
+            return text
+
+        try:
+            answer = await asyncio.shield(_spawn_detached(_answer()))
         except svc.HermesAgentError as exc:
             err = {"error": str(exc)}
             yield f"data: {json.dumps(err)}\n\n"
             yield "data: [DONE]\n\n"
             return
-        await chat_history.append_message(session_key, role="assistant", content=answer)
         # Emit the answer as a single delta (hermes -z returns the final text).
         yield f"data: {json.dumps({'delta': answer})}\n\n"
         yield "data: [DONE]\n\n"

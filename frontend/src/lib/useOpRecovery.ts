@@ -74,8 +74,11 @@ export function useOpRecovery(storageKey: string, cb: OpRecoveryCallbacks): OpRe
     const p = initialPointer.current;
     if (!p) return;
     let cancelled = false;
+    let terminalHandled = false;
 
     const finishTerminal = (state: "succeeded" | "failed", result: Record<string, unknown>, detail: string) => {
+      if (terminalHandled) return; // GET and WS can both deliver it — first wins
+      terminalHandled = true;
       if (state === "succeeded") cbRef.current.onSucceeded(p, result);
       else cbRef.current.onFailed(p, detail);
       setPointer(null);
@@ -83,30 +86,40 @@ export function useOpRecovery(storageKey: string, cb: OpRecoveryCallbacks): OpRe
       streamRef.current = null;
     };
 
+    // Subscribe to live transitions BEFORE querying status. The op registry is
+    // live-only (no replay), so a terminal transition that lands between a "GET
+    // returns running" and the WS subscribe would otherwise be lost, leaving the
+    // popup stuck "running" (the tab-switch-during-create symptom). Subscribing
+    // first closes that gap: the WS catches anything published from now on, and
+    // the GET below catches anything already recorded.
+    streamRef.current = openOpStream(p.opId, {
+      onStatus: (f) => {
+        if (cancelled) return;
+        if (f.state === "succeeded") finishTerminal("succeeded", f.result, f.detail);
+        else if (f.state === "failed") finishTerminal("failed", f.result, f.detail);
+      },
+    });
+
     (async () => {
       let st;
       try {
         st = await api.getOperationStatus(p.opId);
       } catch {
-        return; // transient — leave the pointer for a later recovery
+        return; // transient — leave the pointer + live stream for a later recovery
       }
-      if (cancelled) return;
+      if (cancelled || terminalHandled) return;
       if (st.state === "succeeded") {
         finishTerminal("succeeded", st.result, st.detail);
       } else if (st.state === "failed") {
         finishTerminal("failed", st.result, st.detail);
       } else if (st.state === "not_found") {
         setPointer(null);
+        streamRef.current?.close();
+        streamRef.current = null;
       } else {
-        // running → reconstruct the popup and watch for the terminal transition.
+        // running → reconstruct the popup; the already-open stream above will
+        // deliver the terminal transition.
         cbRef.current.onRunning(p);
-        streamRef.current = openOpStream(p.opId, {
-          onStatus: (f) => {
-            if (cancelled) return;
-            if (f.state === "succeeded") finishTerminal("succeeded", f.result, f.detail);
-            else if (f.state === "failed") finishTerminal("failed", f.result, f.detail);
-          },
-        });
       }
     })();
 

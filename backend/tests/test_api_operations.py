@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -111,3 +112,42 @@ def test_hermes_create_endpoint_records_op_failed_on_cancel(
     body = client.get("/api/operations/hermes_create:math").json()
     assert body["state"] == "failed"
     assert body["detail"] == "cancelled"
+
+
+async def test_detached_work_records_op_after_request_cancelled() -> None:
+    """A client disconnect cancels the request coroutine (which awaits the work
+    via ``asyncio.shield``), but the detached task must still run to completion
+    and record the op's terminal state — otherwise the recovery UI is stuck
+    "running" forever after a tab switch / refresh mid-create."""
+    from app.api import hermes_agents as api_hermes
+
+    ops.reset_op_registry()
+    reg = ops.get_op_registry()
+    reg.start(op_id="hermes_create:slow", user="alice", kind="hermes_create")
+    try:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _commit() -> str:
+            started.set()
+            await release.wait()  # stand in for the slow executor work
+            reg.succeed("hermes_create:slow", result={"agentId": "slow"})
+            return "slow"
+
+        task = api_hermes._spawn_detached(_commit())
+        req = asyncio.ensure_future(asyncio.shield(task))
+        await started.wait()
+
+        req.cancel()  # simulate the client disconnecting mid-create
+        with pytest.raises(asyncio.CancelledError):
+            await req
+
+        # The detached task survived the cancel and is still running.
+        assert reg.get("hermes_create:slow", user="alice").state == "running"
+
+        # Once the work finishes, the op transitions despite the dead request.
+        release.set()
+        assert await task == "slow"
+        assert reg.get("hermes_create:slow", user="alice").state == "succeeded"
+    finally:
+        ops.reset_op_registry()

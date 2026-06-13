@@ -2005,7 +2005,10 @@ function TaskListRow({
             <div className="text-xs text-ink-500 whitespace-nowrap">
               <span>
                 {t("flowEditor.rowOwner")}:{" "}
-                <span className="font-mono">{row.ownerId || "—"}</span>
+                <span className="font-mono">{row.ownerId || "—"}</span>{" "}
+                <span className="pill-default align-middle">
+                  {ownerKindLabel(row.ownerKind, t)}
+                </span>
               </span>
               <span className="mx-2">·</span>
               <span>

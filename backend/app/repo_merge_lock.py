@@ -92,10 +92,23 @@ def build_flocked_baseline_merge_command(
     that ship no ``flock`` (macOS). The git steps are identical on both, so the
     same instruction text is safe to hand any agent regardless of host OS — a
     bare ``flock -x`` would simply error out on macOS and leave the merge unrun.
+
+    **Quoting is deliberately flat (single level).** A previous version wrapped
+    the git steps in ``flock -x <lock> bash -c '<inner>'`` and then wrapped the
+    whole script again in ``bash -c '<script>'`` — two nested ``shlex.quote``
+    layers on top of the merge message, which produced an unreadable
+    ``'"'"'"'"'"'"'"'"'`` quote pyramid. That string is byte-for-byte valid bash,
+    but no agent (LLM) could relay it without mangling the quotes → "shell quote
+    parse error" at merge time. We now hold the lock without a nested shell:
+    ``( flock -x 9 || exit 1; <git steps> ) 9>"<lock>"`` on Linux (the fd is
+    released when the subshell exits) and the mkdir spinlock runs the git steps
+    directly. The merge message is therefore quoted exactly once. The result is a
+    plain POSIX-sh compound command (no outer ``bash -c`` wrapper) that any agent
+    shell can run verbatim.
     """
     repo = _expand_repo(repo_root)
     lock = main_repo_lock_path(repo)
-    inner = (
+    git_steps = (
         f"cd {shlex.quote(repo)} && "
         f"git checkout {shlex.quote(base_branch)} && "
         f"(git pull --ff-only || true) && "
@@ -105,20 +118,22 @@ def build_flocked_baseline_merge_command(
     lock_q = shlex.quote(str(lock))
     lockdir_q = shlex.quote(str(lock) + ".d")
     parent_q = shlex.quote(str(lock.parent))
-    inner_q = shlex.quote(inner)
-    script = (
-        f"mkdir -p {parent_q}; "
-        f"if command -v flock >/dev/null 2>&1; then "
-        f"flock -x {lock_q} bash -c {inner_q}; "
-        f"else "
+    # Linux: hold the lock on fd 9 across a subshell — no nested `bash -c`, so the
+    # git steps (and the merge message) keep their single, original quoting level.
+    flock_branch = f"( flock -x 9 || exit 1; {git_steps} ) 9>{lock_q}"
+    # macOS/no-flock: atomic mkdir spinlock, then run the same git steps inline.
+    mkdir_branch = (
         f"d={lockdir_q}; n=0; "
         f'while ! mkdir "$d" 2>/dev/null; do '
         f'sleep 0.2; n=$((n+1)); [ "$n" -ge 600 ] && break; done; '
         f"trap 'rmdir \"$d\" 2>/dev/null || true' EXIT INT TERM; "
-        f"bash -c {inner_q}; "
-        f"fi"
+        f"{git_steps}"
     )
-    return f"bash -c {shlex.quote(script)}"
+    return (
+        f"mkdir -p {parent_q}; "
+        f"if command -v flock >/dev/null 2>&1; then {flock_branch}; "
+        f"else {mkdir_branch}; fi"
+    )
 
 
 @contextmanager

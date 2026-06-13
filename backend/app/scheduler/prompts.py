@@ -268,7 +268,6 @@ def _upstream_outputs_block(ctx: DispatchContext) -> str:
       ``cd <path> && git diff <base>...HEAD`` to inspect changes
     * the upstream's strict-match completion summary (from leader inbox;
       sender + task_id must both match this upstream task)
-    * a short "How to inspect upstream changes" footer with the two canonical commands
     """
     if not ctx.upstream_outputs:
         return ""
@@ -288,17 +287,6 @@ def _upstream_outputs_block(ctx: DispatchContext) -> str:
         else:
             lines.append("  - completion summary: _(missing; inspect upstream worktree git history)_")
 
-    lines.append("")
-    lines.append("To inspect upstream changes:")
-    # Use concrete base when single-source; otherwise keep a generic placeholder.
-    bases = {u.base_branch for u in ctx.upstream_outputs if u.base_branch}
-    base_hint = next(iter(bases)) if len(bases) == 1 else "<base>"
-    lines.append(
-        f"- `cd <upstream-worktree> && git log --oneline {base_hint}..HEAD | head`"
-    )
-    lines.append(
-        f"- or `cd <upstream-worktree> && git diff {base_hint}...HEAD <optional-path>`"
-    )
     return "\n".join(lines)
 
 

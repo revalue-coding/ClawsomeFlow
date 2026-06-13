@@ -54,3 +54,23 @@ export function clearChatHistory(scope: string): void {
     /* ignore */
   }
 }
+
+/**
+ * Reconcile a locally-cached transcript against the server's chat history.
+ *
+ * Server history is authoritative for completed turns. If a tab switch detached
+ * the in-page streaming closure, the cache keeps a stale *empty* assistant
+ * bubble (which renders as the false "no reply" message) while the server holds
+ * the real answer. We therefore prefer the server, and only keep a trailing
+ * cached turn the server hasn't recorded yet (a genuine in-flight partial),
+ * dropping an empty placeholder.
+ */
+export function reconcileTranscript<T extends PersistedMessage>(
+  cached: T[],
+  server: T[],
+): T[] {
+  if (server.length === 0) return cached;
+  if (cached.length <= server.length) return server;
+  const tail = cached.slice(server.length).filter((m) => m.content.trim() !== "");
+  return tail.length > 0 ? [...server, ...tail] : server;
+}

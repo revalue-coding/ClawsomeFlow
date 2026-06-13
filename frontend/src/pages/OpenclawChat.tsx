@@ -50,6 +50,7 @@ import { cn } from "@/lib/cn";
 import {
   clearChatHistory,
   loadChatHistory,
+  reconcileTranscript,
   saveChatHistory,
 } from "@/lib/chatHistory";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
@@ -1616,6 +1617,10 @@ function ChatRoom({
     { isClosed: (v) => v.trim() === "" },
   );
   const [streaming, setStreaming] = useState(false);
+  // True while polling for a reply whose stream was detached by a tab switch
+  // (the answer is still landing in server history). Drives a pending bubble
+  // without persisting an empty placeholder to the cache.
+  const [recovering, setRecovering] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [teamEditOpen, setTeamEditOpen] = useSessionBackedModalFlag(
     `openclaw-chat:room:${agentId}:team-edit-open`,
@@ -1668,12 +1673,82 @@ function ChatRoom({
   }, [refreshTeams]);
 
   // Restore the last ≤20 messages from localStorage whenever we switch
-  // agents (incl. on initial mount / page refresh). Only the explicit
-  // "Reset" button (or its localStorage entry being cleared) wipes them.
+  // agents (incl. on initial mount / page refresh), then reconcile against
+  // server history. A tab switch can leave the cache holding a stale empty
+  // assistant bubble (the false "no reply") while the real answer sits on the
+  // server; the server is authoritative. Only the explicit "Reset" button (or
+  // its localStorage entry being cleared) wipes the transcript.
   useEffect(() => {
-    setMessages(loadChatHistory(agentId));
+    let cancelled = false;
+    const cached = loadChatHistory(agentId);
+    setMessages(cached);
     setActionError(null);
+    void (async () => {
+      try {
+        const hist = await api.getOpenclawAgentChatHistory(agentId);
+        if (cancelled) return;
+        const server: Message[] = hist.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const merged = reconcileTranscript(cached, server);
+        setMessages(merged);
+        if (merged.length > 0) saveChatHistory(agentId, merged);
+        // A trailing user turn means a reply is still being produced
+        // server-side (its stream was detached); poll for it.
+        const last = merged[merged.length - 1];
+        if (last && last.role === "user") setRecovering(true);
+      } catch {
+        /* keep the cached view if history fetch fails */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [agentId]);
+
+  // Recover a reply whose stream was detached by a tab switch: poll server
+  // history until the assistant turn lands (the backend persists it even after
+  // a client disconnect), then adopt it. Bounded so a genuinely answerless turn
+  // doesn't poll forever.
+  useEffect(() => {
+    if (!recovering) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    let tries = 0;
+    const MAX_TRIES = 30; // ~60s at 2s intervals
+    const tick = async () => {
+      tries += 1;
+      try {
+        const hist = await api.getOpenclawAgentChatHistory(agentId);
+        if (cancelled) return;
+        const server: Message[] = hist.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const last = server[server.length - 1];
+        if (last && last.role === "assistant" && last.content.trim() !== "") {
+          setMessages(server);
+          saveChatHistory(agentId, server);
+          setRecovering(false);
+          return;
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+      if (cancelled) return;
+      if (tries >= MAX_TRIES) {
+        setRecovering(false);
+        return;
+      }
+      timer = window.setTimeout(() => void tick(), 2000);
+    };
+    timer = window.setTimeout(() => void tick(), 2000);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [recovering, agentId]);
 
   // Persist on every transcript change. ``saveChatHistory`` keeps only
   // the trailing ``HISTORY_LIMIT`` entries so the storage stays bounded.
@@ -1697,6 +1772,7 @@ function ChatRoom({
     const text = input.trim();
     if (!text || streaming) return;
     setActionError(null);
+    setRecovering(false); // a fresh send supersedes any in-flight recovery poll
     const turnMessage: Message = { role: "user", content: text };
     const next: Message[] = [...messages, turnMessage];
     setMessages(next);
@@ -1768,6 +1844,7 @@ function ChatRoom({
     setResetting(true);
     try {
       await api.resetOpenclawAgentChat(agentId);
+      setRecovering(false);
       setMessages([]);
       setInput("");
       clearChatHistory(agentId);
@@ -1961,13 +2038,18 @@ function ChatRoom({
           ref={scrollRef}
           className="min-h-[280px] flex-1 overflow-auto px-5 py-4 space-y-4 bg-ink-50/40"
         >
-          {messages.map((m, i) => (
+          {(recovering &&
+          messages.length > 0 &&
+          messages[messages.length - 1].role === "user"
+            ? [...messages, { role: "assistant" as const, content: "" }]
+            : messages
+          ).map((m, i, list) => (
             <Bubble
               key={i}
               msg={m}
               pending={
-                streaming &&
-                i === messages.length - 1 &&
+                (streaming || recovering) &&
+                i === list.length - 1 &&
                 m.role === "assistant" &&
                 !m.content
               }

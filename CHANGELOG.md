@@ -6,6 +6,7 @@
 
 
 
+
 # Changelog
 
 All notable changes to **ClawsomeFlow** are documented here.
@@ -18,6 +19,16 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 "Pre-release channel" section if you want to track them.
 
 ## [Unreleased]
+
+### Added
+### Changed
+### Fixed
+### Removed
+### Deprecated
+### Security
+
+## [0.1.13b14] — 2026-06-13
+
 
 ### Added
 - **Long-running-operation status recovery** so create/install UIs survive a page
@@ -54,9 +65,6 @@ Pre-release identifiers (`X.Y.Zb1`, `X.Y.ZrcN`) follow [PEP 440](https://peps.py
 - **`FlowEditor.tsx` contained a raw NUL byte** in the temp-agent separator constant,
   making tooling treat the file as binary; replaced with a `\u001f` escape (behavior
   identical — still a control char that can't appear in an id/repo/branch).
-### Removed
-### Deprecated
-### Security
 
 ## [0.1.13b13] — 2026-06-12
 
@@ -1249,7 +1257,7 @@ Initial alpha release. Brings the full MVP architecture online:
   OpenClaw workspace; `POST /api/flows/decompose` async pipeline.
 - 379 backend tests, frontend tsc + vite build clean.
 
-[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b13...HEAD
+[Unreleased]: https://github.com/clawsomeflow/clawsomeflow/compare/v0.1.13b14...HEAD
 [0.1.10]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.10
 [0.1.0]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.0
 [0.1.1b1]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.1b1
@@ -1298,3 +1306,4 @@ Initial alpha release. Brings the full MVP architecture online:
 [0.1.13b11]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b11
 [0.1.13b12]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b12
 [0.1.13b13]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b13
+[0.1.13b14]: https://github.com/clawsomeflow/clawsomeflow/releases/tag/v0.1.13b14

@@ -39,10 +39,32 @@ def test_build_flocked_baseline_merge_command_wraps_git_steps() -> None:
     assert "command -v flock" in cmd
     assert "flock -x " in cmd
     assert "mkdir" in cmd
-    assert "bash -c" in cmd
     assert "git checkout main" in cmd
     assert "git pull --ff-only" in cmd
     assert "git merge --no-ff clawteam/t/a" in cmd
+
+
+def test_build_flocked_baseline_merge_command_has_flat_quoting() -> None:
+    """Regression: the command must NOT nest ``bash -c`` inside ``bash -c``.
+
+    The old form double-wrapped the git steps, producing the unreadable
+    ``'"'"'"'"'"'"'"'"'`` quote pyramid that agents mangled into a shell quote
+    parse error. The merge message must be quoted exactly once and the command
+    must be a plain compound statement (no outer ``bash -c`` wrapper)."""
+    cmd = build_flocked_baseline_merge_command(
+        repo_root="/tmp/repo",
+        base_branch="main",
+        feature_branch="clawteam/t/a",
+        merge_message="csflow: scheduled merge clawteam/t/a",
+    )
+    # No nested-shell wrapping at all.
+    assert "bash -c" not in cmd
+    # The single-quote escape pyramid (more than one level of '"'"') must be gone.
+    assert "'\"'\"'\"'\"'" not in cmd
+    # The merge message survives as a single, plain single-quoted token.
+    assert "-m 'csflow: scheduled merge clawteam/t/a'" in cmd
+    # Lock is held via an fd subshell, not a nested shell command.
+    assert "( flock -x 9" in cmd
 
 
 def test_baseline_merge_command_works_without_flock(

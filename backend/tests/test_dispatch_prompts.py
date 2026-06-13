@@ -423,8 +423,9 @@ def test_upstream_block_renders_one_dependency() -> None:
     assert "/tmp/wt/crawler" in msg
     assert "clawteam/csflow-x/crawler" in msg
     assert "12,438 条样本" in msg
-    # Reading-hint footer with the actual base branch.
-    assert "git log --oneline main..HEAD" in msg
+    # The "To inspect upstream changes" git-log/git-diff footer was removed.
+    assert "To inspect upstream changes" not in msg
+    assert "git log --oneline" not in msg
 
 
 def test_upstream_block_handles_missing_summary() -> None:
@@ -444,8 +445,6 @@ def test_upstream_block_handles_missing_worktree() -> None:
         upstream_outputs=upstreams,
     ))
     assert "_(unknown — agent session may have been disposed)_" in msg
-    # Mixed-base hint still present.
-    assert "git log --oneline <base>..HEAD" in msg
 
 
 def test_upstream_block_renders_multiple_dependencies() -> None:
