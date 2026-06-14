@@ -2,13 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Modal } from "@/components/ui";
-import { api, type UpdateStatus } from "@/lib/api";
+import { ApiError, api, type UpdateStatus } from "@/lib/api";
 
 const DISMISSED_KEY = "csflow:dismissed-update-version";
 const MODAL_OPEN_KEY = "csflow:update-modal-open";
 const REFRESH_MS = 6 * 60 * 60 * 1000; // re-check every 6h
 const UPGRADE_POLL_MS = 4000;
-const UPGRADE_TIMEOUT_MS = 90 * 1000;
+// The full pipeline (pip install + `csflow upgrade-runtime` re-deploy + service
+// restart) routinely takes well over a minute — measured ~100s on a typical
+// host, and longer on slow networks or with many agents. The old 90s window
+// fired *before* the new build came up, so a successful upgrade was reported as
+// a failure. Give it generous headroom; the user can always reload sooner.
+const UPGRADE_TIMEOUT_MS = 6 * 60 * 1000;
 
 export function buildDismissedVersionKey(
   currentVersion: string,
@@ -129,7 +134,20 @@ export function UpgradeModal({
     stopHealthPoll();
     timeoutRef.current = window.setTimeout(() => {
       stopHealthPoll();
-      setPhase("failed");
+      // One last check before giving up: the new build may have come up in the
+      // gap since the previous poll (the restart and the poll cadence are not
+      // synchronised).
+      fetch("/health")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d && d.version && d.version !== status.currentVersion) {
+            setPhase("done");
+            window.setTimeout(() => window.location.reload(), 1500);
+          } else {
+            setPhase("failed");
+          }
+        })
+        .catch(() => setPhase("failed"));
     }, UPGRADE_TIMEOUT_MS);
     pollRef.current = window.setInterval(() => {
       fetch("/health")
@@ -154,8 +172,18 @@ export function UpgradeModal({
     api
       .triggerUpgrade()
       .then(() => startHealthPoll())
-      .catch(() => {
+      .catch((e) => {
         stopHealthPoll();
+        // "Already on the latest stable release" means a previous attempt
+        // actually succeeded — typically the service finished restarting only
+        // after our poll window elapsed, so the first attempt was wrongly shown
+        // as failed and this is the user clicking "Retry". Treat it as done and
+        // reload instead of reporting another failure.
+        if (e instanceof ApiError && e.code === "NO_UPGRADE_AVAILABLE") {
+          setPhase("done");
+          window.setTimeout(() => window.location.reload(), 1500);
+          return;
+        }
         setPhase("failed");
       });
   }
@@ -246,8 +274,15 @@ export function UpgradeModal({
               <button className="btn-outline" onClick={onClose} type="button">
                 {t("shell.updateClose")}
               </button>
-              <button className="btn-primary" onClick={onUpgrade} type="button">
+              <button className="btn-ghost" onClick={onUpgrade} type="button">
                 {t("shell.updateRetry")}
+              </button>
+              <button
+                className="btn-primary"
+                onClick={() => window.location.reload()}
+                type="button"
+              >
+                {t("shell.updateReload")}
               </button>
             </>
           )}

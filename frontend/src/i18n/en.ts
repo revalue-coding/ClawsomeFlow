@@ -94,9 +94,10 @@ const en = {
     updateClose: "Later",
     updateInProgress: "Upgrading…",
     updateRestartHint:
-      "The service will restart in about a minute. This page will reload automatically when the new version is live.",
+      "Upgrading and restarting the service — this can take a few minutes. This page will reload automatically once the new version is live; please keep it open.",
     updateDone: "Upgraded to v{{version}}. Reloading…",
-    updateFailed: "Failed to start the upgrade. Please run the upgrade command manually:",
+    updateFailed:
+      "Couldn't confirm the upgrade finished — it may still be completing in the background, or it may have failed. Reload to check; if it didn't apply, run the upgrade command manually:",
     updateFailedCommand: "csflow upgrade",
     updateReload: "Reload now",
   },
