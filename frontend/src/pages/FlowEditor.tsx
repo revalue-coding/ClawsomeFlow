@@ -38,6 +38,7 @@ import {
 import { Card, CardTitle, ErrorBox, Loading, Modal, StatusPill } from "@/components/ui";
 import { ChatIcon } from "@/components/icons";
 import { cn } from "@/lib/cn";
+import { useTheme } from "@/lib/theme";
 import {
   DEFAULT_TARGET_BRANCH,
   getRunInputFields,
@@ -391,7 +392,10 @@ function TempAgentCombobox({
       </span>
       {showDropdown && (
         <ul
-          className="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-auto rounded-md border border-ink-200 bg-surface py-1 shadow-card"
+          // Raised popover: in dark mode the base surface matches the form
+          // behind it, so lift the dropdown to a lighter surface (ink-200) with
+          // a crisper border + shadow so it clearly stands off the background.
+          className="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-auto rounded-md border border-ink-200 bg-surface py-1 shadow-card dark:border-ink-400 dark:bg-ink-200 dark:shadow-lg"
           role="listbox"
         >
           {filtered.map((o, i) => {
@@ -405,7 +409,10 @@ function TempAgentCombobox({
                 aria-selected={isSelected}
                 className={cn(
                   "cursor-pointer px-3 py-2 text-sm",
-                  isActive ? "bg-ink-100" : "hover:bg-ink-50",
+                  // White-veil highlight reads on the lighter dark popover too.
+                  isActive
+                    ? "bg-ink-100 dark:bg-white/10"
+                    : "hover:bg-ink-50 dark:hover:bg-white/5",
                   isSelected && "text-brand-700",
                 )}
                 // onMouseDown (not onClick) so it fires before the input blur.
@@ -1914,7 +1921,17 @@ export function FlowEditor() {
                     onEdit={() =>
                       setEditing({ mode: "edit", rowKey: row.rowKey })
                     }
-                    onRemove={() => removeRow(row.rowKey)}
+                    onRemove={() => {
+                      if (
+                        !window.confirm(
+                          t("flowEditor.removeTaskConfirm", {
+                            name: row.subject || row.id || row.rowKey,
+                          }),
+                        )
+                      )
+                        return;
+                      removeRow(row.rowKey);
+                    }}
                     onToggleCheckpoint={() =>
                       setTasks((prev) =>
                         prev.map((item) =>
@@ -3087,7 +3104,7 @@ function MultiSelect({
         <span className="text-ink-400">▾</span>
       </button>
       {open && (
-        <div className="absolute z-10 mt-1 w-full max-h-48 overflow-auto rounded-md border border-ink-200 bg-surface shadow-card">
+        <div className="absolute z-10 mt-1 w-full max-h-48 overflow-auto rounded-md border border-ink-200 bg-surface shadow-card dark:border-ink-400 dark:bg-ink-200 dark:shadow-lg">
           {options.length === 0 ? (
             <div className="px-3 py-2 text-xs text-ink-500">
               (no other tasks yet)
@@ -3096,7 +3113,7 @@ function MultiSelect({
             options.map((o) => (
               <label
                 key={o}
-                className="flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-ink-50 cursor-pointer"
+                className="flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-ink-50 dark:hover:bg-white/5 cursor-pointer"
               >
                 <input
                   type="checkbox"
@@ -3126,9 +3143,74 @@ function MultiSelect({
  * Pure-DOM SVG keeps the bundle lean (no D3 / Cytoscape). Layout is
  * deterministic and recomputed on every render.
  */
+/** SVG node/edge colors for the dependency graph. SVG attributes can't read
+ *  Tailwind utility classes, so we switch the literal palette by theme. The
+ *  dark variant mirrors the legend chips (deep tinted fills + light strokes/
+ *  text) so the graph reads on the dark canvas instead of glowing white. */
+interface GraphPalette {
+  edge: string;
+  edgeSummary: string;
+  workerFill: string;
+  workerStroke: string;
+  hoverFill: string;
+  hoverStroke: string;
+  summaryFill: string;
+  summaryStroke: string;
+  summaryGlyph: string;
+  rootFill: string;
+  rootStroke: string;
+  rootGlyph: string;
+  glowSummary: string;
+  glowNode: string;
+  checkpointFill: string;
+  checkpointStroke: string;
+  checkpointGlyph: string;
+}
+
+const GRAPH_PALETTE_LIGHT: GraphPalette = {
+  edge: "#475569",
+  edgeSummary: "#ea580c",
+  workerFill: "#ffffff",
+  workerStroke: "#111827",
+  hoverFill: "#f0f9ff",
+  hoverStroke: "#0f172a",
+  summaryFill: "#fff7ed",
+  summaryStroke: "#ea580c",
+  summaryGlyph: "#ea580c",
+  rootFill: "#ecfeff",
+  rootStroke: "#0891b2",
+  rootGlyph: "#0891b2",
+  glowSummary: "#fdba74",
+  glowNode: "#67e8f9",
+  checkpointFill: "#fbbf24",
+  checkpointStroke: "#92400e",
+  checkpointGlyph: "#78350f",
+};
+
+const GRAPH_PALETTE_DARK: GraphPalette = {
+  edge: "#94a3b8",
+  edgeSummary: "#fb923c",
+  workerFill: "#1f2632",
+  workerStroke: "#cbd5e1",
+  hoverFill: "#10212b",
+  hoverStroke: "#e2e8f0",
+  summaryFill: "#3a1e0b",
+  summaryStroke: "#fb923c",
+  summaryGlyph: "#fdba74",
+  rootFill: "#08313d",
+  rootStroke: "#22d3ee",
+  rootGlyph: "#67e8f9",
+  glowSummary: "#fb923c",
+  glowNode: "#22d3ee",
+  checkpointFill: "#fbbf24",
+  checkpointStroke: "#78350f",
+  checkpointGlyph: "#451a03",
+};
+
 function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
   const { t } = useTranslation();
   const [hover, setHover] = useState<string | null>(null);
+  const C = useTheme() === "dark" ? GRAPH_PALETTE_DARK : GRAPH_PALETTE_LIGHT;
 
   const layout = useMemo(() => computeGraphLayout(tasks), [tasks]);
   if (layout.nodes.length === 0) return null;
@@ -3183,7 +3265,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
               <path
                 d="M 1 2 L 9 5 L 1 8"
                 fill="none"
-                stroke="#475569"
+                stroke={C.edge}
                 strokeWidth="1.4"
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -3202,7 +3284,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
               <path
                 d="M 1 2 L 9 5 L 1 8"
                 fill="none"
-                stroke="#ea580c"
+                stroke={C.edgeSummary}
                 strokeWidth="1.6"
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -3219,7 +3301,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
           </defs>
           {edges.map((e, i) => {
             const summaryEdge = e.toSummary;
-            const stroke = summaryEdge ? "#ea580c" : "#475569";
+            const stroke = summaryEdge ? C.edgeSummary : C.edge;
             const marker = summaryEdge
               ? "url(#csflow-arrow-summary)"
               : "url(#csflow-arrow)";
@@ -3259,19 +3341,19 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
             //   - Root:    cyan-teal   (entry points — "start here")
             //   - Worker:  neutral grey (intermediate steps)
             const fill = summary
-              ? "#fff7ed"
+              ? C.summaryFill
               : root
-              ? "#ecfeff"
+              ? C.rootFill
               : isHover
-              ? "#f0f9ff"
-              : "#ffffff";
+              ? C.hoverFill
+              : C.workerFill;
             const stroke = summary
-              ? "#ea580c"
+              ? C.summaryStroke
               : root
-              ? "#0891b2"
+              ? C.rootStroke
               : isHover
-              ? "#0f172a"
-              : "#111827";
+              ? C.hoverStroke
+              : C.workerStroke;
             return (
               <g
                 key={n.id}
@@ -3285,7 +3367,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                 {(isHover || summary) && (
                   <circle
                     r={r + 6}
-                    fill={summary ? "#fdba74" : "#67e8f9"}
+                    fill={summary ? C.glowSummary : C.glowNode}
                     opacity={summary ? 0.25 : 0.35}
                     filter="url(#csflow-glow)"
                   />
@@ -3302,7 +3384,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                     textAnchor="middle"
                     fontSize={11}
                     fontWeight="700"
-                    fill="#ea580c"
+                    fill={C.summaryGlyph}
                   >
                     ★
                   </text>
@@ -3313,7 +3395,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                     textAnchor="middle"
                     fontSize={10}
                     fontWeight="700"
-                    fill="#0891b2"
+                    fill={C.rootGlyph}
                   >
                     ▶
                   </text>
@@ -3324,8 +3406,8 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                       cx={r * 0.74}
                       cy={-r * 0.74}
                       r={3.6}
-                      fill="#fbbf24"
-                      stroke="#92400e"
+                      fill={C.checkpointFill}
+                      stroke={C.checkpointStroke}
                       strokeWidth={1}
                     />
                     <text
@@ -3334,7 +3416,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                       textAnchor="middle"
                       fontSize={5.5}
                       fontWeight="700"
-                      fill="#78350f"
+                      fill={C.checkpointGlyph}
                     >
                       !
                     </text>
@@ -3346,7 +3428,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
           </svg>
           {hovered && (
             <div
-              className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded-md bg-ink-900 px-2 py-1 text-xs text-white shadow-md whitespace-nowrap"
+              className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded-md bg-ink-900 px-2 py-1 text-xs text-ink-50 shadow-md whitespace-nowrap"
               style={{ left: hoveredLeft, top: hoveredTop }}
             >
               {hovered.subject || t("flowEditor.rowUntitled")}

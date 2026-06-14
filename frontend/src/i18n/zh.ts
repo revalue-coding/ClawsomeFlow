@@ -278,6 +278,7 @@ const zh = {
     details: "详情",
     edit: "编辑",
     delete: "删除",
+    removeTaskConfirm: "确定要删除子任务「{{name}}」吗？",
     newTaskModalTitle: "新增任务",
     editTaskModalTitle: "编辑任务",
     detailTaskModalTitle: "任务详情",

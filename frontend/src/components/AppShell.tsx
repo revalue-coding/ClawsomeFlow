@@ -276,14 +276,17 @@ function Sidebar({
                   className={cn(
                     "group mx-2 my-1 flex w-[calc(100%-1rem)] appearance-none items-center gap-3 rounded-md border-0 bg-transparent px-3 py-2 text-left text-sm font-medium transition-all",
                     isActive
-                      ? "bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_theme(colors.brand.200),0_0_18px_-8px_theme(colors.brand.400)]"
+                      // Selected item: a neutral "frosted" veil (not a red fill) +
+                      // a subtle inset hairline. Light: faint dark veil over the
+                      // white sidebar; dark: faint white fog over the dark panel.
+                      ? "bg-ink-900/[0.06] text-brand-700 ring-1 ring-inset ring-ink-900/10 dark:bg-white/10 dark:ring-white/15"
                       : "text-ink-700 hover:bg-ink-100 hover:text-brand-700",
                   )}
                 >
                   <span
                     className={cn(
                       "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
-                      "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
+                      "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_rgb(var(--brand-300))]",
                     )}
                   >
                     {it.icon}
@@ -313,7 +316,7 @@ function Sidebar({
             <span
               className={cn(
                 "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
-                "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
+                "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_rgb(var(--brand-300))]",
               )}
             >
               <StoreIcon className="h-8 w-8" />
@@ -332,7 +335,7 @@ function Sidebar({
             <span
               className={cn(
                 "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
-                "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
+                "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_rgb(var(--brand-300))]",
               )}
             >
               <DocsIcon className="h-8 w-8" />

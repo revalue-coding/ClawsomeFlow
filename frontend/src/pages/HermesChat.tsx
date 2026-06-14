@@ -544,7 +544,7 @@ function Picker() {
                   <Link
                     key={a.id}
                     to={`/hermes/${a.id}`}
-                    className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)]"
+                    className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_rgb(var(--brand-300))]"
                   >
                     <div className="flex items-start justify-between">
                       <AgentCardAvatar platform="hermes" />
@@ -1245,10 +1245,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
                 className="inline-flex h-10 items-center justify-center gap-2 rounded-full
                          bg-gradient-to-r from-brand-500 via-brand-400 to-orange-500
                          px-5 py-0 text-sm font-semibold tracking-wide text-white
-                         shadow-[0_0_24px_-4px_theme(colors.brand.400)]
+                         shadow-[0_0_24px_-4px_rgb(var(--brand-400))]
                          ring-1 ring-brand-300/60
                          hover:from-brand-600 hover:to-orange-600
-                         hover:shadow-[0_0_32px_-2px_theme(colors.brand.400)]
+                         hover:shadow-[0_0_32px_-2px_rgb(var(--brand-400))]
                          hover:-translate-y-0.5
                          transition-all"
                 disabled={dashboardBusy}
@@ -1426,21 +1426,27 @@ function SettingsModal({ agentId, onClose }: { agentId: string; onClose: () => v
 
   return (
     <Modal open onClose={onClose} title={t("hermes.settingsModal.title")} width="max-w-3xl">
-      <div className="flex gap-2 border-b border-ink-100 pb-2 mb-4">
-        {(["soul", "model", "skills", "cron"] as SettingsTab[]).map((k) => (
-          <button
-            key={k}
-            type="button"
-            className={
-              tab === k
-                ? "rounded bg-ink-900 px-3 py-1.5 text-xs font-medium text-white"
-                : "rounded px-3 py-1.5 text-xs text-ink-600 hover:bg-ink-50"
-            }
-            onClick={() => setTab(k)}
-          >
-            {t(`hermes.settingsModal.tabs.${k}`)}
-          </button>
-        ))}
+      {/* Segmented tab control — mirrors the OpenClaw settings modal so the
+          selected tab reads in both themes (a frosted surface chip with brand
+          text + ring), instead of the old white-on-near-white in dark mode. */}
+      <div className="mb-4 rounded-xl border border-ink-100 bg-ink-50/60 p-1.5">
+        <div className="grid grid-cols-4 gap-1">
+          {(["soul", "model", "skills", "cron"] as SettingsTab[]).map((k) => (
+            <button
+              key={k}
+              type="button"
+              className={cn(
+                "rounded-lg px-3 py-2 text-sm font-medium transition",
+                tab === k
+                  ? "bg-surface text-brand-700 shadow-sm ring-1 ring-brand-200"
+                  : "text-ink-600 hover:text-ink-900",
+              )}
+              onClick={() => setTab(k)}
+            >
+              {t(`hermes.settingsModal.tabs.${k}`)}
+            </button>
+          ))}
+        </div>
       </div>
       {tab === "soul" && <SoulTab agentId={agentId} />}
       {tab === "model" && <ModelTab agentId={agentId} />}

@@ -1432,7 +1432,7 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                   <Link
                     key={a.id}
                     to={`/chat/${a.id}`}
-                    className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_theme(colors.brand.300)]"
+                    className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_rgb(var(--brand-300))]"
                   >
                     <div className="flex items-start justify-between">
                       <AgentCardAvatar platform="openclaw" />
@@ -1983,7 +1983,7 @@ function ChatRoom({
             </span>
             <button
               type="button"
-              className="btn-primary !px-2.5 !py-1 text-[11px] shadow-[0_0_12px_-6px_theme(colors.brand.400)]"
+              className="btn-primary !px-2.5 !py-1 text-[11px] shadow-[0_0_12px_-6px_rgb(var(--brand-400))]"
               onClick={() => {
                 setTeamEditChoice(agent.teamId || "");
                 setTeamEditNewTeamName("");
@@ -2033,10 +2033,10 @@ function ChatRoom({
             className="inline-flex h-10 items-center justify-center rounded-full
                      bg-gradient-to-r from-brand-500 via-brand-400 to-orange-500
                      px-5 py-0 text-sm font-semibold tracking-wide text-white
-                     shadow-[0_0_24px_-4px_theme(colors.brand.400)]
+                     shadow-[0_0_24px_-4px_rgb(var(--brand-400))]
                      ring-1 ring-brand-300/60
                      hover:from-brand-600 hover:to-orange-600
-                     hover:shadow-[0_0_32px_-2px_theme(colors.brand.400)]
+                     hover:shadow-[0_0_32px_-2px_rgb(var(--brand-400))]
                      hover:-translate-y-0.5
                      transition-all"
           >

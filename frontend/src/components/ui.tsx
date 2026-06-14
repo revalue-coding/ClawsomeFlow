@@ -87,7 +87,7 @@ export function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
       {icon ? (
-        <div className="mb-4 inline-flex h-20 w-20 items-center justify-center rounded-2xl border border-brand-200 bg-brand-50 text-brand-500 shadow-[0_0_30px_-10px_theme(colors.brand.400)]">
+        <div className="mb-4 inline-flex h-20 w-20 items-center justify-center rounded-2xl border border-brand-200 bg-brand-50 text-brand-500 shadow-[0_0_30px_-10px_rgb(var(--brand-400))]">
           {icon}
         </div>
       ) : null}
@@ -166,7 +166,8 @@ export function Modal({
         fullscreenBackdrop
           // Cover the WHOLE viewport (sidebar included), opaque + blurred, above
           // all app chrome — nothing behind the upgrade modal stays visible.
-          ? "fixed inset-0 z-[100] bg-ink-900/80 backdrop-blur-sm"
+          // Literal black (not ink-900, which inverts to a light scrim in dark).
+          ? "fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm"
           // Stronger dim in dark mode so the page behind clearly recedes — a
           // 20% black scrim is nearly invisible over a dark canvas.
           : "absolute inset-0 z-40 bg-black/20 dark:bg-black/60",

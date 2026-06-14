@@ -279,6 +279,7 @@ const en = {
     details: "Details",
     edit: "Edit",
     delete: "Delete",
+    removeTaskConfirm: "Delete subtask \"{{name}}\"?",
     newTaskModalTitle: "New task",
     editTaskModalTitle: "Edit task",
     detailTaskModalTitle: "Task details",

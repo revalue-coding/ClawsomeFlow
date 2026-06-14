@@ -27,12 +27,16 @@ export function AgentCardAvatar({
   platform = "openclaw",
 }: AgentCardAvatarProps) {
   const slot = SIZE_TO_SLOT[size];
+  // Neutral "frosted" frame — a faint veil instead of a red brand tint. Light:
+  // a barely-there dark veil; dark: a faint white fog over the card surface.
+  const frame =
+    "items-center justify-center rounded-xl border border-ink-200 bg-ink-900/[0.04] dark:bg-white/[0.06]";
   const boxClass =
     size === "card"
-      ? "mb-3 inline-flex h-14 w-14 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 shadow-[0_0_18px_-8px_theme(colors.brand.400)] transition-shadow group-hover:shadow-[0_0_22px_-6px_theme(colors.brand.400)]"
+      ? `mb-3 inline-flex h-14 w-14 ${frame} shadow-sm transition-shadow group-hover:shadow`
       : size === "header"
-        ? "inline-flex h-11 w-11 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 shadow-[0_0_18px_-8px_theme(colors.brand.400)]"
-        : "inline-flex h-16 w-16 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 text-brand-500";
+        ? `inline-flex h-11 w-11 ${frame} shadow-sm`
+        : `inline-flex h-16 w-16 ${frame}`;
 
   return (
     <div className={cn(boxClass, className)}>

@@ -846,14 +846,14 @@ export function RunDetail() {
 
       {/* Leader handoff */}
       {showLeaderReply && (
-        <Card className="border-brand-300 bg-gradient-to-br from-brand-50/70 to-surface shadow-[0_0_0_1px_rgba(59,130,246,0.25),0_0_28px_-10px_rgba(59,130,246,0.65)]">
+        <Card className="border-ink-200 bg-gradient-to-br from-ink-900/[0.04] to-surface dark:from-white/[0.06] dark:to-surface">
           <CardTitle>
             {t("runDetail.leaderReplyTitle")}
           </CardTitle>
           <div className="text-sm text-ink-700 whitespace-pre-wrap">
             {leaderReply ?? t("runDetail.leaderReplyMissing")}
           </div>
-          <div className="mt-3 border-t border-brand-100 pt-2 text-xs text-ink-500">
+          <div className="mt-3 border-t border-ink-200 pt-2 text-xs text-ink-500">
             {t("runDetail.leaderReplyFootnote")}
           </div>
         </Card>
