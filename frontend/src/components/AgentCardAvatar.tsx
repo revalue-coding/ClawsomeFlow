@@ -43,12 +43,12 @@ export function AgentCardAvatar({
       <img
         src={agentIconSrc(platform)}
         alt=""
-        // The mascots are a vivid vermilion that glares on the dark canvas —
-        // soften it in dark mode (less saturation, a touch brighter) so it reads
-        // as a gentle accent rather than a hot red blob.
+        // The mascots are a vivid vermilion — soften it in BOTH themes (less
+        // saturation) so it reads as a gentle accent rather than a hot red blob;
+        // in dark mode also lift brightness a touch so it stays visible.
         className={cn(
           agentIconImgClass(platform, slot),
-          "object-contain dark:saturate-[.8] dark:brightness-110",
+          "object-contain saturate-[.85] dark:saturate-[.75] dark:brightness-110",
         )}
       />
     </div>

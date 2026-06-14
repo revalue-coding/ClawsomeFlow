@@ -192,6 +192,12 @@ export default {
         // NOTE: `text-white` stays literal white (on-color text on brand) — only
         // surface *backgrounds* use this token.
         surface: "rgb(var(--surface) / <alpha-value>)",
+        // Dedicated, non-mirrored tint for decorative red icons. `brand-500` is
+        // the brand red used for buttons; icons looked too hot in both themes,
+        // so they use this softer coral-red (a touch lighter, slightly
+        // desaturated) — set per-theme in styles.css, NOT subject to the brand
+        // ramp's light<->dark mirror, so it stays a soft red in both modes.
+        brandicon: "rgb(var(--brand-icon) / <alpha-value>)",
       },
       fontFamily: {
         sans: [

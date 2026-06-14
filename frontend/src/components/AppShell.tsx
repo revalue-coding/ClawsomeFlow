@@ -68,7 +68,11 @@ function NavAgentIcon({ platform }: { platform: AgentPlatform }) {
     <img
       src={agentIconSrc(platform)}
       alt=""
-      className={cn("object-contain", agentIconImgClass(platform, "sidebar"))}
+      // Soften the vivid mascot red in both themes (matches AgentCardAvatar).
+      className={cn(
+        "object-contain saturate-[.85] dark:saturate-[.75] dark:brightness-110",
+        agentIconImgClass(platform, "sidebar"),
+      )}
     />
   );
 }
@@ -289,7 +293,7 @@ function Sidebar({
                 >
                   <span
                     className={cn(
-                      "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
+                      "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brandicon transition-all",
                       "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_rgb(var(--brand-300))]",
                     )}
                   >
@@ -319,7 +323,7 @@ function Sidebar({
           >
             <span
               className={cn(
-                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
+                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brandicon transition-all",
                 "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_rgb(var(--brand-300))]",
               )}
             >
@@ -338,7 +342,7 @@ function Sidebar({
           >
             <span
               className={cn(
-                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
+                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brandicon transition-all",
                 "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_rgb(var(--brand-300))]",
               )}
             >

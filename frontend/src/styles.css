@@ -26,6 +26,8 @@
   --ink-800: 31 41 55;
   --ink-900: 17 24 39;
   --surface: 255 255 255;
+  /* Softer coral-red for decorative icons (lighter than brand-500 #dd3f30). */
+  --brand-icon: 233 106 92;
 }
 
 /* ── Dark theme tokens ──────────────────────────────────────────────────
@@ -48,6 +50,7 @@
   --ink-800: 224 230 238;
   --ink-900: 241 244 248; /* primary text */
   --surface: 24 30 39;    /* raised panels (cards, sidebar, top bar, inputs) */
+  --brand-icon: 240 138 126; /* paler coral so red icons don't glare on dark */
 }
 
 /* ── Accent ramps (light) ───────────────────────────────────────────────

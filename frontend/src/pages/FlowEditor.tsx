@@ -1589,7 +1589,7 @@ export function FlowEditor() {
                 title={decomposeDisabledReason || t("flowEditor.decompose.hint")}
                 disabled={!!decomposeDisabledReason}
               >
-                <ChatIcon className="h-4 w-4 text-brand-500" />
+                <ChatIcon className="h-4 w-4 text-brandicon" />
                 {t("flowEditor.aiDecompose")}
               </button>
             </div>
