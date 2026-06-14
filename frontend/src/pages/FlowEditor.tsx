@@ -280,6 +280,151 @@ function ownerKindLabel(
   return t("flowEditor.taskFields.ownerKindClaude");
 }
 
+/** Editable combobox for the temporary-agent name field. A single input that
+ *  both free-types a brand-new temporary agent AND opens a dropdown of the
+ *  temporary agents already defined in THIS flow (same kind). Picking one
+ *  re-uses its exact id+repo+targetBranch identity; the moment the text no
+ *  longer matches any candidate it is treated as a brand-new agent (only the
+ *  name changes — repo/target branch stay under their own fields). */
+function TempAgentCombobox({
+  value,
+  options,
+  selectedValue,
+  disabled,
+  placeholder,
+  onType,
+  onPick,
+}: {
+  value: string;
+  options: { id: string; repo: string; targetBranch: string; label: string }[];
+  selectedValue: string;
+  disabled?: boolean;
+  placeholder?: string;
+  onType: (text: string) => void;
+  onPick: (opt: { id: string; repo: string; targetBranch: string }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  const q = value.trim().toLowerCase();
+  // While the text is a committed selection (matches a candidate) show the full
+  // list; once the user types something new, filter to substring matches.
+  const filtered = useMemo(() => {
+    if (!q || selectedValue) return options;
+    return options.filter(
+      (o) =>
+        o.id.toLowerCase().includes(q) || o.label.toLowerCase().includes(q),
+    );
+  }, [options, q, selectedValue]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setActive(-1);
+      }
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  const showDropdown = open && !disabled && filtered.length > 0;
+
+  const pick = (opt: { id: string; repo: string; targetBranch: string }) => {
+    onPick(opt);
+    setOpen(false);
+    setActive(-1);
+  };
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <input
+        className="input pr-8"
+        placeholder={placeholder}
+        value={value}
+        readOnly={disabled}
+        role="combobox"
+        aria-expanded={showDropdown}
+        autoComplete="off"
+        onChange={(e) => {
+          onType(e.target.value);
+          setOpen(true);
+          setActive(-1);
+        }}
+        onFocus={() => !disabled && setOpen(true)}
+        onClick={() => !disabled && setOpen(true)}
+        onKeyDown={(e) => {
+          if (disabled) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            if (!open) {
+              setOpen(true);
+              return;
+            }
+            setActive((i) => Math.min(i + 1, filtered.length - 1));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setActive((i) => Math.max(i - 1, 0));
+          } else if (e.key === "Enter") {
+            if (showDropdown && active >= 0 && active < filtered.length) {
+              e.preventDefault();
+              pick(filtered[active]);
+            }
+          } else if (e.key === "Escape") {
+            setOpen(false);
+            setActive(-1);
+          }
+        }}
+      />
+      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-ink-400">
+        <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path
+            d="M6 8l4 4 4-4"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </span>
+      {showDropdown && (
+        <ul
+          className="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-auto rounded-md border border-ink-200 bg-surface py-1 shadow-card"
+          role="listbox"
+        >
+          {filtered.map((o, i) => {
+            const v = tempAgentValue(o);
+            const isSelected = v === selectedValue;
+            const isActive = i === active;
+            return (
+              <li
+                key={v}
+                role="option"
+                aria-selected={isSelected}
+                className={cn(
+                  "cursor-pointer px-3 py-2 text-sm",
+                  isActive ? "bg-ink-100" : "hover:bg-ink-50",
+                  isSelected && "text-brand-700",
+                )}
+                // onMouseDown (not onClick) so it fires before the input blur.
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(o);
+                }}
+                onMouseEnter={() => setActive(i)}
+              >
+                {o.label}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function buildExistingOwnerOptions(
   rows: TaskRow[],
   openclawOptions: OpenclawAgentSummary[],
@@ -2651,10 +2796,12 @@ function TaskFormBody({
             : t("flowEditor.taskFields.existingAgent")}
         </label>
         {ownerIsNew ? (
-          // Temporary: free-text name + (when present) a dropdown of temporary
-          // agents already defined in another task of THIS flow. Selecting one
+          // Temporary: a single editable combobox. Free-type to create a
+          // brand-new temporary agent, or open the dropdown to pick a temporary
+          // agent already defined in another task of THIS flow — selecting one
           // re-uses its exact id + repo + target branch (same worktree
-          // identity); typing creates a brand-new temporary agent.
+          // identity). The moment the text stops matching any candidate it is
+          // treated as a new agent.
           (() => {
             const opts = flowTempAgentsForKind(
               row.ownerKind as NonOpenclawOwnerKind,
@@ -2673,46 +2820,25 @@ function TaskFormBody({
               ? current
               : "";
             return (
-              <>
-                <input
-                  className="input"
-                  placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
-                  value={row.ownerId}
-                  readOnly={ownerLocked}
-                  onChange={(e) => onChange({ ownerId: e.target.value })}
-                />
-                {opts.length > 0 && (
-                  <select
-                    className="select mt-1"
-                    value={selectValue}
-                    disabled={ownerLocked}
-                    onChange={(e) => {
-                      const sel = opts.find(
-                        (o) => tempAgentValue(o) === e.target.value,
-                      );
-                      if (!sel) return;
-                      onChange({
-                        ownerId: sel.id,
-                        ownerRepo: sel.repo,
-                        ownerTargetBranch: sel.targetBranch,
-                        // The referenced agent is temporary, so keep
-                        // is_temporary true (a false flag would trigger a
-                        // managed-existence check it can't satisfy).
-                        ownerIsTemporary: true,
-                      });
-                    }}
-                  >
-                    <option value="">
-                      {t("flowEditor.taskFields.existingAgentPlaceholder")}
-                    </option>
-                    {opts.map((a) => (
-                      <option key={tempAgentValue(a)} value={tempAgentValue(a)}>
-                        {a.label}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </>
+              <TempAgentCombobox
+                value={row.ownerId}
+                options={opts}
+                selectedValue={selectValue}
+                disabled={ownerLocked}
+                placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
+                onType={(text) => onChange({ ownerId: text })}
+                onPick={(sel) =>
+                  onChange({
+                    ownerId: sel.id,
+                    ownerRepo: sel.repo,
+                    ownerTargetBranch: sel.targetBranch,
+                    // The referenced agent is temporary, so keep is_temporary
+                    // true (a false flag would trigger a managed-existence
+                    // check it can't satisfy).
+                    ownerIsTemporary: true,
+                  })
+                }
+              />
             );
           })()
         ) : ownerIsOpenclaw ? (
@@ -3032,7 +3158,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
       <div className="text-xs text-ink-500 mb-2">
         {t("flowEditor.graphTitle")}
       </div>
-      <div className="min-w-0 w-full min-h-[320px] overflow-hidden rounded-md border border-ink-200 bg-gradient-to-br from-ink-50/40 to-white">
+      <div className="min-w-0 w-full min-h-[320px] overflow-hidden rounded-md border border-ink-200 bg-gradient-to-br from-ink-50/40 to-surface">
         <div className="relative w-full">
           <svg
             className="w-full h-auto block"

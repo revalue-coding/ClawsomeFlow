@@ -167,14 +167,19 @@ export function Modal({
           // Cover the WHOLE viewport (sidebar included), opaque + blurred, above
           // all app chrome — nothing behind the upgrade modal stays visible.
           ? "fixed inset-0 z-[100] bg-ink-900/80 backdrop-blur-sm"
-          : "absolute inset-0 z-40 bg-black/20",
+          // Stronger dim in dark mode so the page behind clearly recedes — a
+          // 20% black scrim is nearly invisible over a dark canvas.
+          : "absolute inset-0 z-40 bg-black/20 dark:bg-black/60",
       )}
     >
       <div className="flex min-h-full items-center justify-center">
         <div
           ref={ref}
           className={cn(
-            "mx-auto w-full max-h-[calc(100vh-2rem)] rounded-lg bg-surface shadow-xl flex flex-col",
+            // Border distinguishes the panel from the page. In dark mode the
+            // surface is only slightly lighter than the canvas, so use a clearly
+            // light border (ink-500 → light gray under .dark) to outline it.
+            "mx-auto w-full max-h-[calc(100vh-2rem)] rounded-lg border border-ink-200 bg-surface shadow-xl dark:border-ink-500 flex flex-col",
             width,
           )}
         >

@@ -846,7 +846,7 @@ export function RunDetail() {
 
       {/* Leader handoff */}
       {showLeaderReply && (
-        <Card className="border-brand-300 bg-gradient-to-br from-brand-50/70 to-white shadow-[0_0_0_1px_rgba(59,130,246,0.25),0_0_28px_-10px_rgba(59,130,246,0.65)]">
+        <Card className="border-brand-300 bg-gradient-to-br from-brand-50/70 to-surface shadow-[0_0_0_1px_rgba(59,130,246,0.25),0_0_28px_-10px_rgba(59,130,246,0.65)]">
           <CardTitle>
             {t("runDetail.leaderReplyTitle")}
           </CardTitle>

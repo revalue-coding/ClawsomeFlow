@@ -24,7 +24,7 @@ export function AgentManagementHeader({
         className,
       )}
     >
-      <div className="border-b border-ink-100/80 bg-gradient-to-br from-ink-50/90 via-white to-brand-50/25 px-5 py-4">
+      <div className="border-b border-ink-100/80 bg-gradient-to-br from-ink-50/90 via-surface to-brand-50/25 px-5 py-4">
         <h1 className="text-xl font-semibold tracking-tight text-ink-900">{title}</h1>
         {description ? (
           <p className="mt-1.5 text-sm leading-relaxed text-ink-500">{description}</p>

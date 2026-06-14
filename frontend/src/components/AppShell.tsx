@@ -385,7 +385,7 @@ function Sidebar({
         title=""
         width="max-w-md"
       >
-        <div className="relative overflow-hidden rounded-2xl border border-brand-100 bg-gradient-to-br from-indigo-50 via-white to-fuchsia-50 px-6 py-7">
+        <div className="relative overflow-hidden rounded-2xl border border-brand-100 bg-gradient-to-br from-indigo-50 via-surface to-fuchsia-50 px-6 py-7">
           <div className="pointer-events-none absolute -left-10 -top-10 h-28 w-28 rounded-full bg-indigo-300/30 blur-2xl" />
           <div className="pointer-events-none absolute -bottom-12 -right-12 h-32 w-32 rounded-full bg-fuchsia-300/30 blur-2xl" />
           <div className="relative space-y-4 text-center">
