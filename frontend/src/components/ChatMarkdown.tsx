@@ -25,7 +25,42 @@ export function ChatMarkdown({
         className,
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          // Render links WITHOUT an href so the browser status bar never reveals
+          // the URL on hover; the target moves to data-href and opens via JS.
+          // Keeps keyboard accessibility (focusable + Enter/Space).
+          a: ({ node: _node, href, children, ...props }) => {
+            const open = () => {
+              if (href) window.open(href, "_blank", "noopener,noreferrer");
+            };
+            return (
+              <a
+                {...props}
+                data-href={href}
+                role="link"
+                tabIndex={0}
+                style={{ cursor: "pointer" }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  open();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    open();
+                  }
+                }}
+              >
+                {children}
+              </a>
+            );
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }

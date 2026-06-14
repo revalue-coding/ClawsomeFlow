@@ -9,7 +9,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
+import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -527,9 +528,9 @@ export function RunDetail() {
   return (
     <div className="space-y-5">
       <div>
-        <Link to="/runs" className="btn-outline">
+        <SilentLink to="/runs" className="btn-outline">
           {t("common.back")}
-        </Link>
+        </SilentLink>
       </div>
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -541,12 +542,12 @@ export function RunDetail() {
             <StatusPill status={run.status} />
             <span>
               {t("runDetail.flowLabel")}{" "}
-              <Link
+              <SilentLink
                 to={`/flows/${run.flowId}`}
                 className="text-brand-600 hover:underline"
               >
                 {flowName || run.flowId}
-              </Link>
+              </SilentLink>
             </span>
             <span>
               {t("runList.columnStarted")}: {new Date(run.startedAt).toLocaleString()}

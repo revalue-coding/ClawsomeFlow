@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
 import { ApiError, RunSummary, api } from "@/lib/api";
@@ -185,10 +185,11 @@ export function RunList() {
               </div>
               <div className="grid gap-3 md:grid-cols-2">
                 {activeRuns.map((r) => (
-                  <Link
+                  <SilentLink
                     key={r.id}
+                    as="div"
                     to={`/runs/${r.id}`}
-                    className="rounded-md border border-ink-200 p-3 hover:border-brand-300 transition-colors"
+                    className="block rounded-md border border-ink-200 p-3 hover:border-brand-300 transition-colors"
                   >
                     <div className="flex items-center justify-between gap-3">
                       <div className="font-medium text-ink-900">{flowNameById[r.flowId] || r.flowId}</div>
@@ -204,7 +205,7 @@ export function RunList() {
                     <div className="mt-1 overflow-x-auto whitespace-nowrap text-xs text-ink-600">
                       {formatRunInputs(r.inputs)}
                     </div>
-                  </Link>
+                  </SilentLink>
                 ))}
               </div>
             </Card>
@@ -233,9 +234,9 @@ export function RunList() {
                   {historyPageItems.map((r) => (
                     <tr key={r.id} className="table-row">
                       <td className="px-4 py-3">
-                        <Link to={`/runs/${r.id}`} className="font-medium text-ink-900 hover:text-brand-600">
+                        <SilentLink to={`/runs/${r.id}`} className="font-medium text-ink-900 hover:text-brand-600">
                           {flowNameById[r.flowId] || r.flowId}
-                        </Link>
+                        </SilentLink>
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-ink-700">{r.teamName}</td>
                       <td className="px-4 py-3 align-middle">

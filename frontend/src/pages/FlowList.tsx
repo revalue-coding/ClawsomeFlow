@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
+import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
 import { ApiError, FlowSummary, api } from "@/lib/api";
@@ -218,9 +219,9 @@ export function FlowList() {
           <h1 className="text-xl font-semibold text-ink-900">{t("flowList.title")}</h1>
           <p className="mt-1 text-sm text-ink-500">{t("flowList.titleHint")}</p>
         </div>
-        <Link to="/flows/new" className="btn-primary">
+        <SilentLink to="/flows/new" className="btn-primary">
           + {t("flowList.new")}
-        </Link>
+        </SilentLink>
       </div>
 
       {error && <ErrorBox>{error}</ErrorBox>}
@@ -232,9 +233,9 @@ export function FlowList() {
           title={t("flowList.empty")}
           hint={t("flowList.emptyHint")}
           action={
-            <Link to="/flows/new" className="btn-primary">
+            <SilentLink to="/flows/new" className="btn-primary">
               + {t("flowList.new")}
-            </Link>
+            </SilentLink>
           }
         />
       )}
@@ -259,12 +260,12 @@ export function FlowList() {
                   <tr key={f.id} className="table-row align-top">
                     <td className="px-4 py-3 max-w-[220px] align-top">
                       <div className="flex items-center gap-1.5">
-                        <Link
+                        <SilentLink
                           to={`/flows/${f.id}`}
                           className="font-medium text-ink-900 hover:text-brand-600"
                         >
                           {f.name}
-                        </Link>
+                        </SilentLink>
                         {f.easyMode && (
                           <span
                             className="h-2 w-2 shrink-0 rounded-full bg-emerald-500"

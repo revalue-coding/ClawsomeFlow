@@ -12,7 +12,8 @@
  */
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -1394,9 +1395,9 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
           action={
             <div className="flex flex-col items-center gap-2">
               <div className="flex items-center gap-2">
-                <Link to="/chat?createAgent=1" className="btn-primary">
+                <SilentLink to="/chat?createAgent=1" className="btn-primary">
                   {t("chat.pickerEmptyActionCreate")}
-                </Link>
+                </SilentLink>
                 <button
                   type="button"
                   className="btn-outline"
@@ -1405,9 +1406,9 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                   {t("chat.pickerEmptyActionLoadStore")}
                 </button>
               </div>
-              <Link to="/chat?importAgent=1" className="btn-outline">
+              <SilentLink to="/chat?importAgent=1" className="btn-outline">
                 {t("assistant.askImport")}
-              </Link>
+              </SilentLink>
             </div>
           }
         />
@@ -1431,8 +1432,9 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {group.agents.map((a) => (
-                  <Link
+                  <SilentLink
                     key={a.id}
+                    as="div"
                     to={`/chat/${a.id}`}
                     className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_rgb(var(--brand-300))]"
                   >
@@ -1461,7 +1463,7 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                         {a.description}
                       </div>
                     )}
-                  </Link>
+                  </SilentLink>
                 ))}
               </div>
             </div>
@@ -1502,9 +1504,9 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                       >
                         <TrashIcon className="h-5 w-5" />
                       </button>
-                      <Link className="btn-primary" to={`/chat/${a.id}`}>
+                      <SilentLink className="btn-primary" to={`/chat/${a.id}`}>
                         {t("agents.chatLink")}
-                      </Link>
+                      </SilentLink>
                     </div>
                   </td>
                 </tr>
@@ -2018,20 +2020,18 @@ function ChatRoom({
             <SettingsIcon className="h-4 w-4" />
             {t("chat.settings.action")}
           </button>
-          <a
-            href={openclawUrl}
-            target="_blank"
-            rel="noreferrer"
-            onClick={(e) => {
+          <button
+            type="button"
+            onClick={() => {
               // The OpenClaw runtime listens on the server's local machine; a
               // remote/SSH browser session cannot reach it, so reject up front
-              // instead of opening a dead tab.
+              // instead of opening a dead tab. Open via JS (no href) so the
+              // browser status bar never reveals the URL on hover.
               if (isRemoteBrowser()) {
-                e.preventDefault();
-                if (typeof window !== "undefined") {
-                  void alert(t("chat.toOpenclawRemoteUnavailable"));
-                }
+                void alert(t("chat.toOpenclawRemoteUnavailable"));
+                return;
               }
+              window.open(openclawUrl, "_blank", "noopener,noreferrer");
             }}
             className="inline-flex h-10 items-center justify-center rounded-full
                      bg-gradient-to-r from-brand-500 via-brand-400 to-orange-500
@@ -2044,7 +2044,7 @@ function ChatRoom({
                      transition-all"
           >
             {t("chat.toOpenclaw")}
-          </a>
+          </button>
         </div>
       </div>
 

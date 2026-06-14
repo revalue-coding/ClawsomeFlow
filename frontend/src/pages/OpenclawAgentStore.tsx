@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -388,9 +388,9 @@ export function OpenclawAgentStore() {
                 </button>
               </>
             )}
-            <Link className="btn-outline !h-8 !px-3 !py-1 !text-xs" to="/chat">
+            <SilentLink className="btn-outline !h-8 !px-3 !py-1 !text-xs" to="/chat">
               {t("common.back")}
-            </Link>
+            </SilentLink>
           </div>
         </header>
 

@@ -6,7 +6,8 @@
  * profile root). No Import&Optimize / Agent Store / "to Hermes" button.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
+import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -542,8 +543,9 @@ function Picker() {
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {list.map((a) => (
-                  <Link
+                  <SilentLink
                     key={a.id}
+                    as="div"
                     to={`/hermes/${a.id}`}
                     className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_rgb(var(--brand-300))]"
                   >
@@ -570,7 +572,7 @@ function Picker() {
                     {a.description && (
                       <p className="mt-2 line-clamp-3 text-xs text-ink-500">{a.description}</p>
                     )}
-                  </Link>
+                  </SilentLink>
                 ))}
               </div>
             </div>

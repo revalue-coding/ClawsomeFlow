@@ -22,6 +22,7 @@ import {
 } from "@/components/UpdateNotice";
 import { Modal, MODAL_ROOT_ID } from "@/components/ui";
 import { DialogProvider } from "@/components/dialog";
+import { SilentLink } from "@/components/SilentLink";
 import type { UpdateStatus } from "@/lib/api";
 import { agentIconImgClass, agentIconSrc, type AgentPlatform } from "@/lib/agentIconSizing";
 import { cn } from "@/lib/cn";
@@ -326,10 +327,10 @@ function Sidebar({
             </span>
             <span>{t("nav.agentStore")}</span>
           </button>
-          <a
-            href={DOCS_URL}
-            target="_blank"
-            rel="noreferrer"
+          <SilentLink
+            to={DOCS_URL}
+            external
+            as="div"
             className={cn(
               "group mx-2 my-1 flex w-[calc(100%-1rem)] appearance-none items-center gap-3 rounded-md border-0 bg-transparent px-3 py-2 text-left text-sm font-medium transition-all",
               "text-ink-700 hover:bg-ink-100 hover:text-brand-700",
@@ -345,7 +346,7 @@ function Sidebar({
             </span>
             <span className="flex-1">{t("nav.docs")}</span>
             <ExternalLinkIcon className="h-4 w-4 text-ink-400" />
-          </a>
+          </SilentLink>
         </div>
       </nav>
       <div className="flex items-center justify-between gap-2 border-t border-ink-100 px-4 py-3 text-left">
