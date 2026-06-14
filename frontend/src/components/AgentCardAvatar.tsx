@@ -2,6 +2,7 @@ import { cn } from "@/lib/cn";
 import {
   agentIconImgClass,
   agentIconSrc,
+  SOFT_RED_ICON,
   type AgentIconSlot,
   type AgentPlatform,
 } from "@/lib/agentIconSizing";
@@ -43,13 +44,8 @@ export function AgentCardAvatar({
       <img
         src={agentIconSrc(platform)}
         alt=""
-        // The mascots are a vivid vermilion — soften it in BOTH themes (less
-        // saturation) so it reads as a gentle accent rather than a hot red blob;
-        // in dark mode also lift brightness a touch so it stays visible.
-        className={cn(
-          agentIconImgClass(platform, slot),
-          "object-contain saturate-[.85] dark:saturate-[.75] dark:brightness-110",
-        )}
+        // Soften the vivid mascot red in BOTH themes (shared with the sidebar).
+        className={cn(agentIconImgClass(platform, slot), "object-contain", SOFT_RED_ICON)}
       />
     </div>
   );

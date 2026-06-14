@@ -24,7 +24,7 @@ import { Modal, MODAL_ROOT_ID } from "@/components/ui";
 import { DialogProvider } from "@/components/dialog";
 import { SilentLink } from "@/components/SilentLink";
 import type { UpdateStatus } from "@/lib/api";
-import { agentIconImgClass, agentIconSrc, type AgentPlatform } from "@/lib/agentIconSizing";
+import { agentIconImgClass, agentIconSrc, SOFT_RED_ICON, type AgentPlatform } from "@/lib/agentIconSizing";
 import { cn } from "@/lib/cn";
 
 interface NavItem {
@@ -69,10 +69,7 @@ function NavAgentIcon({ platform }: { platform: AgentPlatform }) {
       src={agentIconSrc(platform)}
       alt=""
       // Soften the vivid mascot red in both themes (matches AgentCardAvatar).
-      className={cn(
-        "object-contain saturate-[.85] dark:saturate-[.75] dark:brightness-110",
-        agentIconImgClass(platform, "sidebar"),
-      )}
+      className={cn("object-contain", SOFT_RED_ICON, agentIconImgClass(platform, "sidebar"))}
     />
   );
 }
@@ -82,7 +79,8 @@ function NavTimerIcon() {
     <img
       src="/timer-icon.png"
       alt=""
-      className="h-6 w-6 object-contain"
+      // Same soft-red treatment as the other red raster icons.
+      className={cn("h-6 w-6 object-contain", SOFT_RED_ICON)}
     />
   );
 }

@@ -39,6 +39,13 @@ const SLOT_CONTAINER_UNITS: Record<AgentIconSlot, number> = {
   empty: 16,
 };
 
+/** Tailwind filter classes that soften the flat vermilion of the raster icons
+ *  (agent mascots, timer) toward a lighter coral in BOTH themes, so they match
+ *  the softened `text-brandicon` SVG icons instead of glaring. Shared by every
+ *  place that renders one of these red PNGs (sidebar nav + agent cards). */
+export const SOFT_RED_ICON =
+  "saturate-[.7] brightness-[1.15] dark:saturate-[.65] dark:brightness-[1.25]";
+
 export function agentIconSrc(platform: AgentPlatform): string {
   return PLATFORM_ICONS[platform];
 }
