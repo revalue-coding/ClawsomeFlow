@@ -36,6 +36,7 @@ import {
   api,
 } from "@/lib/api";
 import { Card, CardTitle, ErrorBox, Loading, Modal, StatusPill } from "@/components/ui";
+import { useDialog } from "@/components/dialog";
 import { ChatIcon } from "@/components/icons";
 import { cn } from "@/lib/cn";
 import { useTheme } from "@/lib/theme";
@@ -536,6 +537,7 @@ function uniqueSummaryId(existing: TaskRow[]): string {
 export function FlowEditor() {
   const { id } = useParams();
   const { t } = useTranslation();
+  const { confirm, alert } = useDialog();
   const isNew = !id || id === "new";
   const navigate = useNavigate();
 
@@ -921,7 +923,7 @@ export function FlowEditor() {
     // by validation. Without one, opening the editor would let users
     // create invalid drafts.
     if (!leaderId.trim()) {
-      window.alert(t("flowEditor.pickLeaderFirst"));
+      void alert(t("flowEditor.pickLeaderFirst"));
       return;
     }
     setEditing({ mode: "create", draft: blankRow() });
@@ -929,7 +931,7 @@ export function FlowEditor() {
 
   function openMerge() {
     if (!leaderId.trim()) {
-      window.alert(t("flowEditor.mergePickLeaderFirst"));
+      void alert(t("flowEditor.mergePickLeaderFirst"));
       return;
     }
     setMergeOpen(true);
@@ -1005,7 +1007,7 @@ export function FlowEditor() {
       // Soft confirmation — alert is annoying if many merges in a row,
       // but a tiny success line in the page-level error rail keeps
       // it visible without a popup.
-      window.alert(
+      void alert(
         t("flowEditor.mergeModal.mergedSummary", {
           flowCount: details.length,
           taskCount: appended.length,
@@ -1032,7 +1034,7 @@ export function FlowEditor() {
       const agent =
         openclawOptions.find((a) => a.id === normalized) ??
         hermesOptions.find((a) => a.id === normalized);
-      window.alert(
+      void alert(
         t("flowEditor.leaderInUseByTask", {
           name: agent ? `${agent.name} (${agent.id})` : normalized,
         }),
@@ -1163,11 +1165,7 @@ export function FlowEditor() {
   function notifySaveWarnings(warnings: FlowSaveWarning[] | undefined) {
     if (!warnings || warnings.length === 0) return;
     const text = warnings.map((item) => warningText(item)).join("\n\n");
-    if (typeof window !== "undefined") {
-      window.alert(text);
-      return;
-    }
-    setError(text);
+    void alert(text);
   }
 
   async function persistFlow(payload: FlowSavePayload): Promise<PersistFlowResult> {
@@ -1359,7 +1357,7 @@ export function FlowEditor() {
       : !checked.hasInitialCommit
       ? t("flowEditor.repoIssue.reasonNoInitialCommit")
       : t("flowEditor.repoIssue.reasonUnknown");
-    const shouldCreate = window.confirm(
+    const shouldCreate = await confirm(
       t("flowEditor.taskRepoCheck.confirmCreate", {
         agentId: leaderLabel,
         repo: resolvedPath,
@@ -1451,7 +1449,7 @@ export function FlowEditor() {
 
   async function onPickLeaderRepo() {
     if (remoteBrowser) {
-      window.alert(t("flowEditor.pickDirRemoteHint"));
+      void alert(t("flowEditor.pickDirRemoteHint"));
       return;
     }
     setLeaderPickingRepo(true);
@@ -1468,7 +1466,7 @@ export function FlowEditor() {
           : e instanceof Error
           ? e.message
           : String(e);
-      window.alert(t("flowEditor.pickDirFailed", { message: msg }));
+      void alert(t("flowEditor.pickDirFailed", { message: msg }));
     } finally {
       setLeaderPickingRepo(false);
     }
@@ -1525,7 +1523,6 @@ export function FlowEditor() {
         <div className="mb-4 flex items-center justify-between rounded-lg border border-emerald-100/90 bg-emerald-50/60 px-3 py-2">
           <div className="pr-3">
             <div className="text-sm font-medium text-ink-800">{t("flowEditor.easyMode")}</div>
-            <div className="text-xs text-ink-500">{t("flowEditor.easyModeSub")}</div>
           </div>
           <button
             type="button"
@@ -1921,15 +1918,14 @@ export function FlowEditor() {
                     onEdit={() =>
                       setEditing({ mode: "edit", rowKey: row.rowKey })
                     }
-                    onRemove={() => {
-                      if (
-                        !window.confirm(
-                          t("flowEditor.removeTaskConfirm", {
-                            name: row.subject || row.id || row.rowKey,
-                          }),
-                        )
-                      )
-                        return;
+                    onRemove={async () => {
+                      const ok = await confirm(
+                        t("flowEditor.removeTaskConfirm", {
+                          name: row.subject || row.id || row.rowKey,
+                        }),
+                        { danger: true, okText: t("flowEditor.delete") },
+                      );
+                      if (!ok) return;
                       removeRow(row.rowKey);
                     }}
                     onToggleCheckpoint={() =>
@@ -2284,6 +2280,7 @@ function TaskEditModal({
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
+  const { confirm } = useDialog();
   const [draft, setDraft] = useState<TaskRow>(initialRow);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [repoChecking, setRepoChecking] = useState(false);
@@ -2419,7 +2416,7 @@ function TaskEditModal({
       : !checked.hasInitialCommit
       ? t("flowEditor.repoIssue.reasonNoInitialCommit")
       : t("flowEditor.repoIssue.reasonUnknown");
-    const shouldCreate = window.confirm(
+    const shouldCreate = await confirm(
       t("flowEditor.taskRepoCheck.confirmCreate", {
         agentId: agentLabel,
         repo: resolvedPath,
@@ -2531,7 +2528,7 @@ function TaskEditModal({
           !== (initialRow.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
       )
     ) {
-      const ok = window.confirm(
+      const ok = await confirm(
         t("flowEditor.taskRepoCheck.confirmExistingAgentRepoBranchChange"),
       );
       if (!ok) {
@@ -2656,6 +2653,7 @@ function TaskFormBody({
   onChange: (patch: Partial<TaskRow>) => void;
 }) {
   const { t } = useTranslation();
+  const { alert } = useDialog();
   const [pickingRepo, setPickingRepo] = useState(false);
   const ownerLocked = readOnly || isSummary;
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
@@ -2678,7 +2676,7 @@ function TaskFormBody({
     // popup before we even hit the backend. Users still have the input
     // field to paste an absolute path into.
     if (remoteBrowser) {
-      window.alert(t("flowEditor.pickDirRemoteHint"));
+      void alert(t("flowEditor.pickDirRemoteHint"));
       return;
     }
     setPickingRepo(true);
@@ -2699,7 +2697,7 @@ function TaskFormBody({
           : e instanceof Error
           ? e.message
           : String(e);
-      window.alert(t("flowEditor.pickDirFailed", { message: msg }));
+      void alert(t("flowEditor.pickDirFailed", { message: msg }));
     } finally {
       setPickingRepo(false);
     }
@@ -4573,6 +4571,7 @@ function MergeFlowsModal({
   onMerge: (details: FlowDetail[]) => void;
 }) {
   const { t } = useTranslation();
+  const { alert } = useDialog();
   const [items, setItems] = useState<FlowSummary[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -4667,7 +4666,7 @@ function MergeFlowsModal({
               }),
           );
         }
-        window.alert(lines.join("\n"));
+        void alert(lines.join("\n"));
         return;
       }
 

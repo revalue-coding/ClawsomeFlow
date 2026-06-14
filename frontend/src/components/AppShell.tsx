@@ -21,6 +21,7 @@ import {
   setUpgradeModalOpen,
 } from "@/components/UpdateNotice";
 import { Modal, MODAL_ROOT_ID } from "@/components/ui";
+import { DialogProvider } from "@/components/dialog";
 import type { UpdateStatus } from "@/lib/api";
 import { agentIconImgClass, agentIconSrc, type AgentPlatform } from "@/lib/agentIconSizing";
 import { cn } from "@/lib/cn";
@@ -159,7 +160,9 @@ export function AppShell() {
         <TopBar location={location.pathname} />
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-7xl px-6 py-6">
-            <Outlet />
+            <DialogProvider>
+              <Outlet />
+            </DialogProvider>
           </div>
         </div>
         {/* Modeless modal host: covers only the content area (not the sidebar),

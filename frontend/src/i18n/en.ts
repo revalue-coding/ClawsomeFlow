@@ -16,6 +16,8 @@ const en = {
     back: "Back",
     close: "Close",
     confirm: "Confirm",
+    confirmTitle: "Please confirm",
+    noticeTitle: "Notice",
     yes: "Yes",
     no: "No",
     notFound: "Not found",

@@ -27,6 +27,7 @@ import {
   Modal,
   StatusPill,
 } from "@/components/ui";
+import { useDialog } from "@/components/dialog";
 import { DEFAULT_TARGET_BRANCH } from "@/lib/flowRuntime";
 import { useSessionBackedState } from "@/lib/sessionState";
 import { RunWsEvent, eventViewToWs, openRunStream } from "@/lib/ws";
@@ -161,6 +162,7 @@ const EMPTY_TASK_BOARD: TaskBoardModel = {
 export function RunDetail() {
   const { id } = useParams();
   const { t } = useTranslation();
+  const { confirm, alert } = useDialog();
   const [run, setRun] = useState<RunDetailT | null>(null);
   const [flowName, setFlowName] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -324,14 +326,14 @@ export function RunDetail() {
     ) {
       return;
     }
-    if (!run || !confirm(t("runDetail.abortConfirm"))) return;
+    if (!run || !(await confirm(t("runDetail.abortConfirm")))) return;
     setAborting(true);
     try {
       const r = await api.abortRun(run.id);
       setRun({ ...run, status: r.status });
       setCheckpointSnapshot(null);
     } catch (e) {
-      alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
       setAborting(false);
     }
@@ -342,24 +344,24 @@ export function RunDetail() {
     try {
       const out = await api.mergePending(run.id, agentId);
       if (!out.success) {
-        alert(`${t("common.failed")}:\n${out.message.slice(0, 400)}`);
+        void alert(`${t("common.failed")}:\n${out.message.slice(0, 400)}`);
       }
       const r = await api.getRun(run.id);
       setRun(r);
     } catch (e) {
-      alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     }
   }
 
   async function onDismiss(agentId: string) {
     if (!run) return;
-    if (!confirm(`${t("runDetail.dismiss")} (${agentId})?`)) return;
+    if (!(await confirm(`${t("runDetail.dismiss")} (${agentId})?`))) return;
     try {
       await api.dismissPending(run.id, agentId);
       const r = await api.getRun(run.id);
       setRun(r);
     } catch (e) {
-      alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     }
   }
 
@@ -367,7 +369,7 @@ export function RunDetail() {
     if (!run) return;
     const text = complaintText.trim();
     if (!text) {
-      alert(t("runDetail.complaint.emptyError"));
+      void alert(t("runDetail.complaint.emptyError"));
       return;
     }
     setComplaintSubmitting(true);
@@ -379,7 +381,7 @@ export function RunDetail() {
       setComplaintText("");
       setComplaintNotice(t("runDetail.complaint.submittedNotice"));
     } catch (e) {
-      alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
       setComplaintSubmitting(false);
     }
@@ -397,7 +399,7 @@ export function RunDetail() {
       setComplaintText("");
       setComplaintNotice(null);
     } catch (e) {
-      alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
       setComplaintSubmitting(false);
     }
@@ -410,7 +412,7 @@ export function RunDetail() {
       await api.approveCheckpointItem(run.id, taskId);
       await refreshCheckpointAfterApprove(run.id);
     } catch (e) {
-      alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
       endCheckpointAction(taskId);
     }
@@ -423,7 +425,7 @@ export function RunDetail() {
       await api.markCheckpointItemRead(run.id, taskId);
       await refreshRunAndCheckpoint(run.id);
     } catch (e) {
-      alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
       endCheckpointAction(taskId);
     }
@@ -433,7 +435,7 @@ export function RunDetail() {
     if (!run || !rerunModalTaskId) return;
     const text = rerunFeedback.trim();
     if (!text) {
-      alert(t("runDetail.checkpoint.rerunFeedbackRequired"));
+      void alert(t("runDetail.checkpoint.rerunFeedbackRequired"));
       return;
     }
     const taskId = rerunModalTaskId;
@@ -445,7 +447,7 @@ export function RunDetail() {
       setRerunModalTaskId(null);
       setRerunFeedback("");
     } catch (e) {
-      alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
       setRerunSubmitting(false);
       endCheckpointAction(taskId);
@@ -846,7 +848,11 @@ export function RunDetail() {
 
       {/* Leader handoff */}
       {showLeaderReply && (
-        <Card className="border-ink-200 bg-gradient-to-br from-ink-900/[0.04] to-surface dark:from-white/[0.06] dark:to-surface">
+        <Card className="relative overflow-hidden border-brand-400 bg-gradient-to-br from-ink-900/[0.04] to-surface shadow-[0_0_0_1px_rgb(var(--brand-400)),0_0_32px_-10px_rgb(var(--brand-500))] dark:border-brand-500/70 dark:from-white/[0.06] dark:to-surface dark:shadow-[0_0_0_1px_rgb(var(--brand-500)),0_0_36px_-8px_rgb(var(--brand-500))]">
+          {/* Brand spotlight: this is the run's headline deliverable, so it gets
+              a glow + ring + left accent bar to stand out from the other cards
+              (the surface itself stays neutral — no heavy red fill). */}
+          <span className="pointer-events-none absolute inset-y-0 left-0 w-1 bg-brand-500" />
           <CardTitle>
             {t("runDetail.leaderReplyTitle")}
           </CardTitle>

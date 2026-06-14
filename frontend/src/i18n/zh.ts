@@ -20,6 +20,8 @@ const zh = {
     back: "返回",
     close: "关闭",
     confirm: "确认",
+    confirmTitle: "请确认",
+    noticeTitle: "提示",
     yes: "是",
     no: "否",
     notFound: "未找到",

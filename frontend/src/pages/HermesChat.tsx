@@ -16,6 +16,7 @@ import {
   Loading,
   Modal,
 } from "@/components/ui";
+import { useDialog } from "@/components/dialog";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import {
   AgentManagementHeader,
@@ -928,6 +929,7 @@ interface ChatMsg {
 
 function ChatRoom({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
+  const { alert } = useDialog();
   const navigate = useNavigate();
   const [name, setName] = useState(agentId);
   const [teamName, setTeamName] = useState("");
@@ -1065,7 +1067,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
 
   const pickWorkdir = async () => {
     if (isRemoteBrowser()) {
-      window.alert(t("hermes.remoteUnavailable"));
+      void alert(t("hermes.remoteUnavailable"));
       return;
     }
     try {
@@ -1078,14 +1080,14 @@ function ChatRoom({ agentId }: { agentId: string }) {
 
   const openProfile = async () => {
     if (isRemoteBrowser()) {
-      window.alert(t("hermes.remoteUnavailable"));
+      void alert(t("hermes.remoteUnavailable"));
       return;
     }
     setOpening(true);
     try {
       await api.openDirectory({ path: profileRoot });
     } catch (e) {
-      window.alert(t("hermes.openFailed", { message: errText(e) }));
+      void alert(t("hermes.openFailed", { message: errText(e) }));
     } finally {
       setOpening(false);
     }
@@ -1252,7 +1254,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
                          hover:-translate-y-0.5
                          transition-all"
                 disabled={dashboardBusy}
-                onClick={() => void openHermesDashboard(t, () => window.alert(t("hermes.dashboardRemoteUnavailable")), setDashboardBusy)}
+                onClick={() => void openHermesDashboard(t, () => void alert(t("hermes.dashboardRemoteUnavailable")), (msg) => void alert(msg), setDashboardBusy)}
               >
                 <ExternalLinkIcon className="h-4 w-4" />
                 {dashboardBusy ? t("hermes.openingDashboard") : t("hermes.toHermes")}
@@ -1830,6 +1832,7 @@ function SkillsTab({ agentId }: { agentId: string }) {
 
 function CronTab({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
+  const { alert } = useDialog();
   const [available, setAvailable] = useState(true);
   const [jobs, setJobs] = useState<HermesCronJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1959,6 +1962,7 @@ function CronTab({ agentId }: { agentId: string }) {
 async function openHermesDashboard(
   t: (key: string, opts?: Record<string, string>) => string,
   onRemote: () => void,
+  onError: (message: string) => void,
   setBusy?: (busy: boolean) => void,
 ): Promise<void> {
   if (isRemoteBrowser()) {
@@ -1970,7 +1974,7 @@ async function openHermesDashboard(
     const { url } = await api.openHermesDashboard();
     window.open(url, "_blank", "noopener,noreferrer");
   } catch (e) {
-    window.alert(t("hermes.dashboardOpenFailed", { message: errText(e) }));
+    onError(t("hermes.dashboardOpenFailed", { message: errText(e) }));
   } finally {
     setBusy?.(false);
   }

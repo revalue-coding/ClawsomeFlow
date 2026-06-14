@@ -38,6 +38,7 @@ import {
   Loading,
   Modal,
 } from "@/components/ui";
+import { useDialog } from "@/components/dialog";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import {
@@ -239,6 +240,7 @@ function AgentQuickActions({
   children?: (actions: OpenclawPickerActions) => ReactNode;
 }) {
   const { t } = useTranslation();
+  const { confirm } = useDialog();
   const location = useLocation();
   const navigate = useNavigate();
   const [teams, setTeams] = useState<OpenclawTeam[]>([]);
@@ -746,7 +748,7 @@ function AgentQuickActions({
       removeMode === "purge"
         ? t("assistant.removeModal.confirmPurge", { target: targetText })
         : t("assistant.removeModal.confirmUnregister", { target: targetText });
-    if (!window.confirm(confirmText)) return;
+    if (!(await confirm(confirmText))) return;
     setRemoveSubmitting(true);
     setRemoveError(null);
     try {
@@ -1619,6 +1621,7 @@ function ChatRoom({
 }) {
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const { alert } = useDialog();
   const [agent, setAgent] = useState<OpenclawAgentDetail | null>(null);
   const [teams, setTeams] = useState<OpenclawTeam[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1917,7 +1920,7 @@ function ChatRoom({
     if (!agent || openingMyDesktop) return;
     if (isRemoteBrowser()) {
       if (typeof window !== "undefined") {
-        window.alert(t("chat.myDesktop.remoteUnavailable"));
+        void alert(t("chat.myDesktop.remoteUnavailable"));
       }
       return;
     }
@@ -1929,7 +1932,7 @@ function ChatRoom({
     } catch (e) {
       const message = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
       if (typeof window !== "undefined") {
-        window.alert(t("chat.myDesktop.openFailed", { message }));
+        void alert(t("chat.myDesktop.openFailed", { message }));
       } else {
         setActionError(message);
       }
@@ -2026,7 +2029,7 @@ function ChatRoom({
               if (isRemoteBrowser()) {
                 e.preventDefault();
                 if (typeof window !== "undefined") {
-                  window.alert(t("chat.toOpenclawRemoteUnavailable"));
+                  void alert(t("chat.toOpenclawRemoteUnavailable"));
                 }
               }
             }}
@@ -2265,6 +2268,7 @@ function AgentSettingsModal({
   onError: (value: string | null) => void;
 }) {
   const { t } = useTranslation();
+  const { confirm } = useDialog();
   const [tab, setTab] = useState<SettingsTab>("skills");
   const [settings, setSettings] = useState<_SettingsData>(() => createEmptySettingsData());
   const [loadingByTab, setLoadingByTab] = useState<Record<SettingsTab, boolean>>({
@@ -2793,8 +2797,13 @@ function AgentSettingsModal({
                               type="button"
                               className="btn-outline !px-2.5 !py-1 text-xs !border-rose-300 !text-rose-600"
                               disabled={working}
-                              onClick={() => {
-                                if (!window.confirm(t("chat.settings.skills.deleteConfirm", { name: item.name }))) {
+                              onClick={async () => {
+                                if (
+                                  !(await confirm(
+                                    t("chat.settings.skills.deleteConfirm", { name: item.name }),
+                                    { danger: true, okText: t("common.delete") },
+                                  ))
+                                ) {
                                   return;
                                 }
                                 void runAction(async () => {
@@ -2904,8 +2913,13 @@ function AgentSettingsModal({
                                 type="button"
                                 className="btn-outline !px-2.5 !py-1 text-xs !border-rose-300 !text-rose-600"
                                 disabled={working}
-                                onClick={() => {
-                                  if (!window.confirm(t("chat.settings.cron.deleteConfirm", { name: item.name }))) {
+                                onClick={async () => {
+                                  if (
+                                    !(await confirm(
+                                      t("chat.settings.cron.deleteConfirm", { name: item.name }),
+                                      { danger: true, okText: t("common.delete") },
+                                    ))
+                                  ) {
                                     return;
                                   }
                                   void runAction(async () => {
@@ -3021,8 +3035,13 @@ function AgentSettingsModal({
                                 type="button"
                                 className="btn-outline !px-2.5 !py-1 text-xs !border-rose-300 !text-rose-600"
                                 disabled={working}
-                                onClick={() => {
-                                  if (!window.confirm(t("chat.settings.hooks.deleteConfirm", { name: item.name }))) {
+                                onClick={async () => {
+                                  if (
+                                    !(await confirm(
+                                      t("chat.settings.hooks.deleteConfirm", { name: item.name }),
+                                      { danger: true, okText: t("common.delete") },
+                                    ))
+                                  ) {
                                     return;
                                   }
                                   void runAction(async () => {
