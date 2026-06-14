@@ -1,8 +1,8 @@
 import { cn } from "@/lib/cn";
+import { OpenclawGlyph, HermesGlyph } from "@/components/agentGlyphs";
 import {
   agentIconImgClass,
   agentIconSrc,
-  SOFT_RED_ICON,
   type AgentIconSlot,
   type AgentPlatform,
 } from "@/lib/agentIconSizing";
@@ -39,14 +39,23 @@ export function AgentCardAvatar({
         ? `inline-flex h-11 w-11 ${frame} shadow-sm`
         : `inline-flex h-16 w-16 ${frame}`;
 
+  // OpenClaw/Hermes ship as single-color SVG glyphs painted with the shared
+  // `text-brandicon` tint (exact match with every other icon). Other platforms
+  // (claude/codex/cursor) keep their raster logos.
+  const Glyph =
+    platform === "openclaw" ? OpenclawGlyph : platform === "hermes" ? HermesGlyph : null;
+
   return (
     <div className={cn(boxClass, className)}>
-      <img
-        src={agentIconSrc(platform)}
-        alt=""
-        // Soften the vivid mascot red in BOTH themes (shared with the sidebar).
-        className={cn(agentIconImgClass(platform, slot), "object-contain", SOFT_RED_ICON)}
-      />
+      {Glyph ? (
+        <Glyph className={cn(agentIconImgClass(platform, slot), "text-brandicon")} />
+      ) : (
+        <img
+          src={agentIconSrc(platform)}
+          alt=""
+          className={cn(agentIconImgClass(platform, slot), "object-contain")}
+        />
+      )}
     </div>
   );
 }

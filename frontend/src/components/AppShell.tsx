@@ -24,7 +24,8 @@ import { Modal, MODAL_ROOT_ID } from "@/components/ui";
 import { DialogProvider } from "@/components/dialog";
 import { SilentLink } from "@/components/SilentLink";
 import type { UpdateStatus } from "@/lib/api";
-import { agentIconImgClass, agentIconSrc, SOFT_RED_ICON, type AgentPlatform } from "@/lib/agentIconSizing";
+import { agentIconImgClass, agentIconSrc, type AgentPlatform } from "@/lib/agentIconSizing";
+import { OpenclawGlyph, HermesGlyph, TimerGlyph } from "@/components/agentGlyphs";
 import { cn } from "@/lib/cn";
 
 interface NavItem {
@@ -64,25 +65,18 @@ function writeLastModuleRoute(moduleBase: string, route: string): void {
 }
 
 function NavAgentIcon({ platform }: { platform: AgentPlatform }) {
+  // Single-color SVG glyphs (OpenClaw/Hermes) colored by the shared icon tint —
+  // identical hue to every other sidebar icon, in both themes.
+  const sizeClass = agentIconImgClass(platform, "sidebar");
+  if (platform === "openclaw") return <OpenclawGlyph className={cn(sizeClass, "text-brandicon")} />;
+  if (platform === "hermes") return <HermesGlyph className={cn(sizeClass, "text-brandicon")} />;
   return (
-    <img
-      src={agentIconSrc(platform)}
-      alt=""
-      // Soften the vivid mascot red in both themes (matches AgentCardAvatar).
-      className={cn("object-contain", SOFT_RED_ICON, agentIconImgClass(platform, "sidebar"))}
-    />
+    <img src={agentIconSrc(platform)} alt="" className={cn("object-contain", sizeClass)} />
   );
 }
 
 function NavTimerIcon() {
-  return (
-    <img
-      src="/timer-icon.png"
-      alt=""
-      // Same soft-red treatment as the other red raster icons.
-      className={cn("h-6 w-6 object-contain", SOFT_RED_ICON)}
-    />
-  );
+  return <TimerGlyph className="h-6 w-6 text-brandicon" />;
 }
 
 const NAV: NavGroup[] = [
