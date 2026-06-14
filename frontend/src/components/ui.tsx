@@ -174,7 +174,7 @@ export function Modal({
         <div
           ref={ref}
           className={cn(
-            "mx-auto w-full max-h-[calc(100vh-2rem)] rounded-lg bg-white shadow-xl flex flex-col",
+            "mx-auto w-full max-h-[calc(100vh-2rem)] rounded-lg bg-surface shadow-xl flex flex-col",
             width,
           )}
         >

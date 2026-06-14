@@ -20,7 +20,7 @@ export function AgentManagementHeader({
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-2xl border border-ink-200/70 bg-white shadow-sm",
+        "overflow-hidden rounded-2xl border border-ink-200/70 bg-surface shadow-sm",
         className,
       )}
     >
@@ -65,7 +65,7 @@ export function AgentViewModeToggle({
             "min-w-[52px] rounded-md px-2.5 py-1 text-xs font-semibold transition-colors",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300",
             viewMode === mode
-              ? "bg-white text-brand-700 shadow-sm"
+              ? "bg-surface text-brand-700 shadow-sm"
               : "text-ink-600 hover:text-ink-900",
           )}
           onClick={() => onChange(mode)}
@@ -91,7 +91,7 @@ export function AgentPageToolbar({
     <div className={cn("flex shrink-0 flex-wrap items-center justify-end gap-2", className)}>
       <div
         className="inline-flex flex-wrap items-center gap-0.5 rounded-xl border border-ink-200/90
-                   bg-white p-1 shadow-sm"
+                   bg-surface p-1 shadow-sm"
       >
         {children}
       </div>

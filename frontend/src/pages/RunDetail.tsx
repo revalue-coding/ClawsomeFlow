@@ -630,7 +630,7 @@ export function RunDetail() {
                     className={
                       item.hasUnreadUpdate
                         ? "rounded-md border border-amber-300 bg-amber-50/50 px-4 py-3 shadow-[0_0_0_1px_rgba(245,158,11,0.2)]"
-                        : "rounded-md border border-ink-200 bg-white px-4 py-3"
+                        : "rounded-md border border-ink-200 bg-surface px-4 py-3"
                     }
                   >
                     <div className="flex items-center justify-between gap-3">
@@ -873,7 +873,7 @@ export function RunDetail() {
               type="button"
               className={
                 boardTab === "list"
-                  ? "rounded-sm bg-white px-3 py-1 font-medium text-ink-900 shadow-sm"
+                  ? "rounded-sm bg-surface px-3 py-1 font-medium text-ink-900 shadow-sm"
                   : "rounded-sm px-3 py-1 text-ink-600 hover:text-ink-900"
               }
               onClick={() => setBoardTab("list")}
@@ -884,7 +884,7 @@ export function RunDetail() {
               type="button"
               className={
                 boardTab === "terminal"
-                  ? "rounded-sm bg-white px-3 py-1 font-medium text-ink-900 shadow-sm"
+                  ? "rounded-sm bg-surface px-3 py-1 font-medium text-ink-900 shadow-sm"
                   : "rounded-sm px-3 py-1 text-ink-600 hover:text-ink-900"
               }
               onClick={() => setBoardTab("terminal")}

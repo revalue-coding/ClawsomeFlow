@@ -18,7 +18,10 @@ import { OpenclawAgentStore } from "@/pages/OpenclawAgentStore";
 import { Profiles } from "@/pages/Profiles";
 
 import "@/i18n"; // initialise i18next before any component reads `t()`
+import { initTheme } from "@/lib/theme";
 import "./styles.css";
+
+initTheme(); // sync the .dark class with the persisted theme choice
 
 const router = createBrowserRouter([
   {

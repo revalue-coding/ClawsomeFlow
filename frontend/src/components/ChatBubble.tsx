@@ -32,7 +32,7 @@ export function ChatBubble({
         className={
           isUser
             ? "max-w-[75%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-brand-500 px-4 py-2 text-sm text-white"
-            : "shadow-card max-w-[75%] rounded-2xl rounded-tl-sm border border-ink-200 bg-white px-4 py-2 text-sm text-ink-800"
+            : "shadow-card max-w-[75%] rounded-2xl rounded-tl-sm border border-ink-200 bg-surface px-4 py-2 text-sm text-ink-800"
         }
       >
         {msg.content ? (

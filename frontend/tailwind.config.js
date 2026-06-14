@@ -1,10 +1,17 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  // Class strategy: a `.dark` class on <html> flips the theme. The actual
+  // color values are driven by CSS variables (see src/styles.css :root / .dark)
+  // so every existing `ink-*` / `bg-surface` utility adapts with no per-page
+  // `dark:` variants. `brand` stays a literal red in BOTH themes — the lobster
+  // shell accent (icons, focus rings) is intentionally theme-independent.
+  darkMode: "class",
   theme: {
     extend: {
       colors: {
         // OpenClaw-inspired palette: warm crimson accents on warm grays.
+        // Literal hex (theme-independent) — keeps icons/accents red in dark mode.
         brand: {
           50: "#fff5f4",
           100: "#ffe4e1",
@@ -17,18 +24,25 @@ export default {
           800: "#7c1c12",
           900: "#5b150d",
         },
+        // Neutral scale — CSS-variable driven so it inverts under `.dark`.
+        // Light values live in :root, dark values in `.dark` (src/styles.css).
         ink: {
-          50: "#f9fafb",
-          100: "#f3f4f6",
-          200: "#e5e7eb",
-          300: "#d1d5db",
-          400: "#9ca3af",
-          500: "#6b7280",
-          600: "#4b5563",
-          700: "#374151",
-          800: "#1f2937",
-          900: "#111827",
+          50: "rgb(var(--ink-50) / <alpha-value>)",
+          100: "rgb(var(--ink-100) / <alpha-value>)",
+          200: "rgb(var(--ink-200) / <alpha-value>)",
+          300: "rgb(var(--ink-300) / <alpha-value>)",
+          400: "rgb(var(--ink-400) / <alpha-value>)",
+          500: "rgb(var(--ink-500) / <alpha-value>)",
+          600: "rgb(var(--ink-600) / <alpha-value>)",
+          700: "rgb(var(--ink-700) / <alpha-value>)",
+          800: "rgb(var(--ink-800) / <alpha-value>)",
+          900: "rgb(var(--ink-900) / <alpha-value>)",
         },
+        // Raised-surface background (cards, sidebar, top bar, inputs, popovers).
+        // Was `bg-white` everywhere; now a token that flips to a dark panel.
+        // NOTE: `text-white` stays literal white (on-color text on brand) — only
+        // surface *backgrounds* use this token.
+        surface: "rgb(var(--surface) / <alpha-value>)",
       },
       fontFamily: {
         sans: [

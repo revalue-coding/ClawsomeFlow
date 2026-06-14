@@ -228,3 +228,29 @@ export function DesktopIcon(props: IconProps) {
     </IconBase>
   );
 }
+
+/** Sun — light-theme glyph for the theme switcher. */
+export function SunIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2.5" />
+      <path d="M12 19.5V22" />
+      <path d="M2 12h2.5" />
+      <path d="M19.5 12H22" />
+      <path d="m4.6 4.6 1.8 1.8" />
+      <path d="m17.6 17.6 1.8 1.8" />
+      <path d="m19.4 4.6-1.8 1.8" />
+      <path d="m6.4 17.6-1.8 1.8" />
+    </IconBase>
+  );
+}
+
+/** Moon — dark-theme glyph for the theme switcher. */
+export function MoonIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M20 13.5A8 8 0 1 1 10.5 4a6.2 6.2 0 0 0 9.5 9.5Z" />
+    </IconBase>
+  );
+}

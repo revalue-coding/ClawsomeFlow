@@ -8,6 +8,46 @@
     "Helvetica Neue", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* ── Light theme tokens (default) ─────────────────────────────────────
+     Space-separated RGB triples consumed by tailwind's `rgb(var(--x) / a)`
+     color definitions. The neutral `ink` scale + the raised `surface`
+     background flip wholesale under `.dark` below; `brand` is a literal red
+     in tailwind.config.js and intentionally does NOT vary by theme. */
+  color-scheme: light;
+  --ink-50: 249 250 251;
+  --ink-100: 243 244 246;
+  --ink-200: 229 231 235;
+  --ink-300: 209 213 219;
+  --ink-400: 156 163 175;
+  --ink-500: 107 114 128;
+  --ink-600: 75 85 99;
+  --ink-700: 55 65 81;
+  --ink-800: 31 41 55;
+  --ink-900: 17 24 39;
+  --surface: 255 255 255;
+}
+
+/* ── Dark theme tokens ──────────────────────────────────────────────────
+   The `ink` scale inverts by ROLE, not by number: low numbers stay the
+   "subtle background / border" end (now dark panels) and high numbers stay
+   the "high-contrast text" end (now near-white), so every existing
+   `bg-ink-50` / `text-ink-900` / `border-ink-200` reads correctly without
+   touching the call sites. `surface` is a touch lighter than `--ink-50` so
+   cards lift off the page canvas. */
+.dark {
+  color-scheme: dark;
+  --ink-50: 16 20 27;     /* page canvas / subtle bg */
+  --ink-100: 28 34 43;    /* hover track, default pill bg */
+  --ink-200: 42 50 61;    /* borders */
+  --ink-300: 64 74 87;    /* stronger separators */
+  --ink-400: 113 124 138; /* muted icon */
+  --ink-500: 148 158 170; /* muted text */
+  --ink-600: 176 185 197; /* secondary text */
+  --ink-700: 202 210 220; /* body / ghost-button text */
+  --ink-800: 224 230 238;
+  --ink-900: 241 244 248; /* primary text */
+  --surface: 24 30 39;    /* raised panels (cards, sidebar, top bar, inputs) */
 }
 
 html,
@@ -23,16 +63,27 @@ body {
     radial-gradient(1200px 600px at 12% -10%, rgba(221, 63, 48, 0.06), transparent 60%),
     radial-gradient(900px 600px at 110% 0%, rgba(245, 158, 11, 0.05), transparent 65%),
     radial-gradient(circle at 1px 1px, rgba(15, 23, 42, 0.045) 1px, transparent 0) 0 0 / 22px 22px,
-    theme("colors.ink.50");
+    rgb(var(--ink-50));
   background-attachment: fixed;
-  color: theme("colors.ink.900");
+  color: rgb(var(--ink-900));
+}
+
+/* Dark canvas: brighten the brand/amber vignettes a touch and switch the
+   dotted grid to a light tint so it stays visible on the dark base. */
+.dark body {
+  background:
+    radial-gradient(1200px 600px at 12% -10%, rgba(221, 63, 48, 0.10), transparent 60%),
+    radial-gradient(900px 600px at 110% 0%, rgba(245, 158, 11, 0.07), transparent 65%),
+    radial-gradient(circle at 1px 1px, rgba(148, 163, 184, 0.07) 1px, transparent 0) 0 0 / 22px 22px,
+    rgb(var(--ink-50));
+  background-attachment: fixed;
 }
 
 /* Helpers --------------------------------------------------------- */
 
 @layer components {
   .card {
-    @apply rounded-lg border border-ink-200 bg-white shadow-card transition-shadow;
+    @apply rounded-lg border border-ink-200 bg-surface shadow-card transition-shadow;
   }
   .card:hover {
     @apply shadow-glow-sm;
@@ -41,7 +92,7 @@ body {
   .input,
   .select,
   .textarea {
-    @apply w-full rounded-md border border-ink-200 bg-white px-3 py-2 text-sm
+    @apply w-full rounded-md border border-ink-200 bg-surface px-3 py-2 text-sm
       placeholder:text-ink-400 focus:border-brand-500
       focus:outline-none focus:ring-1 focus:ring-brand-500;
   }
@@ -62,11 +113,11 @@ body {
   }
 
   .btn-outline {
-    @apply btn border border-ink-200 bg-white text-ink-700 hover:bg-ink-50;
+    @apply btn border border-ink-200 bg-surface text-ink-700 hover:bg-ink-50;
   }
 
   .btn-danger {
-    @apply btn bg-white text-brand-600 border border-brand-200 hover:bg-brand-50;
+    @apply btn bg-surface text-brand-600 border border-brand-200 hover:bg-brand-50;
   }
 
   .pill {

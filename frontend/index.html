@@ -8,6 +8,20 @@
     <link rel="icon" type="image/png" href="/logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ClawsomeFlow</title>
+    <!-- No-flash theme: apply the persisted dark/light choice before first
+         paint so the page never flickers light-then-dark on load. Mirrors
+         src/lib/theme.ts (localStorage["csflow-theme"], default light). -->
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("csflow-theme") === "dark") {
+            document.documentElement.classList.add("dark");
+          }
+        } catch (e) {
+          /* localStorage blocked — fall back to light */
+        }
+      })();
+    </script>
   </head>
   <body class="antialiased">
     <div id="root"></div>

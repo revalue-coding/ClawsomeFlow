@@ -2731,7 +2731,7 @@ function AgentSettingsModal({
                   className={cn(
                     "rounded-lg px-3 py-2 text-sm font-medium transition",
                     tab === item
-                      ? "bg-white text-brand-700 shadow-sm ring-1 ring-brand-200"
+                      ? "bg-surface text-brand-700 shadow-sm ring-1 ring-brand-200"
                       : "text-ink-600 hover:text-ink-900",
                   )}
                   onClick={() => setTab(item)}
@@ -2761,11 +2761,11 @@ function AgentSettingsModal({
                     </div>
                   ) : (
                     skillItems.map((item) => (
-                      <div key={item.name} className="rounded-xl border border-ink-200 bg-white p-3">
+                      <div key={item.name} className="rounded-xl border border-ink-200 bg-surface p-3">
                         <div className="flex items-center justify-between gap-3">
                           <div className="min-w-0">
                             <div className="truncate text-sm font-semibold text-ink-900">{item.name}</div>
-                            <div className="truncate text-xs text-black">{item.description || t("chat.settings.skills.noDescription")}</div>
+                            <div className="truncate text-xs text-ink-900">{item.description || t("chat.settings.skills.noDescription")}</div>
                             <div className="truncate text-xs text-ink-500">{item.path}</div>
                           </div>
                           <div className="inline-flex items-center gap-2">
@@ -2807,7 +2807,7 @@ function AgentSettingsModal({
                           </div>
                         </div>
                         {expandedSkillName === item.name ? (
-                          <pre className="mt-3 max-h-64 overflow-auto rounded-lg border border-ink-200 bg-white p-3 text-xs text-black">
+                          <pre className="mt-3 max-h-64 overflow-auto rounded-lg border border-ink-200 bg-surface p-3 text-xs text-ink-900">
                             {item.content || t("chat.settings.skills.noContent")}
                           </pre>
                         ) : null}
@@ -2833,7 +2833,7 @@ function AgentSettingsModal({
                     </div>
                   ) : (
                     cronItems.map((item) => (
-                      <div key={item.id} className="rounded-xl border border-ink-200 bg-white p-3">
+                      <div key={item.id} className="rounded-xl border border-ink-200 bg-surface p-3">
                         <div className="flex items-start justify-between gap-3">
                           <div className="space-y-1">
                             <div className="flex items-center gap-2">
@@ -2868,7 +2868,7 @@ function AgentSettingsModal({
                               <span className="mx-2 text-ink-300">|</span>
                               <span>{item.scheduleTz || "UTC"}</span>
                             </div>
-                            <div className="text-xs text-black">{item.message}</div>
+                            <div className="text-xs text-ink-900">{item.message}</div>
                           </div>
                           <div className="inline-flex flex-wrap items-center justify-end gap-2">
                             <button
@@ -2940,7 +2940,7 @@ function AgentSettingsModal({
                     </div>
                   ) : (
                     hookItems.map((item) => (
-                      <div key={item.name} className="rounded-xl border border-ink-200 bg-white p-3">
+                      <div key={item.name} className="rounded-xl border border-ink-200 bg-surface p-3">
                         <div className="flex items-start justify-between gap-3">
                           <div className="space-y-1">
                             <div className="flex items-center gap-2">
@@ -2970,8 +2970,8 @@ function AgentSettingsModal({
                                   : t("chat.settings.common.disabled")}
                               </span>
                             </div>
-                            <div className="text-xs text-black">{item.description || t("chat.settings.hooks.noDescription")}</div>
-                            <div className="text-xs text-black">
+                            <div className="text-xs text-ink-900">{item.description || t("chat.settings.hooks.noDescription")}</div>
+                            <div className="text-xs text-ink-900">
                               {item.events.length > 0 ? item.events.join(", ") : t("chat.settings.hooks.noEvents")}
                             </div>
                           </div>
@@ -3037,10 +3037,10 @@ function AgentSettingsModal({
                         </div>
                         {expandedHookName === item.name ? (
                           <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                            <pre className="max-h-56 overflow-auto rounded-lg border border-ink-200 bg-white p-3 text-xs text-black">
+                            <pre className="max-h-56 overflow-auto rounded-lg border border-ink-200 bg-surface p-3 text-xs text-ink-900">
                               {item.hookMd || t("chat.settings.hooks.noHookMd")}
                             </pre>
-                            <pre className="max-h-56 overflow-auto rounded-lg border border-ink-200 bg-white p-3 text-xs text-black">
+                            <pre className="max-h-56 overflow-auto rounded-lg border border-ink-200 bg-surface p-3 text-xs text-ink-900">
                               {item.handlerTs || t("chat.settings.hooks.noHandler")}
                             </pre>
                           </div>
@@ -3072,14 +3072,14 @@ function AgentSettingsModal({
                   </div>
                   {agentsEditing ? (
                     <textarea
-                      className="textarea h-72 w-full resize-y text-black"
+                      className="textarea h-72 w-full resize-y text-ink-900"
                       value={customSectionDraft}
                       onChange={(e) => setCustomSectionDraft(e.target.value)}
                       disabled={working}
                       placeholder={t("chat.settings.agents.placeholder")}
                     />
                   ) : (
-                    <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-ink-200 bg-white p-3 text-sm text-black">
+                    <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-ink-200 bg-surface p-3 text-sm text-ink-900">
                       {customSectionDraft.trim() || t("chat.settings.agents.placeholder")}
                     </pre>
                   )}
@@ -3473,7 +3473,7 @@ function Bubble({
         className={
           isUser
             ? "bg-brand-500 text-white rounded-2xl rounded-tr-sm px-4 py-2 max-w-[75%] whitespace-pre-wrap text-sm"
-            : "bg-white border border-ink-200 text-ink-800 rounded-2xl rounded-tl-sm px-4 py-2 max-w-[75%] shadow-card"
+            : "bg-surface border border-ink-200 text-ink-800 rounded-2xl rounded-tl-sm px-4 py-2 max-w-[75%] shadow-card"
         }
       >
         {msg.content ? (

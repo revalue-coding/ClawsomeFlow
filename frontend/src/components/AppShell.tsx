@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import {
   DocsIcon,
   ExternalLinkIcon,
@@ -221,7 +222,7 @@ function Sidebar({
   }
 
   return (
-    <aside className="w-56 shrink-0 border-r border-ink-200 bg-white flex flex-col">
+    <aside className="w-56 shrink-0 border-r border-ink-200 bg-surface flex flex-col">
       <div className="px-5 py-5 border-b border-ink-100">
         <div className="flex items-center gap-2">
           <span className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-black animate-pulse-glow">
@@ -281,7 +282,7 @@ function Sidebar({
                 >
                   <span
                     className={cn(
-                      "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-white text-brand-500 transition-all",
+                      "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
                       "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
                     )}
                   >
@@ -311,7 +312,7 @@ function Sidebar({
           >
             <span
               className={cn(
-                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-white text-brand-500 transition-all",
+                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
                 "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
               )}
             >
@@ -330,7 +331,7 @@ function Sidebar({
           >
             <span
               className={cn(
-                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-white text-brand-500 transition-all",
+                "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-surface text-brand-500 transition-all",
                 "group-hover:border-brand-200 group-hover:shadow-[0_0_12px_-4px_theme(colors.brand.300)]",
               )}
             >
@@ -422,7 +423,7 @@ function TopBar({
 }) {
   const crumbs = location.split("/").filter(Boolean);
   return (
-    <div className="border-b border-ink-200 bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60">
+    <div className="border-b border-ink-200 bg-surface/80 backdrop-blur supports-[backdrop-filter]:bg-surface/60">
       <div className="mx-auto max-w-7xl px-6 h-12 flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm">
           <span className="text-brand-600 font-semibold tracking-wide">ClawsomeFlow</span>
@@ -435,7 +436,10 @@ function TopBar({
             </span>
           ))}
         </div>
-        <LanguageSwitcher />
+        <div className="flex items-center gap-2">
+          <ThemeSwitcher />
+          <LanguageSwitcher />
+        </div>
       </div>
     </div>
   );

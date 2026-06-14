@@ -21,7 +21,7 @@ export function LanguageSwitcher() {
   const lang = currentLang();
   return (
     <div
-      className="inline-flex rounded-md border border-ink-200 bg-white text-xs overflow-hidden"
+      className="inline-flex rounded-md border border-ink-200 bg-surface text-xs overflow-hidden"
       role="group"
       aria-label={t("common.languageLabel")}
     >
