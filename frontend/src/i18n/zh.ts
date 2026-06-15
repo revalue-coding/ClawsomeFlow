@@ -957,7 +957,7 @@ const zh = {
         hint: "以下配置会直接传给 Hermes CLI——任何兼容 OpenAI 的提供商都可用。",
         importFromLabel: "从来源导入模型配置",
         importDefault: "default profile",
-        importHint: "与创建 Agent 时一致：可从 default 或已有 Agent profile 导入。",
+        importManual: "手动导入",
         importButton: "导入",
         modelLabel: "模型",
         modelPlaceholder: "例如 Claude-Sonnet-4.5 或 gpt-4o",

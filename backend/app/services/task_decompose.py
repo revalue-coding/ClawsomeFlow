@@ -252,6 +252,8 @@ These are the user's existing persistent agents (platforms: OpenClaw + Hermes).
 **Always prefer assigning a worker task to one of these when one fits.** When you
 reuse a persistent agent, its `agents[]` entry must set `kind` to that agent's
 platform (`openclaw` or `hermes`) and `isTemporary: false`.
+If a worker task is assigned to a non-OpenClaw persistent agent, set its
+`repo` to `{temp_agent_workdir}` by default unless the goal clearly needs another path.
 
 {persistent_agents_yaml}
 

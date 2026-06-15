@@ -155,6 +155,8 @@ def test_prompt_lists_persistent_agents_and_platforms() -> None:
     assert "Persistent agents you may assign" in body
     assert "id=writer" in body and "kind=openclaw" in body
     assert "id=sage" in body and "kind=hermes" in body
+    assert "non-OpenClaw persistent agent" in body
+    assert "repo` to `~/csflow-ai-decompose` by default" in body
     # Available temporary platforms (probed) listed.
     assert "Temporary-agent platforms available" in body
     assert "  - claude" in body and "  - hermes" in body

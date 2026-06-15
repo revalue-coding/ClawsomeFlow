@@ -973,7 +973,7 @@ const en = {
         hint: "These are passed straight to the Hermes CLI — any OpenAI-compatible provider works.",
         importFromLabel: "Import model config from",
         importDefault: "default profile",
-        importHint: "Same as create flow: import from default or an existing agent profile.",
+        importManual: "Manual import",
         importButton: "Import",
         modelLabel: "Model",
         modelPlaceholder: "e.g. Claude-Sonnet-4.5 or gpt-4o",

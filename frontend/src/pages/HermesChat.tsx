@@ -1588,27 +1588,19 @@ function ModelTab({ agentId }: { agentId: string }) {
       .finally(() => setLoading(false));
   }, [agentId]);
 
-  const saveModel = async () => {
-    setBusy(true);
-    setSaved(false);
-    setError("");
-    try {
-      setModel(await api.putHermesModel(agentId, model));
-      setSaved(true);
-    } catch (e) {
-      setError(errText(e));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const isManualImport = inheritFrom === "__manual__";
 
-  const importFromProfile = async () => {
-    if (!inheritFrom.trim()) return;
+  const applyModelFromSource = async () => {
+    if (!isManualImport && !inheritFrom.trim()) return;
     setBusy(true);
     setSaved(false);
     setError("");
     try {
-      setModel(await api.importHermesModel(agentId, { inheritFrom }));
+      if (isManualImport) {
+        setModel(await api.putHermesModel(agentId, model));
+      } else {
+        setModel(await api.importHermesModel(agentId, { inheritFrom }));
+      }
       setSaved(true);
     } catch (e) {
       setError(errText(e));
@@ -1627,7 +1619,10 @@ function ModelTab({ agentId }: { agentId: string }) {
           <select
             className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
             value={inheritFrom}
-            onChange={(e) => setInheritFrom(e.target.value)}
+            onChange={(e) => {
+              setInheritFrom(e.target.value);
+              setSaved(false);
+            }}
             disabled={busy}
           >
             <option value="default">{t("hermes.settingsModal.model.importDefault")}</option>
@@ -1636,60 +1631,73 @@ function ModelTab({ agentId }: { agentId: string }) {
                 {`${a.name || a.id} (${a.id})`}
               </option>
             ))}
+            <option value="__manual__">{t("hermes.settingsModal.model.importManual")}</option>
           </select>
         </label>
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs text-ink-400">{t("hermes.settingsModal.model.importHint")}</p>
-          <button
-            type="button"
-            className="rounded border border-ink-200 px-3 py-2 text-sm hover:bg-ink-50 disabled:opacity-50"
-            onClick={() => void importFromProfile()}
-            disabled={busy}
-          >
-            {t("hermes.settingsModal.model.importButton")}
-          </button>
-        </div>
-      </div>
-      <div className="space-y-2">
-        <p className="text-xs text-ink-400">{t("hermes.settingsModal.model.hint")}</p>
-        <label className="block text-sm">
-          <span className="text-ink-600">{t("hermes.settingsModal.model.modelLabel")}</span>
-          <input
-            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
-            value={model.default}
-            placeholder={t("hermes.settingsModal.model.modelPlaceholder")}
-            onChange={(e) => setModel({ ...model, default: e.target.value })}
-          />
-        </label>
-        <label className="block text-sm">
-          <span className="text-ink-600">{t("hermes.settingsModal.model.providerLabel")}</span>
-          <input
-            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
-            value={model.provider}
-            placeholder={t("hermes.settingsModal.model.providerPlaceholder")}
-            onChange={(e) => setModel({ ...model, provider: e.target.value })}
-          />
-        </label>
-        <label className="block text-sm">
-          <span className="text-ink-600">{t("hermes.settingsModal.model.baseUrlLabel")}</span>
-          <input
-            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
-            value={model.baseUrl}
-            placeholder={t("hermes.settingsModal.model.baseUrlPlaceholder")}
-            onChange={(e) => setModel({ ...model, baseUrl: e.target.value })}
-          />
-        </label>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-            onClick={() => void saveModel()}
-            disabled={busy}
-          >
-            {t("hermes.settingsModal.save")}
-          </button>
-          {saved && <span className="text-xs text-emerald-600">{t("hermes.settingsModal.saved")}</span>}
-        </div>
+        {isManualImport ? (
+          <div className="space-y-2 border-t border-ink-200 pt-3">
+            <p className="text-xs text-ink-400">{t("hermes.settingsModal.model.hint")}</p>
+            <label className="block text-sm">
+              <span className="text-ink-600">{t("hermes.settingsModal.model.modelLabel")}</span>
+              <input
+                className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
+                value={model.default}
+                placeholder={t("hermes.settingsModal.model.modelPlaceholder")}
+                onChange={(e) => {
+                  setModel({ ...model, default: e.target.value });
+                  setSaved(false);
+                }}
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="text-ink-600">{t("hermes.settingsModal.model.providerLabel")}</span>
+              <input
+                className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
+                value={model.provider}
+                placeholder={t("hermes.settingsModal.model.providerPlaceholder")}
+                onChange={(e) => {
+                  setModel({ ...model, provider: e.target.value });
+                  setSaved(false);
+                }}
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="text-ink-600">{t("hermes.settingsModal.model.baseUrlLabel")}</span>
+              <input
+                className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
+                value={model.baseUrl}
+                placeholder={t("hermes.settingsModal.model.baseUrlPlaceholder")}
+                onChange={(e) => {
+                  setModel({ ...model, baseUrl: e.target.value });
+                  setSaved(false);
+                }}
+              />
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                onClick={() => void applyModelFromSource()}
+                disabled={busy}
+              >
+                {t("hermes.settingsModal.model.importButton")}
+              </button>
+              {saved && <span className="text-xs text-emerald-600">{t("hermes.settingsModal.saved")}</span>}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="rounded border border-ink-200 px-3 py-2 text-sm hover:bg-ink-50 disabled:opacity-50"
+              onClick={() => void applyModelFromSource()}
+              disabled={busy}
+            >
+              {t("hermes.settingsModal.model.importButton")}
+            </button>
+            {saved && <span className="text-xs text-emerald-600">{t("hermes.settingsModal.saved")}</span>}
+          </div>
+        )}
       </div>
     </div>
   );
