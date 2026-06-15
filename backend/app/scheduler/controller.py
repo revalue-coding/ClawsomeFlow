@@ -2585,8 +2585,13 @@ class RunController:
             dispatch_kind=dispatch_kind,
             platform="hermes",
         )
-        # Bind the executor to its managed Hermes profile (-p); one-shot -z.
-        argv = [executable, "-p", agent.id, "--yolo", "-z", message]
+        # Bind the executor to its managed Hermes profile (-p) for persistent
+        # agents; one-shot -z. A temporary Hermes agent has NO managed profile
+        # (its id is only a ClawTeam marker, like temporary Claude/Codex) → run
+        # under the default profile with no ``-p``.
+        argv = [executable, "--yolo", "-z", message]
+        if not agent.is_temporary:
+            argv = [executable, "-p", agent.id, "--yolo", "-z", message]
         env = os.environ.copy()
         env.update({
             "CLAWTEAM_AGENT_NAME": agent.id,

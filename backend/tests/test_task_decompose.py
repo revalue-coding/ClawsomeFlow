@@ -201,6 +201,56 @@ def test_ensure_ai_temp_agent_workdir_idempotent(
     assert (wd / ".git").is_dir()
 
 
+@pytest.mark.asyncio
+async def test_resolve_leader_target_temporary_hermes_uses_default_profile() -> None:
+    """A temporary Hermes leader (no managed profile) must resolve to
+    is_temporary=True and dispatch with NO ``-p`` so it runs under the default
+    profile — never ``hermes -p <id>`` which fails 'Profile does not exist'."""
+
+    class _St:
+        def hermes_get(self, _aid):
+            return None  # not a registered/managed Hermes agent
+
+    target = await svc._resolve_leader_target(
+        leader_agent_id="777", user="alice", storage=_St(), config=None,
+        existing_agents=[{
+            "id": "777", "kind": "hermes", "repo": "/tmp/x",
+            "isLeader": True, "isTemporary": True,
+        }],
+        leader_kind="hermes", leader_repo="/tmp/x", leader_target_branch="main",
+    )
+    assert target.kind == AgentKind.hermes
+    assert target.is_temporary is True
+    argv = svc._non_openclaw_dispatch_argv(
+        kind=target.kind, message="hi",
+        profile=None if target.is_temporary else target.id,
+    )
+    assert argv == ["hermes", "--yolo", "-z", "hi"]  # no -p
+
+
+@pytest.mark.asyncio
+async def test_resolve_leader_target_registered_hermes_keeps_profile() -> None:
+    """A registered/managed Hermes leader keeps its ``-p <id>`` profile binding."""
+
+    class _St:
+        def hermes_get(self, _aid):
+            return object()  # a managed Hermes agent row exists
+
+    target = await svc._resolve_leader_target(
+        leader_agent_id="sage", user="alice", storage=_St(), config=None,
+        existing_agents=[{
+            "id": "sage", "kind": "hermes", "repo": "/tmp/x", "isLeader": True,
+        }],
+        leader_kind="hermes", leader_repo="/tmp/x", leader_target_branch="main",
+    )
+    assert target.is_temporary is False
+    argv = svc._non_openclaw_dispatch_argv(
+        kind=target.kind, message="hi",
+        profile=None if target.is_temporary else target.id,
+    )
+    assert argv == ["hermes", "--yolo", "-p", "sage", "-z", "hi"]
+
+
 # ── ② service layer --------------------------------------------------
 
 

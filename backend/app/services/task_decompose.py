@@ -209,6 +209,10 @@ class _LeaderTarget:
     kind: AgentKind
     repo: str | None = None
     target_branch: str | None = None
+    # A temporary (ad-hoc) Hermes leader has NO managed profile — it must run
+    # under Hermes' default profile (no ``-p <id>``), exactly like temporary
+    # Claude/Codex agents. The id is only a ClawTeam marker, not a profile name.
+    is_temporary: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -302,10 +306,12 @@ Invariants (the server rejects violations):
 
 ## Owner assignment policy (in priority order)
 
-a. First reuse a *persistent agent* from section 1 (set `isTemporary: false`).
-b. Otherwise define a *temporary agent* per section 2 (set `isTemporary: true`,
-   `kind` != `openclaw`, `repo` = `{temp_agent_workdir}`). Do NOT leave a worker
-   task's `ownerAgentId` empty.
+a. Reuse a *persistent agent* from section 1 **only when it genuinely fits** the
+   task (set `isTemporary: false`). Never force an ill-suited persistent agent
+   onto a task just to reuse one.
+b. If no persistent agent fits, you MUST define a *temporary agent* per section 2
+   (set `isTemporary: true`, `kind` != `openclaw`, `repo` = `{temp_agent_workdir}`).
+   Do NOT leave a worker task's `ownerAgentId` empty.
 c. Only if NO temporary platform is available above and no persistent agent fits,
    set `ownerAgentId` to an empty string `""` for the user to pick manually
    (last-resort fallback).
@@ -675,8 +681,9 @@ def _non_openclaw_dispatch_argv(
             message,
         ]
     if kind == AgentKind.hermes:
-        # Bind to the managed Hermes profile (== leader agent id). REQUIRED so
-        # the decomposition runs under the agent's own identity/memory.
+        # Bind to a managed Hermes profile (== persistent agent id) so the
+        # decomposition runs under that agent's own identity/memory. A temporary
+        # Hermes leader has no profile → ``profile`` is None → default profile.
         argv = ["hermes", "--yolo"]
         if profile:
             argv += ["-p", profile]
@@ -749,11 +756,20 @@ async def _resolve_leader_target(
                 "field": "leader_repo",
             },
         )
+    # A Hermes leader is persistent only when it is a registered managed agent
+    # (its profile exists on disk). Claude/Codex/Cursor have no persistent
+    # platform, so they are always temporary. A temporary leader must NOT be
+    # bound to a ``-p <id>`` profile — it runs under the default profile.
+    is_temporary = not (
+        resolved_kind == AgentKind.hermes
+        and storage.hermes_get(leader_agent_id) is not None
+    )
     return _LeaderTarget(
         id=leader_agent_id,
         kind=resolved_kind,
         repo=resolved_repo,
         target_branch=resolved_target,
+        is_temporary=is_temporary,
     )
 
 
@@ -856,7 +872,8 @@ async def _dispatch_to_non_openclaw_leader_via_cli(
     argv = _non_openclaw_dispatch_argv(
         kind=leader_target.kind,
         message=message,
-        profile=leader_target.id,
+        # Temporary Hermes leaders have no managed profile → default profile.
+        profile=None if leader_target.is_temporary else leader_target.id,
     )
     timeout_sec = _non_openclaw_cli_timeout_seconds()
     try:
