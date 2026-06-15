@@ -2041,7 +2041,7 @@ export function FlowEditor() {
         openclawAgents={openclawOptions}
         onClose={() => setDecomposeOpen(false)}
         onApply={(proposal) => {
-          const rows = proposalToRows(proposal, openclawOptions);
+          const rows = proposalToRows(proposal, openclawOptions, hermesOptions);
           const idx = rows.findIndex((r) => r.isLeaderSummary);
           if (idx >= 0 && leaderId.trim()) {
             const normalizedLeaderRepo = isNonOpenclawKind(leaderKind)
@@ -4420,6 +4420,7 @@ function rowsToHintAgents(rows: TaskRow[]): Record<string, unknown>[] {
 function proposalToRows(
   proposal: DecomposeProposal,
   openclawOptions: OpenclawAgentSummary[],
+  hermesOptions: HermesAgentSummary[],
 ): TaskRow[] {
   const byId = new Map<
     string,
@@ -4441,11 +4442,19 @@ function proposalToRows(
     const targetBranch = String(
       a.targetBranch ?? a.target_branch ?? DEFAULT_TARGET_BRANCH,
     ).trim() || DEFAULT_TARGET_BRANCH;
-    // Proposed non-OpenClaw agents are ad-hoc (temporary) unless the proposal
-    // explicitly says otherwise. OpenClaw is always persistent.
+    // Temporariness is derived from the registry, NOT from the decomposer's
+    // self-reported flag (which it often gets wrong). A Hermes agent is
+    // persistent ONLY when it matches a registered managed Hermes profile; an
+    // unregistered Hermes id (e.g. one the decomposer invented) is temporary —
+    // exactly like Claude/Codex/Cursor — so it never trips the managed-existence
+    // check on save. OpenClaw is always persistent. This mirrors the backend
+    // _resolve_leader_target classification.
     const isTemporary =
-      kind !== "openclaw" &&
-      (a.isTemporary ?? a.is_temporary ?? true) !== false;
+      kind === "openclaw"
+        ? false
+        : kind === "hermes"
+        ? !hermesOptions.some((h) => h.id === aid)
+        : true;
     byId.set(aid, { kind, repo, targetBranch, isTemporary });
   }
   for (const a of openclawOptions) {
