@@ -853,10 +853,7 @@ const zh = {
   hermes: {
     title: "Hermes Agent",
     pickerTitle: "和你的 Hermes Agent 对话",
-    modelNote:
-      "您可以在此创建拥有独立人格、记忆与经验的 持久化Hermes Agent。注意：各 Hermes Agent 的模型配置彼此" +
-      "独立——新建时默认沿用根 profile 的模型，但此后不会随根配置自动更新；如需调整，请在该 Agent 的" +
-      "「设置 → 模型」中，或通过 Hermes 原生服务手动配置。",
+    modelNote: "您可以在此创建拥有独立人格、记忆与经验的 持久化Hermes Agent。",
     listEmpty: "还没有 Hermes Agent，先创建一个吧。",
     notInstalledTitle: "Hermes 不可用",
     notInstalled:
@@ -894,6 +891,9 @@ const zh = {
       namePlaceholder: "例如 后端助手",
       responsibility: "职责",
       responsibilityPlaceholder: "这个 Agent 负责什么？",
+      modelInheritLabel: "模型继承来源",
+      modelInheritDefault: "default profile",
+      modelInheritHint: "用于复制初始模型配置。创建后该 Agent 的模型配置将独立维护。",
       idLabel: "Profile ID",
       idPlaceholder: "例如 backend-helper",
       idHint: "仅限小写字母和数字，将直接作为 Hermes profile id。",
@@ -909,6 +909,7 @@ const zh = {
         idLength: "Profile ID 长度必须为 2–40 个字符。",
         idReserved: "该 Profile ID 为保留名，不能使用。",
         idDuplicate: "已存在 Profile ID 为「{{id}}」的 Agent，请换一个 ID。",
+        modelInheritMissing: "所选模型来源 profile 已不存在，请刷新后重试。",
         teamRequired: "请填写新团队的名称。",
       },
       workPopup: {
@@ -944,7 +945,8 @@ const zh = {
       title: "Hermes Agent 设置",
       tabs: {
         soul: "SOUL.md",
-        model: "模型与密钥",
+        model: "模型",
+        mcp: "MCP",
         skills: "技能",
         cron: "定时任务",
       },
@@ -952,7 +954,11 @@ const zh = {
       save: "保存",
       saved: "已保存",
       model: {
-        hint: "以下配置会直接传给 Hermes CLI——任何兼容 OpenAI 的提供商都可用。请确保在下方设置对应的 API 密钥。",
+        hint: "以下配置会直接传给 Hermes CLI——任何兼容 OpenAI 的提供商都可用。",
+        importFromLabel: "从来源导入模型配置",
+        importDefault: "default profile",
+        importHint: "与创建 Agent 时一致：可从 default 或已有 Agent profile 导入。",
+        importButton: "导入",
         modelLabel: "模型",
         modelPlaceholder: "例如 Claude-Sonnet-4.5 或 gpt-4o",
         providerLabel: "Provider",
@@ -965,6 +971,22 @@ const zh = {
         keyValue: "例如 sk-...",
         noKeys: "尚未设置 API 密钥。",
         set: "已设置",
+      },
+      mcp: {
+        hint: "按 Hermes 官方流程，MCP 配置会写入该 profile 的 mcp_servers 配置块；HTTP/SSE 服务请使用 URL 方式。",
+        empty: "还没有配置 MCP 服务。",
+        add: "保存 MCP 服务",
+        nameLabel: "名称",
+        namePlaceholder: "例如 my-server",
+        transportLabel: "传输方式",
+        transportHttp: "HTTP/Streamable",
+        transportSse: "HTTP/SSE",
+        urlLabel: "URL",
+        urlPlaceholder: "https://example.com/mcp",
+        envLabel: "环境变量（每行 KEY=VALUE）",
+        envPlaceholder: "API_KEY=secret\nDEBUG=1",
+        envKeys: "环境变量键：{{keys}}",
+        remove: "删除",
       },
       skills: {
         empty: "暂无技能。",

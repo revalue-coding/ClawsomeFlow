@@ -43,7 +43,7 @@ import {
   type HermesAgentSummary,
   type HermesCronJob,
   type HermesModelSetting,
-  type HermesSecretSetting,
+  type HermesMcpServer,
   type HermesSkillSetting,
   type OpenclawTeam,
 } from "@/lib/api";
@@ -76,6 +76,7 @@ const HERMES_ID_RE = /^[a-z0-9]+$/;
 function createFieldError(opts: {
   name: string;
   profileId: string;
+  modelInheritFrom: string;
   teamChoice: string;
   newTeamName: string;
   existingIds: string[];
@@ -89,6 +90,9 @@ function createFieldError(opts: {
   if (id === "default") return "hermes.create.errors.idReserved";
   if (opts.teamChoice === CREATE_TEAM_SENTINEL && !opts.newTeamName.trim()) {
     return "hermes.create.errors.teamRequired";
+  }
+  if (opts.modelInheritFrom !== "default" && !opts.existingIds.includes(opts.modelInheritFrom)) {
+    return "hermes.create.errors.modelInheritMissing";
   }
   if (opts.existingIds.includes(id)) return "hermes.create.errors.idDuplicate";
   return null;
@@ -224,6 +228,10 @@ function Picker() {
   const [createResponsibility, setCreateResponsibility] = useSessionBackedState(
     "hermes:create:responsibility", "",
   );
+  const [createModelInheritFrom, setCreateModelInheritFrom] = useSessionBackedState(
+    "hermes:create:modelInheritFrom",
+    "default",
+  );
   const [createTeamChoice, setCreateTeamChoice] = useSessionBackedState("hermes:create:teamChoice", "");
   const [createNewTeamName, setCreateNewTeamName] = useSessionBackedState("hermes:create:newTeamName", "");
   const [createError, setCreateError] = useState("");
@@ -297,9 +305,17 @@ function Picker() {
     setCreateName("");
     setCreateProfileId("");
     setCreateResponsibility("");
+    setCreateModelInheritFrom("default");
     setCreateTeamChoice("");
     setCreateNewTeamName("");
-  }, [setCreateName, setCreateProfileId, setCreateResponsibility, setCreateTeamChoice, setCreateNewTeamName]);
+  }, [
+    setCreateName,
+    setCreateProfileId,
+    setCreateResponsibility,
+    setCreateModelInheritFrom,
+    setCreateTeamChoice,
+    setCreateNewTeamName,
+  ]);
 
   const resetCreateCancelState = useCallback(() => {
     setCreateCancelState(null);
@@ -368,6 +384,7 @@ function Picker() {
     const errKey = createFieldError({
       name,
       profileId,
+      modelInheritFrom: createModelInheritFrom,
       teamChoice: createTeamChoice,
       newTeamName: createNewTeamName,
       existingIds: agents.map((a) => a.id),
@@ -396,7 +413,13 @@ function Picker() {
       openWorkPopup();
       try {
         const created = await api.createHermesAgent(
-          { id: profileId, name, responsibility, teamId },
+          {
+            id: profileId,
+            name,
+            responsibility,
+            teamId,
+            modelInheritFrom: createModelInheritFrom,
+          },
           { signal: ac.signal },
         );
         clearOp();
@@ -434,7 +457,8 @@ function Picker() {
       createInFlightRef.current = false;
     }
   }, [
-    createProfileId, createName, createResponsibility, createTeamChoice, createNewTeamName,
+    createProfileId, createName, createResponsibility, createModelInheritFrom,
+    createTeamChoice, createNewTeamName,
     agents, setShowCreate, setCreateCancelState, openWorkPopup, finishWorkPopup,
     resetCreateForm, resetWorkPopupDisplayState, resetCreateCancelState, setWorkPopupOpen,
     reload, trackOp, clearOp, t,
@@ -622,6 +646,9 @@ function Picker() {
           onProfileIdChange={setCreateProfileId}
           responsibility={createResponsibility}
           onResponsibilityChange={setCreateResponsibility}
+          modelInheritFrom={createModelInheritFrom}
+          onModelInheritFromChange={setCreateModelInheritFrom}
+          existingProfiles={agents}
           teamChoice={createTeamChoice}
           onTeamChoiceChange={setCreateTeamChoice}
           newTeamName={createNewTeamName}
@@ -771,6 +798,9 @@ function CreateModal({
   onProfileIdChange,
   responsibility,
   onResponsibilityChange,
+  modelInheritFrom,
+  onModelInheritFromChange,
+  existingProfiles,
   teamChoice,
   onTeamChoiceChange,
   newTeamName,
@@ -786,6 +816,9 @@ function CreateModal({
   onProfileIdChange: (v: string) => void;
   responsibility: string;
   onResponsibilityChange: (v: string) => void;
+  modelInheritFrom: string;
+  onModelInheritFromChange: (v: string) => void;
+  existingProfiles: HermesAgentSummary[];
   teamChoice: string;
   onTeamChoiceChange: (v: string) => void;
   newTeamName: string;
@@ -828,6 +861,22 @@ function CreateModal({
             placeholder={t("hermes.create.responsibilityPlaceholder")}
             onChange={(e) => onResponsibilityChange(e.target.value)}
           />
+        </div>
+        <div>
+          <label className="label">{t("hermes.create.modelInheritLabel")}</label>
+          <select
+            className="select"
+            value={modelInheritFrom}
+            onChange={(e) => onModelInheritFromChange(e.target.value)}
+          >
+            <option value="default">{t("hermes.create.modelInheritDefault")}</option>
+            {existingProfiles.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {`${agent.name || agent.id} (${agent.id})`}
+              </option>
+            ))}
+          </select>
+          <div className="mt-1 text-xs text-ink-400">{t("hermes.create.modelInheritHint")}</div>
         </div>
         <div>
           <label className="label">{t("hermes.create.teamLabel")}</label>
@@ -1422,7 +1471,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
 // Settings modal
 // ──────────────────────────────────────────────────────────────────────
 
-type SettingsTab = "soul" | "model" | "skills" | "cron";
+type SettingsTab = "soul" | "model" | "mcp" | "skills" | "cron";
 
 function SettingsModal({ agentId, onClose }: { agentId: string; onClose: () => void }) {
   const { t } = useTranslation();
@@ -1434,8 +1483,8 @@ function SettingsModal({ agentId, onClose }: { agentId: string; onClose: () => v
           selected tab reads in both themes (a frosted surface chip with brand
           text + ring), instead of the old white-on-near-white in dark mode. */}
       <div className="mb-4 rounded-xl border border-ink-100 bg-ink-50/60 p-1.5">
-        <div className="grid grid-cols-4 gap-1">
-          {(["soul", "model", "skills", "cron"] as SettingsTab[]).map((k) => (
+        <div className="grid grid-cols-5 gap-1">
+          {(["soul", "model", "mcp", "skills", "cron"] as SettingsTab[]).map((k) => (
             <button
               key={k}
               type="button"
@@ -1454,6 +1503,7 @@ function SettingsModal({ agentId, onClose }: { agentId: string; onClose: () => v
       </div>
       {tab === "soul" && <SoulTab agentId={agentId} />}
       {tab === "model" && <ModelTab agentId={agentId} />}
+      {tab === "mcp" && <McpTab agentId={agentId} />}
       {tab === "skills" && <SkillsTab agentId={agentId} />}
       {tab === "cron" && <CronTab agentId={agentId} />}
     </Modal>
@@ -1521,23 +1571,18 @@ function SoulTab({ agentId }: { agentId: string }) {
 function ModelTab({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const [model, setModel] = useState<HermesModelSetting>({ default: "", provider: "", baseUrl: "" });
-  const [secrets, setSecrets] = useState<HermesSecretSetting[]>([]);
+  const [sources, setSources] = useState<HermesAgentSummary[]>([]);
+  const [inheritFrom, setInheritFrom] = useState("default");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
-  const [newKey, setNewKey] = useState("");
-  const [newVal, setNewVal] = useState("");
-
-  const reloadSecrets = useCallback(async () => {
-    setSecrets(await api.getHermesSecrets(agentId));
-  }, [agentId]);
 
   useEffect(() => {
-    Promise.all([api.getHermesModel(agentId), api.getHermesSecrets(agentId)])
-      .then(([m, s]) => {
+    Promise.all([api.getHermesModel(agentId), api.listHermesAgents()])
+      .then(([m, a]) => {
         setModel(m);
-        setSecrets(s);
+        setSources(a.items);
       })
       .catch((e) => setError(errText(e)))
       .finally(() => setLoading(false));
@@ -1557,25 +1602,18 @@ function ModelTab({ agentId }: { agentId: string }) {
     }
   };
 
-  const addSecret = async () => {
-    if (!newKey.trim()) return;
+  const importFromProfile = async () => {
+    if (!inheritFrom.trim()) return;
+    setBusy(true);
+    setSaved(false);
     setError("");
     try {
-      await api.putHermesSecret(agentId, { key: newKey.trim(), value: newVal });
-      setNewKey("");
-      setNewVal("");
-      await reloadSecrets();
+      setModel(await api.importHermesModel(agentId, { inheritFrom }));
+      setSaved(true);
     } catch (e) {
       setError(errText(e));
-    }
-  };
-
-  const delSecret = async (key: string) => {
-    try {
-      await api.deleteHermesSecret(agentId, key);
-      await reloadSecrets();
-    } catch (e) {
-      setError(errText(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1583,6 +1621,35 @@ function ModelTab({ agentId }: { agentId: string }) {
   return (
     <div className="space-y-4">
       {error && <ErrorBox>{error}</ErrorBox>}
+      <div className="space-y-2 rounded border border-ink-100 bg-ink-50/40 p-3">
+        <label className="block text-sm">
+          <span className="text-ink-600">{t("hermes.settingsModal.model.importFromLabel")}</span>
+          <select
+            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
+            value={inheritFrom}
+            onChange={(e) => setInheritFrom(e.target.value)}
+            disabled={busy}
+          >
+            <option value="default">{t("hermes.settingsModal.model.importDefault")}</option>
+            {sources.map((a) => (
+              <option key={a.id} value={a.id}>
+                {`${a.name || a.id} (${a.id})`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-ink-400">{t("hermes.settingsModal.model.importHint")}</p>
+          <button
+            type="button"
+            className="rounded border border-ink-200 px-3 py-2 text-sm hover:bg-ink-50 disabled:opacity-50"
+            onClick={() => void importFromProfile()}
+            disabled={busy}
+          >
+            {t("hermes.settingsModal.model.importButton")}
+          </button>
+        </div>
+      </div>
       <div className="space-y-2">
         <p className="text-xs text-ink-400">{t("hermes.settingsModal.model.hint")}</p>
         <label className="block text-sm">
@@ -1624,56 +1691,156 @@ function ModelTab({ agentId }: { agentId: string }) {
           {saved && <span className="text-xs text-emerald-600">{t("hermes.settingsModal.saved")}</span>}
         </div>
       </div>
+    </div>
+  );
+}
 
-      <div className="border-t border-ink-100 pt-3">
-        <div className="mb-2 text-sm font-medium text-ink-700">
-          {t("hermes.settingsModal.model.apiKeys")}
-        </div>
-        {secrets.length === 0 ? (
-          <p className="text-xs text-ink-400">{t("hermes.settingsModal.model.noKeys")}</p>
-        ) : (
-          <ul className="mb-2 divide-y divide-ink-100 rounded border border-ink-100">
-            {secrets.map((s) => (
-              <li key={s.key} className="flex items-center justify-between px-3 py-1.5 text-sm">
-                <code>{s.key}</code>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-ink-400">
-                    {s.isSet ? s.preview : ""}
+function McpTab({ agentId }: { agentId: string }) {
+  const { t } = useTranslation();
+  const [servers, setServers] = useState<HermesMcpServer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState("");
+  const [transport, setTransport] = useState<"http_sse" | "sse">("http_sse");
+  const [url, setUrl] = useState("");
+  const [environment, setEnvironment] = useState("");
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      setServers(await api.getHermesMcpServers(agentId));
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [agentId]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const save = async () => {
+    if (!name.trim() || !url.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.putHermesMcpServer(agentId, {
+        name: name.trim(),
+        transport,
+        url: url.trim(),
+        environment,
+      });
+      setName("");
+      setTransport("http_sse");
+      setUrl("");
+      setEnvironment("");
+      setServers(await api.getHermesMcpServers(agentId));
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (serverName: string) => {
+    setError("");
+    try {
+      await api.deleteHermesMcpServer(agentId, serverName);
+      setServers(await api.getHermesMcpServers(agentId));
+    } catch (e) {
+      setError(errText(e));
+    }
+  };
+
+  if (loading) return <Loading label={t("common.loading")} />;
+  return (
+    <div className="space-y-4">
+      {error && <ErrorBox>{error}</ErrorBox>}
+      <p className="text-xs text-ink-400">{t("hermes.settingsModal.mcp.hint")}</p>
+      {servers.length === 0 ? (
+        <p className="text-sm text-ink-500">{t("hermes.settingsModal.mcp.empty")}</p>
+      ) : (
+        <ul className="divide-y divide-ink-100 rounded border border-ink-100">
+          {servers.map((server) => (
+            <li key={server.name} className="flex items-center justify-between px-3 py-2 text-sm">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <code>{server.name}</code>
+                  <span className="rounded border border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[11px] text-ink-500">
+                    {server.transport === "sse"
+                      ? t("hermes.settingsModal.mcp.transportSse")
+                      : t("hermes.settingsModal.mcp.transportHttp")}
                   </span>
-                  <button
-                    type="button"
-                    className="text-xs text-rose-500 hover:text-rose-700"
-                    onClick={() => void delSecret(s.key)}
-                  >
-                    {t("hermes.settingsModal.skills.delete")}
-                  </button>
                 </div>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="flex gap-2">
+                <p className="truncate font-mono text-xs text-ink-500">{server.url}</p>
+                {server.envKeys.length > 0 && (
+                  <p className="truncate text-xs text-ink-400">
+                    {t("hermes.settingsModal.mcp.envKeys", { keys: server.envKeys.join(", ") })}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                className="text-xs text-rose-500 hover:text-rose-700"
+                onClick={() => void remove(server.name)}
+              >
+                {t("hermes.settingsModal.mcp.remove")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="space-y-2 border-t border-ink-100 pt-3">
+        <div className="text-sm font-medium text-ink-700">{t("hermes.settingsModal.mcp.add")}</div>
+        <label className="block text-sm">
+          <span className="text-ink-600">{t("hermes.settingsModal.mcp.nameLabel")}</span>
           <input
-            className="w-40 rounded border border-ink-200 px-2 py-1.5 text-xs font-mono"
-            value={newKey}
-            placeholder={t("hermes.settingsModal.model.keyName")}
-            onChange={(e) => setNewKey(e.target.value)}
+            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
+            value={name}
+            placeholder={t("hermes.settingsModal.mcp.namePlaceholder")}
+            onChange={(e) => setName(e.target.value)}
           />
-          <input
-            className="flex-1 rounded border border-ink-200 px-2 py-1.5 text-xs font-mono"
-            value={newVal}
-            placeholder={t("hermes.settingsModal.model.keyValue")}
-            onChange={(e) => setNewVal(e.target.value)}
-          />
-          <button
-            type="button"
-            className="rounded border border-ink-200 px-3 py-1.5 text-xs hover:bg-ink-50 disabled:opacity-50"
-            onClick={() => void addSecret()}
-            disabled={!newKey.trim()}
+        </label>
+        <label className="block text-sm">
+          <span className="text-ink-600">{t("hermes.settingsModal.mcp.transportLabel")}</span>
+          <select
+            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
+            value={transport}
+            onChange={(e) => setTransport(e.target.value as "http_sse" | "sse")}
           >
-            {t("hermes.settingsModal.model.addKey")}
-          </button>
-        </div>
+            <option value="http_sse">{t("hermes.settingsModal.mcp.transportHttp")}</option>
+            <option value="sse">{t("hermes.settingsModal.mcp.transportSse")}</option>
+          </select>
+        </label>
+        <label className="block text-sm">
+          <span className="text-ink-600">{t("hermes.settingsModal.mcp.urlLabel")}</span>
+          <input
+            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 font-mono text-xs"
+            value={url}
+            placeholder={t("hermes.settingsModal.mcp.urlPlaceholder")}
+            onChange={(e) => setUrl(e.target.value)}
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="text-ink-600">{t("hermes.settingsModal.mcp.envLabel")}</span>
+          <textarea
+            className="mt-1 h-24 w-full rounded border border-ink-200 px-3 py-2 font-mono text-xs"
+            value={environment}
+            placeholder={t("hermes.settingsModal.mcp.envPlaceholder")}
+            onChange={(e) => setEnvironment(e.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          onClick={() => void save()}
+          disabled={saving || !name.trim() || !url.trim()}
+        >
+          {saving ? t("common.saving") : t("hermes.settingsModal.mcp.add")}
+        </button>
       </div>
     </div>
   );

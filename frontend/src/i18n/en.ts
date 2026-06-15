@@ -865,12 +865,7 @@ const en = {
   hermes: {
     title: "Hermes Agents",
     pickerTitle: "Chat with your Hermes Agents",
-    modelNote:
-      "Create Hermes Agents here, each with its own persona, memory, and accumulated " +
-      "experience. Note: each Hermes Agent's model configuration is independent — a new " +
-      "agent inherits the root profile's model at creation, but does NOT track it " +
-      "afterward. To change it, use the agent's Settings → Model, or configure it in the " +
-      "native Hermes service.",
+    modelNote: "Create persistent Hermes Agents with independent persona, memory, and experience.",
     listEmpty: "No Hermes agents yet. Create one to get started.",
     notInstalledTitle: "Hermes is not available",
     notInstalled:
@@ -910,6 +905,10 @@ const en = {
       namePlaceholder: "e.g. Backend Helper",
       responsibility: "Responsibility",
       responsibilityPlaceholder: "What is this agent responsible for?",
+      modelInheritLabel: "Model inheritance source",
+      modelInheritDefault: "default profile",
+      modelInheritHint:
+        "Choose where to copy the initial model config from. After creation, this agent's model is independent.",
       idLabel: "Profile ID",
       idPlaceholder: "e.g. backend-helper",
       idHint: "Lowercase letters/numbers only. Used directly as the Hermes profile id.",
@@ -925,6 +924,7 @@ const en = {
         idLength: "Profile ID must be 2–40 characters.",
         idReserved: "That Profile ID is reserved and cannot be used.",
         idDuplicate: "An agent with Profile ID \"{{id}}\" already exists. Pick a different ID.",
+        modelInheritMissing: "Selected model source profile does not exist anymore. Please refresh and retry.",
         teamRequired: "Enter a name for the new team.",
       },
       workPopup: {
@@ -961,7 +961,8 @@ const en = {
       title: "Hermes Agent Settings",
       tabs: {
         soul: "SOUL.md",
-        model: "Model & secrets",
+        model: "Model",
+        mcp: "MCP",
         skills: "Skills",
         cron: "Cron",
       },
@@ -969,7 +970,11 @@ const en = {
       save: "Save",
       saved: "Saved",
       model: {
-        hint: "These are passed straight to the Hermes CLI — any OpenAI-compatible provider works. Make sure the matching API key is set below.",
+        hint: "These are passed straight to the Hermes CLI — any OpenAI-compatible provider works.",
+        importFromLabel: "Import model config from",
+        importDefault: "default profile",
+        importHint: "Same as create flow: import from default or an existing agent profile.",
+        importButton: "Import",
         modelLabel: "Model",
         modelPlaceholder: "e.g. Claude-Sonnet-4.5 or gpt-4o",
         providerLabel: "Provider",
@@ -982,6 +987,23 @@ const en = {
         keyValue: "e.g. sk-...",
         noKeys: "No API keys set.",
         set: "set",
+      },
+      mcp: {
+        hint:
+          "Official Hermes MCP flow: save servers under this profile's mcp_servers config block. Use URL transport for HTTP/SSE endpoints.",
+        empty: "No MCP servers configured yet.",
+        add: "Save MCP server",
+        nameLabel: "Name",
+        namePlaceholder: "e.g. my-server",
+        transportLabel: "Transport",
+        transportHttp: "HTTP/Streamable",
+        transportSse: "HTTP/SSE",
+        urlLabel: "URL",
+        urlPlaceholder: "https://example.com/mcp",
+        envLabel: "Environment (KEY=VALUE per line)",
+        envPlaceholder: "API_KEY=secret\nDEBUG=1",
+        envKeys: "Env keys: {{keys}}",
+        remove: "Remove",
       },
       skills: {
         empty: "No skills yet.",

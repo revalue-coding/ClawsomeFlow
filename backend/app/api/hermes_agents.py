@@ -137,6 +137,8 @@ class CreatePayload(_CamelModel):
     name: str = ""
     responsibility: str = ""  # → description / nl_prompt
     team_id: str = ""
+    # "default" (root/active profile) or an existing profile id.
+    model_inherit_from: str = "default"
 
 
 class UpdatePayload(_CamelModel):
@@ -159,6 +161,25 @@ class ModelView(_CamelModel):
     default: str = ""
     provider: str = ""
     base_url: str = ""
+
+
+class ModelImportPayload(_CamelModel):
+    inherit_from: str = "default"
+
+
+class McpServerView(_CamelModel):
+    name: str
+    transport: str = "http_sse"
+    url: str = ""
+    enabled: bool = True
+    env_keys: list[str] = []
+
+
+class McpServerUpsertPayload(_CamelModel):
+    name: str
+    transport: str = "http_sse"
+    url: str
+    environment: str = ""
 
 
 class SecretView(_CamelModel):
@@ -358,6 +379,7 @@ async def create_agent(
         description=payload.responsibility,
         nl_prompt=payload.responsibility,
         team_id=payload.team_id,
+        model_inherit_from=payload.model_inherit_from or "default",
     )
     op_id = f"hermes_create:{agent_id}"
     reg = get_op_registry()
@@ -506,6 +528,70 @@ def put_model(
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
     return ModelView(default=m["default"], provider=m["provider"], base_url=m["base_url"])
+
+
+@router.post("/{agent_id}/settings/model/import", response_model=ModelView)
+def import_model(
+    agent_id: Annotated[str, Path()],
+    payload: Annotated[ModelImportPayload, Body()],
+    user: UserDep,
+    storage: StorageDep,
+) -> ModelView:
+    _get_owned(agent_id, user, storage)
+    try:
+        m = svc.import_model_from_profile(
+            agent_id, source_profile=payload.inherit_from or "default"
+        )
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return ModelView(default=m["default"], provider=m["provider"], base_url=m["base_url"])
+
+
+@router.get("/{agent_id}/settings/mcp", response_model=list[McpServerView])
+def get_mcp_servers(
+    agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep
+) -> list[McpServerView]:
+    _get_owned(agent_id, user, storage)
+    try:
+        rows = svc.list_mcp_servers(agent_id)
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return [McpServerView(**row) for row in rows]
+
+
+@router.put("/{agent_id}/settings/mcp", response_model=McpServerView)
+def put_mcp_server(
+    agent_id: Annotated[str, Path()],
+    payload: Annotated[McpServerUpsertPayload, Body()],
+    user: UserDep,
+    storage: StorageDep,
+) -> McpServerView:
+    _get_owned(agent_id, user, storage)
+    try:
+        row = svc.upsert_mcp_server(
+            agent_id,
+            name=payload.name,
+            transport=payload.transport,
+            url=payload.url,
+            environment=payload.environment,
+        )
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return McpServerView(**row)
+
+
+@router.delete("/{agent_id}/settings/mcp/{name}", status_code=204)
+def del_mcp_server(
+    agent_id: Annotated[str, Path()],
+    name: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> None:
+    _get_owned(agent_id, user, storage)
+    try:
+        svc.delete_mcp_server(agent_id, name)
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
 
 
 @router.get("/{agent_id}/settings/secrets", response_model=list[SecretView])

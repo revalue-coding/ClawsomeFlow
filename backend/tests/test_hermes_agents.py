@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -458,6 +459,45 @@ def test_seed_profile_inference_config_is_idempotent(hermes_home: Path) -> None:
     assert (profile / "config.yaml").read_text() == "model:\n  provider: customised\n"
 
 
+def test_seed_profile_inherits_from_selected_profile(hermes_home: Path) -> None:
+    """When a source profile is selected, seed from that profile instead of default."""
+    src = hermes_home / "profiles" / "source1"
+    src.mkdir(parents=True)
+    (src / "config.yaml").write_text("model:\n  provider: from_source\n")
+    (src / ".env").write_text("SRC_KEY=abc\n")
+    dest = hermes_home / "profiles" / "dest1"
+    dest.mkdir(parents=True)
+
+    svc._seed_profile_inference_config("dest1", source_profile="source1")
+
+    assert (dest / "config.yaml").read_text() == "model:\n  provider: from_source\n"
+    assert (dest / ".env").read_text() == "SRC_KEY=abc\n"
+
+
+def test_import_model_from_profile_preserves_non_model_settings(hermes_home: Path) -> None:
+    src = hermes_home / "profiles" / "source2"
+    src.mkdir(parents=True)
+    (src / "config.yaml").write_text(
+        "model:\n  default: gpt-4o\n  provider: openai\n  base_url: https://api.example.com/v1\n"
+    )
+    (src / ".env").write_text("SRC_KEY=abc\nKEEP=2\n")
+
+    dest = hermes_home / "profiles" / "dest2"
+    dest.mkdir(parents=True)
+    (dest / "config.yaml").write_text("mcp_servers:\n  keep:\n    url: https://example.com/mcp\n")
+    (dest / ".env").write_text("KEEP=1\n")
+
+    out = svc.import_model_from_profile("dest2", source_profile="source2")
+    assert out["default"] == "gpt-4o"
+    assert out["provider"] == "openai"
+    cfg = yaml.safe_load((dest / "config.yaml").read_text())
+    assert cfg["mcp_servers"]["keep"]["url"] == "https://example.com/mcp"
+    assert cfg["model"]["default"] == "gpt-4o"
+    env = (dest / ".env").read_text()
+    assert "SRC_KEY=abc" in env
+    assert "KEEP=2" in env
+
+
 # ── create cancellation + rollback ───────────────────────────────────
 
 
@@ -619,6 +659,66 @@ def test_api_create_requires_name(
     assert r.status_code == 400
 
 
+def test_api_create_passes_model_inherit_from(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, str] = {}
+
+    def _fake_commit(cmd, *, user, storage=None, config=None):  # noqa: ANN001, ANN202
+        seen["model_inherit_from"] = cmd.model_inherit_from
+        return HermesAgent(
+            id=cmd.id,
+            name=cmd.name,
+            description=cmd.description,
+            team_id=cmd.team_id or "",
+            profile_root=str(hermes_home / "profiles" / cmd.id),
+            created_by_user=user,
+            nl_prompt=cmd.nl_prompt or "",
+        )
+
+    monkeypatch.setattr(svc, "commit_agent", _fake_commit)
+    monkeypatch.setattr(svc, "list_agents", lambda **_kw: [])
+    r = client.post(
+        "/api/hermes/agents",
+        json={
+            "id": "myprofile",
+            "name": "Backend Helper",
+            "modelInheritFrom": "source1",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert seen["model_inherit_from"] == "source1"
+
+
+def test_api_import_model_from_profile(client: TestClient, hermes_home: Path) -> None:
+    owner = svc.load_config().default_user
+    src = hermes_home / "profiles" / "source3"
+    src.mkdir(parents=True)
+    (src / "config.yaml").write_text(
+        "model:\n  default: claude-sonnet-4.5\n  provider: anthropic\n  base_url: https://x\n"
+    )
+    (src / ".env").write_text("MODEL_KEY=abc\n")
+
+    dest = hermes_home / "profiles" / "dest3"
+    dest.mkdir(parents=True)
+    (dest / "config.yaml").write_text("mcp_servers:\n  keep:\n    url: https://example.com/mcp\n")
+    get_storage().hermes_create(
+        HermesAgent(id="dest3", name="D", profile_root="x", created_by_user=owner)
+    )
+
+    r = client.post(
+        "/api/hermes/agents/dest3/settings/model/import",
+        json={"inheritFrom": "source3"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["default"] == "claude-sonnet-4.5"
+    cfg = yaml.safe_load((dest / "config.yaml").read_text())
+    assert cfg["mcp_servers"]["keep"]["url"] == "https://example.com/mcp"
+    assert cfg["model"]["provider"] == "anthropic"
+    assert "MODEL_KEY=abc" in (dest / ".env").read_text()
+
+
 def test_chat_once_resume_adds_continue_flag(
     hermes_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -679,3 +779,51 @@ def test_api_chat_requires_workdir(
     )
     r = client.post("/api/hermes/agents/chatty/chat", json={"message": "hi", "workdir": ""})
     assert r.status_code == 400
+
+
+def test_mcp_server_upsert_list_delete(hermes_home: Path) -> None:
+    profile = hermes_home / "profiles" / "mcpagent"
+    profile.mkdir(parents=True)
+    row = svc.upsert_mcp_server(
+        "mcpagent",
+        name="my-server",
+        transport="sse",
+        url="https://example.com/sse",
+        environment="API_KEY=secret\nDEBUG=1",
+    )
+    assert row["name"] == "my-server"
+    assert row["transport"] == "sse"
+    listed = svc.list_mcp_servers("mcpagent")
+    assert listed and listed[0]["env_keys"] == ["API_KEY", "DEBUG"]
+    cfg = (profile / "config.yaml").read_text(encoding="utf-8")
+    assert "mcp_servers" in cfg
+    assert "my-server" in cfg
+    assert "transport: sse" in cfg
+    svc.delete_mcp_server("mcpagent", "my-server")
+    assert svc.list_mcp_servers("mcpagent") == []
+
+
+def test_api_mcp_settings_crud(client: TestClient, hermes_home: Path) -> None:
+    owner = svc.load_config().default_user
+    (hermes_home / "profiles" / "mcpagent").mkdir(parents=True)
+    get_storage().hermes_create(
+        HermesAgent(id="mcpagent", name="M", profile_root="x", created_by_user=owner)
+    )
+    put = client.put(
+        "/api/hermes/agents/mcpagent/settings/mcp",
+        json={
+            "name": "remote-api",
+            "transport": "http_sse",
+            "url": "https://example.com/mcp",
+            "environment": "API_KEY=secret",
+        },
+    )
+    assert put.status_code == 200, put.text
+    listed = client.get("/api/hermes/agents/mcpagent/settings/mcp")
+    assert listed.status_code == 200
+    body = listed.json()
+    assert len(body) == 1
+    assert body[0]["name"] == "remote-api"
+    assert body[0]["envKeys"] == ["API_KEY"]
+    rm = client.delete("/api/hermes/agents/mcpagent/settings/mcp/remote-api")
+    assert rm.status_code == 204

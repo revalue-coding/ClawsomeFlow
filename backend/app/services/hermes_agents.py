@@ -56,6 +56,8 @@ _SOUL_FILENAME = "SOUL.md"
 _SKILLS_DIRNAME = "skills"
 _SKILL_ENTRY_FILENAME = "SKILL.md"
 _SECRET_MASK = "••••••••"
+_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_MCP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "completed_with_conflicts", "complaint_failed", "failed", "aborted"}
@@ -307,15 +309,17 @@ class CommitInput:
     nl_prompt: str = ""
     team_id: str = ""
     skip_bootstrap: bool = False
+    # "default" → active/root profile; otherwise copy from the chosen profile id.
+    model_inherit_from: str = "default"
 
 
 # Inference config files a fresh profile needs to be usable. A brand-new
 # `hermes profile create` leaves these absent, so the profile has NO model /
 # API keys — every `hermes -p <id> …` call (bootstrap, chat, task dispatch)
 # then dies with "No inference provider configured" and SOUL.md is never
-# written. We seed them from the user's active/root profile so managed agents
-# inherit the host's model + keys (config.yaml + .env only — never SOUL.md or
-# memories, to avoid leaking the operator's personal identity/memory).
+# written. We seed them from a source profile (default: the user's active/root
+# profile) so managed agents inherit a usable model + keys (config.yaml + .env
+# only — never SOUL.md or memories, to avoid leaking private identity/memory).
 _INFERENCE_CONFIG_FILES = ("config.yaml", ".env")
 
 
@@ -335,11 +339,28 @@ def _active_profile_root() -> Path:
     return root
 
 
-def _seed_profile_inference_config(agent_id: str) -> None:
+def _resolve_inference_seed_source(*, source_profile: str | None, dest_agent_id: str) -> Path:
+    source_id = (source_profile or "").strip()
+    if not source_id or source_id == "default":
+        return _active_profile_root()
+    source_id = _validate_agent_id(source_id)
+    if source_id == dest_agent_id:
+        return hermes_profile_root(dest_agent_id)
+    source = hermes_profile_root(source_id)
+    if source.is_dir():
+        return source
+    raise AgentIdInvalid(f"model inherit source profile {source_id!r} not found")
+
+
+def _seed_profile_inference_config(
+    agent_id: str, *, source_profile: str | None = None
+) -> None:
     """Copy model + API-key config into a freshly created profile (idempotent;
     never clobbers existing files). Best-effort: failures are logged, not
     raised — the caller surfaces a clearer error if bootstrap then fails."""
-    source = _active_profile_root()
+    source = _resolve_inference_seed_source(
+        source_profile=source_profile, dest_agent_id=agent_id
+    )
     dest = hermes_profile_root(agent_id)
     if source.resolve() == dest.resolve():
         return
@@ -600,7 +621,7 @@ def _commit_agent_locked(
 
         # Seed model + API keys so the new profile can actually run (bootstrap +
         # later chat/task dispatch all go through `hermes -p <id>` and need them).
-        _seed_profile_inference_config(aid)
+        _seed_profile_inference_config(aid, source_profile=cmd.model_inherit_from)
 
         _abort_if_cancelled()  # cancelled during profile create → roll back now
 
@@ -994,7 +1015,199 @@ def write_model(
     return read_model(aid)
 
 
+def import_model_from_profile(
+    agent_id: str, *, source_profile: str = "default"
+) -> dict[str, str]:
+    """Import model config from default/another profile into an existing agent.
+
+    Mirrors create-time inheritance intent while preserving unrelated settings in
+    the destination profile's config.yaml (for example mcp_servers).
+    """
+    aid = _validate_agent_id(agent_id)
+    source_root = _resolve_inference_seed_source(
+        source_profile=source_profile, dest_agent_id=aid
+    )
+    source_cfg_path = source_root / "config.yaml"
+    source_model: dict[str, Any] = {}
+    if source_cfg_path.exists():
+        try:
+            raw = yaml.safe_load(source_cfg_path.read_text(encoding="utf-8")) or {}
+            if isinstance(raw, dict) and isinstance(raw.get("model"), dict):
+                source_model = dict(raw["model"])
+        except yaml.YAMLError:
+            source_model = {}
+
+    dest_cfg = _read_profile_config_dict(aid)
+    if source_model:
+        dest_cfg["model"] = source_model
+    else:
+        dest_cfg.pop("model", None)
+    _write_profile_config_dict(aid, dest_cfg)
+
+    # Import source env keys so model/provider switches remain usable without
+    # requiring manual re-entry of secrets in the settings UI.
+    for key, value in _read_env_pairs(source_root / ".env").items():
+        set_secret(aid, key, value)
+    return read_model(aid)
+
+
+def _read_profile_config_dict(agent_id: str) -> dict[str, Any]:
+    aid = _validate_agent_id(agent_id)
+    cfg_path = _config_path(aid)
+    if not cfg_path.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _write_profile_config_dict(agent_id: str, cfg: dict[str, Any]) -> None:
+    aid = _validate_agent_id(agent_id)
+    cfg_path = _config_path(aid)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        yaml.safe_dump(cfg, sort_keys=False, allow_unicode=False) or "{}\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_mcp_server_name(name: str) -> str:
+    out = (name or "").strip()
+    if not _MCP_SERVER_NAME_RE.fullmatch(out):
+        raise AgentIdInvalid(
+            "MCP server name must start with a letter/digit and contain only "
+            "letters, digits, '.', '_' or '-'"
+        )
+    return out
+
+
+def _parse_mcp_env_lines(environment: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for raw in (environment or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            raise AgentIdInvalid(f"invalid MCP environment line: {line!r} (expected KEY=VALUE)")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not _MCP_ENV_NAME_RE.fullmatch(key):
+            raise AgentIdInvalid(f"invalid MCP environment key: {key!r}")
+        env[key] = value.strip()
+    return env
+
+
+def list_mcp_servers(agent_id: str) -> list[dict[str, Any]]:
+    aid = _validate_agent_id(agent_id)
+    cfg = _read_profile_config_dict(aid)
+    servers = cfg.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for name in sorted(servers):
+        entry = servers.get(name)
+        if not isinstance(entry, dict):
+            continue
+        endpoint = str(entry.get("url") or "").strip()
+        if not endpoint:
+            continue
+        raw_env = entry.get("env")
+        env_keys = sorted(str(k) for k in raw_env.keys()) if isinstance(raw_env, dict) else []
+        raw_transport = str(entry.get("transport") or "").strip().lower()
+        transport = "sse" if raw_transport == "sse" else "http_sse"
+        out.append(
+            {
+                "name": str(name),
+                "transport": transport,
+                "url": endpoint,
+                "enabled": bool(entry.get("enabled", True) is not False),
+                "env_keys": env_keys,
+            }
+        )
+    return out
+
+
+def upsert_mcp_server(
+    agent_id: str,
+    *,
+    name: str,
+    transport: str,
+    url: str,
+    environment: str = "",
+) -> dict[str, Any]:
+    aid = _validate_agent_id(agent_id)
+    server_name = _validate_mcp_server_name(name)
+    mode = (transport or "http_sse").strip().lower()
+    if mode not in {"http_sse", "streamable_http", "sse"}:
+        raise AgentIdInvalid("unsupported MCP transport; expected 'http_sse' or 'sse'")
+    endpoint = (url or "").strip()
+    if not endpoint:
+        raise AgentIdInvalid("MCP server URL is required")
+    env = _parse_mcp_env_lines(environment)
+
+    cfg = _read_profile_config_dict(aid)
+    mcp_servers = cfg.get("mcp_servers")
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = {}
+    entry = mcp_servers.get(server_name)
+    if not isinstance(entry, dict):
+        entry = {}
+    entry["url"] = endpoint
+    # Enforce URL-based flow (official add modal's HTTP/SSE path).
+    entry.pop("command", None)
+    entry.pop("args", None)
+    if mode == "sse":
+        entry["transport"] = "sse"
+    else:
+        entry.pop("transport", None)
+    if env:
+        entry["env"] = env
+    else:
+        entry.pop("env", None)
+    if "enabled" not in entry:
+        entry["enabled"] = True
+    mcp_servers[server_name] = entry
+    cfg["mcp_servers"] = mcp_servers
+    _write_profile_config_dict(aid, cfg)
+    for item in list_mcp_servers(aid):
+        if item["name"] == server_name:
+            return item
+    raise ProfileOpFailed(f"failed to persist MCP server {server_name!r}")
+
+
+def delete_mcp_server(agent_id: str, name: str) -> None:
+    aid = _validate_agent_id(agent_id)
+    server_name = _validate_mcp_server_name(name)
+    cfg = _read_profile_config_dict(aid)
+    mcp_servers = cfg.get("mcp_servers")
+    if not isinstance(mcp_servers, dict) or server_name not in mcp_servers:
+        raise AgentNotFound(f"mcp server {server_name!r} not found")
+    del mcp_servers[server_name]
+    if mcp_servers:
+        cfg["mcp_servers"] = mcp_servers
+    else:
+        cfg.pop("mcp_servers", None)
+    _write_profile_config_dict(aid, cfg)
+
+
 _DOTENV_LINE_RE = re.compile(r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=(?P<val>.*)$")
+
+
+def _read_env_pairs(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _DOTENV_LINE_RE.match(raw)
+        if not m:
+            continue
+        out[m.group("key")] = m.group("val").strip().strip('"').strip("'")
+    return out
 
 
 def list_secrets(agent_id: str) -> list[dict[str, Any]]:
@@ -1312,6 +1525,10 @@ __all__ = [
     "write_soul",
     "read_model",
     "write_model",
+    "import_model_from_profile",
+    "list_mcp_servers",
+    "upsert_mcp_server",
+    "delete_mcp_server",
     "list_secrets",
     "set_secret",
     "delete_secret",

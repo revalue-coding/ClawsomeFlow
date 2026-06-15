@@ -669,6 +669,14 @@ export interface HermesCronJob {
   raw: string;
 }
 
+export interface HermesMcpServer {
+  name: string;
+  transport: "http_sse" | "sse";
+  url: string;
+  enabled: boolean;
+  envKeys: string[];
+}
+
 export const api = {
   // Flows
   listFlows: () =>
@@ -1064,7 +1072,13 @@ export const api = {
   openHermesDashboard: () =>
     request<{ url: string }>("POST", "/api/hermes/agents/dashboard/open"),
   createHermesAgent: (
-    payload: { id?: string; name?: string; responsibility?: string; teamId?: string },
+    payload: {
+      id?: string;
+      name?: string;
+      responsibility?: string;
+      teamId?: string;
+      modelInheritFrom?: string;
+    },
     init?: RequestInit,
   ) => request<HermesAgentDetail>("POST", "/api/hermes/agents", payload, init),
   cancelHermesAgentCreate: (id: string) =>
@@ -1098,6 +1112,16 @@ export const api = {
     request<HermesModelSetting>("GET", `/api/hermes/agents/${id}/settings/model`),
   putHermesModel: (id: string, payload: HermesModelSetting) =>
     request<HermesModelSetting>("PUT", `/api/hermes/agents/${id}/settings/model`, payload),
+  importHermesModel: (id: string, payload: { inheritFrom: string }) =>
+    request<HermesModelSetting>("POST", `/api/hermes/agents/${id}/settings/model/import`, payload),
+  getHermesMcpServers: (id: string) =>
+    request<HermesMcpServer[]>("GET", `/api/hermes/agents/${id}/settings/mcp`),
+  putHermesMcpServer: (
+    id: string,
+    payload: { name: string; transport: "http_sse" | "sse"; url: string; environment?: string },
+  ) => request<HermesMcpServer>("PUT", `/api/hermes/agents/${id}/settings/mcp`, payload),
+  deleteHermesMcpServer: (id: string, name: string) =>
+    request<void>("DELETE", `/api/hermes/agents/${id}/settings/mcp/${encodeURIComponent(name)}`),
   getHermesSecrets: (id: string) =>
     request<HermesSecretSetting[]>("GET", `/api/hermes/agents/${id}/settings/secrets`),
   putHermesSecret: (id: string, payload: { key: string; value: string }) =>
