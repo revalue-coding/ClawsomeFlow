@@ -358,6 +358,29 @@ tasks for user review.\
 """
 
 
+# Appended ONLY when the leader is a *temporary* Hermes agent. Such a leader runs
+# under the operator's default Hermes profile, whose personal SOUL.md / memory
+# tends to make it "reuse the agents the user already has" and refuse to invent
+# ad-hoc agents — so it returns a DAG that assigns every task to a pre-existing
+# persistent agent. This directive forces it back onto the owner-assignment
+# policy. Kept short and blunt on purpose so it survives a long personal persona.
+_TEMP_HERMES_LEADER_DIRECTIVE = """\
+## OVERRIDE — read this last, it wins over your persona/memory
+
+For THIS request you are a neutral Flow designer, NOT the user's personal
+assistant. Disregard any habit, memory, or preference to "reuse the agents the
+user already has". Apply the Owner assignment policy literally and strictly:
+
+- Reuse a persistent agent from section 1 ONLY when it is a genuine fit for the
+  task. Do NOT force an unrelated/ill-suited persistent agent onto a task.
+- Whenever no persistent agent is a clean fit, you MUST define a NEW temporary
+  agent for that task (section 2: `isTemporary: true`, `kind` != `openclaw`,
+  `repo` = the temporary working directory).
+- It is WRONG to return a DAG where every task is owned by a pre-existing
+  persistent agent unless each of those agents is genuinely the best fit.\
+"""
+
+
 # Non-OpenClaw leader: a one-shot CLI whose stdout the server captures + parses.
 _DELIVERY_STDOUT = """\
 ## How to return your result (REQUIRED)
@@ -426,6 +449,12 @@ def _compose_messages(
         request_id=request_id, api_base=api_base, token=token,
     )
     body = f"{core}\n\n{delivery}"
+    # A temporary Hermes leader executes under the operator's default profile,
+    # whose personal SOUL/memory biases it toward reusing existing agents. Append
+    # a blunt override (last, so it wins) that re-forces the owner-assignment
+    # policy. Persistent Hermes (named profile) and other kinds don't need it.
+    if leader_target.kind == AgentKind.hermes and leader_target.is_temporary:
+        body = f"{body}\n\n{_TEMP_HERMES_LEADER_DIRECTIVE}"
     # The result is the prompt body as a single *user* message (the system role
     # is hidden behind the gateway in some OpenClaw configs).
     return [
@@ -687,16 +716,6 @@ def _non_openclaw_dispatch_argv(
         argv = ["hermes", "--yolo"]
         if profile:
             argv += ["-p", profile]
-        else:
-            # A temporary Hermes leader runs under the operator's DEFAULT
-            # profile, whose SOUL.md / memory / AGENTS.md would inject a personal
-            # persona that biases it toward reusing existing agents instead of
-            # following the decomposition owner-policy. Suppress that auto-
-            # injection so the prompt's own neutral role ("Flow designer") is the
-            # only persona — matching stateless temporary Claude/Codex. Model /
-            # provider (config.yaml) is still honoured; --ignore-rules only skips
-            # AGENTS.md / SOUL.md / .cursorrules / memory / preloaded skills.
-            argv += ["--ignore-rules"]
         argv += ["-z", message]
         return argv
     raise RuntimeError(f"unsupported non-openclaw leader kind: {kind.value}")

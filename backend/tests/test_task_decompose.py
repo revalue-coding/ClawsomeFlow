@@ -182,6 +182,56 @@ def test_non_openclaw_delivery_uses_stdout_json() -> None:
     assert "/api/internal/task-decompose/commit" not in body
 
 
+def _compose_body_for_target(target: "svc._LeaderTarget") -> str:
+    msgs = svc._compose_messages(
+        request_id="req-1", user="alice", goal="Build a newsletter pipeline.",
+        leader_target=target, api_base="http://127.0.0.1:17017", token="tok-123",
+        result_language="en",
+        persistent_agents=[
+            {"id": "sage", "name": "Sage", "kind": "hermes", "isLeader": True},
+        ],
+        available_platforms=["claude", "hermes"],
+        temp_workdir="~/csflow-ai-decompose",
+        existing_agents=[], existing_tasks=[],
+    )
+    return msgs[0]["content"]
+
+
+def test_temporary_hermes_leader_gets_override_directive() -> None:
+    """A temporary Hermes leader runs under the operator's default profile, so it
+    gets a blunt override forcing it to follow the owner-assignment policy."""
+    body = _compose_body_for_target(
+        svc._LeaderTarget(
+            id="33333", kind=AgentKind.hermes, repo="/tmp/repo",
+            target_branch="main", is_temporary=True,
+        ),
+    )
+    assert "OVERRIDE — read this last" in body
+    assert "NOT the user's personal" in body
+
+
+def test_persistent_hermes_leader_has_no_override_directive() -> None:
+    """A persistent (named-profile) Hermes leader is neutral already — no override."""
+    body = _compose_body_for_target(
+        svc._LeaderTarget(
+            id="sage", kind=AgentKind.hermes, repo="/tmp/repo",
+            target_branch="main", is_temporary=False,
+        ),
+    )
+    assert "OVERRIDE — read this last" not in body
+
+
+def test_temporary_claude_leader_has_no_hermes_override() -> None:
+    """The override is Hermes-specific; a stateless Claude leader doesn't get it."""
+    body = _compose_body_for_target(
+        svc._LeaderTarget(
+            id="leader-c", kind=AgentKind.claude, repo="/tmp/repo",
+            target_branch="main", is_temporary=True,
+        ),
+    )
+    assert "OVERRIDE — read this last" not in body
+
+
 def test_ensure_ai_temp_agent_workdir_idempotent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -225,9 +275,7 @@ async def test_resolve_leader_target_temporary_hermes_uses_default_profile() -> 
         kind=target.kind, message="hi",
         profile=None if target.is_temporary else target.id,
     )
-    # No -p (default profile) + --ignore-rules so the operator's personal
-    # SOUL/memory does not bias the decomposition toward reusing agents.
-    assert argv == ["hermes", "--yolo", "--ignore-rules", "-z", "hi"]
+    assert argv == ["hermes", "--yolo", "-z", "hi"]  # no -p (default profile)
 
 
 @pytest.mark.asyncio
