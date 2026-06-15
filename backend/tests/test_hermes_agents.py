@@ -281,9 +281,10 @@ def test_tmux_live_injects_profile_for_hermes() -> None:
 def test_decompose_argv_injects_profile() -> None:
     argv = _non_openclaw_dispatch_argv(kind=AgentKind.hermes, message="hi", profile="myh")
     assert argv == ["hermes", "--yolo", "-p", "myh", "-z", "hi"]
-    # no profile → no -p (back-compat)
+    # No profile → temporary Hermes runs under the default profile, so suppress
+    # its personal SOUL/memory/rules with --ignore-rules (model config kept).
     assert _non_openclaw_dispatch_argv(kind=AgentKind.hermes, message="hi") == [
-        "hermes", "--yolo", "-z", "hi",
+        "hermes", "--yolo", "--ignore-rules", "-z", "hi",
     ]
 
 

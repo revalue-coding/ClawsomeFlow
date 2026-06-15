@@ -225,7 +225,9 @@ async def test_resolve_leader_target_temporary_hermes_uses_default_profile() -> 
         kind=target.kind, message="hi",
         profile=None if target.is_temporary else target.id,
     )
-    assert argv == ["hermes", "--yolo", "-z", "hi"]  # no -p
+    # No -p (default profile) + --ignore-rules so the operator's personal
+    # SOUL/memory does not bias the decomposition toward reusing agents.
+    assert argv == ["hermes", "--yolo", "--ignore-rules", "-z", "hi"]
 
 
 @pytest.mark.asyncio

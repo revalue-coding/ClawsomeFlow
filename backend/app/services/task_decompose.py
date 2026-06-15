@@ -687,6 +687,16 @@ def _non_openclaw_dispatch_argv(
         argv = ["hermes", "--yolo"]
         if profile:
             argv += ["-p", profile]
+        else:
+            # A temporary Hermes leader runs under the operator's DEFAULT
+            # profile, whose SOUL.md / memory / AGENTS.md would inject a personal
+            # persona that biases it toward reusing existing agents instead of
+            # following the decomposition owner-policy. Suppress that auto-
+            # injection so the prompt's own neutral role ("Flow designer") is the
+            # only persona — matching stateless temporary Claude/Codex. Model /
+            # provider (config.yaml) is still honoured; --ignore-rules only skips
+            # AGENTS.md / SOUL.md / .cursorrules / memory / preloaded skills.
+            argv += ["--ignore-rules"]
         argv += ["-z", message]
         return argv
     raise RuntimeError(f"unsupported non-openclaw leader kind: {kind.value}")
