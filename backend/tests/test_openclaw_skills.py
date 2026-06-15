@@ -102,7 +102,7 @@ def test_seed_skills_source_copies_bundled(tmp_path: Path) -> None:
     if not src.exists():
         pytest.skip("bundled openclaw-agent-source/ not in this build")
     dst = sk.seed_skills_source()
-    assert (dst / "csflow-task-decomposer" / "SKILL.md").exists()
+    assert (dst / "self-definition-maintenance" / "SKILL.md").exists()
 
 
 def test_seed_skills_source_prunes_stale_entries(

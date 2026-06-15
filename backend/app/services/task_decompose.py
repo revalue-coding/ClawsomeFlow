@@ -15,9 +15,13 @@ End-user flow (per the "AI decompose task" feature):
        polled until status ∈ {succeeded, failed, timed_out}; the
        front-end then renders ``result_tasks`` + ``result_agents``.
 
-OpenClaw leader requests still use the ``csflow-task-decomposer`` skill
-contract. Non-OpenClaw leader requests receive a self-contained prompt
-that returns one JSON object directly to stdout.
+The dispatch prompt is fully self-contained for BOTH leader kinds (there is
+no longer a ``csflow-task-decomposer`` OpenClaw skill — every instruction,
+including how to return the result, lives in the prompt). The only difference
+between the two prompts is the trailing "how to return your result" section:
+an OpenClaw leader curl-POSTs the JSON back to ``/api/internal/task-decompose/
+commit`` (its stdout is not read), while a non-OpenClaw leader prints one JSON
+object to stdout which the server captures and parses directly.
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -76,6 +82,76 @@ _NON_OPENCLAW_SUPPORTED_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.cursor,
     AgentKind.hermes,
 })
+
+# Default working directory for AI-assigned temporary (ad-hoc) agents. The AI
+# decomposer points every temporary agent it invents at this base repo (a
+# temporary agent's platform can never be OpenClaw). It is created + git-inited
+# idempotently (see ``_ensure_ai_temp_agent_workdir``) so ClawTeam can base
+# worktrees on it at run time.
+_AI_TEMP_AGENT_WORKDIR = "~/csflow-ai-decompose"
+
+# Candidate temporary-agent platforms (non-OpenClaw) and their CLI binary name,
+# mirrored from ``cli/deps.py::_NON_OPENCLAW_AGENT_TOOLS``. We probe these with
+# ``shutil.which`` so the prompt only advertises platforms actually installed on
+# this host. Order is preserved in the rendered list.
+_TEMP_AGENT_PLATFORM_BINARIES: tuple[tuple[AgentKind, str], ...] = (
+    (AgentKind.claude, "claude"),
+    (AgentKind.codex, "codex"),
+    (AgentKind.cursor, "agent"),
+    (AgentKind.hermes, "hermes"),
+)
+
+
+def _detect_temp_agent_platforms() -> list[str]:
+    """Return the temporary-agent platforms whose CLI is installed on PATH."""
+    available: list[str] = []
+    for kind, binary in _TEMP_AGENT_PLATFORM_BINARIES:
+        if shutil.which(binary):
+            available.append(kind.value)
+    return available
+
+
+def _platform_lines(platforms: list[str]) -> str:
+    if not platforms:
+        return "  (none installed)"
+    return "\n".join(f"  - {p}" for p in platforms)
+
+
+def _ensure_ai_temp_agent_workdir() -> str:
+    """Idempotently create ``~/csflow-ai-decompose`` as a git repo with a commit.
+
+    Mirrors ``openclaw_agents._git_init_workspace``: a temporary agent spawns via
+    ``clawteam spawn --workspace --repo <dir>`` which needs ``<dir>`` to be a git
+    repo with at least one commit (no-commit repos can't be branched). Fully
+    best-effort — any failure is logged and swallowed so it can never block a
+    decomposition. Returns the unexpanded literal for the prompt.
+    """
+    path = os.path.expanduser(_AI_TEMP_AGENT_WORKDIR)
+    try:
+        os.makedirs(path, exist_ok=True)
+        if not os.path.isdir(os.path.join(path, ".git")):
+            def _run(cmd: list[str]) -> None:
+                subprocess.run(cmd, cwd=path, check=True, capture_output=True)
+
+            _run(["git", "init", "-b", "main"])
+            _run(["git", "config", "user.email", "csflow@local"])
+            _run(["git", "config", "user.name", "ClawsomeFlow"])
+            marker = os.path.join(path, ".csflow-keep")
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "Default working directory for ClawsomeFlow AI-assigned "
+                    "temporary agents. Worktree branches live under "
+                    "~/.clawteam/workspaces/.\n"
+                )
+            _run(["git", "add", "-A"])
+            _run(["git", "commit", "-m", "[csflow] ai-decompose workspace initial commit"])
+    except Exception as exc:  # best-effort: never block decomposition
+        logger.warning(
+            "decompose_temp_workdir_init_failed",
+            path=path,
+            error=_error_text(exc),
+        )
+    return _AI_TEMP_AGENT_WORKDIR
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -140,19 +216,22 @@ class _LeaderTarget:
 # ──────────────────────────────────────────────────────────────────────
 
 
-_OPENCLAW_PROMPT = """\
+# Shared core sent to BOTH leader kinds. The only per-kind difference is the
+# trailing "how to return your result" section (see _DELIVERY_* below).
+_DECOMPOSE_CORE = """\
 ## ClawsomeFlow Task Decomposition Request
 
-You are a Flow designer. Your job is to decompose one high-level Flow goal
-into a scheduler-ready DAG. This session is triggered by ClawsomeFlow backend.
-Your installed `csflow-task-decomposer` skill defines how to **POST results
-back to ClawsomeFlow via curl**.
+You are a Flow designer dispatched by ClawsomeFlow to decompose one high-level
+Flow goal into a scheduler-ready DAG of tasks for the user to review.
 
 ## Runtime variables for this request
 
 - request_id: {request_id}
 - user: {user}
-- you (leader): {leader_agent_id}  (the `isLeaderSummary` task must be owned by you)
+- leader_agent_id (you): {leader_agent_id}  (the `isLeaderSummary` task must be owned by you)
+- leader_kind: {leader_kind}
+- leader_repo: {leader_repo}
+- leader_target_branch: {leader_target_branch}
 - ClawsomeFlow API base: {api_base}
 - short-lived callback token: {token} (valid for 30 minutes)
 - required output language for task `subject` + `description`: {result_language}
@@ -161,12 +240,37 @@ back to ClawsomeFlow via curl**.
 
 {goal}
 
-## Available OpenClaw agents you may assign as task owners
+## Owner sources — every task owner is ONE of these two kinds
 
-These are the OpenClaw agents the user currently owns. **Prefer assigning
-worker tasks to these existing agents** rather than inventing new ones.
+ClawsomeFlow assigns each task to either a **persistent agent** (a managed agent
+that already exists on one of the user's persistent platforms) or a **temporary
+agent** (an ad-hoc agent you define inline just for this Flow).
 
-{available_agents_yaml}
+### 1) Persistent agents you may assign as task owners
+
+These are the user's existing persistent agents (platforms: OpenClaw + Hermes).
+**Always prefer assigning a worker task to one of these when one fits.** When you
+reuse a persistent agent, its `agents[]` entry must set `kind` to that agent's
+platform (`openclaw` or `hermes`) and `isTemporary: false`.
+
+{persistent_agents_yaml}
+
+### 2) Temporary-agent platforms available on this host
+
+If — and only if — no persistent agent above is a clean fit for a worker task,
+define a **temporary agent** to own it. A temporary agent's platform must be one
+of the agent CLIs actually installed on this host (listed below). **OpenClaw can
+NEVER be a temporary agent.**
+
+{available_platforms_yaml}
+
+For every temporary agent you define, its `agents[]` entry must set:
+- `kind`: one of the platforms listed above (never `openclaw`)
+- `isTemporary`: true
+- `repo`: `{temp_agent_workdir}` (default working directory for AI-assigned
+  temporary agents) unless the goal clearly requires another path
+- `targetBranch`: `main` unless the goal says otherwise
+- `id`: a fresh unique id not used by any persistent agent
 
 ## Existing agents in editor (already drafted by the user; treat as hints)
 
@@ -176,101 +280,89 @@ worker tasks to these existing agents** rather than inventing new ones.
 
 {existing_tasks_yaml}
 
-## What you must do
+## Required output schema
 
-1. Analyze the goal and the available agents.
-2. Produce one complete valid Flow proposal (agents + tasks JSON), with:
-   - exactly one `isLeaderSummary: true` task, owned by `{leader_agent_id}`
-   - leader owns no other task
-   - owner kinds limited to `openclaw`, `claude`, `codex`, `cursor`, or `hermes`
-   - unique ids and acyclic DAG
-   - all task `subject` and `description` in `{result_language}`
-3. **Owner assignment policy**:
-   - First try to reuse one of the *Available OpenClaw agents* above.
-   - If no existing agent fits a particular task, set its `ownerAgentId`
-     to an **empty string** (`""`) so the user picks an owner manually
-     in the editor. Do NOT invent a new OpenClaw agent the user does
-     not have.
-   - You may still propose non-OpenClaw workers (`claude` / `codex` /
-     `cursor` / `hermes`) with placeholder `repo` / `targetBranch`
-     when the work is clearly better suited to a local TUI runtime.
-4. POST the result to `/api/internal/task-decompose/commit` as instructed by the skill.
-5. Reply in one short sentence: generated N tasks for user review.
+Produce one JSON object with two arrays:
+
+- `agents`: each item has `id`, `kind`, optional `repo`, optional `targetBranch`,
+  `isTemporary`, `isLeader`.
+- `tasks`: each item has `id`, `ownerAgentId`, `subject` (<=80 chars),
+  `description` (1-3 sentences), `dependsOn` (array of task ids), `isLeaderSummary`
+  (boolean), optional `timeoutSeconds` (default 1800).
+
+Invariants (the server rejects violations):
+1. Exactly one task has `isLeaderSummary: true`, owned by `{leader_agent_id}`.
+2. The leader owns no other (non-summary) task.
+3. Task ids and agent ids are unique; `dependsOn` references resolve; the DAG is acyclic.
+4. Owner kinds limited to `openclaw`, `claude`, `codex`, `cursor`, or `hermes`.
+5. Every agent in `agents` is referenced by at least one task.
+6. All task `subject` and `description` text is in {result_language}.
+
+## Owner assignment policy (in priority order)
+
+a. First reuse a *persistent agent* from section 1 (set `isTemporary: false`).
+b. Otherwise define a *temporary agent* per section 2 (set `isTemporary: true`,
+   `kind` != `openclaw`, `repo` = `{temp_agent_workdir}`). Do NOT leave a worker
+   task's `ownerAgentId` empty.
+c. Only if NO temporary platform is available above and no persistent agent fits,
+   set `ownerAgentId` to an empty string `""` for the user to pick manually
+   (last-resort fallback).
+Never invent a new OpenClaw/Hermes persistent agent the user does not have.\
 """
 
 
-_NON_OPENCLAW_PROMPT = """\
-## ClawsomeFlow Task Decomposition Request
+# OpenClaw leader: its stdout is NOT read by the server — it must POST the
+# result back to the loopback API. Literal ``{{``/``}}`` survive ``.format``.
+_DELIVERY_OPENCLAW = """\
+## How to return your result (REQUIRED — you must POST it back)
 
-You are a Flow designer. This request is dispatched by ClawsomeFlow to a
-non-OpenClaw leader runtime, so **do not rely on any OpenClaw-specific skill
-hooks**.
+The ClawsomeFlow API is loopback-only. The `api_base` and `token` above are
+literal values you substitute yourself (they are NOT shell environment vars).
+Use the bash tool to write the JSON body to a temp file and curl it back, so
+quotes inside `description` don't break:
 
-## Runtime variables for this request
+    cat > /tmp/csflow-decompose-result.json <<'EOF'
+    {{
+      "request_id": "{request_id}",
+      "agents": [ /* your agents */ ],
+      "tasks":  [ /* your tasks  */ ]
+    }}
+    EOF
 
-- request_id: {request_id}
-- user: {user}
-- leader_agent_id: {leader_agent_id}
-- leader_kind: {leader_kind}
-- leader_repo: {leader_repo}
-- leader_target_branch: {leader_target_branch}
-- ClawsomeFlow API base: {api_base}
-- short-lived callback token: {token} (valid for 30 minutes)
-- required output language for task `subject` + `description`: {result_language}
+    curl -fsSL -X POST "{api_base}/api/internal/task-decompose/commit" \\
+      -H "Authorization: Bearer {token}" \\
+      -H "Content-Type: application/json" \\
+      --data @/tmp/csflow-decompose-result.json
 
-## User's Flow goal
+The endpoint returns {{"request_id": "..."}} on success. Do NOT tell the user
+"generated N tasks" until curl has exited 0. If you genuinely cannot satisfy the
+goal (ambiguous / contradictory / out of scope), POST the failure instead:
 
-{goal}
+    curl -fsSL -X POST "{api_base}/api/internal/task-decompose/fail" \\
+      -H "Authorization: Bearer {token}" \\
+      -H "Content-Type: application/json" \\
+      -d '{{"request_id": "{request_id}", "code": "INSUFFICIENT_INPUT", "message": "<one sentence>"}}'
 
-## Available OpenClaw agents
+Hard rules: never call any URL other than the api_base above; never modify
+openclaw.json or other agents' workspaces; never start an actual Flow Run — your
+job ends at posting the JSON back. Then reply in one short sentence: generated N
+tasks for user review.\
+"""
 
-These are OpenClaw agents the user currently owns. Prefer reusing them for
-worker tasks instead of inventing new OpenClaw ids.
 
-{available_agents_yaml}
-
-## Existing agents in editor (hint)
-
-{existing_agents_yaml}
-
-## Existing tasks in editor (hint)
-
-{existing_tasks_yaml}
-
-## Required output schema
-
-Produce one JSON object with:
-
-- `agents`: each item has `id`, `kind`, optional `repo`, optional
-  `targetBranch`, `isLeader`.
-- `tasks`: each item has `id`, `ownerAgentId`, `subject`, `description`,
-  `dependsOn`, `isLeaderSummary`, optional `timeoutSeconds`.
-
-Invariants:
-1. Exactly one task has `isLeaderSummary=true`, owned by `{leader_agent_id}`.
-2. Leader owns no non-summary tasks.
-3. IDs are unique and dependencies form an acyclic DAG.
-4. Use only `openclaw`, `claude`, `codex`, `cursor`, `hermes` as owner kinds.
-5. All `subject` and `description` text must follow `{result_language}`.
-
-Owner assignment policy:
-- First reuse available OpenClaw agents.
-- If no suitable owner exists for a worker task, set `ownerAgentId` to `""`
-  and let the user decide in editor.
-- You may still propose non-OpenClaw workers (`claude`/`codex`/`cursor`/`hermes`)
-  with placeholder repo/branch.
-
-## Output contract (must follow)
+# Non-OpenClaw leader: a one-shot CLI whose stdout the server captures + parses.
+_DELIVERY_STDOUT = """\
+## How to return your result (REQUIRED)
 
 1. Do **not** execute shell commands, do **not** write files, and do **not**
-   call curl. Permissions may block these actions.
-2. Respond with exactly one JSON object and nothing else.
-3. Use this exact shape:
-   {{
-     "agents": [/* your agents */],
-     "tasks": [/* your tasks */]
-   }}
-4. Do not wrap the JSON with markdown fences.
+   call curl — permissions may block these and your result is read from stdout.
+2. Respond with **exactly one JSON object and nothing else** — no prose, no
+   markdown fences — in this exact shape:
+
+       {{
+         "agents": [ /* your agents */ ],
+         "tasks":  [ /* your tasks  */ ]
+       }}\
 """
 
 
@@ -290,7 +382,9 @@ def _compose_messages(
     *, request_id: str, user: str, goal: str, leader_target: _LeaderTarget,
     api_base: str, token: str,
     result_language: str | None,
-    available_agents: list[dict[str, Any]],
+    persistent_agents: list[dict[str, Any]],
+    available_platforms: list[str],
+    temp_workdir: str,
     existing_agents: list[dict[str, Any]],
     existing_tasks: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
@@ -298,38 +392,34 @@ def _compose_messages(
         "zh": "Chinese",
         "en": "English",
     }.get((result_language or "").lower(), "same language as the user's goal")
-    if leader_target.kind == AgentKind.openclaw:
-        body = _OPENCLAW_PROMPT.format(
-            request_id=request_id,
-            user=user,
-            leader_agent_id=leader_target.id,
-            api_base=api_base,
-            token=token,
-            result_language=language,
-            goal=goal.strip(),
-            available_agents_yaml=_yaml_lines(available_agents),
-            existing_agents_yaml=_yaml_lines(existing_agents),
-            existing_tasks_yaml=_yaml_lines(existing_tasks),
-        )
-    else:
-        body = _NON_OPENCLAW_PROMPT.format(
-            request_id=request_id,
-            user=user,
-            leader_agent_id=leader_target.id,
-            leader_kind=leader_target.kind.value,
-            leader_repo=leader_target.repo or "",
-            leader_target_branch=leader_target.target_branch or DEFAULT_TARGET_BRANCH,
-            api_base=api_base,
-            token=token,
-            result_language=language,
-            goal=goal.strip(),
-            available_agents_yaml=_yaml_lines(available_agents),
-            existing_agents_yaml=_yaml_lines(existing_agents),
-            existing_tasks_yaml=_yaml_lines(existing_tasks),
-        )
-    # The skill matches on the top-of-message prefix, so we put it as the
-    # *user* message (the system role is hidden behind the gateway in some
-    # OpenClaw configs and may not be searched for the trigger string).
+    is_openclaw = leader_target.kind == AgentKind.openclaw
+    core = _DECOMPOSE_CORE.format(
+        request_id=request_id,
+        user=user,
+        leader_agent_id=leader_target.id,
+        leader_kind=leader_target.kind.value,
+        leader_repo=leader_target.repo or "",
+        leader_target_branch=leader_target.target_branch or DEFAULT_TARGET_BRANCH,
+        api_base=api_base,
+        token=token,
+        result_language=language,
+        goal=goal.strip(),
+        temp_agent_workdir=temp_workdir,
+        persistent_agents_yaml=_yaml_lines(persistent_agents),
+        available_platforms_yaml=_platform_lines(available_platforms),
+        existing_agents_yaml=_yaml_lines(existing_agents),
+        existing_tasks_yaml=_yaml_lines(existing_tasks),
+    )
+    # The ONLY per-leader-kind difference: how the result is returned. OpenClaw's
+    # stdout is not read (it must curl the result back), while a non-OpenClaw
+    # one-shot CLI returns one JSON object on stdout that the server parses.
+    delivery_template = _DELIVERY_OPENCLAW if is_openclaw else _DELIVERY_STDOUT
+    delivery = delivery_template.format(
+        request_id=request_id, api_base=api_base, token=token,
+    )
+    body = f"{core}\n\n{delivery}"
+    # The result is the prompt body as a single *user* message (the system role
+    # is hidden behind the gateway in some OpenClaw configs).
     return [
         {"role": "user", "content": body},
     ]
@@ -943,14 +1033,13 @@ async def start_decompose_request(
         config=cfg,
     )
 
-    # Hand the leader the user's full OpenClaw agent inventory so it can
-    # pick existing owners instead of inventing new ones. Mirror the
-    # shape used elsewhere (id / kind / isLeader) so the skill's owner
-    # picker can dedupe against ``existing_agents``.
-    inventory_rows = storage.openclaw_list(owner_user=user)
-    available_agents: list[dict[str, Any]] = []
-    for row in inventory_rows:
-        available_agents.append(
+    # Hand the leader the user's full PERSISTENT agent inventory (the two
+    # persistent platforms: OpenClaw + Hermes) so it can reuse existing owners
+    # instead of inventing new ones. Shape: id / name / kind / isLeader, so the
+    # owner picker can dedupe against ``existing_agents``.
+    persistent_agents: list[dict[str, Any]] = []
+    for row in storage.openclaw_list(owner_user=user):
+        persistent_agents.append(
             {
                 "id": row.id,
                 "name": row.name,
@@ -958,6 +1047,25 @@ async def start_decompose_request(
                 "isLeader": row.id == leader_agent_id,
             }
         )
+    try:
+        from app.services.hermes_agents import list_agents as _hermes_list_agents
+
+        for row in _hermes_list_agents(user=user, storage=storage, config=cfg):
+            persistent_agents.append(
+                {
+                    "id": row.id,
+                    "name": row.name,
+                    "kind": "hermes",
+                    "isLeader": row.id == leader_agent_id,
+                }
+            )
+    except Exception as exc:  # listing Hermes must never block decomposition
+        logger.warning("decompose_hermes_inventory_failed", error=_error_text(exc))
+
+    # Temporary-agent platforms actually installed on this host, plus the default
+    # working directory those temporary agents will be pointed at.
+    available_platforms = _detect_temp_agent_platforms()
+    temp_workdir = _ensure_ai_temp_agent_workdir()
 
     coro = _dispatch_to_leader(
         request_id=request_id,
@@ -967,7 +1075,9 @@ async def start_decompose_request(
         api_base=api_base,
         token=token,
         result_language=result_language,
-        available_agents=available_agents,
+        persistent_agents=persistent_agents,
+        available_platforms=available_platforms,
+        temp_workdir=temp_workdir,
         existing_agents=existing_agents_payload,
         existing_tasks=existing_tasks_payload,
         cfg=cfg,
@@ -1104,7 +1214,9 @@ async def _dispatch_to_leader(
     api_base: str,
     token: str,
     result_language: str | None,
-    available_agents: list[dict[str, Any]],
+    persistent_agents: list[dict[str, Any]],
+    available_platforms: list[str],
+    temp_workdir: str,
     existing_agents: list[dict[str, Any]],
     existing_tasks: list[dict[str, Any]],
     cfg: Config,
@@ -1116,7 +1228,9 @@ async def _dispatch_to_leader(
         request_id=request_id, user=user, goal=goal,
         leader_target=leader_target, api_base=api_base, token=token,
         result_language=result_language,
-        available_agents=available_agents,
+        persistent_agents=persistent_agents,
+        available_platforms=available_platforms,
+        temp_workdir=temp_workdir,
         existing_agents=existing_agents, existing_tasks=existing_tasks,
     )
     dispatch_message = str(messages[0].get("content", "")) if messages else ""

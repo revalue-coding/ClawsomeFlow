@@ -667,8 +667,9 @@ class TaskDecomposeRequest(_SQLBase, table=True):
     """Tracks an async "AI decompose Flow goal into tasks" request.
 
     Created when a user clicks "🤖 AI Decompose" in the Flow editor.
-    Updated by the ``csflow-task-decomposer`` skill via
-    ``POST /api/internal/task-decompose/commit``.
+    Updated for an OpenClaw leader via ``POST /api/internal/task-decompose/
+    commit`` (the dispatch prompt instructs it to curl the result back); for a
+    non-OpenClaw leader the server parses the one-shot CLI's stdout directly.
 
     The request targets one leader agent selected in Flow editor. OpenClaw
     leaders use the decomposer skill path; non-OpenClaw leaders receive an

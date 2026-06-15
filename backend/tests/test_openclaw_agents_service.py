@@ -244,7 +244,6 @@ async def test_commit_creates_workspace_skill_json_and_db(fake_openclaw_home: Pa
     assert "[csflow] initial commit" in log
 
     # Skill installed
-    assert (ws / "skills" / "csflow-task-decomposer" / "SKILL.md").exists()
     assert (
         ws / "skills" / "self-skills-heartbeats-maintenance" / "SKILL.md"
     ).exists()
@@ -1408,7 +1407,7 @@ async def test_import_external_agent_copies_workspace_and_wraps_agents_md(
     assert "Shared Rules for ClawsomeFlow Managed Agents" in text
     assert "Legacy Rules" in text
     assert "AGENTS_USER_CUSTOM_SECTION" in text
-    assert (ws / "skills" / "csflow-task-decomposer" / "SKILL.md").exists()
+    assert (ws / "skills" / "self-definition-maintenance" / "SKILL.md").exists()
 
 
 @pytest.mark.asyncio
@@ -1421,11 +1420,11 @@ async def test_reinstall_skills_redeploys_template_materials(
     ws = Path(agent.workspace_path)
     # Simulate drift: user removed AGENTS.md.
     (ws / "AGENTS.md").unlink()
-    shutil.rmtree(ws / "skills" / "csflow-task-decomposer")
+    shutil.rmtree(ws / "skills" / "self-definition-maintenance")
     installed = svc.reinstall_skills("retrofit")
-    assert "csflow-task-decomposer" in installed
+    assert "self-definition-maintenance" in installed
     assert (ws / "AGENTS.md").exists()
-    assert (ws / "skills" / "csflow-task-decomposer" / "SKILL.md").exists()
+    assert (ws / "skills" / "self-definition-maintenance" / "SKILL.md").exists()
 
 
 @pytest.mark.asyncio

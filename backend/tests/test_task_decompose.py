@@ -4,7 +4,8 @@ Covers four layers:
     1. Service (`start_decompose_request`, status transitions, reap)
     2. Public API (POST /api/flows/decompose, GET .../{request_id})
     3. Internal API (commit + fail; loopback + token + purpose check)
-    4. Skill installer pickup (csflow-task-decomposer in USER_AGENT_SKILLS)
+    4. Self-contained dispatch prompt (no csflow-task-decomposer skill; the
+       prompt carries the persistent/temporary owner model + result-delivery)
 """
 
 from __future__ import annotations
@@ -25,9 +26,8 @@ from app.config import load_config, save_config
 from app.integrations import internal_token as it
 from app.integrations import openclaw_json as oj
 from app.integrations.openclaw_bridge import OpenclawGatewayUnavailable
-from app.integrations.openclaw_skills import USER_AGENT_SKILLS
 from app.main import create_app
-from app.models import OpenclawAgent, TaskDecomposeStatus
+from app.models import AgentKind, OpenclawAgent, TaskDecomposeStatus
 from app.services import task_decompose as svc
 from app.storage import get_storage
 
@@ -109,28 +109,94 @@ def _seed_registered_openclaw_entry_without_db(
     registry.write_text(json.dumps({"agent_ids": [agent_id]}), encoding="utf-8")
 
 
-# ── ① skill installer pickup -----------------------------------------
+# ── ① skill removed + self-contained dispatch prompt -----------------
 
 
-def test_user_agent_skills_includes_decomposer() -> None:
-    assert "csflow-task-decomposer" in USER_AGENT_SKILLS
-
-
-def test_skill_md_present_in_repo() -> None:
+def test_decomposer_skill_removed_from_repo() -> None:
     repo = Path(__file__).resolve().parents[2]
-    md = (
+    skill_dir = (
         repo
         / "openclaw-agent-source"
         / "common-agent-source"
         / "skills"
         / "csflow-task-decomposer"
-        / "SKILL.md"
     )
-    assert md.exists()
-    body = md.read_text()
-    assert "ClawsomeFlow Task Decomposer" in body
-    assert "## ClawsomeFlow Task Decomposition Request" in body
+    assert not skill_dir.exists()
+
+
+def _compose_body(*, kind: AgentKind, persistent=None, platforms=None) -> str:
+    target = svc._LeaderTarget(
+        id="leader-x", kind=kind,
+        repo=None if kind == AgentKind.openclaw else "/tmp/repo",
+        target_branch="main",
+    )
+    msgs = svc._compose_messages(
+        request_id="req-1", user="alice", goal="Build a newsletter pipeline.",
+        leader_target=target, api_base="http://127.0.0.1:17017", token="tok-123",
+        result_language="en",
+        persistent_agents=persistent or [],
+        available_platforms=platforms or [],
+        temp_workdir="~/csflow-ai-decompose",
+        existing_agents=[], existing_tasks=[],
+    )
+    return msgs[0]["content"]
+
+
+def test_prompt_lists_persistent_agents_and_platforms() -> None:
+    body = _compose_body(
+        kind=AgentKind.openclaw,
+        persistent=[
+            {"id": "writer", "name": "Writer", "kind": "openclaw", "isLeader": False},
+            {"id": "sage", "name": "Sage", "kind": "hermes", "isLeader": False},
+        ],
+        platforms=["claude", "hermes"],
+    )
+    # Persistent owner source (OpenClaw + Hermes) listed.
+    assert "Persistent agents you may assign" in body
+    assert "id=writer" in body and "kind=openclaw" in body
+    assert "id=sage" in body and "kind=hermes" in body
+    # Available temporary platforms (probed) listed.
+    assert "Temporary-agent platforms available" in body
+    assert "  - claude" in body and "  - hermes" in body
+    # Temporary fallback + default workdir + never-openclaw rule.
+    assert "~/csflow-ai-decompose" in body
+    assert "NEVER be a temporary agent" in body
+
+
+def test_openclaw_delivery_uses_curl_callback() -> None:
+    body = _compose_body(kind=AgentKind.openclaw)
+    # OpenClaw stdout is not read → it must curl the result back.
     assert "/api/internal/task-decompose/commit" in body
+    assert "/api/internal/task-decompose/fail" in body
+    assert "Authorization: Bearer tok-123" in body
+    assert "req-1" in body
+
+
+def test_non_openclaw_delivery_uses_stdout_json() -> None:
+    body = _compose_body(kind=AgentKind.claude, platforms=["claude"])
+    # Non-OpenClaw stdout is captured → emit one JSON object, never curl.
+    assert "exactly one JSON object" in body
+    assert "do **not**" in body
+    assert "/api/internal/task-decompose/commit" not in body
+
+
+def test_ensure_ai_temp_agent_workdir_idempotent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    wd = tmp_path / "csflow-ai-decompose"
+    monkeypatch.setattr(svc, "_AI_TEMP_AGENT_WORKDIR", str(wd))
+    out = svc._ensure_ai_temp_agent_workdir()
+    assert out == str(wd)
+    assert (wd / ".git").is_dir()
+    head = shutil.which("git") and __import__("subprocess").run(
+        ["git", "-C", str(wd), "rev-parse", "HEAD"], capture_output=True,
+    )
+    assert head.returncode == 0  # has at least one commit
+    # Second call is a no-op and must not raise.
+    svc._ensure_ai_temp_agent_workdir()
+    assert (wd / ".git").is_dir()
 
 
 # ── ② service layer --------------------------------------------------
@@ -391,8 +457,8 @@ async def test_start_dispatches_non_openclaw_leader_via_direct_cli(
     assert "--dangerously-skip-permissions" in argv
     assert "-p" in argv
     msg = str(argv[-1])
-    assert "non-OpenClaw leader runtime" in msg
-    assert "Respond with exactly one JSON object" in msg
+    assert "exactly one JSON object" in msg
+    assert "/api/internal/task-decompose/commit" not in msg  # stdout, not curl
     assert "leader-claude" in msg
     assert seen["cwd"] == str(repo_path)
 
@@ -523,8 +589,8 @@ async def test_start_dispatches_cursor_leader_with_force_flags(
     ]
     assert argv[5] == "-p"
     msg = str(argv[-1])
-    assert "non-OpenClaw leader runtime" in msg
-    assert "Respond with exactly one JSON object" in msg
+    assert "exactly one JSON object" in msg
+    assert "/api/internal/task-decompose/commit" not in msg  # stdout, not curl
     assert "leader-cursor" in msg
     assert seen["cwd"] == str(repo_path)
 
@@ -603,8 +669,8 @@ async def test_start_dispatches_codex_leader_with_exec_flags(
     ]
     assert "claude" not in argv[0]
     msg = str(argv[-1])
-    assert "non-OpenClaw leader runtime" in msg
-    assert "Respond with exactly one JSON object" in msg
+    assert "exactly one JSON object" in msg
+    assert "/api/internal/task-decompose/commit" not in msg  # stdout, not curl
     assert "leader-codex" in msg
     assert seen["cwd"] == str(repo_path)
 
@@ -1443,28 +1509,25 @@ def test_task_decompose_commit_rejects_openclaw_purpose_token(
 # ── ⑥ reinstall_skills service -------------------------------------
 
 
-def test_reinstall_skills_includes_decomposer(
+def test_reinstall_skills_excludes_removed_decomposer(
     fake_openclaw_home: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After upgrading, ``reinstall_skills`` must drop the decomposer skill."""
+    """``reinstall_skills`` no longer installs the removed decomposer skill."""
     if not _has_git():
         pytest.skip("git not available")
     from app.services.openclaw_agents import (
-        AgentIdentity, CommitInput, commit_agent, reinstall_skills,
+        CommitInput, commit_agent, reinstall_skills,
     )
     import asyncio
 
     agent = asyncio.run(commit_agent(
-        CommitInput(id="legacy", name="Legacy"), user="alice",
+        CommitInput(id="fresh", name="Fresh"), user="alice",
     ))
-    # Simulate "old" install that didn't have the decomposer skill.
-    decomposer_dir = (
-        Path(agent.workspace_path) / "skills" / "csflow-task-decomposer"
-    )
-    if decomposer_dir.exists():
-        shutil.rmtree(decomposer_dir)
-    assert not decomposer_dir.exists()
 
-    installed = reinstall_skills("legacy")
-    assert "csflow-task-decomposer" in installed
-    assert (decomposer_dir / "SKILL.md").exists()
+    installed = reinstall_skills("fresh")
+    # The decomposer skill is gone; a still-bundled common skill is present.
+    assert "csflow-task-decomposer" not in installed
+    assert not (
+        Path(agent.workspace_path) / "skills" / "csflow-task-decomposer"
+    ).exists()
+    assert "self-definition-maintenance" in installed

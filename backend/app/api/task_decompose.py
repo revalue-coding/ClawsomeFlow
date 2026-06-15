@@ -243,7 +243,7 @@ internal_router = APIRouter(prefix="/internal/task-decompose", tags=["internal"]
 
 
 class CommitPayload(_CamelModel):
-    """Body posted by the csflow-task-decomposer skill."""
+    """Body curl-POSTed back by an OpenClaw leader's decompose dispatch."""
 
     request_id: str
     agents: list[dict[str, Any]] = Field(default_factory=list)

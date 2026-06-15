@@ -9,8 +9,6 @@ Shared bootstrap assets for backend-created OpenClaw agents.
   - `AGENTS_USER_CUSTOM_SECTION` markers are injected dynamically at creation/deploy
 - `skills/`
   - Default common skills copied into workspace `skills/`
-  - Includes migrated skills from legacy `skills-source/`:
-    - `csflow-task-decomposer`
   - Includes built-in self-maintenance skills:
     - `self-skills-heartbeats-maintenance`
     - `self-definition-maintenance`

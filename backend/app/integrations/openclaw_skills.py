@@ -121,7 +121,7 @@ _MANIFEST_FILE = ".csflow-installed.json"
 class InstalledSkill:
     """A record of one skill installed at a workspace."""
 
-    name: str            # logical id (e.g. "csflow-task-decomposer")
+    name: str            # logical id (e.g. "self-definition-maintenance")
     relative_path: str   # source path relative to .skills-source root
     installed_at: str    # absolute install path under workspace/skills/
 

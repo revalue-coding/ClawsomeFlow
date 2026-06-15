@@ -12,7 +12,7 @@ def test_deploy_common_agent_source_syncs_hidden_common_dir() -> None:
     dst = src.deploy_common_agent_source()
     assert dst.name == ".common-agent-source"
     assert (dst / "agent-common-rules.md").exists()
-    assert (dst / "skills" / "csflow-task-decomposer" / "SKILL.md").exists()
+    assert (dst / "skills" / "self-definition-maintenance" / "SKILL.md").exists()
     assert (dst / "cron-jobs" / "entropy-management.json").exists()
 
 
@@ -68,9 +68,6 @@ def test_deploy_common_agent_workspace_writes_agents_and_skills(
     assert "Shared Rules for ClawsomeFlow Managed Agents" in agents_text
     assert "AGENTS_USER_CUSTOM_SECTION" in agents_text
     assert "INDEX.md" in agents_text
-    assert (
-        workspace / "skills" / "csflow-task-decomposer" / "SKILL.md"
-    ).exists()
     assert (
         workspace / "skills" / "self-skills-heartbeats-maintenance" / "SKILL.md"
     ).exists()

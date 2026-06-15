@@ -348,6 +348,68 @@ def _backfill_is_temporary(cfg: Config) -> list[str] | None:
     return warnings or None
 
 
+_DECOMPOSER_SKILL = "csflow-task-decomposer"
+
+
+def _remove_task_decomposer_skill(cfg: Config) -> list[str] | None:
+    """Repair: remove the deleted ``csflow-task-decomposer`` OpenClaw skill.
+
+    Issue fixed: 0.1.15 deleted the ``csflow-task-decomposer`` skill — every
+    decomposition instruction (including how to return the result) now lives in
+    the dispatch prompt itself. The bundled mirror + per-workspace copies are
+    normally pruned by the common-source sync (``_sync_exact_dir`` /
+    ``_sync_common_workspace_skills``), but the per-workspace prune only fires
+    for paths recorded in that workspace's common manifest, so a workspace
+    created before the manifest existed would keep a stale
+    ``skills/csflow-task-decomposer/``. This migration removes it
+    unconditionally from every managed OpenClaw workspace AND the deployed
+    common-agent-source mirror.
+
+    Target versions: deployments that installed the skill at any point <= 0.1.14.
+    Removal baseline: safe to delete once the minimum upgrade baseline is raised
+    past ``0.1.15b1``.
+
+    Idempotent: a missing directory is a no-op. Best-effort (``critical=False``):
+    a per-target failure is collected as a warning and never aborts the upgrade.
+    """
+    import shutil as _shutil
+
+    from app.storage import get_storage
+
+    st = get_storage(cfg)
+    warnings: list[str] = []
+    removed = 0
+
+    targets: list[Path] = [
+        paths.common_agent_source_dir() / "skills" / _DECOMPOSER_SKILL,
+    ]
+    try:
+        for agent in st.openclaw_list():
+            ws = getattr(agent, "workspace_path", "") or ""
+            base = Path(ws) if str(ws).strip() else (paths.agent_dir(agent.id) / "workspace")
+            targets.append(base / "skills" / _DECOMPOSER_SKILL)
+    except Exception as exc:  # best-effort: still prune the mirror below
+        warnings.append(f"could not list managed agents: {exc}")
+        logger.warning("upgrade_decomposer_skill_list_failed", error=str(exc))
+
+    for target in targets:
+        try:
+            if target.is_dir():
+                _shutil.rmtree(target)
+                removed += 1
+        except Exception as exc:  # one bad target must not abort the rest
+            warnings.append(f"could not remove {target}: {exc}")
+            logger.warning(
+                "upgrade_decomposer_skill_remove_failed",
+                path=str(target), error=str(exc),
+            )
+
+    logger.info(
+        "upgrade_decomposer_skill_removed", removed=removed, candidates=len(targets),
+    )
+    return warnings or None
+
+
 # Register migrations in chronological order. Newer entries come last.
 # Each ``apply`` MUST be idempotent (re-runnable). A migration runs once ever,
 # gated by the applied-migrations ledger (see module docstring).
@@ -360,6 +422,17 @@ MIGRATIONS: list[Migration] = [
         version="0.1.13b7",
         description="backfill FlowAgent.is_temporary on legacy specs",
         apply=_backfill_is_temporary,
+        critical=False,
+    ),
+    # 0.1.15b1: the csflow-task-decomposer OpenClaw skill was deleted (decompose
+    # instructions are fully inline in the dispatch prompt now). Prune any stale
+    # copy from managed agent workspaces + the deployed common-source mirror,
+    # covering workspaces older than the common manifest. See
+    # _remove_task_decomposer_skill.
+    Migration(
+        version="0.1.15b1",
+        description="remove deleted csflow-task-decomposer skill from workspaces",
+        apply=_remove_task_decomposer_skill,
         critical=False,
     ),
 ]
@@ -472,6 +545,19 @@ def run_upgrade(
     except Exception as exc:  # pragma: no cover - defensive; never block upgrade
         report.repair_warnings.append(f"hermes inference config backfill: {exc}")
         logger.warning("upgrade_hermes_inference_backfill_failed", error=str(exc))
+
+    # 0c. AI-decompose temporary-agent working directory. The AI decomposer
+    # points every temporary agent it invents at ``~/csflow-ai-decompose``; that
+    # dir must exist as a git repo with a commit before a run can build a worktree
+    # from it. Create it idempotently on the upgrade path so upgrade-only users
+    # converge with fresh deploys. Best-effort: never blocks the upgrade.
+    try:
+        from app.services.task_decompose import _ensure_ai_temp_agent_workdir
+
+        _ensure_ai_temp_agent_workdir()
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"ai-decompose workdir init: {exc}")
+        logger.warning("upgrade_ai_decompose_workdir_failed", error=str(exc))
 
     # 0. Editable-source frontend build (optional).
     if include_frontend_build:

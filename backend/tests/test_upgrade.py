@@ -697,3 +697,75 @@ def test_backfill_is_temporary_registered_in_migrations() -> None:
     assert m.critical is False  # best-effort: never blocks the upgrade
 
 
+
+
+# ── 0.1.15b1: remove the deleted csflow-task-decomposer skill ─────────
+
+
+def test_remove_task_decomposer_skill_prunes_workspaces_and_mirror(
+    tmp_clawsomeflow_home: Path, fake_config: Config,
+) -> None:
+    """Pre-state → migration → expected: a stale skills/csflow-task-decomposer is
+    removed from every managed OpenClaw workspace AND the common-source mirror,
+    while a sibling skill is left intact. Idempotent on a second run."""
+    from app.models import OpenclawAgent
+    from app.storage import get_storage
+
+    storage = get_storage(fake_config)
+
+    ws = tmp_clawsomeflow_home / "agents" / "leader" / "workspace"
+    stale = ws / "skills" / "csflow-task-decomposer"
+    keep = ws / "skills" / "self-definition-maintenance"
+    stale.mkdir(parents=True)
+    (stale / "SKILL.md").write_text("x", encoding="utf-8")
+    keep.mkdir(parents=True)
+    (keep / "SKILL.md").write_text("y", encoding="utf-8")
+    storage.openclaw_create(
+        OpenclawAgent(id="leader", name="Leader", workspace_path=str(ws),
+                      created_by_user="alice")
+    )
+
+    mirror = paths.common_agent_source_dir() / "skills" / "csflow-task-decomposer"
+    mirror.mkdir(parents=True)
+    (mirror / "SKILL.md").write_text("z", encoding="utf-8")
+
+    warnings = upgrade._remove_task_decomposer_skill(fake_config)
+    assert warnings is None
+    assert not stale.exists()           # pruned from the workspace
+    assert keep.exists()                # sibling skill untouched
+    assert not mirror.exists()          # pruned from the deployed mirror
+
+    # Idempotent: a second run is a no-op and must not raise.
+    assert upgrade._remove_task_decomposer_skill(fake_config) is None
+
+
+def test_remove_task_decomposer_skill_registered_in_migrations() -> None:
+    by_version = {m.version: m for m in upgrade.MIGRATIONS}
+    assert "0.1.15b1" in by_version
+    m = by_version["0.1.15b1"]
+    assert m.apply is upgrade._remove_task_decomposer_skill
+    assert m.critical is False  # best-effort: never blocks the upgrade
+
+
+def test_run_upgrade_creates_ai_decompose_workdir(
+    tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
+) -> None:
+    """Upgrade-parity: ~/csflow-ai-decompose is created as a git repo with a
+    commit on the upgrade path, so upgrade-only users converge with fresh deploys."""
+    import shutil as _shutil
+
+    if _shutil.which("git") is None:
+        pytest.skip("git not available")
+    from app.services import task_decompose as td
+
+    wd = tmp_clawsomeflow_home / "ai-decompose-wd"
+    monkeypatch.setattr(td, "_AI_TEMP_AGENT_WORKDIR", str(wd))
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+
+    upgrade.run_upgrade(
+        config=fake_config,
+        target_version="1.0.0",
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+    assert (wd / ".git").is_dir()
