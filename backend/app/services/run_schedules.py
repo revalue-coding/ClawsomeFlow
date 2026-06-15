@@ -578,6 +578,16 @@ def list_schedule_executions(
     )
 
 
+def clear_schedule_executions(
+    *,
+    user: str,
+    storage: StorageBackend | None = None,
+) -> int:
+    """Delete the caller's finished schedule-execution records. Returns count."""
+    storage = storage or get_storage()
+    return storage.run_schedule_execution_clear(user=user)
+
+
 def get_schedule_execution(
     execution_id: str,
     *,

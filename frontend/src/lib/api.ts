@@ -750,6 +750,11 @@ export const api = {
   },
   abortRun: (id: string) =>
     request<RunSummary>("POST", `/api/runs/${id}/abort`),
+  clearRunHistory: () =>
+    request<{ runsDeleted: number; eventsDeleted: number }>(
+      "DELETE",
+      "/api/runs/history",
+    ),
   mergePending: (id: string, agentId: string) =>
     request<{ agentId: string; success: boolean; message: string }>(
       "POST",
@@ -826,6 +831,8 @@ export const api = {
   },
   getRunScheduleExecution: (id: string) =>
     request<RunScheduleExecutionDetail>("GET", `/api/run-schedule-executions/${id}`),
+  clearRunScheduleExecutions: () =>
+    request<{ deleted: number }>("DELETE", "/api/run-schedule-executions"),
 
   // OpenClaw agents
   listOpenclawTeams: () =>

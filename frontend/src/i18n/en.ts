@@ -425,6 +425,11 @@ const en = {
     activeHint: "",
     historyTitle: "Run History",
     historyHint: "",
+    clearHistory: "Clear",
+    clearHistoryConfirm:
+      "Clear all run history? Active runs are kept; finished runs and their events are permanently deleted from the database and cannot be recovered.",
+    clearHistoryEmpty: "No run history to clear.",
+    clearHistoryDone: "Cleared {{count}} run history record(s).",
     columnId: "Run ID",
     columnFlow: "Flow",
     columnInputs: "Run inputs",
@@ -520,6 +525,11 @@ const en = {
     execution: {
       title: "Execution Records",
       empty: "No execution record yet.",
+      clear: "Clear",
+      clearConfirm:
+        "Clear all execution records? Finished records are permanently deleted from the database and cannot be recovered (in-flight records are kept).",
+      clearEmpty: "No execution records to clear.",
+      clearDone: "Cleared {{count}} execution record(s).",
       viewDetail: "Details",
       detailTitle: "Execution Record Detail",
       detailSummary: "Result: {{status}} · Started: {{startedAt}} · Finished: {{finishedAt}}",

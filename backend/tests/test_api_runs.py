@@ -661,6 +661,59 @@ def test_list_runs_hides_internal_csflow_inputs(app_client: TestClient) -> None:
     assert item["inputs"] == {"目标项目": "acme"}
 
 
+def test_clear_run_history_deletes_terminal_keeps_active(
+    app_client: TestClient,
+) -> None:
+    flow = _make_flow(owner="alice")
+    _make_run(flow_id=flow.id, user="alice", status=RunStatus.completed,
+              team_name="csflow-done")
+    _make_run(flow_id=flow.id, user="alice", status=RunStatus.running,
+              team_name="csflow-active")
+    r = app_client.delete("/api/runs/history")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["runsDeleted"] == 1
+    # Active run survives; only the terminal one is gone.
+    remaining = app_client.get("/api/runs").json()["items"]
+    teams = {item["teamName"] for item in remaining}
+    assert teams == {"csflow-active"}
+
+
+def test_clear_run_history_scoped_to_caller(app_client: TestClient) -> None:
+    flow = _make_flow(owner="alice")
+    _make_run(flow_id=flow.id, user="alice", status=RunStatus.completed,
+              team_name="csflow-a")
+    _make_run(flow_id=flow.id, user="bob", status=RunStatus.completed,
+              team_name="csflow-b")
+    r = app_client.delete("/api/runs/history")
+    assert r.status_code == 200
+    assert r.json()["runsDeleted"] == 1
+    # Bob's terminal run is untouched.
+    all_runs = app_client.get("/api/runs?allUsers=true").json()["items"]
+    assert {i["teamName"] for i in all_runs} == {"csflow-b"}
+
+
+def test_clear_run_schedule_executions(app_client: TestClient) -> None:
+    from app.models import FlowRunScheduleExecution
+
+    storage = get_storage()
+    storage.run_schedule_execution_create(FlowRunScheduleExecution(
+        schedule_id="s1", user="alice", status="succeeded",
+    ))
+    storage.run_schedule_execution_create(FlowRunScheduleExecution(
+        schedule_id="s1", user="alice", status="running",
+    ))
+    storage.run_schedule_execution_create(FlowRunScheduleExecution(
+        schedule_id="s2", user="bob", status="failed",
+    ))
+    r = app_client.delete("/api/run-schedule-executions")
+    assert r.status_code == 200
+    assert r.json()["deleted"] == 1
+    # Alice's running record + bob's record remain.
+    rows, total = storage.run_schedule_execution_list(limit=200)
+    assert total == 2
+
+
 def test_list_runs_all_users_query(app_client: TestClient) -> None:
     flow = _make_flow(owner="alice")
     _make_run(flow_id=flow.id, user="alice", team_name="csflow-A")

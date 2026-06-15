@@ -11,6 +11,7 @@ from app.models import (
     Flow,
     FlowAgent,
     FlowRun,
+    FlowRunScheduleExecution,
     OpenclawAgentRequest,
     OpenclawRequestStatus,
     FlowSpec,
@@ -243,6 +244,58 @@ class TestEventLog:
         assert s.openclaw_request_get(req_live.request_id) is not None
         assert s.task_decompose_get(td_old.request_id) is None
         assert s.task_decompose_get(td_live.request_id) is not None
+
+
+class TestClearHistory:
+    def test_run_clear_history_keeps_active_and_scopes_user(self) -> None:
+        s = get_storage()
+        flow = s.flow_create(_flow())
+        now = datetime.now(timezone.utc)
+        done_alice = s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1, team_name="csflow-done-a",
+            user="alice", status=RunStatus.completed, started_at=now, finished_at=now,
+        ))
+        active_alice = s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1, team_name="csflow-active-a",
+            user="alice", status=RunStatus.running, started_at=now,
+        ))
+        done_bob = s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1, team_name="csflow-done-b",
+            user="bob", status=RunStatus.failed, started_at=now, finished_at=now,
+        ))
+        s.event_append(RunEvent(run_id=done_alice.id, type="e1"))
+        s.event_append(RunEvent(run_id=done_alice.id, type="e2"))
+
+        result = s.run_clear_history(user="alice")
+        assert result["runs_deleted"] == 1
+        assert result["events_deleted"] == 2
+
+        assert s.run_get(done_alice.id) is None
+        assert s.run_get(active_alice.id) is not None  # active never deleted
+        assert s.run_get(done_bob.id) is not None  # other user untouched
+        assert len(s.event_list(run_id=done_alice.id)) == 0
+
+    def test_run_schedule_execution_clear_keeps_running_and_scopes_user(self) -> None:
+        s = get_storage()
+        now = datetime.now(timezone.utc)
+        done_a = s.run_schedule_execution_create(FlowRunScheduleExecution(
+            schedule_id="sched-1", user="alice", status="succeeded",
+            started_at=now, finished_at=now,
+        ))
+        running_a = s.run_schedule_execution_create(FlowRunScheduleExecution(
+            schedule_id="sched-1", user="alice", status="running", started_at=now,
+        ))
+        done_b = s.run_schedule_execution_create(FlowRunScheduleExecution(
+            schedule_id="sched-2", user="bob", status="failed",
+            started_at=now, finished_at=now,
+        ))
+
+        deleted = s.run_schedule_execution_clear(user="alice")
+        assert deleted == 1
+
+        assert s.run_schedule_execution_get(done_a.id) is None
+        assert s.run_schedule_execution_get(running_a.id) is not None  # in-flight kept
+        assert s.run_schedule_execution_get(done_b.id) is not None  # other user kept
 
 
 class TestOpenclawAgentCRUD:

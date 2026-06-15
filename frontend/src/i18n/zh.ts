@@ -418,6 +418,11 @@ const zh = {
     activeHint: "",
     historyTitle: "历史运行",
     historyHint: "",
+    clearHistory: "清空记录",
+    clearHistoryConfirm:
+      "确定要清空全部历史运行记录吗？进行中的运行会保留，已结束的运行及其事件将从数据库中永久删除，无法恢复。",
+    clearHistoryEmpty: "暂无可清空的历史运行记录。",
+    clearHistoryDone: "已清空 {{count}} 条历史运行记录。",
     columnId: "Run ID",
     columnFlow: "Flow",
     columnInputs: "执行参数",
@@ -513,6 +518,11 @@ const zh = {
     execution: {
       title: "执行记录",
       empty: "暂无执行记录。",
+      clear: "清空记录",
+      clearConfirm:
+        "确定要清空全部执行记录吗？已结束的执行记录将从数据库中永久删除，无法恢复（进行中的记录会保留）。",
+      clearEmpty: "暂无可清空的执行记录。",
+      clearDone: "已清空 {{count}} 条执行记录。",
       viewDetail: "详情",
       detailTitle: "执行记录详情",
       detailSummary: "结果：{{status}} · 开始：{{startedAt}} · 结束：{{finishedAt}}",

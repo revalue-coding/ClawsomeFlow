@@ -13,9 +13,11 @@ import { Card, EmptyState, ErrorBox, Loading, Modal } from "@/components/ui";
 import { FlowIcon } from "@/components/icons";
 import { getRunInputFields } from "@/lib/flowRuntime";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
+import { useDialog } from "@/components/dialog";
 
 const RUN_MODES = ["parallel", "serial"] as const;
 const EXECUTE_MODES = ["once", "recurring"] as const;
+const EXECUTION_PAGE_SIZE = 10;
 
 interface EditableItem {
   flowId: string;
@@ -78,10 +80,13 @@ function stripToStringMap(inputs: Record<string, string>): Record<string, string
 
 export function ScheduledFlows() {
   const { t } = useTranslation();
+  const { confirm, alert } = useDialog();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<RunScheduleSummary[]>([]);
   const [executions, setExecutions] = useState<RunScheduleExecutionSummary[]>([]);
+  const [executionPage, setExecutionPage] = useState(1);
+  const [clearingExecutions, setClearingExecutions] = useState(false);
   const [flows, setFlows] = useState<FlowSummary[]>([]);
   const [flowFields, setFlowFields] = useState<Record<string, string[]>>({});
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -164,6 +169,39 @@ export function ScheduledFlows() {
     for (const flow of flows) out[flow.id] = flow.name;
     return out;
   }, [flows]);
+
+  const executionTotalPages = Math.max(
+    1,
+    Math.ceil(executions.length / EXECUTION_PAGE_SIZE),
+  );
+  const executionStart = (executionPage - 1) * EXECUTION_PAGE_SIZE;
+  const executionPageItems = executions.slice(
+    executionStart,
+    executionStart + EXECUTION_PAGE_SIZE,
+  );
+
+  useEffect(() => {
+    setExecutionPage((prev) => Math.min(Math.max(prev, 1), executionTotalPages));
+  }, [executionTotalPages]);
+
+  async function handleClearExecutions() {
+    const ok = await confirm(t("scheduledFlows.execution.clearConfirm"), {
+      danger: true,
+      okText: t("scheduledFlows.execution.clear"),
+    });
+    if (!ok) return;
+    setClearingExecutions(true);
+    try {
+      const res = await api.clearRunScheduleExecutions();
+      setExecutionPage(1);
+      await loadPageData({ silent: true });
+      void alert(t("scheduledFlows.execution.clearDone", { count: res.deleted }));
+    } catch (e) {
+      setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setClearingExecutions(false);
+    }
+  }
 
   async function loadPageData(opts?: { silent?: boolean }) {
     const silent = opts?.silent ?? false;
@@ -556,8 +594,20 @@ export function ScheduledFlows() {
 
       {!loading && (
         <Card className="space-y-2">
-          <div className="text-base font-semibold text-ink-900">
-            {t("scheduledFlows.execution.title")}
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-base font-semibold text-ink-900">
+              {t("scheduledFlows.execution.title")}
+            </div>
+            {executions.length > 0 && (
+              <button
+                type="button"
+                className="btn-outline shrink-0"
+                onClick={() => void handleClearExecutions()}
+                disabled={clearingExecutions}
+              >
+                {t("scheduledFlows.execution.clear")}
+              </button>
+            )}
           </div>
           {executions.length === 0 ? (
             <div className="text-xs text-ink-500">{t("scheduledFlows.execution.empty")}</div>
@@ -582,7 +632,7 @@ export function ScheduledFlows() {
                   </tr>
                 </thead>
                 <tbody>
-                  {executions.map((execution) => (
+                  {executionPageItems.map((execution) => (
                     <tr key={execution.id} className="table-row">
                       <td className="px-4 py-3 text-ink-900">
                         {execution.scheduleName || execution.scheduleId}
@@ -611,6 +661,34 @@ export function ScheduledFlows() {
                   ))}
                 </tbody>
               </table>
+              {executions.length > EXECUTION_PAGE_SIZE && (
+                <div className="flex items-center justify-end gap-2 border-t border-ink-100 px-4 py-3 text-xs text-ink-600">
+                  <button
+                    type="button"
+                    className="btn-outline"
+                    onClick={() => setExecutionPage((p) => Math.max(1, p - 1))}
+                    disabled={executionPage <= 1}
+                  >
+                    {t("common.prevPage")}
+                  </button>
+                  <span className="tabular-nums">
+                    {t("common.pageInfo", {
+                      page: executionPage,
+                      total: executionTotalPages,
+                    })}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-outline"
+                    onClick={() =>
+                      setExecutionPage((p) => Math.min(executionTotalPages, p + 1))
+                    }
+                    disabled={executionPage >= executionTotalPages}
+                  >
+                    {t("common.nextPage")}
+                  </button>
+                </div>
+              )}
             </Card>
           )}
         </Card>

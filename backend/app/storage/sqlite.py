@@ -397,6 +397,26 @@ class SqliteStorage:
             )
             return rows, total
 
+    def run_schedule_execution_clear(self, *, user: str | None = None) -> int:
+        """Delete finished schedule-execution records (history). In-flight
+        (``status == "running"``) records are preserved. Scoped to ``user`` when
+        given. Returns the number of records deleted."""
+        with self._session() as s:
+            stmt = select(FlowRunScheduleExecution).where(
+                FlowRunScheduleExecution.status != "running"
+            )
+            if user:
+                stmt = stmt.where(FlowRunScheduleExecution.user == user)
+            ids = [row.id for row in s.exec(stmt).all()]
+            if ids:
+                s.exec(
+                    delete(FlowRunScheduleExecution).where(
+                        FlowRunScheduleExecution.id.in_(ids)
+                    )
+                )
+                s.commit()
+            return len(ids)
+
     def run_schedule_execution_update(
         self, execution: FlowRunScheduleExecution,
     ) -> FlowRunScheduleExecution:
@@ -514,6 +534,33 @@ class SqliteStorage:
                 "openclaw_requests_deleted": len(req_ids),
                 "task_decompose_requests_deleted": len(td_ids),
             }
+
+    def run_clear_history(self, *, user: str | None = None) -> dict[str, int]:
+        """Delete terminal (finished) ``FlowRun`` rows + their ``RunEvent`` rows.
+
+        Active (non-terminal) runs are always preserved so an in-progress Flow is
+        never destroyed. Scoped to ``user`` when given. Returns counts of deleted
+        runs/events."""
+        with self._session() as s:
+            run_stmt = select(FlowRun).where(
+                FlowRun.status.in_([st.value for st in _TERMINAL_STATUSES])
+            )
+            if user:
+                run_stmt = run_stmt.where(FlowRun.user == user)
+            run_ids = [r.id for r in s.exec(run_stmt).all()]
+            events_deleted = 0
+            if run_ids:
+                events_deleted = int(
+                    s.exec(
+                        select(func.count())
+                        .select_from(RunEvent)
+                        .where(RunEvent.run_id.in_(run_ids))
+                    ).one()
+                )
+                s.exec(delete(RunEvent).where(RunEvent.run_id.in_(run_ids)))
+                s.exec(delete(FlowRun).where(FlowRun.id.in_(run_ids)))
+                s.commit()
+            return {"runs_deleted": len(run_ids), "events_deleted": events_deleted}
 
     # ---- OpenclawAgents ----
 

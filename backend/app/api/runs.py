@@ -173,6 +173,11 @@ class RunListResponse(_CamelModel):
     total: int
 
 
+class ClearRunHistoryResponse(_CamelModel):
+    runs_deleted: int
+    events_deleted: int
+
+
 class RunCreatePayload(_CamelModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     runtime_prompt: str | None = None
@@ -262,6 +267,10 @@ class RunScheduleExecutionDetail(RunScheduleExecutionSummary):
 class RunScheduleExecutionListResponse(_CamelModel):
     items: list[RunScheduleExecutionSummary]
     total: int
+
+
+class ClearScheduleExecutionsResponse(_CamelModel):
+    deleted: int
 
 
 class EventView(_CamelModel):
@@ -721,6 +730,19 @@ def list_runs(
     return RunListResponse(items=[_to_summary(r) for r in items], total=total)
 
 
+@router.delete("/runs/history", response_model=ClearRunHistoryResponse)
+def clear_run_history(
+    user: UserDep,
+    storage: StorageDep,
+) -> ClearRunHistoryResponse:
+    """Delete the caller's finished Runs (+ their events). Active Runs are kept."""
+    result = storage.run_clear_history(user=user)
+    return ClearRunHistoryResponse(
+        runs_deleted=int(result.get("runs_deleted", 0)),
+        events_deleted=int(result.get("events_deleted", 0)),
+    )
+
+
 @router.get("/run-schedules", response_model=RunScheduleListResponse)
 def list_run_schedules(
     user: UserDep,
@@ -869,6 +891,19 @@ def list_run_schedule_executions(
         items=[_to_schedule_execution_summary(row) for row in rows],
         total=total,
     )
+
+
+@router.delete(
+    "/run-schedule-executions",
+    response_model=ClearScheduleExecutionsResponse,
+)
+def clear_run_schedule_executions(
+    user: UserDep,
+    storage: StorageDep,
+) -> ClearScheduleExecutionsResponse:
+    """Delete the caller's finished schedule-execution records."""
+    deleted = run_schedule_svc.clear_schedule_executions(user=user, storage=storage)
+    return ClearScheduleExecutionsResponse(deleted=deleted)
 
 
 @router.get(

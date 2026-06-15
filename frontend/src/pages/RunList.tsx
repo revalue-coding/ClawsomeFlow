@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { ApiError, RunSummary, api } from "@/lib/api";
 import { Card, EmptyState, ErrorBox, Loading, StatusPill } from "@/components/ui";
 import { RunIcon } from "@/components/icons";
+import { useDialog } from "@/components/dialog";
 
 const STATUS_OPTIONS = [
   "pending",
@@ -66,7 +67,9 @@ export function RunList() {
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [historyPage, setHistoryPage] = useState(1);
+  const [clearing, setClearing] = useState(false);
   const { t, i18n } = useTranslation();
+  const { confirm, alert } = useDialog();
 
   async function load() {
     setError(null);
@@ -93,6 +96,25 @@ export function RunList() {
     }, 5000);
     return () => clearInterval(tid);
   }, [statusFilter]);
+
+  async function handleClearHistory() {
+    const ok = await confirm(t("runList.clearHistoryConfirm"), {
+      danger: true,
+      okText: t("runList.clearHistory"),
+    });
+    if (!ok) return;
+    setClearing(true);
+    try {
+      const res = await api.clearRunHistory();
+      setHistoryPage(1);
+      await load();
+      void alert(t("runList.clearHistoryDone", { count: res.runsDeleted }));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setClearing(false);
+    }
+  }
 
   const sortedRuns = useMemo(
     () =>
@@ -213,11 +235,21 @@ export function RunList() {
 
           {historyRuns.length > 0 && (
             <Card className="p-0 overflow-hidden">
-              <div className="px-4 py-3 border-b border-ink-100">
-                <h2 className="text-base font-semibold text-ink-900">{t("runList.historyTitle")}</h2>
-                {t("runList.historyHint") ? (
-                  <div className="text-xs text-ink-500">{t("runList.historyHint")}</div>
-                ) : null}
+              <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-ink-100">
+                <div>
+                  <h2 className="text-base font-semibold text-ink-900">{t("runList.historyTitle")}</h2>
+                  {t("runList.historyHint") ? (
+                    <div className="text-xs text-ink-500">{t("runList.historyHint")}</div>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  className="btn-outline shrink-0"
+                  onClick={() => void handleClearHistory()}
+                  disabled={clearing}
+                >
+                  {t("runList.clearHistory")}
+                </button>
               </div>
               <table className="w-full text-sm">
                 <thead className="bg-ink-50 text-ink-500">
