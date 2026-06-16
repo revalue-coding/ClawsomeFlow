@@ -295,6 +295,31 @@ function flowTempAgentsForKind(
   return out;
 }
 
+/** Find an existing in-flow workspace binding for a non-OpenClaw owner id.
+ *  Used when selecting a persistent owner already referenced by another task:
+ *  we prefill repo/branch from the existing binding. */
+function findFlowOwnerWorkspace(
+  rows: TaskRow[],
+  owner: Pick<TaskRow, "ownerKind" | "ownerId">,
+  excludeRowKey?: string,
+): { repo: string; targetBranch: string } | null {
+  if (!isNonOpenclawKind(owner.ownerKind)) return null;
+  const ownerId = owner.ownerId.trim();
+  if (!ownerId) return null;
+  for (const r of rows) {
+    if (excludeRowKey && r.rowKey === excludeRowKey) continue;
+    if (r.ownerKind !== owner.ownerKind) continue;
+    if (r.ownerId.trim() !== ownerId) continue;
+    const repo = r.ownerRepo.trim();
+    if (!repo) continue;
+    return {
+      repo: r.ownerRepo,
+      targetBranch: r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
+    };
+  }
+  return null;
+}
+
 function ownerKey(
   row: Pick<TaskRow, "ownerKind" | "ownerId" | "ownerRepo" | "ownerTargetBranch">,
 ) {
@@ -1090,41 +1115,41 @@ export function FlowEditor() {
    *  the summary task so the summary stays pinned at the end. */
   function commitNewTask(row: TaskRow) {
     setTasks((rows) => {
-    const ownerId = row.ownerId.trim();
-    const ownerTargetBranch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
-    const rowForInsert = isNonOpenclawKind(row.ownerKind)
-      ? { ...row, ownerTargetBranch }
-      : row;
-    const shouldPropagateOwnerWorkspace =
-      isNonOpenclawKind(row.ownerKind) &&
-      ownerId.length > 0 &&
-      rows.some(
-        (r) =>
-          r.ownerKind === row.ownerKind &&
-          r.ownerId.trim() === ownerId &&
-          (
-            !sameRepoPathForCompare(r.ownerRepo, row.ownerRepo) ||
-            (r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH) !== ownerTargetBranch
-          ),
-      );
-    const baseRows = shouldPropagateOwnerWorkspace
-      ? rows.map((r) =>
-          r.ownerKind === row.ownerKind && r.ownerId.trim() === ownerId
-            ? {
-                ...r,
-                ownerRepo: row.ownerRepo,
-                ownerTargetBranch,
-              }
-            : r,
-        )
-      : rows;
-    const summaryIdx = baseRows.findIndex((r) => r.isLeaderSummary);
-    if (summaryIdx === -1) return [...baseRows, rowForInsert];
-    return [
-      ...baseRows.slice(0, summaryIdx),
-      rowForInsert,
-      ...baseRows.slice(summaryIdx),
-    ];
+      const ownerId = row.ownerId.trim();
+      const ownerTargetBranch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+      const rowForInsert = isNonOpenclawKind(row.ownerKind)
+        ? { ...row, ownerTargetBranch }
+        : row;
+      const shouldPropagateOwnerWorkspace =
+        isNonOpenclawKind(row.ownerKind) &&
+        ownerId.length > 0 &&
+        rows.some(
+          (r) =>
+            r.ownerKind === row.ownerKind &&
+            r.ownerId.trim() === ownerId &&
+            (
+              !sameRepoPathForCompare(r.ownerRepo, row.ownerRepo) ||
+              (r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH) !== ownerTargetBranch
+            ),
+        );
+      const baseRows = shouldPropagateOwnerWorkspace
+        ? rows.map((r) =>
+            r.ownerKind === row.ownerKind && r.ownerId.trim() === ownerId
+              ? {
+                  ...r,
+                  ownerRepo: row.ownerRepo,
+                  ownerTargetBranch,
+                }
+              : r,
+          )
+        : rows;
+      const summaryIdx = baseRows.findIndex((r) => r.isLeaderSummary);
+      if (summaryIdx === -1) return [...baseRows, rowForInsert];
+      return [
+        ...baseRows.slice(0, summaryIdx),
+        rowForInsert,
+        ...baseRows.slice(summaryIdx),
+      ];
     });
   }
 
@@ -1135,33 +1160,43 @@ export function FlowEditor() {
       const prevId = prev?.id.trim() || "";
       const nextId = replacement.id.trim();
       const renamed = prevId.length > 0 && nextId.length > 0 && prevId !== nextId;
-      const changedExistingNonOpenclaw = Boolean(
-        prev &&
-        isNonOpenclawKind(prev.ownerKind) &&
-        prev.ownerId.trim() &&
-        prev.ownerId.trim() === replacement.ownerId.trim() &&
-        prev.ownerKind === replacement.ownerKind &&
-        (
-          !sameRepoPathForCompare(prev.ownerRepo, replacement.ownerRepo)
-          || (prev.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
-            !== (replacement.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
-        ),
-      );
+      const replacementOwnerId = replacement.ownerId.trim();
+      const replacementOwnerTargetBranch =
+        replacement.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+      const normalizedReplacement = isNonOpenclawKind(replacement.ownerKind)
+        ? {
+            ...replacement,
+            ownerTargetBranch: replacementOwnerTargetBranch,
+          }
+        : replacement;
+      const changedExistingNonOpenclaw =
+        isNonOpenclawKind(replacement.ownerKind) &&
+        replacementOwnerId.length > 0 &&
+        rows.some(
+          (r) =>
+            r.rowKey !== rowKey &&
+            r.ownerKind === replacement.ownerKind &&
+            r.ownerId.trim() === replacementOwnerId &&
+            (
+              !sameRepoPathForCompare(r.ownerRepo, replacement.ownerRepo) ||
+              (r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
+                !== replacementOwnerTargetBranch
+            ),
+        );
       return rows.map((r) => {
         let nextRow = r;
         if (r.rowKey === rowKey) {
-          return { ...replacement, rowKey };
+          return { ...normalizedReplacement, rowKey };
         }
         if (
           changedExistingNonOpenclaw
-          && r.ownerKind === replacement.ownerKind
-          && r.ownerId.trim() === replacement.ownerId.trim()
+          && r.ownerKind === normalizedReplacement.ownerKind
+          && r.ownerId.trim() === replacementOwnerId
         ) {
           nextRow = {
             ...nextRow,
-            ownerRepo: replacement.ownerRepo,
-            ownerTargetBranch:
-              replacement.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
+            ownerRepo: normalizedReplacement.ownerRepo,
+            ownerTargetBranch: replacementOwnerTargetBranch,
           };
         }
         if (!renamed) return nextRow;
@@ -2602,10 +2637,7 @@ function TaskEditModal({
           agentId: draft.ownerId.trim(),
         }),
       );
-      if (!ok) {
-        setSaveError(t("flowEditor.taskRepoCheck.modifyCancelled"));
-        return;
-      }
+      if (!ok) return;
     }
     setRepoChecking(true);
     try {
@@ -2956,7 +2988,23 @@ function TaskFormBody({
               className="select"
               value={row.ownerId}
               disabled={ownerLocked}
-              onChange={(e) => onChange({ ownerId: e.target.value })}
+              onChange={(e) => {
+                const ownerId = e.target.value;
+                const existing = findFlowOwnerWorkspace(
+                  tasks,
+                  { ownerKind: row.ownerKind, ownerId },
+                  row.rowKey,
+                );
+                onChange({
+                  ownerId,
+                  ...(existing
+                    ? {
+                        ownerRepo: existing.repo,
+                        ownerTargetBranch: existing.targetBranch,
+                      }
+                    : {}),
+                });
+              }}
             >
               <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
               {row.ownerId &&

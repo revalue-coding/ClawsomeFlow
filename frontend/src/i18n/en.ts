@@ -246,8 +246,6 @@ const en = {
       createFailed: "Failed to process repository path: {{message}}",
       confirmExistingAgentRepoBranchChange:
         "Agent \"{{agentId}}\" workspace is about to change. Within one Flow, all tasks under the same Agent must share one git repository and one target branch.\n\nIf you need to work on another repository or branch at the same time, create another Agent.\n\nContinue and apply this change to the other tasks owned by \"{{agentId}}\"?",
-      modifyCancelled:
-        "Canceled. Repo/branch update for this existing Agent was not applied.",
     },
     taskBranchCheck: {
       loading: "Loading repository branches…",
