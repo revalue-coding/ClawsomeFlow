@@ -182,6 +182,17 @@ def _validate_agent_id(agent_id: str) -> str:
     return aid
 
 
+def _existing_directory(path: str, *, field_name: str = "path") -> Path:
+    """Validate that *path* points to an existing directory."""
+    raw = (path or "").strip()
+    candidate = Path(raw).expanduser()
+    if not candidate.exists():
+        raise AgentIdInvalid(f"{field_name} path does not exist: {path}")
+    if not candidate.is_dir():
+        raise AgentIdInvalid(f"{field_name} path is not a directory: {path}")
+    return candidate.resolve(strict=False)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Runtime availability
 # ──────────────────────────────────────────────────────────────────────
@@ -309,8 +320,18 @@ class CommitInput:
     nl_prompt: str = ""
     team_id: str = ""
     skip_bootstrap: bool = False
-    # "default" → active/root profile; otherwise copy from the chosen profile id.
+    # "default" → active/root profile; "" → do not inherit; otherwise the
+    # profile id to copy initial model config from.
     model_inherit_from: str = "default"
+    # Optional clone of an existing profile at create time (mirrors Hermes'
+    # ``hermes profile create --clone[-all] [--clone-from SOURCE]``):
+    #   clone_from == ""        → no clone
+    #   clone_from == "default" → clone the active/root profile (`--clone`)
+    #   clone_from == "<id>"    → clone that profile (`--clone --clone-from <id>`)
+    # clone_all switches the light config clone (`--clone`) to a full state clone
+    # (`--clone-all`: memories, sessions, skills, state).
+    clone_from: str = ""
+    clone_all: bool = False
 
 
 # Inference config files a fresh profile needs to be usable. A brand-new
@@ -607,7 +628,19 @@ def _commit_agent_locked(
                 raise AgentCreateCancelled(f"creation of {aid!r} cancelled by user")
 
         description = (cmd.description or "").strip()
+        clone_from = (cmd.clone_from or "").strip()
+        model_inherit = (cmd.model_inherit_from or "").strip()
+
+        # Step 1 — create the profile, optionally cloning an existing one. The
+        # clone happens AT creation (Hermes copies config/.env[/full state] from
+        # the source), so a subsequent model inheritance can override on top.
         create_args = ["profile", "create", aid]
+        if clone_from:
+            create_args.append("--clone-all" if cmd.clone_all else "--clone")
+            if clone_from != "default":
+                # "default" clones the active profile (no --clone-from); any other
+                # value must be a valid profile id passed as the clone source.
+                create_args += ["--clone-from", _validate_agent_id(clone_from)]
         if description:
             create_args += ["--description", description]
         rc, out, err = _run_hermes(create_args)
@@ -619,9 +652,27 @@ def _commit_agent_locked(
 
         profile_root = str(hermes_profile_root(aid))
 
-        # Seed model + API keys so the new profile can actually run (bootstrap +
-        # later chat/task dispatch all go through `hermes -p <id>` and need them).
-        _seed_profile_inference_config(aid, source_profile=cmd.model_inherit_from)
+        # Step 2 — inference config. The new profile must be runnable (bootstrap +
+        # later chat/task dispatch all go through `hermes -p <id>`). Order:
+        #   * clone + model inherit → clone already populated config; run a model
+        #     inheritance ON TOP (override just the model + import its keys),
+        #     preserving the cloned skills/mcp/etc.
+        #   * model inherit only (fresh profile) → copy config.yaml + .env wholesale.
+        #   * neither → seed from the active/default profile so it still runs.
+        if model_inherit:
+            if clone_from:
+                try:
+                    import_model_from_profile(aid, source_profile=model_inherit)
+                except HermesAgentError as exc:
+                    logger.warning(
+                        "hermes_model_inherit_after_clone_failed",
+                        agent_id=aid,
+                        error=str(exc),
+                    )
+            else:
+                _seed_profile_inference_config(aid, source_profile=model_inherit)
+        elif not clone_from:
+            _seed_profile_inference_config(aid)
 
         _abort_if_cancelled()  # cancelled during profile create → roll back now
 
@@ -1435,7 +1486,7 @@ def create_cron(
     if name:
         args += ["--name", name]
     if workdir:
-        args += ["--workdir", workdir]
+        args += ["--workdir", str(_existing_directory(workdir, field_name="workdir"))]
     args += ["--profile", aid]
     rc, out, err = _hermes_profile(aid, args)
     if rc != 0:
@@ -1466,9 +1517,7 @@ def chat_once(agent_id: str, *, message: str, workdir: str, resume: bool = False
     can keep chatting; UI history remains the source of truth for the thread.
     """
     aid = _validate_agent_id(agent_id)
-    wd = Path(workdir).expanduser()
-    if not wd.is_dir():
-        raise HermesAgentError(f"working directory does not exist: {workdir}")
+    wd = _existing_directory(workdir, field_name="workdir")
 
     def _run(*, with_resume: bool) -> tuple[int, str, str]:
         args = ["--yolo", *(["-c"] if with_resume else []), "-z", message]

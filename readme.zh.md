@@ -70,11 +70,11 @@ ClawsomeFlow 把零散的 AI Agent 变成一套可控的工程系统——从第
 
 | 🔐 默认隔离与回滚 | 📊 可审计的可观测性 | 🔄 会自我进化的系统 |
 |---|---|---|
-| 每个 Agent 都在独立的工作区与分支中运行——并行而不串扰、不误写，内置 checkpoint / merge / cleanup。 | 每一次 dispatch / completion / failure 都记录为 RunEvent——每次运行都可追溯、可回放、可审阅，绝不是黑盒。 | 对结果不满意？发起一次「投诉」，系统会反思、返工，并把经验写回——让下一次比上一次更好。 |
+| 基于 Git worktree 的底层隔离机制，每个 Agent 在独立工作区与分支中并行开发，天然避免串扰与误写；支持智能合入与回滚，并可内置人工检查点，随时进行行为纠正。 | 每一次 dispatch / completion / failure 都记录为 RunEvent——每次运行都可追溯、可回放、可审阅，绝不是黑盒。 | 对结果不满意？发起一次「投诉」，系统会反思、返工，并把经验写回——让下一次比上一次更好。 |
 
 ClawsomeFlow继承了Clawteam如下特色：
 
-- **Git Worktree 工作区隔离**：每个 Agent 拥有独立分支与目录，并行互不干扰，支持 checkpoint / merge / cleanup。
+- **Git Worktree 并行隔离底座**：每个 Agent 拥有独立分支与目录，天然适合多 Agent 并行开发；支持智能合入与回滚，并可内置人工检查点，随时进行行为纠正。
 - **Agent 间消息**：点对点 inbox 与广播，团队成员实时共享进展。
 
 > ClawsomeFlow 在此之上，增加了 **AI与精确编排结合、Openclaw深度适配、失败收敛、人工护栏、Web 产品化** 等能力。

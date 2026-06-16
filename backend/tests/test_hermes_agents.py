@@ -87,6 +87,104 @@ def test_commit_agent_creates_profile_and_row(
     assert any(a[:3] == ["-p", "helper", "--yolo"] for a in boots)
 
 
+def test_commit_agent_light_clone_from_other_profile(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """clone_from=<id> without clone_all → light clone (`--clone --clone-from`);
+    no separate model seed because the clone already populated config."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    seeds: list[tuple] = []
+    monkeypatch.setattr(
+        svc, "_seed_profile_inference_config",
+        lambda *a, **k: seeds.append((a, k)),
+    )
+
+    svc.commit_agent(
+        svc.CommitInput(id="c1", name="C1", clone_from="src"), user="alice"
+    )
+    assert ["profile", "create", "c1", "--clone", "--clone-from", "src"] in calls
+    assert seeds == []  # cloned + no model inherit → no extra seed
+
+
+def test_commit_agent_full_clone(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    svc.commit_agent(
+        svc.CommitInput(id="c2", name="C2", clone_from="src", clone_all=True),
+        user="alice",
+    )
+    assert ["profile", "create", "c2", "--clone-all", "--clone-from", "src"] in calls
+
+
+def test_commit_agent_clone_from_default_uses_active_profile(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """clone_from='default' clones the active profile, so no --clone-from arg."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    svc.commit_agent(
+        svc.CommitInput(id="c3", name="C3", clone_from="default"), user="alice"
+    )
+    assert ["profile", "create", "c3", "--clone"] in calls
+    assert not any("--clone-from" in c for c in calls)
+
+
+def test_commit_agent_clone_then_model_inherit(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """clone_from + model_inherit_from → clone first, then a model inheritance ON
+    TOP via import_model_from_profile (not a wholesale seed)."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    imports: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        svc, "import_model_from_profile",
+        lambda aid, *, source_profile: imports.append((aid, source_profile)),
+    )
+    seeds: list[tuple] = []
+    monkeypatch.setattr(
+        svc, "_seed_profile_inference_config",
+        lambda *a, **k: seeds.append((a, k)),
+    )
+
+    svc.commit_agent(
+        svc.CommitInput(
+            id="c4", name="C4", clone_from="src", model_inherit_from="m1"
+        ),
+        user="alice",
+    )
+    assert ["profile", "create", "c4", "--clone", "--clone-from", "src"] in calls
+    assert imports == [("c4", "m1")]  # model inherit applied after clone
+    assert seeds == []  # cloned → no wholesale seed
+
+
+def test_commit_agent_model_inherit_only_seeds_config(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """model_inherit_from without clone → wholesale config seed (legacy path)."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    seeds: list[tuple] = []
+    monkeypatch.setattr(
+        svc, "_seed_profile_inference_config",
+        lambda *a, **k: seeds.append((a, k)),
+    )
+    svc.commit_agent(
+        svc.CommitInput(id="c5", name="C5", model_inherit_from="m1"), user="alice"
+    )
+    assert ["profile", "create", "c5"] in calls
+    assert not any("--clone" in c for c in calls)
+    assert seeds == [(("c5",), {"source_profile": "m1"})]
+
+
 def test_commit_agent_rejects_duplicate(
     hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -690,6 +788,44 @@ def test_api_create_passes_model_inherit_from(
     assert seen["model_inherit_from"] == "source1"
 
 
+def test_api_create_passes_clone_params(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_commit(cmd, *, user, storage=None, config=None):  # noqa: ANN001, ANN202
+        seen["clone_from"] = cmd.clone_from
+        seen["clone_all"] = cmd.clone_all
+        seen["model_inherit_from"] = cmd.model_inherit_from
+        return HermesAgent(
+            id=cmd.id,
+            name=cmd.name,
+            description=cmd.description,
+            team_id=cmd.team_id or "",
+            profile_root=str(hermes_home / "profiles" / cmd.id),
+            created_by_user=user,
+            nl_prompt=cmd.nl_prompt or "",
+        )
+
+    monkeypatch.setattr(svc, "commit_agent", _fake_commit)
+    monkeypatch.setattr(svc, "list_agents", lambda **_kw: [])
+    r = client.post(
+        "/api/hermes/agents",
+        json={
+            "id": "myprofile",
+            "name": "Backend Helper",
+            "cloneFrom": "src",
+            "cloneAll": True,
+            "modelInheritFrom": "",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert seen["clone_from"] == "src"
+    assert seen["clone_all"] is True
+    # "" passes through verbatim → "do not inherit"
+    assert seen["model_inherit_from"] == ""
+
+
 def test_api_import_model_from_profile(client: TestClient, hermes_home: Path) -> None:
     owner = svc.load_config().default_user
     src = hermes_home / "profiles" / "source3"
@@ -753,6 +889,51 @@ def test_chat_once_resume_failure_falls_back_to_fresh(
     assert calls[1] == ["-p", "chatty", "--yolo", "-z", "more"]
 
 
+def test_create_cron_rejects_missing_workdir(
+    hermes_home: Path, tmp_path: Path
+) -> None:
+    missing = tmp_path / "missing-workdir"
+    with pytest.raises(svc.AgentIdInvalid, match="workdir path does not exist"):
+        svc.create_cron(
+            "cron1",
+            schedule="30m",
+            prompt="do",
+            workdir=str(missing),
+        )
+
+
+def test_create_cron_passes_resolved_workdir(
+    hermes_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    wd = tmp_path / "cron-wd"
+    wd.mkdir()
+
+    svc.create_cron(
+        "cron1",
+        schedule="30m",
+        prompt="do",
+        name="n1",
+        workdir=str(wd),
+    )
+
+    assert calls == [[
+        "-p",
+        "cron1",
+        "cron",
+        "create",
+        "30m",
+        "do",
+        "--name",
+        "n1",
+        "--workdir",
+        str(wd.resolve()),
+        "--profile",
+        "cron1",
+    ]]
+
+
 def test_api_create_and_list(
     client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -779,6 +960,25 @@ def test_api_chat_requires_workdir(
     )
     r = client.post("/api/hermes/agents/chatty/chat", json={"message": "hi", "workdir": ""})
     assert r.status_code == 400
+
+
+def test_api_create_cron_rejects_missing_workdir(
+    client: TestClient, hermes_home: Path, tmp_path: Path
+) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="cron1", name="Cron", profile_root="x", created_by_user=owner)
+    )
+    r = client.post(
+        "/api/hermes/agents/cron1/settings/cron",
+        json={
+            "schedule": "30m",
+            "prompt": "do it",
+            "workdir": str(tmp_path / "missing-dir"),
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"] == "INVALID_PAYLOAD"
 
 
 def test_mcp_server_upsert_list_delete(hermes_home: Path) -> None:

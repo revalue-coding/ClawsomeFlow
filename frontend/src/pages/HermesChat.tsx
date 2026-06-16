@@ -77,6 +77,7 @@ function createFieldError(opts: {
   name: string;
   profileId: string;
   modelInheritFrom: string;
+  cloneFrom: string;
   teamChoice: string;
   newTeamName: string;
   existingIds: string[];
@@ -91,7 +92,20 @@ function createFieldError(opts: {
   if (opts.teamChoice === CREATE_TEAM_SENTINEL && !opts.newTeamName.trim()) {
     return "hermes.create.errors.teamRequired";
   }
-  if (opts.modelInheritFrom !== "default" && !opts.existingIds.includes(opts.modelInheritFrom)) {
+  // Clone source is optional ("" = no clone); "default" = active profile.
+  if (
+    opts.cloneFrom &&
+    opts.cloneFrom !== "default" &&
+    !opts.existingIds.includes(opts.cloneFrom)
+  ) {
+    return "hermes.create.errors.cloneFromMissing";
+  }
+  // Model inheritance is optional ("" = none); "default" = active profile.
+  if (
+    opts.modelInheritFrom &&
+    opts.modelInheritFrom !== "default" &&
+    !opts.existingIds.includes(opts.modelInheritFrom)
+  ) {
     return "hermes.create.errors.modelInheritMissing";
   }
   if (opts.existingIds.includes(id)) return "hermes.create.errors.idDuplicate";
@@ -230,7 +244,16 @@ function Picker() {
   );
   const [createModelInheritFrom, setCreateModelInheritFrom] = useSessionBackedState(
     "hermes:create:modelInheritFrom",
-    "default",
+    "",
+  );
+  // Optional "clone config from another agent" (default: none). When set, the
+  // full-clone checkbox is enabled; cleared back to none disables/unchecks it.
+  const [createCloneFrom, setCreateCloneFrom] = useSessionBackedState(
+    "hermes:create:cloneFrom",
+    "",
+  );
+  const [createCloneAll, setCreateCloneAll] = useSessionBackedState(
+    "hermes:create:cloneAll", false, { isClosed: (v) => v === false },
   );
   const [createTeamChoice, setCreateTeamChoice] = useSessionBackedState("hermes:create:teamChoice", "");
   const [createNewTeamName, setCreateNewTeamName] = useSessionBackedState("hermes:create:newTeamName", "");
@@ -305,7 +328,9 @@ function Picker() {
     setCreateName("");
     setCreateProfileId("");
     setCreateResponsibility("");
-    setCreateModelInheritFrom("default");
+    setCreateModelInheritFrom("");
+    setCreateCloneFrom("");
+    setCreateCloneAll(false);
     setCreateTeamChoice("");
     setCreateNewTeamName("");
   }, [
@@ -313,6 +338,8 @@ function Picker() {
     setCreateProfileId,
     setCreateResponsibility,
     setCreateModelInheritFrom,
+    setCreateCloneFrom,
+    setCreateCloneAll,
     setCreateTeamChoice,
     setCreateNewTeamName,
   ]);
@@ -385,6 +412,7 @@ function Picker() {
       name,
       profileId,
       modelInheritFrom: createModelInheritFrom,
+      cloneFrom: createCloneFrom,
       teamChoice: createTeamChoice,
       newTeamName: createNewTeamName,
       existingIds: agents.map((a) => a.id),
@@ -419,6 +447,9 @@ function Picker() {
             responsibility,
             teamId,
             modelInheritFrom: createModelInheritFrom,
+            cloneFrom: createCloneFrom,
+            // Full-clone only applies when a clone source is chosen.
+            cloneAll: createCloneFrom ? createCloneAll : false,
           },
           { signal: ac.signal },
         );
@@ -458,6 +489,7 @@ function Picker() {
     }
   }, [
     createProfileId, createName, createResponsibility, createModelInheritFrom,
+    createCloneFrom, createCloneAll,
     createTeamChoice, createNewTeamName,
     agents, setShowCreate, setCreateCancelState, openWorkPopup, finishWorkPopup,
     resetCreateForm, resetWorkPopupDisplayState, resetCreateCancelState, setWorkPopupOpen,
@@ -648,6 +680,10 @@ function Picker() {
           onResponsibilityChange={setCreateResponsibility}
           modelInheritFrom={createModelInheritFrom}
           onModelInheritFromChange={setCreateModelInheritFrom}
+          cloneFrom={createCloneFrom}
+          onCloneFromChange={setCreateCloneFrom}
+          cloneAll={createCloneAll}
+          onCloneAllChange={setCreateCloneAll}
           existingProfiles={agents}
           teamChoice={createTeamChoice}
           onTeamChoiceChange={setCreateTeamChoice}
@@ -800,6 +836,10 @@ function CreateModal({
   onResponsibilityChange,
   modelInheritFrom,
   onModelInheritFromChange,
+  cloneFrom,
+  onCloneFromChange,
+  cloneAll,
+  onCloneAllChange,
   existingProfiles,
   teamChoice,
   onTeamChoiceChange,
@@ -818,6 +858,10 @@ function CreateModal({
   onResponsibilityChange: (v: string) => void;
   modelInheritFrom: string;
   onModelInheritFromChange: (v: string) => void;
+  cloneFrom: string;
+  onCloneFromChange: (v: string) => void;
+  cloneAll: boolean;
+  onCloneAllChange: (v: boolean) => void;
   existingProfiles: HermesAgentSummary[];
   teamChoice: string;
   onTeamChoiceChange: (v: string) => void;
@@ -863,12 +907,48 @@ function CreateModal({
           />
         </div>
         <div>
+          <label className="label">{t("hermes.create.cloneFromLabel")}</label>
+          <select
+            className="select"
+            value={cloneFrom}
+            onChange={(e) => {
+              const v = e.target.value;
+              onCloneFromChange(v);
+              // Full clone only makes sense with a source — reset it otherwise.
+              if (!v) onCloneAllChange(false);
+            }}
+          >
+            <option value="">{t("hermes.create.cloneFromNone")}</option>
+            <option value="default">{t("hermes.create.cloneFromDefault")}</option>
+            {existingProfiles.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {`${agent.name || agent.id} (${agent.id})`}
+              </option>
+            ))}
+          </select>
+          <div className="mt-1 text-xs text-ink-400">{t("hermes.create.cloneFromHint")}</div>
+          <label
+            className={`mt-2 flex items-center gap-2 text-sm ${
+              cloneFrom ? "text-ink-700" : "text-ink-300"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={cloneFrom ? cloneAll : false}
+              disabled={!cloneFrom}
+              onChange={(e) => onCloneAllChange(e.target.checked)}
+            />
+            {t("hermes.create.cloneAllLabel")}
+          </label>
+        </div>
+        <div>
           <label className="label">{t("hermes.create.modelInheritLabel")}</label>
           <select
             className="select"
             value={modelInheritFrom}
             onChange={(e) => onModelInheritFromChange(e.target.value)}
           >
+            <option value="">{t("hermes.create.modelInheritNone")}</option>
             <option value="default">{t("hermes.create.modelInheritDefault")}</option>
             {existingProfiles.map((agent) => (
               <option key={agent.id} value={agent.id}>
@@ -2017,6 +2097,8 @@ function CronTab({ agentId }: { agentId: string }) {
   const [schedule, setSchedule] = useState("");
   const [prompt, setPrompt] = useState("");
   const [jobName, setJobName] = useState("");
+  const [workdir, setWorkdir] = useState("");
+  const [pickingWorkdir, setPickingWorkdir] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -2035,6 +2117,25 @@ function CronTab({ agentId }: { agentId: string }) {
     void reload();
   }, [reload]);
 
+  const pickCronWorkdir = async () => {
+    if (isRemoteBrowser()) {
+      void alert(t("hermes.remoteUnavailable"));
+      return;
+    }
+    setPickingWorkdir(true);
+    try {
+      const out = await api.pickDirectory({
+        title: t("hermes.settingsModal.cron.workdir"),
+        initialPath: workdir || undefined,
+      });
+      if (out.path) setWorkdir(out.path);
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setPickingWorkdir(false);
+    }
+  };
+
   const add = async () => {
     if (!schedule.trim()) return;
     setError("");
@@ -2043,10 +2144,12 @@ function CronTab({ agentId }: { agentId: string }) {
         schedule: schedule.trim(),
         prompt: prompt.trim(),
         name: jobName.trim(),
+        workdir: workdir.trim(),
       });
       setSchedule("");
       setPrompt("");
       setJobName("");
+      setWorkdir("");
       await reload();
     } catch (e) {
       setError(errText(e));
@@ -2123,6 +2226,24 @@ function CronTab({ agentId }: { agentId: string }) {
           placeholder={t("hermes.settingsModal.cron.prompt")}
           onChange={(e) => setPrompt(e.target.value)}
         />
+        <div className="flex gap-2">
+          <input
+            className="input flex-1"
+            value={workdir}
+            placeholder={t("hermes.settingsModal.cron.workdir")}
+            onChange={(e) => setWorkdir(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn-outline whitespace-nowrap"
+            onClick={() => void pickCronWorkdir()}
+            disabled={pickingWorkdir}
+          >
+            {pickingWorkdir
+              ? t("hermes.settingsModal.cron.pickingWorkdir")
+              : t("hermes.settingsModal.cron.pickWorkdir")}
+          </button>
+        </div>
         <button
           type="button"
           className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"

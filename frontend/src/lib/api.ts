@@ -1085,6 +1085,8 @@ export const api = {
       responsibility?: string;
       teamId?: string;
       modelInheritFrom?: string;
+      cloneFrom?: string;
+      cloneAll?: boolean;
     },
     init?: RequestInit,
   ) => request<HermesAgentDetail>("POST", "/api/hermes/agents", payload, init),

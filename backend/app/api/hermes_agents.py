@@ -139,6 +139,11 @@ class CreatePayload(_CamelModel):
     team_id: str = ""
     # "default" (root/active profile) or an existing profile id.
     model_inherit_from: str = "default"
+    # Optional "clone config from another agent": "" = no clone, "default" =
+    # active/root profile, otherwise an existing profile id. ``clone_all`` does a
+    # full clone (memories/sessions/skills/state) vs. a light config-only clone.
+    clone_from: str = ""
+    clone_all: bool = False
 
 
 class UpdatePayload(_CamelModel):
@@ -379,7 +384,11 @@ async def create_agent(
         description=payload.responsibility,
         nl_prompt=payload.responsibility,
         team_id=payload.team_id,
-        model_inherit_from=payload.model_inherit_from or "default",
+        # Pass through verbatim ("" means "do not inherit"); the default value of
+        # ``model_inherit_from`` is "default", so omitting it keeps legacy behaviour.
+        model_inherit_from=payload.model_inherit_from,
+        clone_from=payload.clone_from,
+        clone_all=payload.clone_all,
     )
     op_id = f"hermes_create:{agent_id}"
     reg = get_op_registry()
