@@ -417,6 +417,62 @@ class SqliteStorage:
                 s.commit()
             return len(ids)
 
+    def run_schedule_execution_reap_orphans(self) -> int:
+        """Reconcile orphaned in-flight schedule executions to a terminal state.
+
+        Every schedule execution runs as an in-process asyncio task, so any row
+        still ``status == "running"`` at worker start belongs to a previous
+        process that has since died — it can never reach a terminal status on
+        its own and would otherwise (a) display forever and (b) be skipped by
+        :meth:`run_schedule_execution_clear` (which preserves genuinely-running
+        rows). Mark them ``failed`` with ``finished_at`` set so they become
+        clearable. Returns the number of rows reaped."""
+        reaped = 0
+        with self._session() as s:
+            rows = list(
+                s.exec(
+                    select(FlowRunScheduleExecution).where(
+                        FlowRunScheduleExecution.status == "running"
+                    )
+                ).all()
+            )
+            if not rows:
+                return 0
+            now = datetime.now(timezone.utc)
+            for row in rows:
+                results = list(row.item_results or [])
+                next_index = max(
+                    (int(r.get("index", -1)) for r in results), default=-1
+                ) + 1
+                results.append(
+                    {
+                        "index": next_index,
+                        "flow_id": "",
+                        "flow_name": "",
+                        "status": "failed",
+                        "reason": "service restarted before execution finished",
+                        "reason_code": "worker_interrupted",
+                        "run_id": "",
+                    }
+                )
+                row.item_results = results
+                row.status = "failed"
+                row.failed_items = sum(
+                    1 for r in results if r.get("status") == "failed"
+                )
+                row.succeeded_items = sum(
+                    1 for r in results if r.get("status") == "succeeded"
+                )
+                row.skipped_items = sum(
+                    1 for r in results if r.get("status") == "skipped"
+                )
+                row.total_items = len(results)
+                row.finished_at = now
+                s.add(row)
+                reaped += 1
+            s.commit()
+        return reaped
+
     def run_schedule_execution_update(
         self, execution: FlowRunScheduleExecution,
     ) -> FlowRunScheduleExecution:

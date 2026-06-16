@@ -2315,6 +2315,24 @@ function TaskEditModal({
     setDraft((d) => ({ ...d, ...p }));
   }
 
+  function hasOtherTaskWithSameAgentDifferentRepoOrBranch(row: TaskRow): boolean {
+    if (!isNonOpenclawKind(row.ownerKind)) return false;
+    const ownerId = row.ownerId.trim();
+    if (!ownerId) return false;
+    const repo = row.ownerRepo.trim();
+    const targetBranch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+    return tasks.some(
+      (task) =>
+        task.rowKey !== initialRow.rowKey &&
+        task.ownerKind === row.ownerKind &&
+        task.ownerId.trim() === ownerId &&
+        (
+          task.ownerRepo.trim() !== repo ||
+          (task.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH) !== targetBranch
+        ),
+    );
+  }
+
   useEffect(() => {
     if (isOpenclawKind(draft.ownerKind)) {
       setBranchOptions([]);
@@ -2519,15 +2537,7 @@ function TaskEditModal({
         }
       }
     }
-    if (
-      ownerMode === "existing"
-      && isNonOpenclawKind(draft.ownerKind)
-      && (
-        draft.ownerRepo.trim() !== initialRow.ownerRepo.trim()
-        || (draft.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
-          !== (initialRow.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
-      )
-    ) {
+    if (ownerMode === "existing" && hasOtherTaskWithSameAgentDifferentRepoOrBranch(draft)) {
       const ok = await confirm(
         t("flowEditor.taskRepoCheck.confirmExistingAgentRepoBranchChange"),
       );
@@ -3084,6 +3094,7 @@ function MultiSelect({
         ? selected.filter((x) => x !== v)
         : [...selected, v],
     );
+    setOpen(false);
   }
 
   return (

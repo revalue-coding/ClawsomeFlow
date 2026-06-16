@@ -634,6 +634,17 @@ class RunScheduleWorker:
     def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
+        # Reconcile orphaned in-flight executions left behind by a previous
+        # process: they can never finish on their own and would otherwise show
+        # forever and dodge the history-clear (which preserves running rows).
+        try:
+            reaped = get_storage().run_schedule_execution_reap_orphans()
+            if reaped:
+                logger.info("run_schedule_execution_orphans_reaped", count=reaped)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "run_schedule_execution_reap_failed", error=str(exc)
+            )
         self._stop_evt = asyncio.Event()
         self._task = asyncio.create_task(
             self._run_loop(),

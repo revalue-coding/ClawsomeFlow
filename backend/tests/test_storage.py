@@ -297,6 +297,47 @@ class TestClearHistory:
         assert s.run_schedule_execution_get(running_a.id) is not None  # in-flight kept
         assert s.run_schedule_execution_get(done_b.id) is not None  # other user kept
 
+    def test_run_schedule_execution_reap_orphans_then_clearable(self) -> None:
+        s = get_storage()
+        now = datetime.now(timezone.utc)
+        orphan = s.run_schedule_execution_create(FlowRunScheduleExecution(
+            schedule_id="sched-1", schedule_name="testing", user="alice",
+            status="running", started_at=now,
+        ))
+        done = s.run_schedule_execution_create(FlowRunScheduleExecution(
+            schedule_id="sched-1", user="alice", status="succeeded",
+            started_at=now, finished_at=now,
+        ))
+
+        reaped = s.run_schedule_execution_reap_orphans()
+        assert reaped == 1
+
+        reaped_row = s.run_schedule_execution_get(orphan.id)
+        assert reaped_row is not None
+        assert reaped_row.status == "failed"
+        assert reaped_row.finished_at is not None
+        assert reaped_row.failed_items >= 1
+        assert any(
+            r.get("reason_code") == "worker_interrupted"
+            for r in (reaped_row.item_results or [])
+        )
+        # Already-terminal rows are untouched by the reap.
+        assert s.run_schedule_execution_get(done.id) is not None
+
+        # The previously-stuck orphan is now clearable like any history row.
+        deleted = s.run_schedule_execution_clear(user="alice")
+        assert deleted == 2
+        assert s.run_schedule_execution_get(orphan.id) is None
+
+    def test_run_schedule_execution_reap_orphans_noop_when_none(self) -> None:
+        s = get_storage()
+        now = datetime.now(timezone.utc)
+        s.run_schedule_execution_create(FlowRunScheduleExecution(
+            schedule_id="sched-1", user="alice", status="succeeded",
+            started_at=now, finished_at=now,
+        ))
+        assert s.run_schedule_execution_reap_orphans() == 0
+
 
 class TestOpenclawAgentCRUD:
     def test_full_cycle(self) -> None:
