@@ -224,9 +224,40 @@ function pickAgentsForKind(
 /** Field separator used to encode a temp-agent selection into one <option>
  *  value. NUL never appears in an agent id / repo path / branch name. */
 const TEMP_AGENT_VALUE_SEP = "\u001f";
+const HOME_PATH_SENTINEL = "__CSFLOW_HOME__";
+
+/** Normalize repo paths for identity comparisons only (not for display).
+ *  Treat ``~/foo`` and common home-absolute forms like ``/Users/x/foo`` /
+ *  ``/home/x/foo`` as equivalent, and ignore trailing slashes. */
+function normalizeRepoPathForCompare(repo: string): string {
+  const trimmed = repo.trim();
+  if (!trimmed) return "";
+  const slashNormalized = trimmed.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  const noTrailingSlash = slashNormalized.length > 1
+    ? slashNormalized.replace(/\/+$/g, "")
+    : slashNormalized;
+  if (noTrailingSlash === "~") return HOME_PATH_SENTINEL;
+  if (noTrailingSlash.startsWith("~/")) {
+    return `${HOME_PATH_SENTINEL}/${noTrailingSlash.slice(2)}`;
+  }
+  const homeAbs = noTrailingSlash.match(/^\/(?:Users|home)\/[^/]+(\/.*)?$/);
+  if (homeAbs) {
+    return `${HOME_PATH_SENTINEL}${homeAbs[1] ?? ""}`;
+  }
+  return noTrailingSlash;
+}
+
+function sameRepoPathForCompare(a: string, b: string): boolean {
+  return normalizeRepoPathForCompare(a) === normalizeRepoPathForCompare(b);
+}
 
 function tempAgentValue(a: { id: string; repo: string; targetBranch: string }): string {
-  return [a.id, a.repo, a.targetBranch].join(TEMP_AGENT_VALUE_SEP);
+  const branch = a.targetBranch.trim() || DEFAULT_TARGET_BRANCH;
+  return [
+    a.id.trim(),
+    normalizeRepoPathForCompare(a.repo),
+    branch,
+  ].join(TEMP_AGENT_VALUE_SEP);
 }
 
 /** "Existing"-source picklist for a non-OpenClaw, non-managed kind (claude /
@@ -268,7 +299,8 @@ function ownerKey(
   row: Pick<TaskRow, "ownerKind" | "ownerId" | "ownerRepo" | "ownerTargetBranch">,
 ) {
   if (isOpenclawKind(row.ownerKind)) return `openclaw:${row.ownerId.trim()}`;
-  return `${row.ownerKind}:${row.ownerRepo.trim()}:${row.ownerTargetBranch.trim()}:${row.ownerId.trim()}`;
+  const branch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+  return `${row.ownerKind}:${normalizeRepoPathForCompare(row.ownerRepo)}:${branch}:${row.ownerId.trim()}`;
 }
 
 function ownerKindLabel(
@@ -454,7 +486,7 @@ function buildExistingOwnerOptions(
     t,
   } = opts;
   const normalizedLeaderId = leaderId.trim();
-  const normalizedLeaderRepo = leaderRepo.trim();
+  const normalizedLeaderRepo = normalizeRepoPathForCompare(leaderRepo);
   const normalizedLeaderTargetBranch =
     leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
   const leaderKey = normalizedLeaderId
@@ -487,7 +519,8 @@ function buildExistingOwnerOptions(
     const id = r.ownerId.trim();
     if (!id) continue;
     const kind = r.ownerKind;
-    const repo = isNonOpenclawKind(kind) ? r.ownerRepo.trim() : "";
+    const repoRaw = isNonOpenclawKind(kind) ? r.ownerRepo.trim() : "";
+    const repo = isNonOpenclawKind(kind) ? normalizeRepoPathForCompare(repoRaw) : "";
     const targetBranch = isNonOpenclawKind(kind)
       ? (r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
       : "";
@@ -499,11 +532,11 @@ function buildExistingOwnerOptions(
       key,
       id,
       kind,
-      repo,
+      repo: repoRaw,
       targetBranch,
       label: isOpenclawKind(kind)
         ? `${ownerKindLabel(kind, t)} · ${id}`
-        : `${ownerKindLabel(kind, t)} · ${id} (${repo || "—"} @ ${targetBranch || DEFAULT_TARGET_BRANCH})`,
+        : `${ownerKindLabel(kind, t)} · ${id} (${repoRaw || "—"} @ ${targetBranch || DEFAULT_TARGET_BRANCH})`,
     });
   }
 
@@ -1057,9 +1090,41 @@ export function FlowEditor() {
    *  the summary task so the summary stays pinned at the end. */
   function commitNewTask(row: TaskRow) {
     setTasks((rows) => {
-      const summaryIdx = rows.findIndex((r) => r.isLeaderSummary);
-      if (summaryIdx === -1) return [...rows, row];
-      return [...rows.slice(0, summaryIdx), row, ...rows.slice(summaryIdx)];
+    const ownerId = row.ownerId.trim();
+    const ownerTargetBranch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+    const rowForInsert = isNonOpenclawKind(row.ownerKind)
+      ? { ...row, ownerTargetBranch }
+      : row;
+    const shouldPropagateOwnerWorkspace =
+      isNonOpenclawKind(row.ownerKind) &&
+      ownerId.length > 0 &&
+      rows.some(
+        (r) =>
+          r.ownerKind === row.ownerKind &&
+          r.ownerId.trim() === ownerId &&
+          (
+            !sameRepoPathForCompare(r.ownerRepo, row.ownerRepo) ||
+            (r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH) !== ownerTargetBranch
+          ),
+      );
+    const baseRows = shouldPropagateOwnerWorkspace
+      ? rows.map((r) =>
+          r.ownerKind === row.ownerKind && r.ownerId.trim() === ownerId
+            ? {
+                ...r,
+                ownerRepo: row.ownerRepo,
+                ownerTargetBranch,
+              }
+            : r,
+        )
+      : rows;
+    const summaryIdx = baseRows.findIndex((r) => r.isLeaderSummary);
+    if (summaryIdx === -1) return [...baseRows, rowForInsert];
+    return [
+      ...baseRows.slice(0, summaryIdx),
+      rowForInsert,
+      ...baseRows.slice(summaryIdx),
+    ];
     });
   }
 
@@ -1077,7 +1142,7 @@ export function FlowEditor() {
         prev.ownerId.trim() === replacement.ownerId.trim() &&
         prev.ownerKind === replacement.ownerKind &&
         (
-          prev.ownerRepo.trim() !== replacement.ownerRepo.trim()
+          !sameRepoPathForCompare(prev.ownerRepo, replacement.ownerRepo)
           || (prev.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
             !== (replacement.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
         ),
@@ -1095,7 +1160,8 @@ export function FlowEditor() {
           nextRow = {
             ...nextRow,
             ownerRepo: replacement.ownerRepo,
-            ownerTargetBranch: replacement.ownerTargetBranch,
+            ownerTargetBranch:
+              replacement.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
           };
         }
         if (!renamed) return nextRow;
@@ -2327,7 +2393,7 @@ function TaskEditModal({
         task.ownerKind === row.ownerKind &&
         task.ownerId.trim() === ownerId &&
         (
-          task.ownerRepo.trim() !== repo ||
+          !sameRepoPathForCompare(task.ownerRepo, repo) ||
           (task.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH) !== targetBranch
         ),
     );
@@ -2516,20 +2582,13 @@ function TaskEditModal({
     if (ownerMode === "new") {
       const candidate = draft.ownerId.trim();
       if (candidate && knownAgentIds.has(candidate)) {
-        // The temporary category lets the user EITHER create a brand-new agent
-        // OR pick a temporary agent already defined elsewhere in this flow.
-        // Reusing one (same kind + repo + target branch) is legitimate, so only
-        // a genuinely-new name that collides with an existing agent is an error.
-        const isReuse =
-          isNonOpenclawKind(draft.ownerKind) &&
-          flowTempAgentsForKind(draft.ownerKind, tasks, initialRow.rowKey).some(
-            (o) =>
-              o.id === candidate &&
-              o.repo === draft.ownerRepo.trim() &&
-              o.targetBranch ===
-                (draft.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH),
-          );
-        if (!isReuse) {
+        const sameKindExists = tasks.some(
+          (task) =>
+            task.rowKey !== initialRow.rowKey &&
+            task.ownerId.trim() === candidate &&
+            task.ownerKind === draft.ownerKind,
+        );
+        if (!sameKindExists) {
           setSaveError(
             t("flowEditor.validation.newAgentNameDuplicated", { agentId: candidate }),
           );
@@ -2537,9 +2596,11 @@ function TaskEditModal({
         }
       }
     }
-    if (ownerMode === "existing" && hasOtherTaskWithSameAgentDifferentRepoOrBranch(draft)) {
+    if (hasOtherTaskWithSameAgentDifferentRepoOrBranch(draft)) {
       const ok = await confirm(
-        t("flowEditor.taskRepoCheck.confirmExistingAgentRepoBranchChange"),
+        t("flowEditor.taskRepoCheck.confirmExistingAgentRepoBranchChange", {
+          agentId: draft.ownerId.trim(),
+        }),
       );
       if (!ok) {
         setSaveError(t("flowEditor.taskRepoCheck.modifyCancelled"));
@@ -3855,7 +3916,7 @@ function validate(
       if (!prev) {
         ownerRepoBranch.set(ownerKey, { repo, branch });
       } else if (
-        (prev.repo !== repo || prev.branch !== branch)
+        (!sameRepoPathForCompare(prev.repo, repo) || prev.branch !== branch)
         && !ownerConflictReported.has(ownerKey)
       ) {
         ownerConflictReported.add(ownerKey);

@@ -245,7 +245,7 @@ const en = {
         "The target path is still not a usable git repository. Please reselect or check permissions.",
       createFailed: "Failed to process repository path: {{message}}",
       confirmExistingAgentRepoBranchChange:
-        "All tasks under the same Agent in this Flow share one git repository and one target branch.\n\nIf you update repo/branch for this existing Agent, other tasks owned by this Agent will follow the same repo+branch.\n\nIf you need another repository or another branch, choose \"Create new agent\".\n\nContinue?",
+        "Agent \"{{agentId}}\" workspace is about to change. Within one Flow, all tasks under the same Agent must share one git repository and one target branch.\n\nIf you need to work on another repository or branch at the same time, create another Agent.\n\nContinue and apply this change to the other tasks owned by \"{{agentId}}\"?",
       modifyCancelled:
         "Canceled. Repo/branch update for this existing Agent was not applied.",
     },

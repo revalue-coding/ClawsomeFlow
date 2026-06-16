@@ -244,7 +244,7 @@ const zh = {
       stillInvalid: "目标路径仍不是可用的 Git 仓库，请重选目录或检查权限后重试。",
       createFailed: "仓库路径处理失败：{{message}}",
       confirmExistingAgentRepoBranchChange:
-        "该任务流下每个Agent的子任务都会基于同一git仓下的同一分支进行，如需同时在其他git仓或基于其他分支工作，请选择“新建Agent”！\n\n继续修改并应用到该 Agent 的其他子任务吗？",
+        "Agent「{{agentId}}」的工作目录即将被改变，同一 Flow 下每个 Agent 的子任务都会基于同一 git 仓下的同一分支进行，如需同时在其他 git 仓或基于其他分支工作，请另建 Agent！\n\n是否继续并将该修改应用到 Agent「{{agentId}}」的其他子任务？",
       modifyCancelled: "已取消本次修改，未应用已有 Agent 的仓库/分支变更。",
     },
     taskBranchCheck: {
