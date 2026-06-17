@@ -52,15 +52,25 @@ def _stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── id validation ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("bad", ["Upper", "has-dash", "with space", "a", "", "x_y"])
+@pytest.mark.parametrize("bad", ["Upper", "_start", "-start", "with space", "has.dot", ""])
 def test_validate_agent_id_rejects(bad: str) -> None:
     with pytest.raises(svc.AgentIdInvalid):
         svc._validate_agent_id(bad)
 
 
-@pytest.mark.parametrize("ok", ["abc", "agent1", "backendhelper"])
+@pytest.mark.parametrize("ok", ["a", "abc", "agent1", "backend-helper", "backend_helper"])
 def test_validate_agent_id_accepts(ok: str) -> None:
     assert svc._validate_agent_id(ok) == ok
+
+
+def test_validate_agent_id_accepts_64_chars() -> None:
+    aid = "a" * 64
+    assert svc._validate_agent_id(aid) == aid
+
+
+def test_validate_agent_id_rejects_over_64_chars() -> None:
+    with pytest.raises(svc.AgentIdInvalid):
+        svc._validate_agent_id("a" * 65)
 
 
 # ── commit / delete / claim (mocked CLI) ─────────────────────────────

@@ -53,11 +53,11 @@
 
 ## 🎯 Who Should Try It?
 
-- Developers and teams who want **multiple AI agents to genuinely collaborate** — instead of each one running off on its own;
-- Engineering-minded folks who are **done with the black box of prompt self-scheduling** and want predictable behavior with controllable cost;
-- Power users who need **parallelism + isolation + rollback** to run batch workloads;
-- People who aren't deeply versed in driving **OpenClaw / Hermes / Claude Code / Codex** and the like, but still want to **put their capabilities to work** — ClawsomeFlow gives you a natural-language management layer over all of them;
-- Builders seriously exploring the **OPC (One-Person Company)** — putting an agent team to work on their behalf.
+- Software teams building a **local, multi-branch engineering agent squad** — where specialists can develop in parallel and still converge cleanly;
+- Builders who want **real software collaboration among multiple agents** (plan, implement, review, converge), not just one more chat window;
+- Founders and operators designing an **AI-native company**, where repeatable execution can be delegated to orchestrated agent teams;
+- Ambitious creators pursuing **super-individual leverage** — one person steering many specialized agents with clear guardrails;
+- Engineering-minded folks who are **done with prompt-only black-box orchestration** and want predictable behavior with controllable cost.
 
 ---
 

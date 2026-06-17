@@ -934,7 +934,8 @@ const en = {
         "Choose where to copy the initial model config from. After creation, this agent's model is independent. If a clone source is also set, the clone runs first and then model inheritance is applied on top.",
       idLabel: "Profile ID",
       idPlaceholder: "e.g. backend-helper",
-      idHint: "Lowercase letters/numbers only. Used directly as the Hermes profile id.",
+      idHint:
+        "Use lowercase letters, digits, underscores, or hyphens; the first character must be a letter or digit; max 64 chars. Used directly as the Hermes profile id.",
       teamLabel: "Team",
       submit: "Create",
       creating: "Creating…",
@@ -943,8 +944,9 @@ const en = {
       errors: {
         nameRequired: "Agent Name is required.",
         idRequired: "Profile ID is required.",
-        idFormat: "Profile ID must be lowercase letters and digits only ([a-z0-9]).",
-        idLength: "Profile ID must be 2–40 characters.",
+        idFormat:
+          "Profile ID must match [a-z0-9][a-z0-9_-]* (lowercase letters/digits/underscore/hyphen; first character must be a letter or digit).",
+        idLength: "Profile ID must be at most 64 characters.",
         idReserved: "That Profile ID is reserved and cannot be used.",
         idDuplicate: "An agent with Profile ID \"{{id}}\" already exists. Pick a different ID.",
         modelInheritMissing: "Selected model source profile does not exist anymore. Please refresh and retry.",

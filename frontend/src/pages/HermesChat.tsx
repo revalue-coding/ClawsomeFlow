@@ -66,10 +66,10 @@ function isAbortError(value: unknown): boolean {
   return value instanceof Error && value.name === "AbortError";
 }
 
-// Mirror of the backend Hermes id rules (services/hermes_agents.py): lowercase
-// alphanumeric, length 2–40, "default" reserved. Kept in sync so the form can
-// reject bad input on the spot instead of after a round-trip.
-const HERMES_ID_RE = /^[a-z0-9]+$/;
+// Mirror of the backend Hermes id rules (services/hermes_agents.py):
+// lowercase letters/digits/underscore/hyphen; first character must be
+// letter/digit; max 64 chars; "default" reserved.
+const HERMES_ID_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 /** Returns an i18n error key for the first failing create-form rule, or null
  *  when the input is valid. Duplicate check is against the loaded agent list. */
@@ -87,7 +87,7 @@ function createFieldError(opts: {
   if (!name) return "hermes.create.errors.nameRequired";
   if (!id) return "hermes.create.errors.idRequired";
   if (!HERMES_ID_RE.test(id)) return "hermes.create.errors.idFormat";
-  if (id.length < 2 || id.length > 40) return "hermes.create.errors.idLength";
+  if (id.length > 64) return "hermes.create.errors.idLength";
   if (id === "default") return "hermes.create.errors.idReserved";
   if (opts.teamChoice === CREATE_TEAM_SENTINEL && !opts.newTeamName.trim()) {
     return "hermes.create.errors.teamRequired";

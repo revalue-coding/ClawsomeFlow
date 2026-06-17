@@ -39,9 +39,10 @@ logger = get_logger("services.hermes_agents")
 
 HERMES_HOME_ENV = "HERMES_HOME"
 _DEFAULT_HERMES_HOME = "~/.hermes"
-_AGENT_ID_RE = re.compile(r"^[a-z0-9]+$")  # hermes requires lowercase alphanumeric
-_AGENT_ID_MIN_LEN = 2
-_AGENT_ID_MAX_LEN = 40
+# Hermes profile id rules: lowercase letters/digits/underscore/hyphen;
+# first character must be lowercase letter or digit; max 64 chars.
+_AGENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_AGENT_ID_MAX_LEN = 64
 _RESERVED_PROFILE_NAMES = frozenset({"default"})
 
 _CLI_TIMEOUT_SEC = 60.0
@@ -170,12 +171,13 @@ def _validate_agent_id(agent_id: str) -> str:
     aid = (agent_id or "").strip()
     if not _AGENT_ID_RE.fullmatch(aid):
         raise AgentIdInvalid(
-            "Hermes agent id (profile name) must be lowercase alphanumeric "
-            "([a-z0-9])"
+            "Hermes agent id (profile name) must use lowercase letters/digits/"
+            "underscore/hyphen, start with a letter or digit "
+            "([a-z0-9][a-z0-9_-]*)"
         )
-    if not (_AGENT_ID_MIN_LEN <= len(aid) <= _AGENT_ID_MAX_LEN):
+    if len(aid) > _AGENT_ID_MAX_LEN:
         raise AgentIdInvalid(
-            f"Hermes agent id length must be {_AGENT_ID_MIN_LEN}-{_AGENT_ID_MAX_LEN}"
+            f"Hermes agent id length must be <= {_AGENT_ID_MAX_LEN}"
         )
     if aid in _RESERVED_PROFILE_NAMES:
         raise AgentIdInvalid(f"'{aid}' is reserved and cannot be used")
