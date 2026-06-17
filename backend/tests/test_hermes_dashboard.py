@@ -44,7 +44,7 @@ def test_ensure_spawns_on_free_port(monkeypatch: pytest.MonkeyPatch) -> None:
         del host, port
         return "hermes" if state["running"] else "free"
 
-    def _spawn(*, exe: str, host: str, port: int, skip_build: bool):
+    def _spawn(*, exe: str, host: str, port: int, skip_build: bool, profile=None):
         del exe, host, port, skip_build
         state["spawned"] = True
         state["running"] = True
@@ -73,7 +73,7 @@ def test_ensure_auto_switches_when_default_port_foreign(
             return "hermes" if started[9120] else "free"
         return "free"
 
-    def _spawn(*, exe: str, host: str, port: int, skip_build: bool):
+    def _spawn(*, exe: str, host: str, port: int, skip_build: bool, profile=None):
         del exe, host, skip_build
         assert port == 9120, f"should spawn on the first free port, got {port}"
         started[9120] = True
@@ -85,6 +85,50 @@ def test_ensure_auto_switches_when_default_port_foreign(
     monkeypatch.setattr(dash, "_classify", _classify)
     monkeypatch.setattr(dash, "_spawn_dashboard", _spawn)
     assert dash.ensure_hermes_dashboard_url() == "http://127.0.0.1:9120/chat"
+
+
+def test_ensure_profile_spawns_dedicated_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profile dashboard must NOT reuse the root instance on 9119 (it serves a
+    different home): it spawns its own ``hermes -p <id> dashboard`` on a free
+    port, passing the profile through, and tracks it for reuse."""
+    dash._PROFILE_DASHBOARDS.clear()
+    monkeypatch.setattr(dash, "hermes_executable", lambda: "/usr/bin/hermes")
+    state = {9120: False}
+    seen_profile: list[str | None] = []
+
+    def _classify(host: str, port: int) -> str:
+        del host
+        if port == 9119:
+            return "hermes"  # root dashboard already serving — must be ignored
+        if port == 9120:
+            return "hermes" if state[9120] else "free"
+        return "free"
+
+    def _spawn(*, exe: str, host: str, port: int, skip_build: bool, profile=None):
+        del exe, host, skip_build
+        seen_profile.append(profile)
+        assert port == 9120
+        state[9120] = True
+        proc = MagicMock()
+        proc.pid = 789
+        proc.poll.return_value = None
+        return proc
+
+    monkeypatch.setattr(dash, "_classify", _classify)
+    monkeypatch.setattr(dash, "_spawn_dashboard", _spawn)
+    monkeypatch.setattr(dash._subproc_registry, "register", lambda proc: None)
+
+    url = dash.ensure_hermes_dashboard_url(profile="math")
+    assert url == "http://127.0.0.1:9120/chat"
+    assert seen_profile == ["math"]
+    assert dash._PROFILE_DASHBOARDS["math"][1] == 9120
+
+    # A second call reuses the tracked instance (no second spawn).
+    seen_profile.clear()
+    url2 = dash.ensure_hermes_dashboard_url(profile="math")
+    assert url2 == "http://127.0.0.1:9120/chat"
+    assert seen_profile == []
+    dash._PROFILE_DASHBOARDS.clear()
 
 
 def test_ensure_raises_when_all_ports_foreign(monkeypatch: pytest.MonkeyPatch) -> None:

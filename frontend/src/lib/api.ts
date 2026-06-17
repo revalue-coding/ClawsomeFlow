@@ -528,6 +528,30 @@ export interface ChatHistoryMessage {
   content: string;
 }
 
+/** One progress entry for an in-flight Hermes chat turn (formatted via i18n). */
+export interface HermesChatStep {
+  kind: "tool" | "info";
+  name?: string;
+  seq: number;
+}
+
+export interface HermesChatProgress {
+  toolCalls: number;
+  apiCalls: number;
+  messageCount: number;
+  elapsedSec: number;
+}
+
+/** Live turn state for reconnect after a tab switch / refresh. */
+export interface HermesChatStatus {
+  status: "idle" | "running" | "done" | "error";
+  steps: HermesChatStep[];
+  progress: HermesChatProgress | null;
+  final: string;
+  error: string;
+  startedAtMono: number | null;
+}
+
 export interface ProfileSummary {
   name: string;
   agent?: string | null;
@@ -667,8 +691,18 @@ export interface HermesCronJob {
   name: string;
   schedule: string;
   enabled: boolean;
+  prompt: string;
+  deliver: string;
+  workdir: string;
+  nextRun: string;
+  lastRun: string;
   detail: string;
   raw: string;
+}
+
+export interface HermesCronDeliveryTarget {
+  value: string;
+  label: string;
 }
 
 export interface HermesMcpServer {
@@ -1078,8 +1112,13 @@ export const api = {
       undefined,
       { cache: "no-store" },
     ),
-  openHermesDashboard: () =>
-    request<{ url: string }>("POST", "/api/hermes/agents/dashboard/open"),
+  openHermesDashboard: (agentId?: string) =>
+    request<{ url: string }>(
+      "POST",
+      `/api/hermes/agents/dashboard/open${
+        agentId ? `?agentId=${encodeURIComponent(agentId)}` : ""
+      }`,
+    ),
   createHermesAgent: (
     payload: {
       id?: string;
@@ -1129,7 +1168,13 @@ export const api = {
     request<HermesMcpServer[]>("GET", `/api/hermes/agents/${id}/settings/mcp`),
   putHermesMcpServer: (
     id: string,
-    payload: { name: string; transport: "http_sse" | "sse"; url: string; environment?: string },
+    // environment: omit (or null) to preserve existing env on edit; "" clears; text replaces.
+    payload: {
+      name: string;
+      transport: "http_sse" | "sse";
+      url: string;
+      environment?: string | null;
+    },
   ) => request<HermesMcpServer>("PUT", `/api/hermes/agents/${id}/settings/mcp`, payload),
   deleteHermesMcpServer: (id: string, name: string) =>
     request<void>("DELETE", `/api/hermes/agents/${id}/settings/mcp/${encodeURIComponent(name)}`),
@@ -1145,17 +1190,43 @@ export const api = {
     request<HermesSkillSetting>("GET", `/api/hermes/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
   createHermesSkill: (id: string, payload: { name: string; description?: string; content: string }) =>
     request<HermesSkillSetting>("POST", `/api/hermes/agents/${id}/settings/skills`, payload),
+  updateHermesSkill: (
+    id: string,
+    name: string,
+    payload: { description?: string; content: string },
+  ) =>
+    request<HermesSkillSetting>(
+      "PUT",
+      `/api/hermes/agents/${id}/settings/skills/${encodeURIComponent(name)}`,
+      payload,
+    ),
   deleteHermesSkill: (id: string, name: string) =>
     request<void>("DELETE", `/api/hermes/agents/${id}/settings/skills/${encodeURIComponent(name)}`),
   getHermesCron: (id: string) =>
-    request<{ available: boolean; items: HermesCronJob[] }>(
+    request<{ available: boolean; items: HermesCronJob[]; deliveryTargets: HermesCronDeliveryTarget[] }>(
       "GET",
       `/api/hermes/agents/${id}/settings/cron`,
     ),
   createHermesCron: (
     id: string,
-    payload: { schedule: string; prompt?: string; name?: string; workdir?: string },
+    payload: { schedule: string; prompt?: string; name?: string; workdir?: string; deliver?: string },
   ) => request<void>("POST", `/api/hermes/agents/${id}/settings/cron`, payload),
+  editHermesCron: (
+    id: string,
+    jobId: string,
+    payload: {
+      schedule?: string;
+      prompt?: string;
+      name?: string;
+      deliver?: string;
+      workdir?: string;
+    },
+  ) =>
+    request<void>(
+      "PUT",
+      `/api/hermes/agents/${id}/settings/cron/${encodeURIComponent(jobId)}`,
+      payload,
+    ),
   hermesCronAction: (id: string, jobId: string, action: "pause" | "resume" | "remove") =>
     request<void>(
       "POST",
@@ -1176,6 +1247,13 @@ export const api = {
     request<{ messages: ChatHistoryMessage[] }>(
       "GET",
       `/api/hermes/agents/${id}/chat-history`,
+    ),
+  getHermesChatStatus: (id: string) =>
+    request<HermesChatStatus>(
+      "GET",
+      `/api/hermes/agents/${id}/chat/status`,
+      undefined,
+      { cache: "no-store" },
     ),
   resetHermesAgentChat: (id: string) =>
     request<void>("POST", `/api/hermes/agents/${id}/reset`),

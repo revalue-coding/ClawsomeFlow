@@ -14,6 +14,7 @@ Hermes manages its own workspace, so there is no common-source deployment.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -1188,8 +1189,18 @@ def upsert_mcp_server(
     name: str,
     transport: str,
     url: str,
-    environment: str = "",
+    environment: str | None = "",
 ) -> dict[str, Any]:
+    """Create or update an MCP server entry.
+
+    ``environment`` semantics:
+
+    - a string (including ``""``) → **replace** the env block with the parsed
+      pairs (empty string clears it). This is the create path.
+    - ``None`` → **preserve** whatever env the existing entry already has. The
+      edit form passes ``None`` when the user leaves the env field blank, so an
+      edit that only changes the URL never wipes existing (masked) secrets.
+    """
     aid = _validate_agent_id(agent_id)
     server_name = _validate_mcp_server_name(name)
     mode = (transport or "http_sse").strip().lower()
@@ -1198,7 +1209,6 @@ def upsert_mcp_server(
     endpoint = (url or "").strip()
     if not endpoint:
         raise AgentIdInvalid("MCP server URL is required")
-    env = _parse_mcp_env_lines(environment)
 
     cfg = _read_profile_config_dict(aid)
     mcp_servers = cfg.get("mcp_servers")
@@ -1215,10 +1225,13 @@ def upsert_mcp_server(
         entry["transport"] = "sse"
     else:
         entry.pop("transport", None)
-    if env:
-        entry["env"] = env
-    else:
-        entry.pop("env", None)
+    if environment is not None:
+        env = _parse_mcp_env_lines(environment)
+        if env:
+            entry["env"] = env
+        else:
+            entry.pop("env", None)
+    # else: leave entry["env"] untouched (preserve on edit).
     if "enabled" not in entry:
         entry["enabled"] = True
     mcp_servers[server_name] = entry
@@ -1391,6 +1404,29 @@ def write_skill(agent_id: str, *, name: str, description: str = "", content: str
     return {"name": skill_name, "description": (description or "").strip(), "path": str(skill_dir)}
 
 
+def update_skill(agent_id: str, *, name: str, description: str = "", content: str) -> dict[str, str]:
+    """Overwrite an existing user-defined skill's ``SKILL.md``.
+
+    Mirrors :func:`write_skill` but requires the skill to already exist (the
+    create path rejects existing dirs; this is the edit path)."""
+    aid = _validate_agent_id(agent_id)
+    skill_name = (name or "").strip()
+    if not _SKILL_NAME_RE.match(skill_name):
+        raise AgentIdInvalid(
+            "skill name must be non-empty and contain only letters, digits, '-' or '_'"
+        )
+    body = (content or "").strip()
+    if not body:
+        raise AgentIdInvalid("skill content is required")
+    skill_dir = hermes_profile_root(aid) / _SKILLS_DIRNAME / skill_name
+    if not skill_dir.is_dir():
+        raise AgentNotFound(f"skill {skill_name!r} not found")
+    (skill_dir / _SKILL_ENTRY_FILENAME).write_text(
+        _build_skill_md(skill_name, description, body), encoding="utf-8"
+    )
+    return {"name": skill_name, "description": (description or "").strip(), "path": str(skill_dir)}
+
+
 def delete_skill(agent_id: str, name: str) -> None:
     aid = _validate_agent_id(agent_id)
     # Prefer the CLI (hub-installed skills); fall back to removing the dir.
@@ -1414,48 +1450,209 @@ def cron_available() -> bool:
     return hermes_executable() is not None
 
 
+_STATUS_PLATFORM_SLUGS: dict[str, str] = {
+    "telegram": "telegram",
+    "discord": "discord",
+    "whatsapp": "whatsapp",
+    "signal": "signal",
+    "slack": "slack",
+    "email": "email",
+    "sms": "sms",
+    "dingtalk": "dingtalk",
+    "feishu": "feishu",
+    "wecom": "wecom",
+    "wecom callback": "wecom_callback",
+    "weixin": "weixin",
+    "bluebubbles": "bluebubbles",
+    "qqbot": "qqbot",
+    "yuanbao": "yuanbao",
+}
+
+_MESSAGING_STATUS_RE = re.compile(
+    r"^\s{2}([A-Za-z][A-Za-z0-9 /]+?)\s{2,}✓\s+configured"
+    r"(?:\s+\(home:\s*([^)]+)\))?",
+)
+
+
+def _status_platform_slug(display: str) -> str:
+    key = display.strip().lower()
+    return _STATUS_PLATFORM_SLUGS.get(key, key.replace(" ", "_"))
+
+
+def _delivery_target_label(value: str) -> str:
+    if ":" not in value:
+        return value
+    platform, target = value.split(":", 1)
+    return f"{platform} ({target})"
+
+
+def _append_delivery_target(
+    targets: list[dict[str, str]],
+    seen: set[str],
+    value: str,
+) -> None:
+    val = value.strip()
+    if not val or val in seen:
+        return
+    seen.add(val)
+    targets.append({"value": val, "label": _delivery_target_label(val)})
+
+
+def _parse_status_delivery_targets(text: str) -> list[dict[str, str]]:
+    """Extract configured messaging platforms from ``hermes status --all``."""
+    targets: list[dict[str, str]] = []
+    seen: set[str] = set()
+    in_section = False
+    for raw in text.splitlines():
+        line = _strip_ansi(raw)
+        if "Messaging Platforms" in line:
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("◆"):
+                break
+            m = _MESSAGING_STATUS_RE.match(line)
+            if not m:
+                continue
+            slug = _status_platform_slug(m.group(1))
+            home = (m.group(2) or "").strip()
+            _append_delivery_target(targets, seen, slug)
+            if home:
+                _append_delivery_target(targets, seen, f"{slug}:{home}")
+    return targets
+
+
+def _parse_send_list_delivery_targets(text: str) -> list[dict[str, str]]:
+    """Extract channel targets from ``hermes send --list --json``."""
+    targets: list[dict[str, str]] = []
+    seen: set[str] = set()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return targets
+    platforms = data.get("platforms")
+    if not isinstance(platforms, dict):
+        return targets
+    for platform, channels in sorted(platforms.items()):
+        if not isinstance(channels, list) or not channels:
+            continue
+        for ch in channels:
+            ch_s = str(ch).strip()
+            if not ch_s:
+                continue
+            _append_delivery_target(targets, seen, f"{platform}:{ch_s}")
+    return targets
+
+
+def list_cron_delivery_targets(agent_id: str) -> list[dict[str, str]]:
+    """Return cron ``--deliver`` options for the profile.
+
+    Always includes ``local``. Configured platforms come from
+    ``hermes -p <id> status --all`` (home channel) and
+    ``hermes -p <id> send --list --json`` (discovered channels — faster
+    structured lookup than parsing the full status table).
+    """
+    aid = _validate_agent_id(agent_id)
+    targets: list[dict[str, str]] = []
+    seen: set[str] = set()
+    _append_delivery_target(targets, seen, "local")
+
+    rc, out, _err = _hermes_profile(aid, ["send", "--list", "--json"])
+    if rc == 0:
+        for item in _parse_send_list_delivery_targets(out):
+            _append_delivery_target(targets, seen, item["value"])
+
+    rc, out, _err = _hermes_profile(aid, ["status", "--all"])
+    if rc == 0:
+        for item in _parse_status_delivery_targets(out):
+            _append_delivery_target(targets, seen, item["value"])
+
+    return targets
+
+
 @dataclass
 class CronJob:
     id: str = ""
     name: str = ""
     schedule: str = ""
     enabled: bool = True
+    prompt: str = ""
+    deliver: str = ""
+    workdir: str = ""
+    next_run: str = ""
+    last_run: str = ""
     detail: str = ""
     raw: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def list_cron(agent_id: str) -> list[dict[str, Any]]:
-    """Best-effort parse of ``hermes -p <id> cron list --all``.
+def _cron_jobs_path(agent_id: str) -> Path:
+    """``~/.hermes/profiles/{id}/cron/jobs.json`` — Hermes' own per-profile cron
+    store. A well-known profile file we read for fields the CLI does not expose
+    (prompt, workdir, deliver, next/last run)."""
+    return hermes_profile_root(agent_id) / "cron" / "jobs.json"
 
-    The CLI prints a human table; we extract a stable id/name + schedule per
-    row and keep the raw line so the UI can still show unparsed detail.
+
+def _coerce_schedule_str(value: Any) -> str:
+    """Hermes stores schedule as ``{"kind","expr","display"}`` (or a bare
+    string in older formats). Return the most human-friendly form."""
+    if isinstance(value, dict):
+        return str(value.get("display") or value.get("expr") or "").strip()
+    return str(value or "").strip()
+
+
+def list_cron(agent_id: str) -> list[dict[str, Any]]:
+    """List scheduled jobs by reading Hermes' per-profile ``cron/jobs.json``.
+
+    The ``hermes cron list`` CLI prints a multi-line *block* per job (not a
+    table) and omits the prompt entirely, so we read the structured store
+    Hermes itself maintains — same approach as MCP servers / skills, which read
+    well-known profile files rather than scraping CLI output. Returns one entry
+    per job (the previous line-based parser produced one bogus entry per output
+    line). Best-effort: a missing/unparseable file yields ``[]``.
     """
     aid = _validate_agent_id(agent_id)
-    rc, out, _err = _hermes_profile(aid, ["cron", "list", "--all"])
-    if rc != 0:
+    path = _cron_jobs_path(aid)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    raw_jobs = data.get("jobs") if isinstance(data, dict) else data
+    if not isinstance(raw_jobs, list):
         return []
     jobs: list[dict[str, Any]] = []
-    for raw in out.splitlines():
-        line = _strip_ansi(raw).strip()
-        if not line:
+    for entry in raw_jobs:
+        if not isinstance(entry, dict):
             continue
-        low = line.lower()
-        if "no scheduled jobs" in low or low.startswith("create one"):
+        job_id = str(entry.get("id") or "").strip()
+        if not job_id:
             continue
-        if low.startswith("id") and "schedule" in low:
-            continue  # header
-        if set(line) <= set("─-—│| "):
-            continue
-        cols = re.split(r"\s{2,}", line)
-        first = cols[0].strip()
+        schedule = _coerce_schedule_str(
+            entry.get("schedule_display") or entry.get("schedule")
+        )
+        name = str(entry.get("name") or "").strip()
+        deliver = str(entry.get("deliver") or "").strip()
+        workdir = str(entry.get("workdir") or "").strip()
+        next_run = str(entry.get("next_run_at") or "").strip()
+        last_run_at = str(entry.get("last_run_at") or "").strip()
+        last_status = str(entry.get("last_status") or "").strip()
+        last_run = f"{last_run_at} {last_status}".strip() if last_run_at else ""
+        enabled = bool(entry.get("enabled", True)) and not entry.get("paused_at")
+        detail_bits = [b for b in (schedule, deliver) if b]
         jobs.append({
-            "id": first,
-            "name": cols[1].strip() if len(cols) > 1 else first,
-            "schedule": cols[2].strip() if len(cols) > 2 else "",
-            "enabled": "paused" not in low and "disabled" not in low,
-            "detail": "  ".join(c.strip() for c in cols[1:]),
-            "raw": line,
+            "id": job_id,
+            "name": name or job_id,
+            "schedule": schedule,
+            "enabled": enabled,
+            "prompt": str(entry.get("prompt") or ""),
+            "deliver": deliver,
+            "workdir": workdir,
+            "next_run": next_run,
+            "last_run": last_run,
+            "detail": "  ·  ".join(detail_bits),
+            "raw": schedule,
         })
     return jobs
 
@@ -1473,6 +1670,52 @@ def cron_action(agent_id: str, job_id: str, action: str) -> None:
         )
 
 
+def edit_cron(
+    agent_id: str,
+    job_id: str,
+    *,
+    schedule: str | None = None,
+    prompt: str | None = None,
+    name: str | None = None,
+    deliver: str | None = None,
+    workdir: str | None = None,
+) -> None:
+    """Edit an existing job via ``hermes -p <id> cron edit <job_id> --…``.
+
+    Only the fields the caller passes (non-``None``) are forwarded, so an edit
+    that touches just the schedule never clobbers the prompt/workdir. ``workdir``
+    is the one field Hermes lets you *clear* with an empty string, so we forward
+    it even when empty; the others are skipped when blank.
+    """
+    aid = _validate_agent_id(agent_id)
+    jid = (job_id or "").strip()
+    if not jid:
+        raise AgentIdInvalid("cron job id is required")
+    args = ["cron", "edit", jid]
+    if schedule:
+        args += ["--schedule", schedule]
+    if prompt:
+        args += ["--prompt", prompt]
+    if name:
+        args += ["--name", name]
+    if deliver:
+        args += ["--deliver", deliver]
+    if workdir is not None:
+        wd = workdir.strip()
+        if wd:
+            args += ["--workdir", str(_existing_directory(wd, field_name="workdir"))]
+        else:
+            args += ["--workdir", ""]  # explicit clear
+    if len(args) == 3:
+        return  # nothing to change
+    rc, out, err = _hermes_profile(aid, args)
+    if rc != 0:
+        raise ProfileOpFailed(
+            f"`hermes cron edit {jid}` failed: "
+            f"{(_strip_ansi(err) or _strip_ansi(out)).strip()}"
+        )
+
+
 def create_cron(
     agent_id: str,
     *,
@@ -1480,6 +1723,7 @@ def create_cron(
     prompt: str,
     name: str = "",
     workdir: str = "",
+    deliver: str = "local",
 ) -> None:
     aid = _validate_agent_id(agent_id)
     args = ["cron", "create", schedule]
@@ -1487,6 +1731,9 @@ def create_cron(
         args.append(prompt)
     if name:
         args += ["--name", name]
+    deliver_val = (deliver or "local").strip() or "local"
+    if deliver_val != "local":
+        args += ["--deliver", deliver_val]
     if workdir:
         args += ["--workdir", str(_existing_directory(workdir, field_name="workdir"))]
     args += ["--profile", aid]
@@ -1585,11 +1832,15 @@ __all__ = [
     "delete_secret",
     "list_skills",
     "read_skill",
+    "write_skill",
+    "update_skill",
     "delete_skill",
     "cron_available",
+    "list_cron_delivery_targets",
     "list_cron",
     "cron_action",
     "create_cron",
+    "edit_cron",
     "chat_once",
     "backfill_hermes_inference_config",
 ]

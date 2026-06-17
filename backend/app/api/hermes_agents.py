@@ -14,10 +14,12 @@ Endpoints (prefix ``/api``):
 * ``DELETE /hermes/agents/{id}``                  — delete (permanent)
 * ``GET    /hermes/agents/runtime/status``        — is the Hermes CLI usable
 * ``POST   /hermes/agents/dashboard/open``        — ensure dashboard running; return URL
+                                                    (``?agentId=`` → profile-scoped)
 * ``GET    /hermes/agents/claimable``             — existing unmanaged profiles
 * ``POST   /hermes/agents/claim``                 — register an existing profile
 * ``*      /hermes/agents/{id}/settings/...``     — soul / model / secrets / skills / cron
-* ``POST   /hermes/agents/{id}/chat``             — direct chat (SSE; message + workdir)
+* ``POST   /hermes/agents/{id}/chat``             — direct chat (SSE; step progress + final)
+* ``GET    /hermes/agents/{id}/chat/status``      — live turn state (reconnect after refresh)
 * ``GET    /hermes/agents/{id}/chat-history``     — UI chat history cache
 * ``POST   /hermes/agents/{id}/reset``            — clear cached history
 
@@ -43,6 +45,7 @@ from app.models import HermesAgent, iso_utc
 from app.operations import get_op_registry
 from app.scheduler.naming import hermes_user_chat_session_id
 from app.services import hermes_agents as svc
+from app.services import hermes_chat as chat_svc
 from app.services import hermes_dashboard as dash_svc
 from app.services import openclaw_agents as oc_svc
 from app.services import openclaw_chat_history as chat_history
@@ -184,7 +187,8 @@ class McpServerUpsertPayload(_CamelModel):
     name: str
     transport: str = "http_sse"
     url: str
-    environment: str = ""
+    # Omitted/None → preserve existing env (edit path); "" → clear; text → replace.
+    environment: str | None = None
 
 
 class SecretView(_CamelModel):
@@ -211,18 +215,34 @@ class SkillCreatePayload(_CamelModel):
     content: str = ""
 
 
+class SkillUpdatePayload(_CamelModel):
+    description: str = ""
+    content: str = ""
+
+
 class CronJobView(_CamelModel):
     id: str
     name: str = ""
     schedule: str = ""
     enabled: bool = True
+    prompt: str = ""
+    deliver: str = ""
+    workdir: str = ""
+    next_run: str = ""
+    last_run: str = ""
     detail: str = ""
     raw: str = ""
+
+
+class DeliveryTargetView(_CamelModel):
+    value: str
+    label: str
 
 
 class CronListResponse(_CamelModel):
     available: bool
     items: list[CronJobView]
+    delivery_targets: list[DeliveryTargetView] = []
 
 
 class CreateCronPayload(_CamelModel):
@@ -230,6 +250,17 @@ class CreateCronPayload(_CamelModel):
     prompt: str = ""
     name: str = ""
     workdir: str = ""
+    deliver: str = "local"
+
+
+class EditCronPayload(_CamelModel):
+    # All optional — only fields actually present are forwarded to
+    # ``hermes cron edit`` so an edit never clobbers untouched fields.
+    schedule: str | None = None
+    prompt: str | None = None
+    name: str | None = None
+    deliver: str | None = None
+    workdir: str | None = None
 
 
 class ChatPayload(_CamelModel):
@@ -329,10 +360,19 @@ def runtime_status(
 
 
 @router.post("/dashboard/open", response_model=HermesDashboardOpenResponse)
-def open_dashboard(user: UserDep) -> HermesDashboardOpenResponse:
-    del user
+def open_dashboard(
+    user: UserDep,
+    storage: StorageDep,
+    agent_id: Annotated[str | None, Query(alias="agentId")] = None,
+) -> HermesDashboardOpenResponse:
+    # With an agent id, open a dashboard scoped to that agent's Hermes profile so
+    # the user lands on *that agent's* sessions (the root home has none of them).
+    profile: str | None = None
+    if agent_id:
+        _get_owned(agent_id, user, storage)
+        profile = agent_id
     try:
-        url = dash_svc.ensure_hermes_dashboard_url()
+        url = dash_svc.ensure_hermes_dashboard_url(profile=profile)
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
     return HermesDashboardOpenResponse(url=url)
@@ -657,7 +697,8 @@ def get_skill(
         content = svc.read_skill(agent_id, name)
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
-    return SkillView(name=name, content=content)
+    meta = svc._parse_skill_front_matter(content)
+    return SkillView(name=meta.get("name") or name, description=meta.get("description", ""), content=content)
 
 
 @router.post("/{agent_id}/settings/skills", response_model=SkillView, status_code=201)
@@ -671,6 +712,24 @@ def create_skill(
     try:
         out = svc.write_skill(
             agent_id, name=payload.name, description=payload.description, content=payload.content,
+        )
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return SkillView(name=out["name"], description=out.get("description", ""), path=out.get("path", ""))
+
+
+@router.put("/{agent_id}/settings/skills/{name}", response_model=SkillView)
+def update_skill(
+    agent_id: Annotated[str, Path()],
+    name: Annotated[str, Path()],
+    payload: Annotated[SkillUpdatePayload, Body()],
+    user: UserDep,
+    storage: StorageDep,
+) -> SkillView:
+    _get_owned(agent_id, user, storage)
+    try:
+        out = svc.update_skill(
+            agent_id, name=name, description=payload.description, content=payload.content,
         )
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
@@ -700,10 +759,13 @@ def del_skill(
 def get_cron(agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep) -> CronListResponse:
     _get_owned(agent_id, user, storage)
     if not svc.cron_available():
-        return CronListResponse(available=False, items=[])
+        return CronListResponse(available=False, items=[], delivery_targets=[])
     return CronListResponse(
         available=True,
         items=[CronJobView(**j) for j in svc.list_cron(agent_id)],
+        delivery_targets=[
+            DeliveryTargetView(**t) for t in svc.list_cron_delivery_targets(agent_id)
+        ],
     )
 
 
@@ -718,7 +780,26 @@ def create_cron(
     try:
         svc.create_cron(
             agent_id, schedule=payload.schedule, prompt=payload.prompt,
-            name=payload.name, workdir=payload.workdir,
+            name=payload.name, workdir=payload.workdir, deliver=payload.deliver,
+        )
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+
+
+@router.put("/{agent_id}/settings/cron/{job_id}", status_code=204)
+def edit_cron(
+    agent_id: Annotated[str, Path()],
+    job_id: Annotated[str, Path()],
+    payload: Annotated[EditCronPayload, Body()],
+    user: UserDep,
+    storage: StorageDep,
+) -> None:
+    _get_owned(agent_id, user, storage)
+    try:
+        svc.edit_cron(
+            agent_id, job_id,
+            schedule=payload.schedule, prompt=payload.prompt,
+            name=payload.name, deliver=payload.deliver, workdir=payload.workdir,
         )
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
@@ -755,6 +836,17 @@ async def chat_history_view(
     return ChatHistoryResponse(messages=[ChatMessage(**m) for m in rows])
 
 
+async def _finalize_chat_history(job: chat_svc.ChatJob, session_key: str) -> None:
+    """Persist the final answer to chat history when the job completes, even if
+    the SSE client disconnected. Skips killed/superseded jobs (status != done),
+    so a reset never leaves a ghost reply behind."""
+    while job.snapshot()["status"] == "running":
+        await asyncio.sleep(0.5)
+    snap = job.snapshot()
+    if snap["status"] == "done" and snap["final"]:
+        await chat_history.append_message(session_key, role="assistant", content=snap["final"])
+
+
 @router.post("/{agent_id}/chat")
 async def chat_with_agent(
     agent_id: Annotated[str, Path()],
@@ -771,39 +863,65 @@ async def chat_with_agent(
         raise ApiError("INVALID_PAYLOAD", "workdir is required", status_code=400)
 
     session_key = _session_key(user, agent_id)
-    # Resume the existing session whenever this conversation already has turns
-    # (history is persisted, so this survives a backend restart). ``/reset``
-    # clears history → next turn starts a fresh session.
+    # Resume the existing session whenever this conversation already has turns.
+    # ``/reset`` clears history → next turn starts a fresh session.
     resume = len(await chat_history.list_messages(session_key)) > 0
     await chat_history.append_message(session_key, role="user", content=message)
 
+    try:
+        job = chat_svc.start_chat(
+            agent_id, message=message, workdir=workdir, resume=resume, session_key=session_key
+        )
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+
+    # Record the final answer independently of the SSE client's lifetime so a
+    # tab switch / disconnect still lands the reply in history (the status poll
+    # and next page load recover it).
+    _spawn_detached(_finalize_chat_history(job, session_key))
+
     async def _stream():
-        loop = asyncio.get_running_loop()
-
-        async def _answer() -> str:
-            # Detached from the SSE request (shield below): if the client
-            # disconnects mid-generation, this task still finishes and persists
-            # the assistant turn to chat_history, so the next page load recovers
-            # the real reply instead of a stale empty bubble.
-            text = await loop.run_in_executor(
-                _CHAT_EXECUTOR,
-                lambda: svc.chat_once(agent_id, message=message, workdir=workdir, resume=resume),
-            )
-            await chat_history.append_message(session_key, role="assistant", content=text)
-            return text
-
-        try:
-            answer = await asyncio.shield(_spawn_detached(_answer()))
-        except svc.HermesAgentError as exc:
-            err = {"error": str(exc)}
-            yield f"data: {json.dumps(err)}\n\n"
-            yield "data: [DONE]\n\n"
-            return
-        # Emit the answer as a single delta (hermes -z returns the final text).
-        yield f"data: {json.dumps({'delta': answer})}\n\n"
-        yield "data: [DONE]\n\n"
+        emitted = 0
+        last_counts: tuple[int, int, int] | None = None
+        while True:
+            snap = job.snapshot()
+            steps = snap["steps"]
+            for step in steps[emitted:]:
+                yield f"data: {json.dumps({'step': step})}\n\n"
+            emitted = len(steps)
+            prog = snap["progress"]
+            counts = (prog["toolCalls"], prog["apiCalls"], prog["messageCount"])
+            if counts != last_counts:
+                yield f"data: {json.dumps({'progress': prog})}\n\n"
+                last_counts = counts
+            if snap["status"] != "running":
+                if snap["status"] == "done":
+                    if snap["final"]:
+                        yield f"data: {json.dumps({'delta': snap['final']})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'error': snap['error'] or 'chat failed'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@router.get("/{agent_id}/chat/status")
+async def chat_status(
+    agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,
+) -> dict:
+    """Live turn state for reconnect (tab switch / refresh). ``status`` is
+    ``idle`` when no turn is tracked; otherwise the running/done/error job
+    snapshot (steps + progress + final)."""
+    _get_owned(agent_id, user, storage)
+    job = chat_svc.get_job(_session_key(user, agent_id))
+    if job is None:
+        return {
+            "status": "idle", "steps": [], "progress": None,
+            "final": "", "error": "", "startedAtMono": None,
+        }
+    return job.snapshot()
 
 
 @router.post("/{agent_id}/reset", status_code=204)
@@ -811,7 +929,11 @@ async def reset_chat(
     agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,
 ) -> None:
     _get_owned(agent_id, user, storage)
-    await chat_history.clear_messages(_session_key(user, agent_id))
+    session_key = _session_key(user, agent_id)
+    # Kill any in-flight turn FIRST so a "reset" can't leave a runaway hermes
+    # process that later appends a ghost reply into the cleared history.
+    chat_svc.kill_chat(session_key)
+    await chat_history.clear_messages(session_key)
 
 
 __all__ = ["router"]

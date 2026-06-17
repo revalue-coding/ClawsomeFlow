@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 
 from app.logging_setup import get_logger
+from app.services import subprocess_registry as _subproc_registry
 from app.services.hermes_agents import HermesUnavailable, hermes_executable
 
 logger = get_logger("services.hermes_dashboard")
@@ -89,8 +90,16 @@ def _wait_hermes(host: str, port: int, *, deadline: float) -> bool:
     return False
 
 
-def _spawn_dashboard(*, exe: str, host: str, port: int, skip_build: bool) -> subprocess.Popen:
-    argv = [exe, "dashboard", "--no-open", "--host", host, "--port", str(port)]
+def _spawn_dashboard(
+    *, exe: str, host: str, port: int, skip_build: bool, profile: str | None = None
+) -> subprocess.Popen:
+    # ``-p <profile>`` is a GLOBAL flag and must precede the ``dashboard``
+    # subcommand so the dashboard binds to that profile's HERMES_HOME (and thus
+    # shows that agent's sessions, not the root home's).
+    argv = [exe]
+    if profile:
+        argv += ["-p", profile]
+    argv += ["dashboard", "--no-open", "--host", host, "--port", str(port)]
     if skip_build:
         argv.append("--skip-build")
     return subprocess.Popen(  # noqa: S603
@@ -101,18 +110,32 @@ def _spawn_dashboard(*, exe: str, host: str, port: int, skip_build: bool) -> sub
     )
 
 
+# Profile-scoped dashboards we launched, keyed by profile id → (proc, port).
+# A foreign/root hermes on a port serves a *different* home, so we cannot reuse
+# it for a profile; we must track our own instance per profile.
+_PROFILE_DASHBOARDS: dict[str, tuple[subprocess.Popen, int]] = {}
+
+
 def ensure_hermes_dashboard_url(
     *,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     startup_timeout_sec: float = 120.0,
+    profile: str | None = None,
 ) -> str:
     """Start Hermes dashboard if needed; return the chat URL.
 
-    Reuses an already-running Hermes (confirmed via HTTP, on any scanned port).
-    Otherwise spawns one on the first free port in the scan range. Raises
-    :class:`HermesUnavailable` if the CLI is missing, every scanned port is held
-    by a foreign service, or the dashboard fails to come up in time.
+    With ``profile=None`` (root home): reuse any already-running Hermes dashboard
+    found on the scan range, else spawn one on the first free port.
+
+    With ``profile`` set: launch (and track) a dashboard scoped to that profile
+    (``hermes -p <id> dashboard``) on its own port, so the WebUI opens *that
+    agent's* sessions. A running root/foreign dashboard is never reused for a
+    profile (it serves a different home). Reuses our previously-tracked instance
+    for the same profile if it is still alive.
+
+    Raises :class:`HermesUnavailable` if the CLI is missing, every scanned port
+    is held by a foreign service, or the dashboard fails to come up in time.
     """
     exe = hermes_executable()
     if not exe:
@@ -120,17 +143,35 @@ def ensure_hermes_dashboard_url(
 
     candidates = [port + i for i in range(_PORT_SCAN_RANGE)]
 
-    # Reuse pass (no lock): return immediately if Hermes is already serving.
-    for cand in candidates:
-        if _classify(host, cand) == "hermes":
-            return dashboard_url(host=host, port=cand)
-
-    with _START_LOCK:
-        # Re-check under the lock (another request may have just started it).
+    if profile is None:
+        # Reuse pass (no lock): return immediately if Hermes is already serving.
         for cand in candidates:
             if _classify(host, cand) == "hermes":
                 return dashboard_url(host=host, port=cand)
+    else:
+        # Reuse our own tracked instance for this profile if still alive+serving.
+        tracked = _PROFILE_DASHBOARDS.get(profile)
+        if tracked is not None:
+            proc, tport = tracked
+            if proc.poll() is None and _classify(host, tport) == "hermes":
+                return dashboard_url(host=host, port=tport)
+            _PROFILE_DASHBOARDS.pop(profile, None)
 
+    with _START_LOCK:
+        if profile is None:
+            # Re-check under the lock (another request may have just started it).
+            for cand in candidates:
+                if _classify(host, cand) == "hermes":
+                    return dashboard_url(host=host, port=cand)
+        else:
+            tracked = _PROFILE_DASHBOARDS.get(profile)
+            if tracked is not None and tracked[0].poll() is None and (
+                _classify(host, tracked[1]) == "hermes"
+            ):
+                return dashboard_url(host=host, port=tracked[1])
+
+        # A profile dashboard must get its OWN port — only ``free`` ports are
+        # eligible (never reuse a port already serving some other home).
         free_port = next((c for c in candidates if _classify(host, c) == "free"), None)
         if free_port is None:
             raise HermesUnavailable(
@@ -144,16 +185,22 @@ def ensure_hermes_dashboard_url(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            proc = _spawn_dashboard(exe=exe, host=host, port=free_port, skip_build=skip_build)
+            proc = _spawn_dashboard(
+                exe=exe, host=host, port=free_port, skip_build=skip_build, profile=profile
+            )
             logger.info(
                 "hermes_dashboard_spawn",
                 host=host,
                 requested_port=port,
                 port=free_port,
                 skip_build=skip_build,
+                profile=profile or "",
                 pid=proc.pid,
             )
             if _wait_hermes(host, free_port, deadline=min(deadline, time.monotonic() + remaining)):
+                if profile is not None:
+                    _PROFILE_DASHBOARDS[profile] = (proc, free_port)
+                    _subproc_registry.register(proc)
                 return dashboard_url(host=host, port=free_port)
             if proc.poll() is not None and skip_build:
                 continue

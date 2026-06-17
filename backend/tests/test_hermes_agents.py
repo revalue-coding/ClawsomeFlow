@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -691,6 +692,46 @@ def test_write_skill_creates_and_lists(hermes_home: Path) -> None:
         svc.write_skill("agt", name="ok", content="   ")
 
 
+def test_update_skill_overwrites_existing(hermes_home: Path) -> None:
+    svc.write_skill("agt", name="my-skill", description="old", content="# old body")
+    out = svc.update_skill("agt", name="my-skill", description="new", content="# new body")
+    assert out["description"] == "new"
+    md = svc.read_skill("agt", "my-skill")
+    assert "# new body" in md
+    assert "# old body" not in md
+    assert "description: \"new\"" in md
+    listed = [s for s in svc.list_skills("agt") if s["name"] == "my-skill"]
+    assert listed and listed[0]["description"] == "new"
+
+
+def test_update_skill_requires_existing(hermes_home: Path) -> None:
+    with pytest.raises(svc.AgentNotFound):
+        svc.update_skill("agt", name="ghost", content="# x")
+
+
+def test_upsert_mcp_server_preserves_env_when_none(hermes_home: Path) -> None:
+    (hermes_home / "profiles" / "mcpagent").mkdir(parents=True)
+    svc.upsert_mcp_server(
+        "mcpagent", name="srv", transport="sse",
+        url="https://a.example/sse", environment="API_KEY=secret\nDEBUG=1",
+    )
+    # Edit with environment=None must keep the existing env block.
+    svc.upsert_mcp_server(
+        "mcpagent", name="srv", transport="http_sse",
+        url="https://b.example/mcp", environment=None,
+    )
+    listed = svc.list_mcp_servers("mcpagent")
+    assert listed[0]["url"] == "https://b.example/mcp"
+    assert listed[0]["transport"] == "http_sse"
+    assert listed[0]["env_keys"] == ["API_KEY", "DEBUG"]
+    # Edit with empty string clears env.
+    svc.upsert_mcp_server(
+        "mcpagent", name="srv", transport="http_sse",
+        url="https://b.example/mcp", environment="",
+    )
+    assert svc.list_mcp_servers("mcpagent")[0]["env_keys"] == []
+
+
 def test_api_list_empty(
     client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -942,6 +983,215 @@ def test_create_cron_passes_resolved_workdir(
         "--profile",
         "cron1",
     ]]
+
+
+def test_create_cron_passes_deliver_target(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+
+    svc.create_cron(
+        "cron1",
+        schedule="30m",
+        prompt="do",
+        deliver="telegram:8940342611",
+    )
+
+    assert calls == [[
+        "-p",
+        "cron1",
+        "cron",
+        "create",
+        "30m",
+        "do",
+        "--deliver",
+        "telegram:8940342611",
+        "--profile",
+        "cron1",
+    ]]
+
+
+def test_create_cron_omits_deliver_when_local(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+
+    svc.create_cron("cron1", schedule="30m", prompt="do", deliver="local")
+
+    assert calls == [[
+        "-p",
+        "cron1",
+        "cron",
+        "create",
+        "30m",
+        "do",
+        "--profile",
+        "cron1",
+    ]]
+
+
+def _write_cron_jobs(home: Path, agent_id: str, jobs: list[dict]) -> None:
+    cron_dir = home / "profiles" / agent_id / "cron"
+    cron_dir.mkdir(parents=True, exist_ok=True)
+    (cron_dir / "jobs.json").write_text(
+        json.dumps({"jobs": jobs}), encoding="utf-8"
+    )
+
+
+def test_list_cron_parses_jobs_json_one_entry_per_job(hermes_home: Path) -> None:
+    _write_cron_jobs(hermes_home, "cron1", [
+        {
+            "id": "abc123",
+            "name": "morning",
+            "schedule": {"kind": "cron", "expr": "0 9 * * *", "display": "0 9 * * *"},
+            "enabled": True,
+            "prompt": "say hi",
+            "deliver": "telegram",
+            "workdir": "/tmp/wd",
+            "next_run_at": "2026-06-18T09:00:00+08:00",
+            "last_run_at": "2026-06-17T09:00:00+08:00",
+            "last_status": "ok",
+            "paused_at": None,
+        },
+        {
+            "id": "def456",
+            "name": "weekly",
+            "schedule": {"expr": "0 18 * * 1"},
+            "enabled": True,
+            "prompt": "review",
+            "paused_at": "2026-06-17T00:00:00+08:00",
+        },
+    ])
+
+    jobs = svc.list_cron("cron1")
+
+    assert [j["id"] for j in jobs] == ["abc123", "def456"]
+    first = jobs[0]
+    assert first["name"] == "morning"
+    assert first["schedule"] == "0 9 * * *"
+    assert first["enabled"] is True
+    assert first["prompt"] == "say hi"
+    assert first["deliver"] == "telegram"
+    assert first["workdir"] == "/tmp/wd"
+    assert first["next_run"] == "2026-06-18T09:00:00+08:00"
+    assert first["last_run"] == "2026-06-17T09:00:00+08:00 ok"
+    # paused_at set => not enabled even though enabled flag is True
+    assert jobs[1]["enabled"] is False
+    assert jobs[1]["schedule"] == "0 18 * * 1"
+
+
+def test_list_cron_missing_file_returns_empty(hermes_home: Path) -> None:
+    assert svc.list_cron("cron1") == []
+
+
+def test_edit_cron_forwards_only_changed_fields(
+    hermes_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    wd = tmp_path / "edit-wd"
+    wd.mkdir()
+
+    svc.edit_cron(
+        "cron1", "abc123",
+        schedule="0 8 * * *", prompt="new prompt", name="renamed",
+        deliver="telegram", workdir=str(wd),
+    )
+
+    assert calls == [[
+        "-p", "cron1", "cron", "edit", "abc123",
+        "--schedule", "0 8 * * *",
+        "--prompt", "new prompt",
+        "--name", "renamed",
+        "--deliver", "telegram",
+        "--workdir", str(wd.resolve()),
+    ]]
+
+
+def test_edit_cron_skips_blank_fields_and_clears_workdir(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+
+    # Only schedule provided; workdir explicitly cleared with empty string.
+    svc.edit_cron("cron1", "abc123", schedule="30m", workdir="")
+
+    assert calls == [[
+        "-p", "cron1", "cron", "edit", "abc123",
+        "--schedule", "30m",
+        "--workdir", "",
+    ]]
+
+
+def test_edit_cron_noop_when_nothing_changes(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+
+    svc.edit_cron("cron1", "abc123")
+
+    assert calls == []
+
+
+def test_list_cron_delivery_targets_parses_status_and_send_list(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def _run(args, *, cwd=None, timeout=svc._CLI_TIMEOUT_SEC):  # noqa: ANN001
+        calls.append(list(args))
+        if args[-2:] == ["--list", "--json"] or args[-1:] == ["--json"]:
+            return 0, (
+                '{"platforms":{"telegram":["-100123"],"discord":[]}}'
+            ), ""
+        if args[-1:] == ["--all"]:
+            return 0, (
+                "◆ Messaging Platforms\n"
+                "  Telegram      ✓ configured (home: 8940342611)\n"
+                "  Discord       ✗ not configured\n"
+                "◆ Gateway Service\n"
+            ), ""
+        return 1, "", ""
+
+    monkeypatch.setattr(svc, "_run_hermes", _run)
+    targets = svc.list_cron_delivery_targets("cron1")
+
+    assert calls[0] == ["-p", "cron1", "send", "--list", "--json"]
+    assert calls[1] == ["-p", "cron1", "status", "--all"]
+    values = [t["value"] for t in targets]
+    assert values[0] == "local"
+    assert "telegram:-100123" in values
+    assert "telegram" in values
+    assert "telegram:8940342611" in values
+    assert "discord" not in values
+
+
+def test_api_get_cron_includes_delivery_targets(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="cron1", name="Cron", profile_root="x", created_by_user=owner)
+    )
+    monkeypatch.setattr(svc, "cron_available", lambda: True)
+    monkeypatch.setattr(svc, "list_cron", lambda _id: [])
+    monkeypatch.setattr(
+        svc,
+        "list_cron_delivery_targets",
+        lambda _id: [{"value": "local", "label": "local"}, {"value": "telegram", "label": "telegram"}],
+    )
+
+    r = client.get("/api/hermes/agents/cron1/settings/cron")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deliveryTargets"] == [
+        {"value": "local", "label": "local"},
+        {"value": "telegram", "label": "telegram"},
+    ]
 
 
 def test_api_create_and_list(
