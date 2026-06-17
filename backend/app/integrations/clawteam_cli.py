@@ -281,25 +281,37 @@ class ClawTeamCli:
             has_skill=bool(args.skills),
         )
 
-        # Two locks: per-main-repo serialises concurrent ``git worktree add``;
-        # per-team serialises tmux session/window creation.
+        # Two locks, acquired in a globally consistent order
+        # (``clawteam_main_repo`` → ``team_spawn``) so no spawn/merge can
+        # deadlock against another:
+        #   * ``clawteam_main_repo`` guards all git metadata on the main repo —
+        #     held continuously across branch prep (commit/checkout) AND the
+        #     ``git worktree add`` that ClawTeam runs inside ``clawteam spawn``,
+        #     so the worktree-creation lock is never released mid-flight.
+        #   * ``team_spawn`` only guards tmux session/window creation races, so
+        #     it is held for the minimum window: just the spawn invocation.
         async with self._locks.lock(f"clawteam_main_repo:{main_repo_for_lock}"):
-            async with self._locks.lock(f"team_spawn:{args.team}"):
-                if args.workspace and target_branch:
-                    current_branch, switched = await _ensure_repo_on_target_branch(
+            # Prep the main repo for EVERY worktree-creating spawn (workspace=True),
+            # whether or not a target branch is requested. ``_ensure_repo_on_target_branch``
+            # auto-commits any pending changes ("csflow auto commit") so the new
+            # worktree branches off a committed state, and — when a target branch is
+            # given — guarantees the switch succeeds before the worktree is built.
+            if args.workspace:
+                current_branch, switched = await _ensure_repo_on_target_branch(
+                    repo=args.repo,
+                    target_branch=target_branch,
+                    env=env,
+                )
+                if switched:
+                    self._log.info(
+                        "spawn_repo_branch_switched",
                         repo=args.repo,
-                        target_branch=target_branch,
-                        env=env,
+                        from_branch=current_branch,
+                        to_branch=target_branch,
+                        team=args.team,
+                        agent_name=args.agent_name,
                     )
-                    if switched:
-                        self._log.info(
-                            "spawn_repo_branch_switched",
-                            repo=args.repo,
-                            from_branch=current_branch,
-                            to_branch=target_branch,
-                            team=args.team,
-                            agent_name=args.agent_name,
-                        )
+            async with self._locks.lock(f"team_spawn:{args.team}"):
                 exit_code, stdout, stderr = await _run(argv, env=env)
 
         logging_setup.spawn_cmd_executed(
@@ -936,47 +948,93 @@ async def _run_in_cwd(
     return proc.returncode or 0, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
 
 
-async def _ensure_repo_on_target_branch(
+_AUTO_COMMIT_MESSAGE = "csflow auto commit"
+
+
+async def _auto_commit_if_dirty(
     *,
     repo: str,
-    target_branch: str,
     env: dict[str, str],
-) -> tuple[str, bool]:
-    target = (target_branch or "").strip()
-    if not target:
-        return "", False
-    current_argv = ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]
-    code, out, err = await _run_in_cwd(current_argv, cwd=repo, env=env)
-    if code != 0:
-        raise CliInvocationError(
-            argv=current_argv,
-            exit_code=code,
-            stderr=err,
-            stdout=out,
-        )
-    current = out.strip()
-    if current == target:
-        return current, False
+) -> bool:
+    """Stage + commit any pending changes in ``repo`` (``csflow auto commit``).
 
+    Returns ``True`` if a commit was created, ``False`` if the tree was already
+    clean. Raises :class:`CliInvocationError` if any git step fails — the caller
+    is about to create a worktree off this repo, so a half-known state must fail
+    loudly rather than silently lose work.
+
+    ``--no-verify`` is intentional: this is a scheduler-side bookkeeping commit
+    whose only job is to capture the working tree before a ``git worktree add``;
+    a repo-local pre-commit hook must not be able to block the spawn.
+    """
     status_argv = ["git", "status", "--porcelain"]
     status_code, status_out, status_err = await _run_in_cwd(status_argv, cwd=repo, env=env)
     if status_code != 0:
         raise CliInvocationError(
-            argv=status_argv,
-            exit_code=status_code,
-            stderr=status_err,
-            stdout=status_out,
+            argv=status_argv, exit_code=status_code, stderr=status_err, stdout=status_out,
         )
-    if status_out.strip():
+    if not status_out.strip():
+        return False  # clean tree — nothing to commit
+
+    add_argv = ["git", "add", "-A"]
+    add_code, add_out, add_err = await _run_in_cwd(add_argv, cwd=repo, env=env)
+    if add_code != 0:
         raise CliInvocationError(
-            argv=["git", "checkout", target],
-            exit_code=1,
-            stderr=(
-                f"cannot switch repo {repo!r} from branch {current!r} to {target!r}: "
-                "repository has uncommitted changes; please commit or stash first"
-            ),
-            stdout=status_out,
+            argv=add_argv, exit_code=add_code, stderr=add_err, stdout=add_out,
         )
+
+    # After ``git add -A`` the index may still be empty (e.g. only ignored files
+    # changed). ``git diff --cached --quiet`` → rc 0 == nothing staged, rc 1 ==
+    # staged changes present; any other rc is a real error.
+    staged_argv = ["git", "diff", "--cached", "--quiet"]
+    staged_code, staged_out, staged_err = await _run_in_cwd(staged_argv, cwd=repo, env=env)
+    if staged_code == 0:
+        return False  # nothing actually staged — skip empty commit
+    if staged_code != 1:
+        raise CliInvocationError(
+            argv=staged_argv, exit_code=staged_code, stderr=staged_err, stdout=staged_out,
+        )
+
+    commit_argv = ["git", "commit", "--no-verify", "-m", _AUTO_COMMIT_MESSAGE]
+    commit_code, commit_out, commit_err = await _run_in_cwd(commit_argv, cwd=repo, env=env)
+    if commit_code != 0:
+        raise CliInvocationError(
+            argv=commit_argv, exit_code=commit_code, stderr=commit_err, stdout=commit_out,
+        )
+    return True
+
+
+async def _ensure_repo_on_target_branch(
+    *,
+    repo: str,
+    target_branch: str | None,
+    env: dict[str, str],
+) -> tuple[str, bool]:
+    """Prepare ``repo`` for a ``git worktree add``.
+
+    Before a worktree is created we (1) auto-commit any pending changes so the
+    new worktree branches off a committed state that includes the latest work,
+    and (2) — when ``target_branch`` is given — guarantee the main repo is on
+    that branch. Returns ``(previous_branch, switched)``.
+
+    All scheduler-side commits use the message ``csflow auto commit``.
+    """
+    target = (target_branch or "").strip()
+
+    # Current branch (best-effort): symbolic-ref fails on a detached HEAD — that
+    # is fine, we still commit and (if a target is given) check it out below.
+    current_argv = ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]
+    code, out, _err = await _run_in_cwd(current_argv, cwd=repo, env=env)
+    current = out.strip() if code == 0 else ""
+
+    # 1. Commit pending work first: a dirty tree would otherwise block the
+    #    checkout, and the worktree must capture the latest state.
+    await _auto_commit_if_dirty(repo=repo, env=env)
+
+    # 2. No switch needed when there is no target branch (e.g. OpenClaw, which
+    #    relies on session-id not branches) or we are already on it.
+    if not target or current == target:
+        return current, False
 
     exists_argv = ["git", "show-ref", "--verify", f"refs/heads/{target}"]
     exists_code, exists_out, exists_err = await _run_in_cwd(exists_argv, cwd=repo, env=env)
@@ -994,6 +1052,7 @@ async def _ensure_repo_on_target_branch(
             stdout=exists_out,
         )
 
+    # Tree is clean now (step 1), so the checkout is safe.
     checkout_argv = ["git", "checkout", target]
     checkout_code, checkout_out, checkout_err = await _run_in_cwd(checkout_argv, cwd=repo, env=env)
     if checkout_code != 0:
@@ -1003,6 +1062,10 @@ async def _ensure_repo_on_target_branch(
             stderr=checkout_err,
             stdout=checkout_out,
         )
+
+    # Defensive: commit anything that surfaced on the target branch (normally a
+    # no-op after a clean checkout).
+    await _auto_commit_if_dirty(repo=repo, env=env)
     return current, True
 
 

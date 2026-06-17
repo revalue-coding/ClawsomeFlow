@@ -184,7 +184,12 @@ async def test_ensure_repo_on_target_branch_no_switch(monkeypatch: pytest.Monkey
     )
     assert current == "main"
     assert switched is False
-    assert seen == [["git", "symbolic-ref", "--quiet", "--short", "HEAD"]]
+    # Already on target with a clean tree → only HEAD + status probes, no commit.
+    assert seen == [
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        ["git", "status", "--porcelain"],
+    ]
+    assert not any(a[:2] == ["git", "commit"] for a in seen)
 
 
 @pytest.mark.asyncio
@@ -238,28 +243,88 @@ async def test_ensure_repo_on_target_branch_switches_clean_repo(
     )
     assert current == "dev"
     assert switched is True
-    assert seen[-1] == ["git", "checkout", "main"]
+    assert ["git", "checkout", "main"] in seen
+    # Clean tree → no auto-commit on either branch.
+    assert not any(a[:2] == ["git", "commit"] for a in seen)
 
 
 @pytest.mark.asyncio
-async def test_ensure_repo_on_target_branch_rejects_dirty_repo(
+async def test_ensure_repo_on_target_branch_auto_commits_dirty_repo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A dirty main repo is auto-committed ("csflow auto commit"), then switched."""
+    seen: list[list[str]] = []
+    status_calls = {"n": 0}
+
     async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):
         del cwd, env
+        seen.append(argv)
+        if argv[:3] == ["git", "symbolic-ref", "--quiet"]:
+            return 0, "dev\n", ""
+        if argv[:3] == ["git", "status", "--porcelain"]:
+            status_calls["n"] += 1
+            # Dirty before the switch, clean after the checkout.
+            return (0, " M a.py\n", "") if status_calls["n"] == 1 else (0, "", "")
+        if argv[:2] == ["git", "add"]:
+            return 0, "", ""
+        if argv[:3] == ["git", "diff", "--cached"]:
+            return 1, "", ""  # rc 1 == staged changes present
+        if argv[:2] == ["git", "commit"]:
+            return 0, "", ""
+        if argv[:3] == ["git", "show-ref", "--verify"]:
+            return 0, "ok", ""
+        if argv[:2] == ["git", "checkout"]:
+            return 0, "Switched", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(cli_mod, "_run_in_cwd", _fake_run_in_cwd)
+    current, switched = await _ensure_repo_on_target_branch(
+        repo="/tmp/repo",
+        target_branch="main",
+        env={},
+    )
+    assert current == "dev"
+    assert switched is True
+    assert ["git", "commit", "--no-verify", "-m", "csflow auto commit"] in seen
+    assert ["git", "add", "-A"] in seen
+    # Commit happens BEFORE the checkout (so the switch is never blocked).
+    assert seen.index(["git", "commit", "--no-verify", "-m", "csflow auto commit"]) < seen.index(
+        ["git", "checkout", "main"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_repo_on_target_branch_auto_commits_without_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenClaw-style spawn (no target branch): commit the dirty tree, no checkout."""
+    seen: list[list[str]] = []
+
+    async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):
+        del cwd, env
+        seen.append(argv)
         if argv[:3] == ["git", "symbolic-ref", "--quiet"]:
             return 0, "dev\n", ""
         if argv[:3] == ["git", "status", "--porcelain"]:
             return 0, " M a.py\n", ""
+        if argv[:2] == ["git", "add"]:
+            return 0, "", ""
+        if argv[:3] == ["git", "diff", "--cached"]:
+            return 1, "", ""
+        if argv[:2] == ["git", "commit"]:
+            return 0, "", ""
         return 0, "", ""
 
     monkeypatch.setattr(cli_mod, "_run_in_cwd", _fake_run_in_cwd)
-    with pytest.raises(CliInvocationError, match="uncommitted changes"):
-        await _ensure_repo_on_target_branch(
-            repo="/tmp/repo",
-            target_branch="main",
-            env={},
-        )
+    current, switched = await _ensure_repo_on_target_branch(
+        repo="/tmp/repo",
+        target_branch=None,
+        env={},
+    )
+    assert current == "dev"
+    assert switched is False
+    assert ["git", "commit", "--no-verify", "-m", "csflow auto commit"] in seen
+    assert not any(a[:2] == ["git", "checkout"] for a in seen)
 
 
 def test_cli_env_prefers_request_scoped_user() -> None:

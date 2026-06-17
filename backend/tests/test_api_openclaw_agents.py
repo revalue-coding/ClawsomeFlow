@@ -970,13 +970,8 @@ async def test_chat_non_stream_returns_chat_payload(
         pytest.skip("git not available")
     await svc_agents.commit_agent(svc_agents.CommitInput(id="chat1", name="C"), user="alice")
     captured: dict[str, Any] = {}
-    commit_probe: dict[str, str] = {}
 
     from app.api import openclaw_agents as router_mod
-
-    def _fake_precommit(*, agent):
-        commit_probe["agent_id"] = agent.id
-        commit_probe["workspace"] = agent.workspace_path
 
     async def _fake_cli_chat_completion(
         *,
@@ -997,7 +992,6 @@ async def test_chat_non_stream_returns_chat_payload(
         )
         return {"id": "x", "choices": [{"message": {"content": "hi user"}}]}
 
-    monkeypatch.setattr(router_mod, "_best_effort_pre_chat_workspace_commit", _fake_precommit)
     monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
 
     r = client.post(
@@ -1008,46 +1002,6 @@ async def test_chat_non_stream_returns_chat_payload(
     assert r.json()["choices"][0]["message"]["content"] == "hi user"
     assert captured["agent_id"] == "chat1"
     assert captured["message"] == "hi"
-    assert commit_probe["agent_id"] == "chat1"
-    assert commit_probe["workspace"].endswith("/chat1/workspace")
-
-
-@pytest.mark.asyncio
-async def test_chat_precommit_failure_is_ignored(
-    client: TestClient,
-    fake_openclaw_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    if not _has_git():
-        pytest.skip("git not available")
-    await svc_agents.commit_agent(svc_agents.CommitInput(id="chat-precommit-fail", name="C"), user="alice")
-
-    from app.api import openclaw_agents as router_mod
-
-    def _broken_precommit(*, agent):
-        del agent
-        raise RuntimeError("simulated git failure")
-
-    async def _fake_cli_chat_completion(
-        *,
-        agent_id: str,
-        session_key: str,
-        message: str,
-        model_override: str | None,
-        timeout_sec: float = 120.0,
-    ) -> dict[str, Any]:
-        del agent_id, session_key, model_override, timeout_sec
-        return {"id": "x", "choices": [{"message": {"content": f"echo:{message}"}}]}
-
-    monkeypatch.setattr(router_mod, "_best_effort_pre_chat_workspace_commit", _broken_precommit)
-    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
-
-    r = client.post(
-        "/api/openclaw/agents/chat-precommit-fail/chat",
-        json={"messages": [{"role": "user", "content": "hello"}], "stream": False},
-    )
-    assert r.status_code == 200
-    assert r.json()["choices"][0]["message"]["content"] == "echo:hello"
 
 
 @pytest.mark.asyncio

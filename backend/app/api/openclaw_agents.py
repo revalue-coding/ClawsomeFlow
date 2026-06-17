@@ -84,8 +84,6 @@ _CHAT_SESSION_REVISIONS: dict[tuple[str, str], int] = {}
 _PENDING_AGENT_CREATE_CANCELLATIONS: dict[str, asyncio.Event] = {}
 _REQUESTED_AGENT_CREATE_CANCELLATIONS: set[str] = set()
 _REQUESTED_AGENT_CREATE_CANCELLATION_TTL_SEC = 120.0
-_PRE_CHAT_WORKSPACE_COMMIT_MESSAGE = "[csflow] pre-chat workspace checkpoint"
-_PRE_CHAT_GIT_TIMEOUT_SEC = 8.0
 _OPENCLAW_RUNTIME_OP_TIMEOUT_SEC = 30.0
 _ENTROPY_CRON_NAME_PREFIX = "csflow-entropy-management-"
 _SKILL_ENTRY_FILENAME = "SKILL.md"
@@ -1479,8 +1477,7 @@ def _build_create_self_define_prompt(
         "After completion, reply with:\n"
         "1) Which files you modified.\n"
         "2) Key changes for each file.\n"
-        "3) Final summary of your responsibility boundaries.\n\n"
-        "Do not run git commit; the system will commit after your reply."
+        "3) Final summary of your responsibility boundaries."
     )
 
 
@@ -2736,118 +2733,6 @@ def _pick_latest_user_message(messages: list[dict[str, Any]]) -> dict[str, str]:
     )
 
 
-def _run_git_in_workspace(
-    *,
-    workspace: FsPath,
-    argv: list[str],
-) -> subprocess.CompletedProcess[str] | None:
-    try:
-        return subprocess.run(
-            argv,
-            cwd=str(workspace),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_PRE_CHAT_GIT_TIMEOUT_SEC,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-
-def _best_effort_pre_chat_workspace_commit(*, agent: OpenclawAgent) -> None:
-    """Best-effort ``git add``/``git commit`` before a chat turn.
-
-    Any failure here must NOT block user chat; we only log warnings.
-    """
-    workspace = FsPath(agent.workspace_path).expanduser().resolve(strict=False)
-    if not workspace.exists() or not workspace.is_dir():
-        logger.warning(
-            "chat_precommit_workspace_missing",
-            agent_id=agent.id,
-            workspace=str(workspace),
-        )
-        return
-
-    repo_check = _run_git_in_workspace(
-        workspace=workspace,
-        argv=["git", "rev-parse", "--is-inside-work-tree"],
-    )
-    if repo_check is None:
-        logger.warning(
-            "chat_precommit_repo_check_failed",
-            agent_id=agent.id,
-            workspace=str(workspace),
-        )
-        return
-    if repo_check.returncode != 0:
-        logger.warning(
-            "chat_precommit_not_git_repo",
-            agent_id=agent.id,
-            workspace=str(workspace),
-            detail=(repo_check.stderr or repo_check.stdout or "").strip()[:300],
-        )
-        return
-
-    add_proc = _run_git_in_workspace(workspace=workspace, argv=["git", "add", "-A"])
-    if add_proc is None:
-        logger.warning(
-            "chat_precommit_git_add_failed",
-            agent_id=agent.id,
-            workspace=str(workspace),
-        )
-        return
-    if add_proc.returncode != 0:
-        logger.warning(
-            "chat_precommit_git_add_nonzero",
-            agent_id=agent.id,
-            workspace=str(workspace),
-            detail=(add_proc.stderr or add_proc.stdout or "").strip()[:300],
-        )
-        return
-
-    staged = _run_git_in_workspace(
-        workspace=workspace,
-        argv=["git", "diff", "--cached", "--quiet"],
-    )
-    if staged is None:
-        logger.warning(
-            "chat_precommit_git_diff_failed",
-            agent_id=agent.id,
-            workspace=str(workspace),
-        )
-        return
-    if staged.returncode == 0:
-        # Nothing staged after `git add -A`; skip commit quietly.
-        return
-    if staged.returncode != 1:
-        logger.warning(
-            "chat_precommit_git_diff_nonzero",
-            agent_id=agent.id,
-            workspace=str(workspace),
-            detail=(staged.stderr or staged.stdout or "").strip()[:300],
-        )
-        return
-
-    commit_proc = _run_git_in_workspace(
-        workspace=workspace,
-        argv=["git", "commit", "-m", _PRE_CHAT_WORKSPACE_COMMIT_MESSAGE],
-    )
-    if commit_proc is None:
-        logger.warning(
-            "chat_precommit_git_commit_failed",
-            agent_id=agent.id,
-            workspace=str(workspace),
-        )
-        return
-    if commit_proc.returncode != 0:
-        logger.warning(
-            "chat_precommit_git_commit_nonzero",
-            agent_id=agent.id,
-            workspace=str(workspace),
-            detail=(commit_proc.stderr or commit_proc.stdout or "").strip()[:300],
-        )
-
-
 def _extract_chunk_text(chunk: dict[str, Any]) -> str:
     """Extract text from one OpenAI-compatible chunk/response."""
     choice = chunk.get("choices", [{}])[0]
@@ -3332,18 +3217,9 @@ async def chat_with_agent(
     storage: StorageDep,
 ):
     # Verify the agent exists (and is ours) BEFORE we open a bridge.
-    row = _ensure_chat_target_access(agent_id, user, storage)
-    try:
-        # Runs git on every chat turn — offload so a busy chat tab doesn't
-        # stall the rest of the UI.
-        await asyncio.to_thread(_best_effort_pre_chat_workspace_commit, agent=row)
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning(
-            "chat_precommit_unexpected_error",
-            agent_id=row.id,
-            error=str(exc),
-        )
-
+    _ensure_chat_target_access(agent_id, user, storage)
+    # NOTE: the workspace is intentionally NOT auto-committed before a chat turn.
+    # Committing chat-driven workspace changes is the agent's own responsibility.
     session_key = _session_key(user, agent_id)
     incoming = [m.model_dump(mode="python") for m in payload.messages]
     turn = _pick_latest_user_message(incoming)
