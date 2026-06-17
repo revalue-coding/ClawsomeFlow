@@ -705,6 +705,14 @@ const zh = {
     },
   },
   chat: {
+    // 共享的实时进度条（OpenClaw + Hermes 单 Agent 对话）。
+    progress: {
+      title: "运行进度",
+      elapsed: "已用时 {{seconds}}s",
+      counters: "{{tools}} 次工具调用 · {{api}} 次模型调用",
+      tool: "调用工具 {{name}}",
+      working: "处理中…",
+    },
     title: "OpenClaw Agent",
     pickerTitle: "在这里，和 Agent 畅聊！",
     pageNote:
@@ -902,15 +910,6 @@ const zh = {
     workdir: "工作目录",
     messagePlaceholder: "给你的 Hermes Agent 发消息…",
     chatError: "对话失败：{{message}}",
-    chat: {
-      progress: {
-        title: "运行进度",
-        elapsed: "已用时 {{seconds}}s",
-        counters: "{{tools}} 次工具调用 · {{api}} 次模型调用",
-        tool: "调用工具 {{name}}",
-        working: "处理中…",
-      },
-    },
     create: {
       title: "创建 Hermes Agent",
       name: "名称",

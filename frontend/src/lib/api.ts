@@ -528,14 +528,15 @@ export interface ChatHistoryMessage {
   content: string;
 }
 
-/** One progress entry for an in-flight Hermes chat turn (formatted via i18n). */
-export interface HermesChatStep {
+/** One progress entry for an in-flight chat turn (formatted via i18n). Shared by
+ *  the OpenClaw and Hermes single-agent chat pages. */
+export interface ChatStep {
   kind: "tool" | "info";
   name?: string;
   seq: number;
 }
 
-export interface HermesChatProgress {
+export interface ChatProgress {
   toolCalls: number;
   apiCalls: number;
   messageCount: number;
@@ -543,10 +544,10 @@ export interface HermesChatProgress {
 }
 
 /** Live turn state for reconnect after a tab switch / refresh. */
-export interface HermesChatStatus {
+export interface ChatStatus {
   status: "idle" | "running" | "done" | "error";
-  steps: HermesChatStep[];
-  progress: HermesChatProgress | null;
+  steps: ChatStep[];
+  progress: ChatProgress | null;
   final: string;
   error: string;
   startedAtMono: number | null;
@@ -1097,6 +1098,13 @@ export const api = {
       "GET",
       `/api/openclaw/agents/${id}/chat-history`,
     ),
+  getOpenclawChatStatus: (id: string) =>
+    request<ChatStatus>(
+      "GET",
+      `/api/openclaw/agents/${id}/chat/status`,
+      undefined,
+      { cache: "no-store" },
+    ),
   resetOpenclawAgentChat: (id: string) =>
     request<void>("POST", `/api/openclaw/agents/${id}/reset`),
 
@@ -1249,7 +1257,7 @@ export const api = {
       `/api/hermes/agents/${id}/chat-history`,
     ),
   getHermesChatStatus: (id: string) =>
-    request<HermesChatStatus>(
+    request<ChatStatus>(
       "GET",
       `/api/hermes/agents/${id}/chat/status`,
       undefined,

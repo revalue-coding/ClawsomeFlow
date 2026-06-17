@@ -59,6 +59,8 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
     monkeypatch.setenv("CSFLOW_DISABLE_BOARD", "1")
     monkeypatch.setenv("CSFLOW_DISABLE_CLAWTEAM_STACK_CHECK", "1")
     monkeypatch.setenv("CSFLOW_DISABLE_RUN_SCHEDULE_WORKER", "1")
+    # Don't fork real `openclaw sessions tail/list` progress followers in tests.
+    monkeypatch.setenv("CSFLOW_DISABLE_OPENCLAW_CHAT_FOLLOWER", "1")
     _reset_all_singletons()
     yield home
     _reset_all_singletons()

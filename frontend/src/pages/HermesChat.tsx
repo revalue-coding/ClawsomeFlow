@@ -26,6 +26,7 @@ import {
   AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
 import { ChatBubble } from "@/components/ChatBubble";
+import { ChatStepTrail } from "@/components/ChatStepTrail";
 import { DesktopIcon, ExternalLinkIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import {
   clearChatHistory,
@@ -41,8 +42,8 @@ import {
   isNetworkError,
   type ChatHistoryMessage,
   type HermesAgentSummary,
-  type HermesChatProgress,
-  type HermesChatStep,
+  type ChatProgress,
+  type ChatStep,
   type HermesCronJob,
   type HermesCronDeliveryTarget,
   type HermesModelSetting,
@@ -1061,49 +1062,6 @@ interface ChatMsg {
   content: string;
 }
 
-/** Live step-level progress for an in-flight turn: elapsed + counters + the
- *  ordered list of tool calls surfaced from the Hermes session store. */
-function ChatStepTrail({
-  steps,
-  progress,
-}: {
-  steps: HermesChatStep[];
-  progress: HermesChatProgress | null;
-}) {
-  const { t } = useTranslation();
-  const elapsed = Math.round(progress?.elapsedSec ?? 0);
-  return (
-    <div className="rounded-lg border border-brand-200 bg-brand-50/60 px-3 py-2 text-xs text-ink-600">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-medium text-brand-700">
-        <span>{t("hermes.chat.progress.title")}</span>
-        <span className="text-ink-500">{t("hermes.chat.progress.elapsed", { seconds: String(elapsed) })}</span>
-        {progress && (
-          <span className="text-ink-500">
-            {t("hermes.chat.progress.counters", {
-              tools: String(progress.toolCalls),
-              api: String(progress.apiCalls),
-            })}
-          </span>
-        )}
-      </div>
-      {steps.length > 0 && (
-        <ul className="mt-1.5 space-y-0.5">
-          {steps.slice(-8).map((s) => (
-            <li key={s.seq} className="flex items-center gap-1.5">
-              <span className="text-brand-400">›</span>
-              <span className="font-mono">
-                {s.kind === "tool" && s.name
-                  ? t("hermes.chat.progress.tool", { name: s.name })
-                  : t("hermes.chat.progress.working")}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 function ChatRoom({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const { alert } = useDialog();
@@ -1139,8 +1097,8 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const [recovering, setRecovering] = useState(false);
   // Live step-level progress for the in-flight turn (tool calls + counters).
   // Transient: recoverable from /chat/status while running, irrelevant once done.
-  const [steps, setSteps] = useState<HermesChatStep[]>([]);
-  const [progress, setProgress] = useState<HermesChatProgress | null>(null);
+  const [steps, setSteps] = useState<ChatStep[]>([]);
+  const [progress, setProgress] = useState<ChatProgress | null>(null);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
   const [showSettings, setShowSettings] = useSessionBackedModalFlag(`hermes:${agentId}:settings:open`);
@@ -1373,8 +1331,8 @@ function ChatRoom({ agentId }: { agentId: string }) {
             const obj = JSON.parse(data) as {
               delta?: string;
               error?: string;
-              step?: HermesChatStep;
-              progress?: HermesChatProgress;
+              step?: ChatStep;
+              progress?: ChatProgress;
             };
             if (obj.error) {
               streamErr = obj.error;

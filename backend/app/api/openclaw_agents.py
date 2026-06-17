@@ -60,6 +60,7 @@ from app.models import OpenclawAgent, iso_utc
 from app.operations import get_op_registry
 from app.scheduler.naming import openclaw_user_chat_session_id
 from app.services import openclaw_agents as svc
+from app.services import openclaw_chat as chat_progress
 from app.services import openclaw_chat_history as chat_history
 from app.services import subprocess_registry as _subproc_registry
 from app.storage import StorageBackend, get_storage
@@ -3031,6 +3032,9 @@ async def _chat_completion_via_cli(
             # a bare proc.kill() left them alive → cancel-create took ~20s).
             start_new_session=True,
         )
+        # Record the in-flight turn process so a reset / new send can kill it
+        # (no-op unless a chat-turn progress entry is registered for this key).
+        chat_progress.set_agent_proc(session_key, proc)
         cancel_event = _agent_create_cancellation_event(agent_id)
         if cancel_event is None:
             try:
@@ -3154,6 +3158,18 @@ async def _chat_completion_via_cli(
         )
 
 
+# Strong refs to detached completion tasks so a client disconnect doesn't GC the
+# task before it records the reply into history + the turn registry.
+_DETACHED_CHAT_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_detached_chat(coro) -> asyncio.Task:
+    task = asyncio.ensure_future(coro)
+    _DETACHED_CHAT_TASKS.add(task)
+    task.add_done_callback(_DETACHED_CHAT_TASKS.discard)
+    return task
+
+
 async def _chat_via_cli(
     *,
     agent_id: str,
@@ -3161,35 +3177,73 @@ async def _chat_via_cli(
     session_key: str,
     turn: dict[str, str],
 ):
-    response = await _chat_completion_via_cli(
-        agent_id=agent_id,
-        session_key=session_key,
-        message=turn["content"],
-        model_override=payload.model_override,
-        timeout_sec=_chat_cli_timeout_seconds(),
-    )
-    assistant_text = _normalize_assistant_text(_extract_chunk_text(response))
-    await chat_history.append_message(
-        session_key,
-        role="assistant",
-        content=assistant_text,
-    )
+    # Register a progress turn + start the trajectory follower BEFORE running the
+    # agent, so step-level progress streams live (the agent CLI itself only
+    # returns the final answer).
+    chat_progress.start_progress(agent_id, session_key)
+
     if not payload.stream:
+        try:
+            response = await _chat_completion_via_cli(
+                agent_id=agent_id,
+                session_key=session_key,
+                message=turn["content"],
+                model_override=payload.model_override,
+                timeout_sec=_chat_cli_timeout_seconds(),
+            )
+        except Exception:
+            chat_progress.finish_progress(session_key, status="error")
+            raise
+        assistant_text = _normalize_assistant_text(_extract_chunk_text(response))
+        await chat_history.append_message(session_key, role="assistant", content=assistant_text)
+        chat_progress.finish_progress(session_key, status="done", final=assistant_text)
         return response
 
+    ct = chat_progress.get_turn(session_key)
+
+    async def _run_completion() -> None:
+        # Detached from the SSE request: a client disconnect still lands the
+        # reply in history + the turn registry (the status poll recovers it).
+        try:
+            response = await _chat_completion_via_cli(
+                agent_id=agent_id,
+                session_key=session_key,
+                message=turn["content"],
+                model_override=payload.model_override,
+                timeout_sec=_chat_cli_timeout_seconds(),
+            )
+            text = _normalize_assistant_text(_extract_chunk_text(response))
+            await chat_history.append_message(session_key, role="assistant", content=text)
+            chat_progress.finish_progress(session_key, status="done", final=text)
+        except ApiError as exc:
+            chat_progress.finish_progress(session_key, status="error", error=exc.message)
+        except Exception as exc:  # pragma: no cover - defensive
+            chat_progress.finish_progress(session_key, status="error", error=str(exc))
+
+    _spawn_detached_chat(_run_completion())
+
     async def _event_stream():
-        if assistant_text != _NO_TEXT_REPLY_MARKER:
-            chunk = {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": assistant_text},
-                        "finish_reason": None,
-                    }
-                ]
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-        yield "data: [DONE]\n\n"
+        emitted = 0
+        while True:
+            snap = ct.snapshot() if ct is not None else {"status": "done", "steps": [], "final": "", "error": ""}
+            for step in snap["steps"][emitted:]:
+                yield f"data: {json.dumps({'step': step})}\n\n"
+            emitted = len(snap["steps"])
+            if snap["status"] != "running":
+                if snap["status"] == "done":
+                    text = snap["final"]
+                    if text and text != _NO_TEXT_REPLY_MARKER:
+                        chunk = {
+                            "choices": [
+                                {"index": 0, "delta": {"content": text}, "finish_reason": None}
+                            ]
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                else:
+                    yield f"data: {json.dumps({'error': snap['error'] or 'chat failed'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            await asyncio.sleep(0.4)
 
     return StreamingResponse(
         _event_stream(),
@@ -3207,6 +3261,22 @@ async def chat_history_view(
     _ensure_chat_target_access(agent_id, user, storage)
     rows = await chat_history.list_messages(_session_key(user, agent_id))
     return ChatHistoryResponse(messages=[ChatMessage(**m) for m in rows])
+
+
+@router.get("/{agent_id}/chat/status")
+async def chat_status(
+    agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,
+) -> dict:
+    """Live turn state for reconnect (tab switch / refresh). ``idle`` when no
+    turn is tracked; otherwise the running/done/error snapshot (steps + final)."""
+    _ensure_chat_target_access(agent_id, user, storage)
+    turn = chat_progress.get_turn(_session_key(user, agent_id))
+    if turn is None:
+        return {
+            "status": "idle", "steps": [], "progress": None,
+            "final": "", "error": "", "startedAtMono": None,
+        }
+    return turn.snapshot()
 
 
 @router.post("/{agent_id}/chat")
@@ -3245,6 +3315,9 @@ async def reset_chat_session(
     """Reset the per-(user, agent) session by sending exactly ``/reset``."""
     _ensure_chat_target_access(agent_id, user, storage)
     session_key = _session_key(user, agent_id)
+    # Stop any in-flight turn (agent + trajectory follower) before rotating the
+    # session, so a reset can't leave a runaway turn writing to the old session.
+    chat_progress.kill_turn(session_key)
     should_fallback_rotate = False
     try:
         await _chat_completion_via_cli(

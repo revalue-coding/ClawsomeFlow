@@ -714,6 +714,14 @@ const en = {
     },
   },
   chat: {
+    // Shared live-turn progress trail (OpenClaw + Hermes single-agent chat).
+    progress: {
+      title: "Progress",
+      elapsed: "elapsed {{seconds}}s",
+      counters: "{{tools}} tool calls · {{api}} model calls",
+      tool: "Called tool {{name}}",
+      working: "Working…",
+    },
     title: "OpenClaw Agent",
     pickerTitle: "Chat with Agents Here!",
     pageNote:
@@ -915,15 +923,6 @@ const en = {
     workdir: "Working directory",
     messagePlaceholder: "Message your Hermes agent…",
     chatError: "Chat failed: {{message}}",
-    chat: {
-      progress: {
-        title: "Progress",
-        elapsed: "elapsed {{seconds}}s",
-        counters: "{{tools}} tool calls · {{api}} model calls",
-        tool: "Called tool {{name}}",
-        working: "Working…",
-      },
-    },
     create: {
       title: "Create a Hermes agent",
       name: "Name",

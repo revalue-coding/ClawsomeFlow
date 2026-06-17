@@ -46,9 +46,13 @@ logger = get_logger("services.hermes_chat")
 # Hard ceiling on a single turn; matches the historical chat timeout. The poll
 # thread kills the process group if a turn exceeds this.
 _CHAT_TIMEOUT_SEC = 1800.0
-# Cadence of the session-export progress poll. Each export spawns a short hermes
-# subprocess, so keep it modest (a single turn at a time is active).
-_POLL_INTERVAL_SEC = 3.0
+# Cadence of the session-export progress poll. hermes has no live ``--follow``
+# stream for one-shot turns (``hermes -z`` suppresses logging and ``sessions``
+# has no tail), so we poll ``sessions export`` for near-real-time progress. Each
+# export spawns a short hermes subprocess; 1.5s is snappy yet fine for the single
+# active turn at a time (kept tighter than a true push stream's 0s, looser than a
+# busy-loop). Bump up if CPU from repeated CLI spawns becomes a concern.
+_POLL_INTERVAL_SEC = 1.5
 # Bound the retained step list so a pathological turn can't grow it unbounded.
 _MAX_STEPS = 400
 

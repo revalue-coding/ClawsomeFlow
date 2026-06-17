@@ -19,6 +19,8 @@ import { useTranslation } from "react-i18next";
 import {
   ApiError,
   isNetworkError,
+  type ChatProgress,
+  type ChatStep,
   ExternalOpenclawImportCandidate,
   ExternalOpenclawImportFailure,
   ExternalOpenclawImportResult,
@@ -41,6 +43,7 @@ import {
 } from "@/components/ui";
 import { useDialog } from "@/components/dialog";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
+import { ChatStepTrail } from "@/components/ChatStepTrail";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import {
   AgentManagementHeader,
@@ -1640,6 +1643,10 @@ function ChatRoom({
   // (the answer is still landing in server history). Drives a pending bubble
   // without persisting an empty placeholder to the cache.
   const [recovering, setRecovering] = useState(false);
+  // Live step-level progress for the in-flight turn (transient; recoverable
+  // from /chat/status while running).
+  const [steps, setSteps] = useState<ChatStep[]>([]);
+  const [progress, setProgress] = useState<ChatProgress | null>(null);
   const [resetting, setResetting] = useState(false);
   const [teamEditOpen, setTeamEditOpen] = useSessionBackedModalFlag(
     `openclaw-chat:room:${agentId}:team-edit-open`,
@@ -1726,18 +1733,16 @@ function ChatRoom({
     };
   }, [agentId]);
 
-  // Recover a reply whose stream was detached by a tab switch: poll server
-  // history until the assistant turn lands (the backend persists it even after
-  // a client disconnect), then adopt it. Bounded so a genuinely answerless turn
-  // doesn't poll forever.
+  // Reconnect to a turn whose SSE stream was detached (tab switch / refresh):
+  // poll GET /chat/status and keep going *as long as the server says running*
+  // (no fixed cap — a turn can run many minutes), surfacing the live step trail.
+  // On done/error/idle, adopt the final answer (from history, which the backend
+  // persists even after a disconnect) and stop.
   useEffect(() => {
     if (!recovering) return;
     let cancelled = false;
     let timer: number | undefined;
-    let tries = 0;
-    const MAX_TRIES = 30; // ~60s at 2s intervals
-    const tick = async () => {
-      tries += 1;
+    const adoptFinalFromHistory = async () => {
       try {
         const hist = await api.getOpenclawAgentChatHistory(agentId);
         if (cancelled) return;
@@ -1749,6 +1754,25 @@ function ChatRoom({
         if (last && last.role === "assistant" && last.content.trim() !== "") {
           setMessages(server);
           saveChatHistory(agentId, server);
+        }
+      } catch {
+        /* leave the transcript as-is */
+      }
+    };
+    const tick = async () => {
+      try {
+        const st = await api.getOpenclawChatStatus(agentId);
+        if (cancelled) return;
+        if (st.status === "running") {
+          setSteps(st.steps);
+          setProgress(st.progress);
+        } else {
+          setSteps([]);
+          setProgress(null);
+          await adoptFinalFromHistory();
+          if (st.status === "error" && st.error && st.error !== "cancelled") {
+            setActionError(st.error);
+          }
           setRecovering(false);
           return;
         }
@@ -1756,13 +1780,9 @@ function ChatRoom({
         /* transient — keep polling */
       }
       if (cancelled) return;
-      if (tries >= MAX_TRIES) {
-        setRecovering(false);
-        return;
-      }
       timer = window.setTimeout(() => void tick(), 2000);
     };
-    timer = window.setTimeout(() => void tick(), 2000);
+    timer = window.setTimeout(() => void tick(), 1200);
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
@@ -1792,6 +1812,8 @@ function ChatRoom({
     if (!text || streaming) return;
     setActionError(null);
     setRecovering(false); // a fresh send supersedes any in-flight recovery poll
+    setSteps([]);
+    setProgress(null);
     const turnMessage: Message = { role: "user", content: text };
     const next: Message[] = [...messages, turnMessage];
     setMessages(next);
@@ -1827,6 +1849,17 @@ function ChatRoom({
           if (payload === "[DONE]") continue;
           try {
             const chunk = JSON.parse(payload);
+            if (chunk.step) {
+              const step = chunk.step as ChatStep;
+              setSteps((prev) =>
+                prev.some((s) => s.seq === step.seq) ? prev : [...prev, step],
+              );
+              continue;
+            }
+            if (chunk.progress) {
+              setProgress(chunk.progress as ChatProgress);
+              continue;
+            }
             const delta = extractDelta(chunk);
             if (delta) {
               setMessages((m) => {
@@ -1854,6 +1887,8 @@ function ChatRoom({
       });
     } finally {
       setStreaming(false);
+      setSteps([]);
+      setProgress(null);
     }
   }
 
@@ -1864,6 +1899,8 @@ function ChatRoom({
     try {
       await api.resetOpenclawAgentChat(agentId);
       setRecovering(false);
+      setSteps([]);
+      setProgress(null);
       setMessages([]);
       setInput("");
       clearChatHistory(agentId);
@@ -2073,6 +2110,9 @@ function ChatRoom({
               noTextReply={t("chat.noTextReply")}
             />
           ))}
+          {(streaming || recovering) && (progress || steps.length > 0) && (
+            <ChatStepTrail steps={steps} progress={progress} />
+          )}
         </div>
         <form
           onSubmit={onSend}
