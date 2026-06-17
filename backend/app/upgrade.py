@@ -559,6 +559,20 @@ def run_upgrade(
         report.repair_warnings.append(f"ai-decompose workdir init: {exc}")
         logger.warning("upgrade_ai_decompose_workdir_failed", error=str(exc))
 
+    # 0d. opencode temporary agents: interactive auto-approval is config-only
+    # (no CLI flag), so seed ``permission: allow`` into opencode's global config
+    # when opencode is installed. Idempotent + non-destructive (never clobbers a
+    # user-set ``permission``). On the upgrade path so upgrade-only users who use
+    # opencode converge with fresh deploys.
+    try:
+        from app.integrations.opencode_config import ensure_opencode_permission_allow
+
+        if ensure_opencode_permission_allow():
+            logger.info("upgrade_opencode_permission_seeded")
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"opencode config init: {exc}")
+        logger.warning("upgrade_opencode_config_failed", error=str(exc))
+
     # 0. Editable-source frontend build (optional).
     if include_frontend_build:
         status, detail = _build_frontend_bundle_if_editable()

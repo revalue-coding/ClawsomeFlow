@@ -536,6 +536,12 @@ function LeaderCell({
         return "bg-sky-50 text-sky-700 border-sky-200";
       case "gemini":
         return "bg-emerald-50 text-emerald-700 border-emerald-200";
+      case "kimi":
+        return "bg-rose-50 text-rose-700 border-rose-200";
+      case "qwen":
+        return "bg-indigo-50 text-indigo-700 border-indigo-200";
+      case "opencode":
+        return "bg-teal-50 text-teal-700 border-teal-200";
       default:
         return "bg-ink-50 text-ink-700 border-ink-200";
     }

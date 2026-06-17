@@ -76,10 +76,17 @@ _DECOMPOSE_CANCEL_RESET_TIMEOUT_SEC = 30.0
 _INFLIGHT_DISPATCH_TASKS: dict[str, asyncio.Task[None]] = {}
 _START_REQUEST_LOCK = asyncio.Lock()
 
+# NOTE: nanobot is supported at the runtime layer (see tmux_live._KIND_TO_CMD)
+# but temporarily NOT exposed to users, so it is intentionally absent here (the
+# AI decomposer won't pick it as a leader) and from _TEMP_AGENT_PLATFORM_BINARIES.
 _NON_OPENCLAW_SUPPORTED_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.claude,
     AgentKind.codex,
     AgentKind.cursor,
+    AgentKind.gemini,
+    AgentKind.kimi,
+    AgentKind.qwen,
+    AgentKind.opencode,
     AgentKind.hermes,
 })
 
@@ -98,6 +105,11 @@ _TEMP_AGENT_PLATFORM_BINARIES: tuple[tuple[AgentKind, str], ...] = (
     (AgentKind.claude, "claude"),
     (AgentKind.codex, "codex"),
     (AgentKind.cursor, "agent"),
+    (AgentKind.gemini, "gemini"),
+    (AgentKind.kimi, "kimi"),
+    (AgentKind.qwen, "qwen"),
+    (AgentKind.opencode, "opencode"),
+    # nanobot intentionally omitted — temporarily not user-exposed.
     (AgentKind.hermes, "hermes"),
 )
 
@@ -300,7 +312,10 @@ Invariants (the server rejects violations):
 1. Exactly one task has `isLeaderSummary: true`, owned by `{leader_agent_id}`.
 2. The leader owns no other (non-summary) task.
 3. Task ids and agent ids are unique; `dependsOn` references resolve; the DAG is acyclic.
-4. Owner kinds limited to `openclaw`, `claude`, `codex`, `cursor`, or `hermes`.
+4. Owner kinds limited to `openclaw`, `hermes`, or a temporary-agent platform
+   advertised in section 1 (`claude`, `codex`, `cursor`, `gemini`, `kimi`,
+   `qwen`, `opencode`). Only assign temporary platforms listed there as
+   available on this host.
 5. Every agent in `agents` is referenced by at least one task.
 6. All task `subject` and `description` text is in {result_language}.
 
@@ -709,6 +724,27 @@ def _non_openclaw_dispatch_argv(
             "-p",
             message,
         ]
+    # gemini: `-p <prompt>` is the non-interactive one-shot mode. Use the
+    # non-deprecated `--approval-mode yolo` (gemini rejects `--yolo` together with
+    # `--approval-mode`). Run cwd comes from the subprocess working directory.
+    if kind == AgentKind.gemini:
+        return ["gemini", "--approval-mode", "yolo", "-p", message]
+    # qwen (gemini-cli fork): positional prompt is one-shot (`-p` is deprecated);
+    # `--approval-mode yolo` auto-approves.
+    if kind == AgentKind.qwen:
+        return ["qwen", "--approval-mode", "yolo", message]
+    # kimi: `--print -p <prompt>` is the headless print mode (auto-approves);
+    # `--yolo` is belt-and-suspenders.
+    if kind == AgentKind.kimi:
+        return ["kimi", "--yolo", "--print", "-p", message]
+    # opencode: `run <prompt>` is non-interactive; `--dangerously-skip-permissions`
+    # (available on the `run` subcommand) auto-approves every tool call.
+    if kind == AgentKind.opencode:
+        return ["opencode", "run", "--dangerously-skip-permissions", message]
+    # nanobot: `nanobot agent -m <prompt>` runs one-shot (no permission flag —
+    # nanobot auto-executes).
+    if kind == AgentKind.nanobot:
+        return ["nanobot", "agent", "-m", message]
     if kind == AgentKind.hermes:
         # Bind to a managed Hermes profile (== persistent agent id) so the
         # decomposition runs under that agent's own identity/memory. A temporary

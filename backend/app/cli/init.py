@@ -147,6 +147,17 @@ def init(
     cfg = ensure_api_token_initialised(cfg)
     cfg_mod.save_config(cfg)
     console.print(f"[green]✓[/green] Wrote config: [dim]{cfg_path}[/dim]")
+
+    # opencode temporary agents need ``permission: allow`` in opencode's global
+    # config (interactive mode has no permission-bypass flag). Idempotent +
+    # non-destructive + gated on opencode being installed. ``csflow start`` also
+    # re-runs this via run_upgrade, so this is just the fresh-deploy convergence.
+    try:
+        from app.integrations.opencode_config import ensure_opencode_permission_allow
+
+        ensure_opencode_permission_allow()
+    except Exception:  # pragma: no cover - defensive; never block init
+        pass
     console.print(
         f"[green]✓[/green] Data home: [dim]{home_path}[/dim]"
     )

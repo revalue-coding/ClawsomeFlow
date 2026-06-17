@@ -53,7 +53,18 @@ import {
   useSessionBackedState,
 } from "@/lib/sessionState";
 
-type NonOpenclawOwnerKind = "claude" | "codex" | "cursor" | "hermes";
+// NOTE: nanobot is intentionally NOT listed — it is supported at the runtime
+// layer but temporarily not exposed to users (no UI option). Re-add it here (and
+// to NEW_OWNER_KINDS / ownerKindLabel / i18n / task_decompose / deps) to surface.
+type NonOpenclawOwnerKind =
+  | "claude"
+  | "codex"
+  | "cursor"
+  | "gemini"
+  | "kimi"
+  | "qwen"
+  | "opencode"
+  | "hermes";
 type OwnerKind = "openclaw" | NonOpenclawOwnerKind;
 type OwnerMode = "existing" | "new";
 type DeploymentMode = "local" | "server";
@@ -184,7 +195,16 @@ function blankRow(): TaskRow {
 // THIS flow (worker tasks only; the leader never reuses an in-flow worker agent
 // and so gets the input alone).
 const PERSISTENT_OWNER_KINDS: OwnerKind[] = ["openclaw", "hermes"];
-const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = ["claude", "codex", "cursor", "hermes"];
+const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = [
+  "claude",
+  "codex",
+  "cursor",
+  "gemini",
+  "kimi",
+  "qwen",
+  "opencode",
+  "hermes",
+];
 
 /** Detect whether the SPA is served to a non-loopback host. The native
  *  directory picker only works when backend and browser run on the same
@@ -335,8 +355,26 @@ function ownerKindLabel(
   if (kind === "openclaw") return t("flowEditor.taskFields.ownerKindOpenclaw");
   if (kind === "codex") return t("flowEditor.taskFields.ownerKindCodex");
   if (kind === "cursor") return t("flowEditor.taskFields.ownerKindCursor");
+  if (kind === "gemini") return t("flowEditor.taskFields.ownerKindGemini");
+  if (kind === "kimi") return t("flowEditor.taskFields.ownerKindKimi");
+  if (kind === "qwen") return t("flowEditor.taskFields.ownerKindQwen");
+  if (kind === "opencode") return t("flowEditor.taskFields.ownerKindOpencode");
   if (kind === "hermes") return t("flowEditor.taskFields.ownerKindHermes");
   return t("flowEditor.taskFields.ownerKindClaude");
+}
+
+// All owner kinds the editor understands. Used to coerce an arbitrary
+// backend/proposal `kind` string into a known OwnerKind (unknown → "claude").
+const ALL_OWNER_KINDS: readonly OwnerKind[] = [
+  "openclaw",
+  ...NEW_OWNER_KINDS,
+];
+
+function toOwnerKind(raw: unknown): OwnerKind {
+  const k = String(raw ?? "").trim();
+  return (ALL_OWNER_KINDS as readonly string[]).includes(k)
+    ? (k as OwnerKind)
+    : "claude";
 }
 
 /** Editable combobox for the temporary-agent name field. A single input that
@@ -4549,15 +4587,7 @@ function proposalToRows(
   for (const a of proposal.agents) {
     const aid = String(a.id ?? "").trim();
     if (!aid) continue;
-    const kind: OwnerKind = a.kind === "openclaw"
-      ? "openclaw"
-      : a.kind === "codex"
-      ? "codex"
-      : a.kind === "cursor"
-      ? "cursor"
-      : a.kind === "hermes"
-      ? "hermes"
-      : "claude";
+    const kind: OwnerKind = toOwnerKind(a.kind);
     const repo = String(a.repo ?? "");
     const targetBranch = String(
       a.targetBranch ?? a.target_branch ?? DEFAULT_TARGET_BRANCH,
@@ -4627,16 +4657,7 @@ function specToRows(spec: FlowSpec): TaskRow[] {
   for (const a of spec.agents) byId.set(a.id, a);
   return spec.tasks.map((tk) => {
     const a = byId.get(tk.ownerAgentId);
-    const ownerKind: OwnerKind =
-      a?.kind === "openclaw"
-        ? "openclaw"
-        : a?.kind === "codex"
-        ? "codex"
-        : a?.kind === "cursor"
-        ? "cursor"
-        : a?.kind === "hermes"
-        ? "hermes"
-        : "claude";
+    const ownerKind: OwnerKind = toOwnerKind(a?.kind);
     return {
       rowKey: newRowKey(),
       id: tk.id,

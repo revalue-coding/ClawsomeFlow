@@ -172,6 +172,31 @@ def test_run_upgrade_unmarked_home_writes_marker(
     assert report.redeploy_performed is True
 
 
+def test_run_upgrade_seeds_opencode_permission_when_installed(
+    tmp_clawsomeflow_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """Upgrade-path parity: opencode's global config gets permission:allow."""
+    import json
+
+    from app.integrations import opencode_config as oc
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+    # Pretend opencode is installed; point its config at a temp XDG home.
+    monkeypatch.setattr(oc.shutil, "which", lambda _name: "/usr/bin/opencode")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+
+    report = upgrade.run_upgrade(config=fake_config, target_version="1.2.3")
+    assert report.ok is True
+
+    cfg_file = tmp_path / "cfg" / "opencode" / "opencode.json"
+    assert cfg_file.exists()
+    assert json.loads(cfg_file.read_text())["permission"] == "allow"
+
+
 def test_run_upgrade_skips_old_migrations(
     tmp_clawsomeflow_home: Path,
     monkeypatch: pytest.MonkeyPatch,

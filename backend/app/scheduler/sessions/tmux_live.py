@@ -65,23 +65,37 @@ _CODEX_TUI_OVERRIDES: tuple[str, ...] = (
 )
 
 
-# Map AgentKind → (binary command, native --resume command).
-# Adjust as new TUI-CLI agents land in ClawTeam's NativeCliAdapter coverage.
+# Map AgentKind → (fresh-spawn command, native --resume command).
 #
-# IMPORTANT — do NOT hardcode the per-CLI "skip permissions / bypass sandbox"
-# flag here for any CLI that ClawTeam's DirectCliAdapter already injects under
-# ``--skip-permissions`` (which our spawn path always passes). ClawTeam appends:
-#   claude → --dangerously-skip-permissions (only when NOT root)
-#   codex  → --dangerously-bypass-approvals-and-sandbox
-#   gemini/kimi/qwen/opencode → --yolo
-# Repeating those produces a duplicate argv. codex is parsed by clap, which
-# hard-errors ("the argument '--dangerously-bypass-approvals-and-sandbox'
-# cannot be used multiple times"); claude's parser merely tolerates the dupe.
-# We therefore only carry flags ClawTeam does NOT inject:
-#   claude → --permission-mode bypassPermissions (root-safe; ClawTeam adds the
-#            dangerous flag for us on non-root, and skips it on root where
-#            claude would reject it)
-#   cursor (`agent`) / hermes → their own bypass flags (ClawTeam injects none)
+# Two permission-flag strategies coexist here (see _SELF_PERMISSION_KINDS):
+#
+# (A) ClawTeam-injected (claude/codex): we pass ``--skip-permissions`` and let
+#     ClawTeam's NativeCliAdapter append the bypass flag (claude →
+#     --dangerously-skip-permissions only when NOT root; codex →
+#     --dangerously-bypass-approvals-and-sandbox). We therefore must NOT repeat
+#     those here (codex's clap parser hard-errors on a duplicate). We only carry
+#     flags ClawTeam does NOT inject (claude → --permission-mode bypassPermissions,
+#     which is also root-safe).
+#
+# (B) Self-controlled (cursor/hermes + the five temporary CLIs below): we carry
+#     the EXACT permission flag ourselves and pass ``--no-skip-permissions`` so
+#     ClawTeam injects nothing. Required because ClawTeam's ``--yolo`` injection
+#     is wrong for current CLI versions (verified against installed binaries):
+#       gemini 0.46 → ``--yolo`` and ``--approval-mode`` HARD-CONFLICT, so we use
+#                     the non-deprecated ``--approval-mode yolo``; resume is
+#                     ``--resume latest`` (gemini has NO ``--continue``).
+#       qwen 0.18   → gemini fork: ``--approval-mode yolo``; ``--continue`` only
+#                     works when ``--chat-recording`` was set at spawn, so we add
+#                     it to both fresh and resume.
+#       kimi 1.47   → ``--yolo``; resume ``--continue``.
+#       opencode 1.17 → has NO ``--yolo`` (rejects unknown top-level flags → spawn
+#                     would exit 1); interactive auto-approval is config-only
+#                     (``"permission": "allow"`` written by opencode_config), so we
+#                     carry no flag. Resume ``--continue``.
+#       nanobot     → ``nanobot agent``; no permission flag (auto-executes). No
+#                     ``--continue``; resumed via a stable ``-s`` (injected per
+#                     agent in __init__) which also isolates each agent's session
+#                     (the default ``cli:direct`` would collide across agents).
 _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
     AgentKind.claude:   (
         ["claude", "--permission-mode", "bypassPermissions"],
@@ -95,14 +109,33 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
         ["agent", "--force", "--approve-mcps", "--sandbox", "disabled"],
         ["agent", "--force", "--approve-mcps", "--sandbox", "disabled", "--continue"],
     ),
-    AgentKind.gemini:   (["gemini"],   ["gemini", "--continue"]),
-    AgentKind.kimi:     (["kimi"],     ["kimi", "--continue"]),
-    AgentKind.qwen:     (["qwen"],     ["qwen", "--continue"]),
+    AgentKind.gemini:   (
+        ["gemini", "--approval-mode", "yolo"],
+        ["gemini", "--approval-mode", "yolo", "--resume", "latest"],
+    ),
+    AgentKind.qwen:     (
+        ["qwen", "--approval-mode", "yolo", "--chat-recording"],
+        ["qwen", "--approval-mode", "yolo", "--chat-recording", "--continue"],
+    ),
+    AgentKind.kimi:     (["kimi", "--yolo"], ["kimi", "--yolo", "--continue"]),
     AgentKind.opencode: (["opencode"], ["opencode", "--continue"]),
     AgentKind.pi:       (["pi"],       ["pi", "--continue"]),
-    AgentKind.nanobot:  (["nanobot"],  ["nanobot", "--continue"]),
+    # nanobot: runtime mapping kept ready, but the platform is temporarily NOT
+    # exposed to users (absent from the Flow editor + AI decomposer + deps probe).
+    AgentKind.nanobot:  (["nanobot", "agent"], ["nanobot", "agent"]),
     AgentKind.hermes:   (["hermes", "--yolo"],   ["hermes", "--yolo", "-c"]),
 }
+
+# Kinds where ClawsomeFlow carries the permission flag itself and must tell
+# ClawTeam NOT to inject one (strategy B above). Passed as
+# ``skip_permissions=False`` to spawn_fresh/spawn_resume.
+_SELF_PERMISSION_KINDS: frozenset[AgentKind] = frozenset({
+    AgentKind.gemini,
+    AgentKind.qwen,
+    AgentKind.kimi,
+    AgentKind.opencode,
+    AgentKind.nanobot,
+})
 
 class UnsupportedAgentKind(Exception):
     """Raised when this session class can't host the requested agent kind."""
@@ -151,8 +184,25 @@ class TmuxLiveSession(WorkerSession):
                 # Temporary Hermes agents have NO managed profile → no ``-p``.
                 self._spawn_cmd += ["-p", agent.id]
                 self._resume_cmd += ["-p", agent.id]
+            if agent.kind == AgentKind.nanobot:
+                # nanobot keys sessions by ``-s`` (default ``cli:direct``), NOT by
+                # cwd. Inject a stable, per-agent session id so (1) concurrent
+                # nanobot agents don't share one conversation, and (2) a crash
+                # resume reattaches to the same session instead of starting over.
+                session_id = f"{self.team_name}-{agent.id}"
+                self._spawn_cmd += ["-s", session_id]
+                self._resume_cmd += ["-s", session_id]
 
     # ── concrete state-machine actions ───────────────────────────────
+
+    def _skip_permissions(self) -> bool:
+        """Whether ClawTeam should inject its per-CLI permission-bypass flag.
+
+        False for kinds that carry the exact flag themselves (see
+        _SELF_PERMISSION_KINDS) — passing both would duplicate/conflict (gemini)
+        or fail outright (opencode rejects ClawTeam's ``--yolo``).
+        """
+        return self.agent.kind not in _SELF_PERMISSION_KINDS
 
     def _resolve_profile(self) -> str | None:
         """ClawTeam runtime profile to apply at spawn.
@@ -182,6 +232,7 @@ class TmuxLiveSession(WorkerSession):
             command=self._spawn_cmd,
             profile=self._resolve_profile(),
             skills=(),  # explicitly NO skills (no clawteam, no opt-ins)
+            skip_permissions=self._skip_permissions(),
         )
         # Wait for the CLI to finish booting before any dispatch.
         ok = await wait_tui_ready(self.tmux_target, timeout_sec=self._ready_timeout)
@@ -265,6 +316,7 @@ class TmuxLiveSession(WorkerSession):
             resume_command=command,
             profile=self._resolve_profile(),
             skills=(),
+            skip_permissions=self._skip_permissions(),
         )
         ok = await wait_tui_ready(self.tmux_target, timeout_sec=self._ready_timeout)
         if ok:

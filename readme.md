@@ -98,14 +98,14 @@ From a sentence to a shipped result. You stay in charge of the goal; ClawsomeFlo
 | Agent | Kind | Runtime | Status |
 |---|---|---|---|
 | **OpenClaw** | `openclaw` | TUI | ⭐ Deeply adapted |
+| **Hermes** | `hermes` | TUI | ✅ Full support |
 | **Claude Code** | `claude` | TUI | ✅ Full support |
 | **Codex** | `codex` | TUI | ✅ Full support |
-| **Gemini CLI** | `gemini` | TUI | Testing|
 | **Cursor** | `cursor` | TUI | ✅ Full support |
-| **Hermes** | `hermes` | TUI | ✅ Full support |
+| **OpenCode** | `opencode` | TUI | Testing |
+| **Gemini CLI** | `gemini` | TUI | Testing|
 | **Kimi CLI** | `kimi` | TUI | Testing |
 | **Qwen Code** | `qwen` | TUI | Testing |
-| **OpenCode** | `opencode` | TUI | Testing |
 | **nanobot** | `nanobot` | TUI | Testing |
 
 ---

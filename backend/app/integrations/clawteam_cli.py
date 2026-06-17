@@ -196,6 +196,7 @@ class ClawTeamCli:
         profile: str | None = None,
         skills: Sequence[str] = (),
         workspace: bool = True,
+        skip_permissions: bool = True,
     ) -> SpawnResult:
         """Fresh ``clawteam spawn`` (creates worktree). Enforces anti-loop defences.
 
@@ -203,11 +204,19 @@ class ClawTeamCli:
         ④ (dispatch context block) is
         the responsibility of the caller composing the ``runtime_inject``
         ``summary`` argument (template enforced by :mod:`app.scheduler.prompts`).
+
+        ``skip_permissions`` controls whether ClawTeam injects its per-CLI
+        permission-bypass flag (claude → ``--dangerously-skip-permissions``,
+        gemini/kimi/qwen/opencode → ``--yolo``, …). Callers that carry the exact
+        flag themselves (e.g. gemini needs ``--approval-mode yolo`` which CONFLICTS
+        with ClawTeam's ``--yolo``; opencode rejects ``--yolo`` outright) pass
+        ``False`` to take full control via ``command``.
         """
         return await self._spawn(_SpawnArgs(
             backend=backend, command=list(command), team=team,
             agent_name=agent_name, repo=repo, workspace=workspace,
             profile=profile, agent_type=agent_type, skills=list(skills),
+            skip_permissions=skip_permissions,
         ), main_repo_for_lock=repo, target_branch=target_branch)
 
     async def spawn_resume(
@@ -221,6 +230,7 @@ class ClawTeamCli:
         agent_type: str = "general-purpose",
         profile: str | None = None,
         skills: Sequence[str] = (),
+        skip_permissions: bool = True,
     ) -> SpawnResult:
         """Resume re-spawn after a crash.
 
@@ -238,6 +248,7 @@ class ClawTeamCli:
             backend=backend, command=list(resume_command), team=team,
             agent_name=agent_name, repo=existing_worktree, workspace=False,
             profile=profile, agent_type=agent_type, skills=list(skills),
+            skip_permissions=skip_permissions,
             # Recovery path: replace stale runtime records if ClawTeam still
             # thinks this agent is running.
             extra_flags=["--replace"],

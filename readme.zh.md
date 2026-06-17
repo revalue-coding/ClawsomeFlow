@@ -97,14 +97,14 @@ ClawsomeFlow继承了Clawteam如下特色：
 | Agent | Kind | 运行形态 | 状态 |
 |---|---|---|---|
 | **OpenClaw** | `openclaw` | TUI | ⭐ 深度适配 |
+| **Hermes** | `hermes` | TUI | ✅ 完整支持 |
 | **Claude Code** | `claude` | TUI | ✅ 完整支持 |
 | **Codex** | `codex` | TUI | ✅ 完整支持 |
-| **Gemini CLI** | `gemini` | TUI | Testing |
 | **Cursor** | `cursor` | TUI | ✅ 完整支持 |
-| **Hermes** | `hermes` | TUI | ✅ 完整支持 |
+| **OpenCode** | `opencode` | TUI | Testing |
+| **Gemini CLI** | `gemini` | TUI | Testing |
 | **Kimi CLI** | `kimi` | TUI | Testing |
 | **Qwen Code** | `qwen` | TUI | Testing |
-| **OpenCode** | `opencode` | TUI | Testing |
 | **nanobot** | `nanobot` | TUI | Testing |
 
 ---

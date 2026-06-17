@@ -508,6 +508,11 @@ _NON_OPENCLAW_AGENT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ("claude", "Claude Code", "claude"),
     ("codex", "Codex", "codex"),
     ("cursor", "Cursor", "agent"),
+    ("gemini", "Gemini CLI", "gemini"),
+    ("kimi", "Kimi CLI", "kimi"),
+    ("qwen", "Qwen Code", "qwen"),
+    ("opencode", "OpenCode", "opencode"),
+    # nanobot intentionally omitted — temporarily not user-exposed.
     ("hermes", "Hermes", "hermes"),
 )
 
