@@ -39,6 +39,8 @@ _NEW_KINDS = [
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
+    AgentKind.qoder,
+    AgentKind.codebuddy,
     AgentKind.nanobot,
 ]
 
@@ -48,6 +50,8 @@ _USER_EXPOSED_KINDS = [
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
+    AgentKind.qoder,
+    AgentKind.codebuddy,
 ]
 
 
@@ -72,6 +76,15 @@ def test_kind_to_cmd_spawn_and_resume() -> None:
     assert _KIND_TO_CMD[AgentKind.nanobot] == (
         ["nanobot", "agent"],
         ["nanobot", "agent"],
+    )
+    # qoder/codebuddy are Claude-style (note qoder's underscore mode value).
+    assert _KIND_TO_CMD[AgentKind.qoder] == (
+        ["qodercli", "--permission-mode", "bypass_permissions"],
+        ["qodercli", "--permission-mode", "bypass_permissions", "--continue"],
+    )
+    assert _KIND_TO_CMD[AgentKind.codebuddy] == (
+        ["codebuddy", "--permission-mode", "bypassPermissions"],
+        ["codebuddy", "--permission-mode", "bypassPermissions", "--continue"],
     )
 
 
@@ -153,6 +166,14 @@ def test_new_platform_headless_dispatch_commands() -> None:
     assert _non_openclaw_dispatch_argv(kind=AgentKind.nanobot, message="m") == [
         "nanobot", "agent", "-m", "m",
     ]
+    assert _non_openclaw_dispatch_argv(kind=AgentKind.qoder, message="m") == [
+        "qodercli", "--permission-mode", "bypass_permissions",
+        "--dangerously-skip-permissions", "-p", "m",
+    ]
+    assert _non_openclaw_dispatch_argv(kind=AgentKind.codebuddy, message="m") == [
+        "codebuddy", "--permission-mode", "bypassPermissions",
+        "--dangerously-skip-permissions", "-p", "m",
+    ]
 
 
 # ── opencode global-config seeding ───────────────────────────────────
@@ -202,3 +223,75 @@ def test_opencode_config_skipped_when_not_installed(tmp_path, monkeypatch) -> No
     # Without force and with opencode "absent", do nothing.
     assert oc.ensure_opencode_permission_allow() is False
     assert not (tmp_path / "opencode").exists()
+
+
+# ── Qoder / CodeBuddy folder-trust seeding ───────────────────────────
+
+
+def test_codebuddy_trust_all_seeded(tmp_path, monkeypatch) -> None:
+    import json
+
+    from app.integrations import temp_agent_trust as tat
+
+    monkeypatch.setattr(tat.Path, "home", classmethod(lambda cls: tmp_path))
+    assert tat.ensure_codebuddy_trust_all(force=True) is True
+    data = json.loads((tmp_path / ".codebuddy" / "settings.json").read_text())
+    assert data["trustAll"] is True
+    # Idempotent.
+    assert tat.ensure_codebuddy_trust_all(force=True) is False
+
+
+def test_codebuddy_trust_all_preserves_user_value(tmp_path, monkeypatch) -> None:
+    import json
+
+    from app.integrations import temp_agent_trust as tat
+
+    monkeypatch.setattr(tat.Path, "home", classmethod(lambda cls: tmp_path))
+    p = tmp_path / ".codebuddy" / "settings.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"trustAll": False, "model": "x"}))
+    assert tat.ensure_codebuddy_trust_all(force=True) is False
+    data = json.loads(p.read_text())
+    assert data["trustAll"] is False  # not clobbered
+    assert data["model"] == "x"
+
+
+def test_qoder_trust_dirs_seeded_with_home(tmp_path, monkeypatch) -> None:
+    import json
+
+    from app.integrations import temp_agent_trust as tat
+
+    monkeypatch.setattr(tat.Path, "home", classmethod(lambda cls: tmp_path))
+    assert tat.ensure_qoder_trust_dirs(force=True) is True
+    data = json.loads((tmp_path / ".qoder" / "settings.json").read_text())
+    assert str(tmp_path) in data["permissions"]["trustDirectories"]
+    # Idempotent.
+    assert tat.ensure_qoder_trust_dirs(force=True) is False
+
+
+def test_qoder_trust_dirs_merges_existing(tmp_path, monkeypatch) -> None:
+    import json
+
+    from app.integrations import temp_agent_trust as tat
+
+    monkeypatch.setattr(tat.Path, "home", classmethod(lambda cls: tmp_path))
+    p = tmp_path / ".qoder" / "settings.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"permissions": {"trustDirectories": ["/keep/me"]},
+                             "general": {"enableAutoUpdate": False}}))
+    assert tat.ensure_qoder_trust_dirs(force=True) is True
+    data = json.loads(p.read_text())
+    assert "/keep/me" in data["permissions"]["trustDirectories"]
+    assert str(tmp_path) in data["permissions"]["trustDirectories"]
+    assert data["general"]["enableAutoUpdate"] is False  # other keys preserved
+
+
+def test_trust_seeders_skipped_when_not_installed(tmp_path, monkeypatch) -> None:
+    from app.integrations import temp_agent_trust as tat
+
+    monkeypatch.setattr(tat.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(tat.shutil, "which", lambda _name: None)
+    assert tat.ensure_codebuddy_trust_all() is False
+    assert tat.ensure_qoder_trust_dirs() is False
+    assert not (tmp_path / ".codebuddy").exists()
+    assert not (tmp_path / ".qoder").exists()

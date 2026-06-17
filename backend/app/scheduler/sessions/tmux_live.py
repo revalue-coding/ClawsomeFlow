@@ -123,6 +123,21 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
     # nanobot: runtime mapping kept ready, but the platform is temporarily NOT
     # exposed to users (absent from the Flow editor + AI decomposer + deps probe).
     AgentKind.nanobot:  (["nanobot", "agent"], ["nanobot", "agent"]),
+    # qoder (binary `qodercli`) and codebuddy are Claude-style clones: interactive
+    # tool approval via `--permission-mode bypass_permissions/bypassPermissions`
+    # (verified vs installed binaries), resume via `--continue`. Neither is in
+    # ClawTeam's adapter, so we self-control flags (skip_permissions=False below).
+    # NOTE the per-folder "trust this folder" gate is NOT skippable by any flag —
+    # it is handled out-of-band by seeding each CLI's global config (trustAll /
+    # trustDirectories) in qoder_config / codebuddy_config (init + upgrade).
+    AgentKind.qoder:    (
+        ["qodercli", "--permission-mode", "bypass_permissions"],
+        ["qodercli", "--permission-mode", "bypass_permissions", "--continue"],
+    ),
+    AgentKind.codebuddy: (
+        ["codebuddy", "--permission-mode", "bypassPermissions"],
+        ["codebuddy", "--permission-mode", "bypassPermissions", "--continue"],
+    ),
     AgentKind.hermes:   (["hermes", "--yolo"],   ["hermes", "--yolo", "-c"]),
 }
 
@@ -135,6 +150,8 @@ _SELF_PERMISSION_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.kimi,
     AgentKind.opencode,
     AgentKind.nanobot,
+    AgentKind.qoder,
+    AgentKind.codebuddy,
 })
 
 class UnsupportedAgentKind(Exception):

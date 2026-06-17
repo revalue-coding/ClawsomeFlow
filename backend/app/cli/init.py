@@ -158,6 +158,19 @@ def init(
         ensure_opencode_permission_allow()
     except Exception:  # pragma: no cover - defensive; never block init
         pass
+
+    # Qoder / CodeBuddy folder-trust seeds (see temp_agent_trust). Same idempotent,
+    # install-gated, fresh-deploy convergence as opencode above.
+    try:
+        from app.integrations.temp_agent_trust import (
+            ensure_codebuddy_trust_all,
+            ensure_qoder_trust_dirs,
+        )
+
+        ensure_codebuddy_trust_all()
+        ensure_qoder_trust_dirs()
+    except Exception:  # pragma: no cover - defensive; never block init
+        pass
     console.print(
         f"[green]✓[/green] Data home: [dim]{home_path}[/dim]"
     )

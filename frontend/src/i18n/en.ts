@@ -133,6 +133,8 @@ const en = {
     agentKindNanobot: "Nanobot",
     agentKindOpencode: "OpenCode",
     agentKindPi: "pi",
+    agentKindQoder: "Qoder CLI",
+    agentKindCodebuddy: "CodeBuddy Code",
     agentKindCustom: "Custom",
     deleteConfirm: "Delete flow {{name}}?",
     runDialog: {
@@ -341,6 +343,8 @@ const en = {
       ownerKindKimi: "Kimi CLI",
       ownerKindQwen: "Qwen Code",
       ownerKindOpencode: "OpenCode",
+      ownerKindQoder: "Qoder CLI",
+      ownerKindCodebuddy: "CodeBuddy Code",
       ownerKindOpenclaw: "OpenClaw",
       ownerKindHermes: "Hermes",
       newAgentName: "Agent name *",

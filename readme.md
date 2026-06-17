@@ -106,6 +106,8 @@ From a sentence to a shipped result. You stay in charge of the goal; ClawsomeFlo
 | **Gemini CLI** | `gemini` | TUI | Testing|
 | **Kimi CLI** | `kimi` | TUI | Testing |
 | **Qwen Code** | `qwen` | TUI | Testing |
+| **Qoder CLI** | `qoder` | TUI | Testing |
+| **CodeBuddy Code** | `codebuddy` | TUI | Testing |
 | **nanobot** | `nanobot` | TUI | Testing |
 
 ---
@@ -162,6 +164,12 @@ ClawsomeFlow is built on top of **ClawTeam**.
 > on a login prompt. For Hermes you can also set the model/provider/key per agent
 > in **Settings → Model**. If you hit auth errors, verify the CLI's own
 > model/provider config first.
+>
+> **Qoder / CodeBuddy** need a one-time auth: CodeBuddy via `codebuddy` →
+> interactive login; Qoder via `export QODER_PERSONAL_ACCESS_TOKEN=…` (or
+> `qodercli` → `/login`). ClawsomeFlow auto-seeds their folder-trust config
+> (`trustAll` / `trustDirectories`) so unattended runs don't stall on the
+> "trust this folder?" prompt — no action needed there.
 
 ### Install
 

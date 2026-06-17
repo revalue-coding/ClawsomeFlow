@@ -300,8 +300,9 @@ class _ResumeCliStub:
         resume_command: list[str],
         profile: str | None,
         skills: tuple[str, ...],
+        skip_permissions: bool = True,
     ) -> None:
-        del team, agent_name, existing_worktree, profile, skills
+        del team, agent_name, existing_worktree, profile, skills, skip_permissions
         self.commands.append(list(resume_command))
 
 

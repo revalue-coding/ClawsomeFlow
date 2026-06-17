@@ -241,6 +241,17 @@ def _agent_runtime_setup_hint(kind: str) -> str:
             "PATH on macOS, run `/Applications/Cursor.app/Contents/Resources/app/bin/"
             "cursor agent --help`, then ensure `~/.local/bin` is in PATH."
         )
+    if kind == "qoder":
+        return (
+            "Install Qoder CLI (`npm i -g @qoder-ai/qodercli`), then authenticate "
+            "once (set QODER_PERSONAL_ACCESS_TOKEN or run `qodercli` and /login) "
+            "and verify with `qodercli --version`."
+        )
+    if kind == "codebuddy":
+        return (
+            "Install CodeBuddy Code (`npm i -g @tencent-ai/codebuddy-code`), then "
+            "run `codebuddy` once to log in, and verify with `codebuddy --version`."
+        )
     return "Install the CLI and verify it with `<tool> --version`."
 
 
@@ -512,6 +523,8 @@ _NON_OPENCLAW_AGENT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ("kimi", "Kimi CLI", "kimi"),
     ("qwen", "Qwen Code", "qwen"),
     ("opencode", "OpenCode", "opencode"),
+    ("qoder", "Qoder CLI", "qodercli"),
+    ("codebuddy", "CodeBuddy Code", "codebuddy"),
     # nanobot intentionally omitted — temporarily not user-exposed.
     ("hermes", "Hermes", "hermes"),
 )

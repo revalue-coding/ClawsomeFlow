@@ -573,6 +573,24 @@ def run_upgrade(
         report.repair_warnings.append(f"opencode config init: {exc}")
         logger.warning("upgrade_opencode_config_failed", error=str(exc))
 
+    # 0e. Qoder / CodeBuddy temporary agents gate startup on a per-folder trust
+    # dialog that no flag skips; seed each CLI's global trust config (trustAll /
+    # trustDirectories) so fresh ClawTeam worktrees don't hang on the prompt.
+    # Idempotent + non-destructive + gated on the CLI being installed.
+    try:
+        from app.integrations.temp_agent_trust import (
+            ensure_codebuddy_trust_all,
+            ensure_qoder_trust_dirs,
+        )
+
+        if ensure_codebuddy_trust_all():
+            logger.info("upgrade_codebuddy_trust_seeded")
+        if ensure_qoder_trust_dirs():
+            logger.info("upgrade_qoder_trust_seeded")
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"temp-agent trust config init: {exc}")
+        logger.warning("upgrade_temp_agent_trust_failed", error=str(exc))
+
     # 0. Editable-source frontend build (optional).
     if include_frontend_build:
         status, detail = _build_frontend_bundle_if_editable()

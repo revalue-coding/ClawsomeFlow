@@ -41,6 +41,8 @@ const AGENT_CHOICES = [
   "qwen",
   "opencode",
   "pi",
+  "qoder",
+  "codebuddy",
   "custom",
 ];
 

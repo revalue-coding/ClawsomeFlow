@@ -136,6 +136,8 @@ export type AgentKind =
   | "qwen"
   | "opencode"
   | "pi"
+  | "qoder"
+  | "codebuddy"
   | "hermes"
   | "custom";
 

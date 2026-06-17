@@ -105,6 +105,8 @@ ClawsomeFlow继承了Clawteam如下特色：
 | **Gemini CLI** | `gemini` | TUI | Testing |
 | **Kimi CLI** | `kimi` | TUI | Testing |
 | **Qwen Code** | `qwen` | TUI | Testing |
+| **Qoder CLI** | `qoder` | TUI | Testing |
+| **CodeBuddy Code** | `codebuddy` | TUI | Testing |
 | **nanobot** | `nanobot` | TUI | Testing |
 
 ---
@@ -159,6 +161,11 @@ ClawsomeFlow 构建在 **ClawTeam**  之上
 > 未完成认证,使用它的 Agent 会卡在登录界面。Hermes 还可在 **设置 → 模型** 中为
 > 每个 Agent 单独配置模型/提供商/密钥。遇到认证报错时,请优先排查 CLI 自身的
 > 模型/提供商配置是否正确。
+>
+> **Qoder / CodeBuddy** 需一次性认证:CodeBuddy 运行 `codebuddy` 交互式登录;
+> Qoder 设置 `export QODER_PERSONAL_ACCESS_TOKEN=…`(或 `qodercli` → `/login`)。
+> ClawsomeFlow 会自动写入二者的目录信任配置(`trustAll` / `trustDirectories`),
+> 使无人值守运行不会卡在"是否信任此文件夹"提示——这部分无需手动处理。
 
 ### 安装
 

@@ -157,6 +157,8 @@ class AgentKind(str, Enum):
     qwen = "qwen"
     opencode = "opencode"
     pi = "pi"
+    qoder = "qoder"
+    codebuddy = "codebuddy"
     hermes = "hermes"
     custom = "custom"
 

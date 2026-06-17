@@ -197,6 +197,32 @@ def test_run_upgrade_seeds_opencode_permission_when_installed(
     assert json.loads(cfg_file.read_text())["permission"] == "allow"
 
 
+def test_run_upgrade_seeds_qoder_codebuddy_trust_when_installed(
+    tmp_clawsomeflow_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """Upgrade-path parity: Qoder/CodeBuddy folder-trust configs get seeded."""
+    import json
+
+    from app.integrations import temp_agent_trust as tat
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+    home = tmp_path / "trusthome"
+    home.mkdir()
+    monkeypatch.setattr(tat.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(tat.shutil, "which", lambda _name: "/usr/bin/" + _name)
+
+    report = upgrade.run_upgrade(config=fake_config, target_version="1.2.3")
+    assert report.ok is True
+
+    assert json.loads((home / ".codebuddy" / "settings.json").read_text())["trustAll"] is True
+    qoder = json.loads((home / ".qoder" / "settings.json").read_text())
+    assert str(home) in qoder["permissions"]["trustDirectories"]
+
+
 def test_run_upgrade_skips_old_migrations(
     tmp_clawsomeflow_home: Path,
     monkeypatch: pytest.MonkeyPatch,

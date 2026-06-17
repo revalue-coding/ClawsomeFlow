@@ -87,6 +87,8 @@ _NON_OPENCLAW_SUPPORTED_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
+    AgentKind.qoder,
+    AgentKind.codebuddy,
     AgentKind.hermes,
 })
 
@@ -109,6 +111,8 @@ _TEMP_AGENT_PLATFORM_BINARIES: tuple[tuple[AgentKind, str], ...] = (
     (AgentKind.kimi, "kimi"),
     (AgentKind.qwen, "qwen"),
     (AgentKind.opencode, "opencode"),
+    (AgentKind.qoder, "qodercli"),
+    (AgentKind.codebuddy, "codebuddy"),
     # nanobot intentionally omitted — temporarily not user-exposed.
     (AgentKind.hermes, "hermes"),
 )
@@ -314,8 +318,8 @@ Invariants (the server rejects violations):
 3. Task ids and agent ids are unique; `dependsOn` references resolve; the DAG is acyclic.
 4. Owner kinds limited to `openclaw`, `hermes`, or a temporary-agent platform
    advertised in section 1 (`claude`, `codex`, `cursor`, `gemini`, `kimi`,
-   `qwen`, `opencode`). Only assign temporary platforms listed there as
-   available on this host.
+   `qwen`, `opencode`, `qoder`, `codebuddy`). Only assign temporary platforms
+   listed there as available on this host.
 5. Every agent in `agents` is referenced by at least one task.
 6. All task `subject` and `description` text is in {result_language}.
 
@@ -745,6 +749,20 @@ def _non_openclaw_dispatch_argv(
     # nanobot auto-executes).
     if kind == AgentKind.nanobot:
         return ["nanobot", "agent", "-m", message]
+    # qoder / codebuddy: Claude-style. Headless `-p` requires the explicit
+    # `--dangerously-skip-permissions` to perform tool actions (folder trust is
+    # handled by the seeded global config). Note qoder's mode value uses an
+    # underscore (`bypass_permissions`) vs codebuddy's camelCase.
+    if kind == AgentKind.qoder:
+        return [
+            "qodercli", "--permission-mode", "bypass_permissions",
+            "--dangerously-skip-permissions", "-p", message,
+        ]
+    if kind == AgentKind.codebuddy:
+        return [
+            "codebuddy", "--permission-mode", "bypassPermissions",
+            "--dangerously-skip-permissions", "-p", message,
+        ]
     if kind == AgentKind.hermes:
         # Bind to a managed Hermes profile (== persistent agent id) so the
         # decomposition runs under that agent's own identity/memory. A temporary
