@@ -1684,7 +1684,6 @@ export function FlowEditor() {
         <div className="mb-2 flex items-center justify-between rounded-lg border border-emerald-100/90 bg-emerald-50/60 px-3 py-2">
           <div className="pr-3">
             <div className="text-sm font-medium text-ink-800">{t("flowEditor.easyMode")}</div>
-            <div className="text-xs text-ink-500">{t("flowEditor.easyModeSub")}</div>
           </div>
           <button
             type="button"
@@ -1715,7 +1714,6 @@ export function FlowEditor() {
         <div className="mb-4 flex items-center justify-between rounded-lg border border-purple-100/90 bg-purple-50/60 px-3 py-2">
           <div className="pr-3">
             <div className="text-sm font-medium text-ink-800">{t("flowEditor.devMode")}</div>
-            <div className="text-xs text-ink-500">{t("flowEditor.devModeSub")}</div>
           </div>
           <button
             type="button"
