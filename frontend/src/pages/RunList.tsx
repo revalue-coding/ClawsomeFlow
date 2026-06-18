@@ -66,6 +66,7 @@ export function RunList() {
   const [flowNameById, setFlowNameById] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("");
+  const [flowSearch, setFlowSearch] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
   const [clearing, setClearing] = useState(false);
   const { t, i18n } = useTranslation();
@@ -123,15 +124,23 @@ export function RunList() {
       ),
     [items],
   );
+  const normalizedFlowSearch = flowSearch.trim().toLowerCase();
+  const filteredRuns = useMemo(() => {
+    if (!normalizedFlowSearch) return sortedRuns;
+    return sortedRuns.filter((run) => {
+      const flowName = flowNameById[run.flowId] || run.flowId;
+      return flowName.toLowerCase().includes(normalizedFlowSearch);
+    });
+  }, [sortedRuns, flowNameById, normalizedFlowSearch]);
 
   const activeRuns = useMemo(
-    () => sortedRuns.filter((r) => ACTIVE_STATUSES.has(r.status)),
-    [sortedRuns],
+    () => filteredRuns.filter((r) => ACTIVE_STATUSES.has(r.status)),
+    [filteredRuns],
   );
 
   const historyRuns = useMemo(
-    () => sortedRuns.filter((r) => !ACTIVE_STATUSES.has(r.status)),
-    [sortedRuns],
+    () => filteredRuns.filter((r) => !ACTIVE_STATUSES.has(r.status)),
+    [filteredRuns],
   );
 
   const historyTotalPages = Math.max(1, Math.ceil(historyRuns.length / HISTORY_PAGE_SIZE));
@@ -144,29 +153,42 @@ export function RunList() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-ink-900">{t("runList.title")}</h1>
         </div>
-        <select
-          className="select max-w-xs"
-          value={statusFilter}
-          onChange={(e) => {
-            setHistoryPage(1);
-            setStatusFilter(e.target.value);
-          }}
-          aria-label={t("runList.filterStatus")}
-        >
-          <option value="">{t("runList.filterStatusAll")}</option>
-          {STATUS_OPTIONS.map((s) => {
-            const k = `statusLabel.${s}`;
-            return (
-              <option key={s} value={s}>
-                {i18n.exists(k) ? t(k) : s}
-              </option>
-            );
-          })}
-        </select>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <input
+            type="search"
+            className="input w-full sm:w-72"
+            value={flowSearch}
+            onChange={(e) => {
+              setHistoryPage(1);
+              setFlowSearch(e.target.value);
+            }}
+            placeholder={t("runList.searchPlaceholder")}
+            aria-label={t("runList.searchByFlowName")}
+          />
+          <select
+            className="select w-full sm:max-w-xs"
+            value={statusFilter}
+            onChange={(e) => {
+              setHistoryPage(1);
+              setStatusFilter(e.target.value);
+            }}
+            aria-label={t("runList.filterStatus")}
+          >
+            <option value="">{t("runList.filterStatusAll")}</option>
+            {STATUS_OPTIONS.map((s) => {
+              const k = `statusLabel.${s}`;
+              return (
+                <option key={s} value={s}>
+                  {i18n.exists(k) ? t(k) : s}
+                </option>
+              );
+            })}
+          </select>
+        </div>
       </div>
 
       {error && <ErrorBox>{error}</ErrorBox>}
@@ -180,12 +202,20 @@ export function RunList() {
         />
       )}
 
-      {items && (
+      {items && items.length > 0 && filteredRuns.length === 0 && (
+        <EmptyState
+          icon={<RunIcon className="h-10 w-10" />}
+          title={t("runList.searchEmpty")}
+          hint={t("runList.searchEmptyHint")}
+        />
+      )}
+
+      {items && filteredRuns.length > 0 && (
         <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-3">
             <Card>
               <div className="text-xs text-ink-500">{t("runList.kpiTotal")}</div>
-              <div className="text-2xl font-semibold text-ink-900">{sortedRuns.length}</div>
+              <div className="text-2xl font-semibold text-ink-900">{filteredRuns.length}</div>
             </Card>
             <Card>
               <div className="text-xs text-ink-500">{t("runList.kpiActive")}</div>
