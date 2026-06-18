@@ -1217,14 +1217,21 @@ function ChatRoom({ agentId }: { agentId: string }) {
   useEffect(() => {
     if (newDividerAt < 0 || didJumpToNewDividerRef.current) return;
     const divider = newDividerRef.current;
-    if (!divider) return;
+    const container = scrollRef.current;
+    if (!divider || !container) return;
     const raf = window.requestAnimationFrame(() => {
-      divider.scrollIntoView({ block: "start" });
+      const dividerRect = divider.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const dividerTopInContainer =
+        dividerRect.top - containerRect.top + container.scrollTop;
+      // Keep the divider around the upper-middle area (not pinned to top).
+      const targetTop = Math.max(0, dividerTopInContainer - container.clientHeight * 0.35);
+      container.scrollTo({ top: targetTop });
       handleScroll();
       didJumpToNewDividerRef.current = true;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [newDividerAt, messages.length, recovering, handleScroll]);
+  }, [newDividerAt, messages.length, recovering, handleScroll, scrollRef]);
 
   // Reconnect to a turn whose SSE stream was detached (tab switch / refresh):
   // poll GET /chat/status and keep going *as long as the server says running*

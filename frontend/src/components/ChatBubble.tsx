@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ChatMarkdown } from "@/components/ChatMarkdown";
@@ -58,18 +58,40 @@ export function NewMessagesDivider({ label }: { label: string }) {
 }
 
 /** Placeholder shown in the assistant bubble while a turn is still running:
- *  typing dots for the first 10s, then a marquee reassurance line so a slow
+ *  typing dots for the first 10s, then a looping character-by-character
+ *  reassurance line so a slow
  *  turn never looks stuck. Shared by the OpenClaw and Hermes chat bubbles. */
 export function PendingReply() {
   const { t } = useTranslation();
   const [waitedLong, setWaitedLong] = useState(false);
+  const text = t("chat.stillThinking");
+  const chars = useMemo(() => Array.from(text), [text]);
+  const [visibleChars, setVisibleChars] = useState(1);
   useEffect(() => {
     const id = window.setTimeout(() => setWaitedLong(true), 10000);
     return () => window.clearTimeout(id);
   }, []);
+  useEffect(() => {
+    if (!waitedLong) return;
+    setVisibleChars(1);
+  }, [waitedLong, text]);
+  useEffect(() => {
+    if (!waitedLong || chars.length === 0) return;
+    const isEnd = visibleChars >= chars.length;
+    const id = window.setTimeout(
+      () => {
+        setVisibleChars((prev) => (prev >= chars.length ? 1 : prev + 1));
+      },
+      isEnd ? 1100 : 110,
+    );
+    return () => window.clearTimeout(id);
+  }, [waitedLong, visibleChars, chars.length]);
   return waitedLong ? (
-    <span className="csflow-thinking-marquee text-ink-400">
-      <span className="csflow-thinking-marquee-text">{t("chat.stillThinking")}</span>
+    <span className="text-ink-400">
+      {chars.slice(0, Math.min(visibleChars, chars.length)).join("")}
+      <span className="csflow-thinking-caret" aria-hidden>
+        |
+      </span>
     </span>
   ) : (
     <TypingDots />

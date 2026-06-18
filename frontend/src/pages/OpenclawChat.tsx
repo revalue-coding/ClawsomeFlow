@@ -1861,14 +1861,21 @@ function ChatRoom({
   useEffect(() => {
     if (newDividerAt < 0 || didJumpToNewDividerRef.current) return;
     const divider = newDividerRef.current;
-    if (!divider) return;
+    const container = scrollRef.current;
+    if (!divider || !container) return;
     const raf = window.requestAnimationFrame(() => {
-      divider.scrollIntoView({ block: "start" });
+      const dividerRect = divider.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const dividerTopInContainer =
+        dividerRect.top - containerRect.top + container.scrollTop;
+      // Keep the divider around the upper-middle area (not pinned to top).
+      const targetTop = Math.max(0, dividerTopInContainer - container.clientHeight * 0.35);
+      container.scrollTo({ top: targetTop });
       handleScroll();
       didJumpToNewDividerRef.current = true;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [newDividerAt, messages.length, recovering, handleScroll]);
+  }, [newDividerAt, messages.length, recovering, handleScroll, scrollRef]);
 
   // Core streaming turn. ``appendUser`` is false on regenerate (the user message
   // is already in the transcript — we only replace the assistant reply).
