@@ -1107,6 +1107,8 @@ export const api = {
     ),
   resetOpenclawAgentChat: (id: string) =>
     request<void>("POST", `/api/openclaw/agents/${id}/reset`),
+  stopOpenclawAgentChat: (id: string) =>
+    request<void>("POST", `/api/openclaw/agents/${id}/chat/stop`),
 
   // ── Hermes agents ────────────────────────────────────────────────
   listHermesAgents: () =>
@@ -1265,6 +1267,8 @@ export const api = {
     ),
   resetHermesAgentChat: (id: string) =>
     request<void>("POST", `/api/hermes/agents/${id}/reset`),
+  stopHermesAgentChat: (id: string) =>
+    request<void>("POST", `/api/hermes/agents/${id}/chat/stop`),
 
   // Agent Store
   loginAgentStore: (payload: { email: string; password: string }) =>

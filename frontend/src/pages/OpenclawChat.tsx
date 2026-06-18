@@ -11,7 +11,7 @@
  * can choose any of their OpenClaw agents.
  */
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
@@ -43,24 +43,29 @@ import {
 } from "@/components/ui";
 import { useDialog } from "@/components/dialog";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
+import { CopyButton, NewMessagesDivider, PendingReply } from "@/components/ChatBubble";
 import { ChatStepTrail } from "@/components/ChatStepTrail";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import {
   AgentManagementHeader,
   AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
-import { DesktopIcon, EditIcon, PlusIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
+import { DesktopIcon, EditIcon, PlusIcon, RefreshIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
   clearChatHistory,
   formatChatTime,
   loadChatHistory,
+  loadLastSeenCount,
   reconcileTranscript,
   saveChatHistory,
+  saveLastSeenCount,
+  settledCount,
 } from "@/lib/chatHistory";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
+import { useStickyScroll } from "@/lib/useStickyScroll";
 
 interface Message {
   role: "user" | "assistant" | "system";
@@ -1673,7 +1678,22 @@ function ChatRoom({
     `openclaw-chat:room:${agentId}:settings-open`,
   );
   const [openingMyDesktop, setOpeningMyDesktop] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const {
+    ref: scrollRef,
+    atBottom,
+    scrollToBottom,
+    handleScroll,
+    stickIfAtBottom,
+  } = useStickyScroll<HTMLDivElement>();
+  // AbortController for the in-flight SSE fetch, so "Stop" can cut the stream.
+  const abortRef = useRef<AbortController | null>(null);
+  // Index (into the displayed message list) before which a "new messages"
+  // divider is drawn on re-entry; -1 = none. Computed once at load.
+  const [newDividerAt, setNewDividerAt] = useState(-1);
+  // Latest transcript, so the unmount cleanup can persist how many messages the
+  // user had seen when they navigated away.
+  const messagesRef = useRef<Message[]>([]);
+  messagesRef.current = messages;
 
   useEffect(() => {
     api
@@ -1708,6 +1728,9 @@ function ChatRoom({
   // its localStorage entry being cleared) wipes the transcript.
   useEffect(() => {
     let cancelled = false;
+    // How many messages the user had already seen before this visit — read once,
+    // up front, so the persist-on-change effect can't clobber it first.
+    const seenAtEntry = loadLastSeenCount(agentId);
     const cached = loadChatHistory(agentId);
     setMessages(cached);
     setActionError(null);
@@ -1729,6 +1752,10 @@ function ChatRoom({
         });
         setMessages(merged);
         if (merged.length > 0) saveChatHistory(agentId, merged);
+        // Draw the "new messages" divider above anything that arrived while the
+        // user was away (settled count grew beyond what they'd last seen).
+        const shown = settledCount(merged);
+        setNewDividerAt(seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1);
         // A trailing user turn means a reply is still being produced
         // server-side (its stream was detached); poll for it.
         const last = merged[merged.length - 1];
@@ -1805,39 +1832,51 @@ function ChatRoom({
     saveChatHistory(agentId, messages);
   }, [agentId, messages]);
 
+  // On leaving the page (or switching agents), remember how many messages the
+  // user had seen so the next visit can mark what's new.
+  useEffect(() => {
+    return () => saveLastSeenCount(agentId, settledCount(messagesRef.current));
+  }, [agentId]);
+
   // Auto-scroll on new content and once the chat panel is actually mounted.
   // When we restore history before agent detail finishes loading, the first
   // ``messages`` update can happen while the scroll container is still absent.
   // Including ``agent`` ensures we scroll to latest as soon as the panel appears.
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages, agent]);
+    stickIfAtBottom();
+  }, [messages, agent, stickIfAtBottom]);
 
-  async function onSend(e: FormEvent) {
-    e.preventDefault();
-    const text = input.trim();
-    if (!text || streaming) return;
+  // Core streaming turn. ``appendUser`` is false on regenerate (the user message
+  // is already in the transcript — we only replace the assistant reply).
+  async function runTurn(text: string, opts: { appendUser: boolean }) {
     setActionError(null);
     setRecovering(false); // a fresh send supersedes any in-flight recovery poll
     setSteps([]);
     setProgress(null);
-    const turnMessage: Message = { role: "user", content: text, ts: Date.now() };
-    const next: Message[] = [...messages, turnMessage];
-    setMessages(next);
-    setInput("");
+    setNewDividerAt(-1); // engaging with the chat clears the "new messages" mark
     setStreaming(true);
-    // Add an empty assistant message to stream into (timestamped once it lands).
-    setMessages((m) => [...m, { role: "assistant", content: "" }]);
-
+    setMessages((m) => {
+      const base = opts.appendUser
+        ? [...m, { role: "user" as const, content: text, ts: Date.now() }]
+        : m;
+      // Add an empty assistant message to stream into (timestamped once it lands).
+      return [...base, { role: "assistant" as const, content: "" }];
+    });
+    scrollToBottom(); // the user just acted — jump to the latest
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let aborted = false;
     try {
-      const resp = await api.chatWithOpenclawAgent(agentId, {
-        // Session context is maintained by backend session_key.
-        // Send only this turn's message to avoid client-side context replay.
-        messages: [{ role: turnMessage.role, content: turnMessage.content }],
-        stream: true,
-      });
+      const resp = await api.chatWithOpenclawAgent(
+        agentId,
+        {
+          // Session context is maintained by backend session_key.
+          // Send only this turn's message to avoid client-side context replay.
+          messages: [{ role: "user", content: text }],
+          stream: true,
+        },
+        { signal: controller.signal },
+      );
       if (!resp.ok) {
         const errBody = await resp.text();
         throw new Error(`HTTP ${resp.status}: ${errBody.slice(0, 300)}`);
@@ -1887,20 +1926,70 @@ function ChatRoom({
         }
       }
     } catch (e) {
-      setMessages((m) => {
-        const out = m.slice();
-        out[out.length - 1] = {
-          role: "assistant",
-          content: `(error) ${e instanceof Error ? e.message : String(e)}`,
-          ts: Date.now(),
-        };
-        return out;
-      });
+      if (controller.signal.aborted) {
+        aborted = true;
+      } else {
+        setMessages((m) => {
+          const out = m.slice();
+          out[out.length - 1] = {
+            role: "assistant",
+            content: `(error) ${e instanceof Error ? e.message : String(e)}`,
+            ts: Date.now(),
+          };
+          return out;
+        });
+      }
     } finally {
+      abortRef.current = null;
       setStreaming(false);
       setSteps([]);
       setProgress(null);
+      if (aborted) {
+        // Mark the (still-empty) pending reply as stopped; keep any partial text.
+        setMessages((m) => {
+          const out = m.slice();
+          const last = out[out.length - 1];
+          if (last && last.role === "assistant" && !last.content) {
+            out[out.length - 1] = {
+              role: "assistant",
+              content: t("chat.stopped"),
+              ts: Date.now(),
+            };
+          }
+          return out;
+        });
+      }
     }
+  }
+
+  async function onSend(e: FormEvent) {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text || streaming) return;
+    setInput("");
+    await runTurn(text, { appendUser: true });
+  }
+
+  async function stopTurn() {
+    abortRef.current?.abort();
+    try {
+      await api.stopOpenclawAgentChat(agentId);
+    } catch {
+      /* best-effort — the client stream is already cut */
+    }
+  }
+
+  async function regenerate() {
+    if (streaming || resetting) return;
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    // Drop the trailing assistant reply; runTurn appends a fresh one.
+    setMessages((m) => {
+      const out = m.slice();
+      if (out.length && out[out.length - 1].role === "assistant") out.pop();
+      return out;
+    });
+    await runTurn(lastUser.content, { appendUser: false });
   }
 
   async function onResetConversation() {
@@ -1913,6 +2002,7 @@ function ChatRoom({
       setSteps([]);
       setProgress(null);
       setMessages([]);
+      setNewDividerAt(-1);
       setInput("");
       clearChatHistory(agentId);
     } catch (e) {
@@ -2099,30 +2189,64 @@ function ChatRoom({
       {actionError && <ErrorBox>{t("chat.error", { message: actionError })}</ErrorBox>}
 
       <Card className="flex min-h-0 flex-1 flex-col p-0 overflow-hidden">
-        <div
-          ref={scrollRef}
-          className="min-h-[280px] flex-1 overflow-auto px-5 py-4 space-y-4 bg-ink-50/40"
-        >
-          {(recovering &&
-          messages.length > 0 &&
-          messages[messages.length - 1].role === "user"
-            ? [...messages, { role: "assistant" as const, content: "" }]
-            : messages
-          ).map((m, i, list) => (
-            <Bubble
-              key={i}
-              msg={m}
-              pending={
-                (streaming || recovering) &&
-                i === list.length - 1 &&
-                m.role === "assistant" &&
-                !m.content
-              }
-              noTextReply={t("chat.noTextReply")}
-            />
-          ))}
-          {(streaming || recovering) && (progress || steps.length > 0) && (
-            <ChatStepTrail steps={steps} progress={progress} />
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="min-h-[280px] flex-1 overflow-auto px-5 py-4 space-y-4 bg-ink-50/40"
+          >
+            {(recovering &&
+            messages.length > 0 &&
+            messages[messages.length - 1].role === "user"
+              ? [...messages, { role: "assistant" as const, content: "" }]
+              : messages
+            ).map((m, i, list) => (
+              <Fragment key={i}>
+                {i === newDividerAt && (
+                  <NewMessagesDivider label={t("chat.newMessages")} />
+                )}
+                <Bubble
+                  msg={m}
+                  pending={
+                    (streaming || recovering) &&
+                    i === list.length - 1 &&
+                    m.role === "assistant" &&
+                    !m.content
+                  }
+                  noTextReply={t("chat.noTextReply")}
+                />
+              </Fragment>
+            ))}
+            {!streaming &&
+              !recovering &&
+              messages.length > 0 &&
+              messages[messages.length - 1].role === "assistant" &&
+              !!messages[messages.length - 1].content && (
+                <div className="flex justify-start">
+                  <button
+                    type="button"
+                    onClick={() => void regenerate()}
+                    disabled={resetting}
+                    className="inline-flex items-center gap-1 rounded-full border border-ink-200 bg-surface px-3 py-1 text-xs text-ink-500 hover:bg-ink-50 hover:text-ink-700 disabled:opacity-50"
+                  >
+                    <RefreshIcon className="h-3.5 w-3.5" />
+                    {t("chat.regenerate")}
+                  </button>
+                </div>
+              )}
+            {(streaming || recovering) && (progress || steps.length > 0) && (
+              <ChatStepTrail steps={steps} progress={progress} />
+            )}
+          </div>
+          {!atBottom && (
+            <button
+              type="button"
+              onClick={scrollToBottom}
+              className="absolute bottom-3 right-4 inline-flex items-center gap-1 rounded-full border border-ink-200 bg-surface/95 px-3 py-1 text-xs text-ink-600 shadow-card backdrop-blur hover:bg-ink-50"
+            >
+              {t("chat.scrollToBottom")}
+              <span aria-hidden>↓</span>
+            </button>
           )}
         </div>
         <form
@@ -2151,13 +2275,23 @@ function ChatRoom({
           >
             {resetting ? t("chat.resetting") : t("chat.reset")}
           </button>
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={streaming || !input.trim()}
-          >
-            {streaming ? t("chat.sending") : t("chat.send")}
-          </button>
+          {streaming ? (
+            <button
+              type="button"
+              className="btn-outline border-rose-300 text-rose-600 hover:bg-rose-50"
+              onClick={() => void stopTurn()}
+            >
+              {t("chat.stop")}
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={!input.trim()}
+            >
+              {t("chat.send")}
+            </button>
+          )}
         </form>
       </Card>
 
@@ -3538,8 +3672,9 @@ function Bubble({
 }) {
   const isUser = msg.role === "user";
   const time = !pending ? formatChatTime(msg.ts) : "";
+  const showFooter = !pending && (!!time || !!msg.content);
   return (
-    <div className={isUser ? "flex flex-col items-end" : "flex flex-col items-start"}>
+    <div className={`group flex flex-col ${isUser ? "items-end" : "items-start"}`}>
       <div
         className={
           isUser
@@ -3554,25 +3689,27 @@ function Bubble({
             <ChatMarkdown content={msg.content} />
           )
         ) : pending ? (
-          <TypingDots />
+          <PendingReply />
         ) : (
           <span className="text-ink-400">{noTextReply}</span>
         )}
       </div>
-      {time && <span className="mt-1 px-1 text-[11px] text-ink-400">{time}</span>}
+      {showFooter && (
+        <div
+          className={`mt-1 flex items-center gap-2 px-1 text-[11px] text-ink-400 ${
+            isUser ? "flex-row-reverse" : ""
+          }`}
+        >
+          {time && <span>{time}</span>}
+          {msg.content && (
+            <span className="opacity-0 transition-opacity group-hover:opacity-100">
+              <CopyButton text={msg.content} />
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
-}
-
-function TypingDots() {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setTick((v) => (v + 1) % 3);
-    }, 350);
-    return () => clearInterval(timer);
-  }, []);
-  return <span className="text-ink-400">{".".repeat(tick + 1)}</span>;
 }
 
 /** Extract text delta from an OpenAI-style chat completion chunk.

@@ -3317,6 +3317,18 @@ async def chat_with_agent(
     )
 
 
+@router.post("/{agent_id}/chat/stop", status_code=204)
+async def stop_chat_turn(
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> None:
+    """Stop the in-flight turn (agent + follower) WITHOUT clearing history — the
+    user's "stop generating" action. The question stays for regenerate/retry."""
+    _ensure_chat_target_access(agent_id, user, storage)
+    chat_progress.kill_turn(_session_key(user, agent_id))
+
+
 @router.post("/{agent_id}/reset", status_code=204)
 async def reset_chat_session(
     agent_id: Annotated[str, Path()],

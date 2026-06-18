@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
@@ -44,6 +44,7 @@ export function FlowList() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [searchQuery, setSearchQuery] = useState("");
   /**
    * "Already-running" confirmation modal payload. ``activeStatuses`` is a
    * comma-joined list of the in-flight runs' user-facing statuses; we
@@ -72,10 +73,16 @@ export function FlowList() {
     load();
   }, []);
 
-  const totalItems = items?.length ?? 0;
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const filteredItems = useMemo(() => {
+    if (!items) return [];
+    if (!normalizedSearch) return items;
+    return items.filter((item) => item.name.toLowerCase().includes(normalizedSearch));
+  }, [items, normalizedSearch]);
+  const totalItems = filteredItems.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
   const pageStart = (page - 1) * PAGE_SIZE;
-  const pageItems = items ? items.slice(pageStart, pageStart + PAGE_SIZE) : [];
+  const pageItems = filteredItems.slice(pageStart, pageStart + PAGE_SIZE);
 
   useEffect(() => {
     setPage((prev) => Math.min(Math.max(prev, 1), totalPages));
@@ -224,6 +231,20 @@ export function FlowList() {
         </SilentLink>
       </div>
 
+      <div className="max-w-md">
+        <input
+          type="search"
+          className="input"
+          value={searchQuery}
+          onChange={(e) => {
+            setPage(1);
+            setSearchQuery(e.target.value);
+          }}
+          placeholder={t("flowList.searchPlaceholder")}
+          aria-label={t("flowList.searchByName")}
+        />
+      </div>
+
       {error && <ErrorBox>{error}</ErrorBox>}
       {!items && !error && <Loading />}
 
@@ -240,7 +261,15 @@ export function FlowList() {
         />
       )}
 
-      {items && items.length > 0 && (
+      {items && items.length > 0 && filteredItems.length === 0 && (
+        <EmptyState
+          icon={<FlowIcon className="h-10 w-10" />}
+          title={t("flowList.searchEmpty")}
+          hint={t("flowList.searchEmptyHint")}
+        />
+      )}
+
+      {items && filteredItems.length > 0 && (
         <Card className="p-0 overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-ink-50 text-ink-500">

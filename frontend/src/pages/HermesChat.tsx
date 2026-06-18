@@ -5,7 +5,7 @@
  * a per-chat working-directory picker, and a "my-profile" button (opens the
  * profile root). No Import&Optimize / Agent Store / "to Hermes" button.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
@@ -25,17 +25,21 @@ import {
   AgentToolbarIconButton,
   AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
-import { ChatBubble } from "@/components/ChatBubble";
+import { ChatBubble, NewMessagesDivider } from "@/components/ChatBubble";
 import { ChatStepTrail } from "@/components/ChatStepTrail";
-import { DesktopIcon, ExternalLinkIcon, SettingsIcon, TrashIcon } from "@/components/icons";
+import { DesktopIcon, ExternalLinkIcon, RefreshIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import {
   clearChatHistory,
   loadChatHistory,
+  loadLastSeenCount,
   reconcileTranscript,
   saveChatHistory,
+  saveLastSeenCount,
+  settledCount,
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
+import { useStickyScroll } from "@/lib/useStickyScroll";
 import {
   api,
   ApiError,
@@ -1105,13 +1109,31 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const [showSettings, setShowSettings] = useSessionBackedModalFlag(`hermes:${agentId}:settings:open`);
   const [opening, setOpening] = useState(false);
   const [dashboardBusy, setDashboardBusy] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const {
+    ref: scrollRef,
+    atBottom,
+    scrollToBottom,
+    handleScroll,
+    stickIfAtBottom,
+  } = useStickyScroll<HTMLDivElement>();
+  // AbortController for the in-flight SSE fetch, so "Stop" can cut the stream.
+  const abortRef = useRef<AbortController | null>(null);
+  // Index (into the displayed, non-system message list) before which a "new
+  // messages" divider is drawn on re-entry; -1 = none. Computed once at load.
+  const [newDividerAt, setNewDividerAt] = useState(-1);
+  // Latest transcript, so the unmount cleanup can persist how many messages the
+  // user had seen when they navigated away.
+  const messagesRef = useRef<ChatMsg[]>([]);
+  messagesRef.current = messages;
 
   // localStorage scope for the transcript cache. Namespaced under `hermes:` so
   // it can't collide with an OpenClaw agent's cache for the same id.
   const chatScope = `hermes:${agentId}`;
 
   useEffect(() => {
+    // How many messages the user had already seen before this visit — read once,
+    // up front, so the persist-on-change effect can't clobber it first.
+    const seenAtEntry = loadLastSeenCount(chatScope);
     void (async () => {
       // Show the cache immediately (it may hold an in-flight partial), then
       // reconcile against server history once it loads.
@@ -1148,6 +1170,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
         });
         setMessages(merged);
         if (merged.length > 0) saveChatHistory(chatScope, merged);
+        // Draw the "new messages" divider above anything that arrived while the
+        // user was away (settled count grew beyond what they'd last seen).
+        const shown = settledCount(merged);
+        setNewDividerAt(seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1);
         // A trailing user turn means a reply is still being produced server-side
         // (its stream was detached); poll for it instead of showing "no reply".
         const last = merged[merged.length - 1];
@@ -1166,9 +1192,15 @@ function ChatRoom({ agentId }: { agentId: string }) {
     saveChatHistory(chatScope, messages);
   }, [chatScope, messages]);
 
+  // On leaving the page (or switching agents), remember how many messages the
+  // user had seen so the next visit can mark what's new.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages, recovering]);
+    return () => saveLastSeenCount(chatScope, settledCount(messagesRef.current));
+  }, [chatScope]);
+
+  useEffect(() => {
+    stickIfAtBottom();
+  }, [messages, recovering, stickIfAtBottom]);
 
   // Reconnect to a turn whose SSE stream was detached (tab switch / refresh):
   // poll GET /chat/status and keep going *as long as the server says running*
@@ -1302,9 +1334,9 @@ function ChatRoom({ agentId }: { agentId: string }) {
     }
   };
 
-  const send = async () => {
-    const message = input.trim();
-    if (!message) return;
+  // Core streaming turn. ``appendUser`` is false on regenerate (the user message
+  // is already in the transcript — we only replace the assistant reply).
+  const runTurn = async (message: string, opts: { appendUser: boolean }) => {
     if (!workdir) {
       setError(t("hermes.workdirNeeded"));
       return;
@@ -1313,22 +1345,31 @@ function ChatRoom({ agentId }: { agentId: string }) {
     setRecovering(false); // a fresh send supersedes any in-flight recovery poll
     setSteps([]);
     setProgress(null);
+    setNewDividerAt(-1); // engaging with the chat clears the "new messages" mark
     setSending(true);
-    setInput("");
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: message, ts: Date.now() },
-      { role: "assistant", content: "" },
-    ]);
+    setMessages((prev) => {
+      const base = opts.appendUser
+        ? [...prev, { role: "user" as const, content: message, ts: Date.now() }]
+        : prev;
+      return [...base, { role: "assistant" as const, content: "" }];
+    });
+    scrollToBottom(); // the user just acted — jump to the latest
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let streamErr = "";
+    let aborted = false;
     try {
-      const res = await api.chatWithHermesAgent(agentId, { message, workdir });
+      const res = await api.chatWithHermesAgent(
+        agentId,
+        { message, workdir },
+        { signal: controller.signal },
+      );
       if (!res.ok || !res.body) {
         throw new Error(`HTTP ${res.status}`);
       }
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
-      let streamErr = "";
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -1375,12 +1416,61 @@ function ChatRoom({ agentId }: { agentId: string }) {
       }
       if (streamErr) setError(t("hermes.chatError", { message: streamErr }));
     } catch (e) {
-      setError(t("hermes.chatError", { message: errText(e) }));
+      if (controller.signal.aborted) {
+        aborted = true;
+      } else {
+        setError(t("hermes.chatError", { message: errText(e) }));
+      }
     } finally {
+      abortRef.current = null;
       setSending(false);
       setSteps([]);
       setProgress(null);
+      if (aborted) {
+        // Mark the (still-empty) pending reply as stopped; keep any partial text.
+        setMessages((prev) => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          if (last && last.role === "assistant" && !last.content) {
+            next[next.length - 1] = {
+              role: "assistant",
+              content: t("chat.stopped"),
+              ts: Date.now(),
+            };
+          }
+          return next;
+        });
+      }
     }
+  };
+
+  const send = async () => {
+    const message = input.trim();
+    if (!message) return;
+    setInput("");
+    await runTurn(message, { appendUser: true });
+  };
+
+  const stop = async () => {
+    abortRef.current?.abort();
+    try {
+      await api.stopHermesAgentChat(agentId);
+    } catch {
+      /* best-effort — the client stream is already cut */
+    }
+  };
+
+  const regenerate = async () => {
+    if (sending || resetting) return;
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    // Drop the trailing assistant reply; runTurn appends a fresh one.
+    setMessages((prev) => {
+      const next = [...prev];
+      if (next.length && next[next.length - 1].role === "assistant") next.pop();
+      return next;
+    });
+    await runTurn(lastUser.content, { appendUser: false });
   };
 
   const reset = async () => {
@@ -1394,6 +1484,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
       setSteps([]);
       setProgress(null);
       setMessages([]);
+      setNewDividerAt(-1);
       setInput("");
     } catch (e) {
       setError(errText(e));
@@ -1475,31 +1566,65 @@ function ChatRoom({ agentId }: { agentId: string }) {
       {error && <ErrorBox>{error}</ErrorBox>}
 
       <Card className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
-        <div
-          ref={scrollRef}
-          className="min-h-[280px] flex-1 space-y-4 overflow-auto bg-ink-50/40 px-5 py-4"
-        >
-          {(recovering &&
-          messages.length > 0 &&
-          messages[messages.length - 1].role === "user"
-            ? [...messages, { role: "assistant" as const, content: "" }]
-            : messages)
-            .filter((m) => m.role !== "system")
-            .map((m, i, list) => (
-              <ChatBubble
-                key={i}
-                msg={m}
-                pending={
-                  (sending || recovering) &&
-                  i === list.length - 1 &&
-                  m.role === "assistant" &&
-                  !m.content
-                }
-                noTextReply={t("chat.noTextReply")}
-              />
-            ))}
-          {(sending || recovering) && (progress || steps.length > 0) && (
-            <ChatStepTrail steps={steps} progress={progress} />
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="min-h-[280px] flex-1 space-y-4 overflow-auto bg-ink-50/40 px-5 py-4"
+          >
+            {(recovering &&
+            messages.length > 0 &&
+            messages[messages.length - 1].role === "user"
+              ? [...messages, { role: "assistant" as const, content: "" }]
+              : messages)
+              .filter((m) => m.role !== "system")
+              .map((m, i, list) => (
+                <Fragment key={i}>
+                  {i === newDividerAt && (
+                    <NewMessagesDivider label={t("chat.newMessages")} />
+                  )}
+                  <ChatBubble
+                    msg={m}
+                    pending={
+                      (sending || recovering) &&
+                      i === list.length - 1 &&
+                      m.role === "assistant" &&
+                      !m.content
+                    }
+                    noTextReply={t("chat.noTextReply")}
+                  />
+                </Fragment>
+              ))}
+            {!sending &&
+              !recovering &&
+              messages.length > 0 &&
+              messages[messages.length - 1].role === "assistant" &&
+              !!messages[messages.length - 1].content && (
+                <div className="flex justify-start">
+                  <button
+                    type="button"
+                    onClick={() => void regenerate()}
+                    disabled={resetting}
+                    className="inline-flex items-center gap-1 rounded-full border border-ink-200 bg-surface px-3 py-1 text-xs text-ink-500 hover:bg-ink-50 hover:text-ink-700 disabled:opacity-50"
+                  >
+                    <RefreshIcon className="h-3.5 w-3.5" />
+                    {t("chat.regenerate")}
+                  </button>
+                </div>
+              )}
+            {(sending || recovering) && (progress || steps.length > 0) && (
+              <ChatStepTrail steps={steps} progress={progress} />
+            )}
+          </div>
+          {!atBottom && (
+            <button
+              type="button"
+              onClick={scrollToBottom}
+              className="absolute bottom-3 right-4 inline-flex items-center gap-1 rounded-full border border-ink-200 bg-surface/95 px-3 py-1 text-xs text-ink-600 shadow-card backdrop-blur hover:bg-ink-50"
+            >
+              {t("chat.scrollToBottom")}
+              <span aria-hidden>↓</span>
+            </button>
           )}
         </div>
         <form
@@ -1547,9 +1672,23 @@ function ChatRoom({ agentId }: { agentId: string }) {
             >
               {resetting ? t("chat.resetting") : t("chat.reset")}
             </button>
-            <button type="submit" className="btn-primary" disabled={sending || resetting || !input.trim()}>
-              {sending ? t("chat.sending") : t("chat.send")}
-            </button>
+            {sending ? (
+              <button
+                type="button"
+                className="btn-outline border-rose-300 text-rose-600 hover:bg-rose-50"
+                onClick={() => void stop()}
+              >
+                {t("chat.stop")}
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={resetting || !input.trim()}
+              >
+                {t("chat.send")}
+              </button>
+            )}
           </div>
         </form>
       </Card>

@@ -934,6 +934,17 @@ async def chat_status(
     return job.snapshot()
 
 
+@router.post("/{agent_id}/chat/stop", status_code=204)
+async def stop_chat(
+    agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,
+) -> None:
+    """Stop the in-flight turn WITHOUT clearing history (the user's "stop
+    generating" action). The killed job goes to ``error: cancelled`` so the SSE
+    stream ends cleanly; the question stays in history for a regenerate/retry."""
+    _get_owned(agent_id, user, storage)
+    chat_svc.kill_chat(_session_key(user, agent_id))
+
+
 @router.post("/{agent_id}/reset", status_code=204)
 async def reset_chat(
     agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,

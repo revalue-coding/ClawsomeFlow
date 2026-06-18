@@ -66,8 +66,46 @@ export function saveChatHistory(scope: string, msgs: PersistedMessage[]): void {
 export function clearChatHistory(scope: string): void {
   try {
     localStorage.removeItem(storageKey(scope));
+    localStorage.removeItem(seenKey(scope));
   } catch {
     /* ignore */
+  }
+}
+
+// ── "New messages" marker ───────────────────────────────────────────────
+// Remembers how many settled (non-system, non-pending) messages the user had
+// already seen, so when they navigate back to the chat we can draw a divider
+// above whatever arrived while they were away.
+
+function seenKey(scope: string): string {
+  return `csflow:chat-seen:${scope}`;
+}
+
+/** Count of messages the user has "seen": non-system, excluding a trailing
+ *  empty assistant placeholder (the in-flight pending bubble). */
+export function settledCount(msgs: PersistedMessage[]): number {
+  const arr = msgs.filter((m) => m.role !== "system");
+  let n = arr.length;
+  const last = arr[n - 1];
+  if (last && last.role === "assistant" && last.content.trim() === "") n -= 1;
+  return n;
+}
+
+export function loadLastSeenCount(scope: string): number {
+  try {
+    const raw = localStorage.getItem(seenKey(scope));
+    const n = raw ? parseInt(raw, 10) : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function saveLastSeenCount(scope: string, n: number): void {
+  try {
+    localStorage.setItem(seenKey(scope), String(Math.max(0, n)));
+  } catch {
+    /* localStorage disabled or quota exceeded — ignore */
   }
 }
 
