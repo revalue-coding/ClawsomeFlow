@@ -65,6 +65,7 @@ import {
 } from "@/lib/chatHistory";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
+import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useStickyScroll } from "@/lib/useStickyScroll";
 
 interface Message {
@@ -1645,6 +1646,7 @@ function ChatRoom({
     "",
     { isClosed: (v) => v.trim() === "" },
   );
+  const inputRef = useAutoGrowTextarea(input, { minHeightPx: 80, maxHeightPx: 240 });
   const [streaming, setStreaming] = useState(false);
   // True while polling for a reply whose stream was detached by a tab switch
   // (the answer is still landing in server history). Drives a pending bubble
@@ -1690,10 +1692,18 @@ function ChatRoom({
   // Index (into the displayed message list) before which a "new messages"
   // divider is drawn on re-entry; -1 = none. Computed once at load.
   const [newDividerAt, setNewDividerAt] = useState(-1);
+  // Divider anchor used to jump to the first unseen message block when the user
+  // returns to this chat and new messages arrived while away.
+  const newDividerRef = useRef<HTMLDivElement | null>(null);
+  const didJumpToNewDividerRef = useRef(false);
   // Latest transcript, so the unmount cleanup can persist how many messages the
   // user had seen when they navigated away.
   const messagesRef = useRef<Message[]>([]);
   messagesRef.current = messages;
+
+  useEffect(() => {
+    didJumpToNewDividerRef.current = false;
+  }, [agentId]);
 
   useEffect(() => {
     api
@@ -1845,6 +1855,20 @@ function ChatRoom({
   useEffect(() => {
     stickIfAtBottom();
   }, [messages, agent, stickIfAtBottom]);
+
+  // On re-entry, if we have unread messages, start the viewport from the
+  // "new messages" divider instead of forcing the latest tail.
+  useEffect(() => {
+    if (newDividerAt < 0 || didJumpToNewDividerRef.current) return;
+    const divider = newDividerRef.current;
+    if (!divider) return;
+    const raf = window.requestAnimationFrame(() => {
+      divider.scrollIntoView({ block: "start" });
+      handleScroll();
+      didJumpToNewDividerRef.current = true;
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [newDividerAt, messages.length, recovering, handleScroll]);
 
   // Core streaming turn. ``appendUser`` is false on regenerate (the user message
   // is already in the transcript — we only replace the assistant reply).
@@ -2203,7 +2227,9 @@ function ChatRoom({
             ).map((m, i, list) => (
               <Fragment key={i}>
                 {i === newDividerAt && (
-                  <NewMessagesDivider label={t("chat.newMessages")} />
+                  <div ref={newDividerRef}>
+                    <NewMessagesDivider label={t("chat.newMessages")} />
+                  </div>
                 )}
                 <Bubble
                   msg={m}
@@ -2242,7 +2268,7 @@ function ChatRoom({
             <button
               type="button"
               onClick={scrollToBottom}
-              className="absolute bottom-3 right-4 inline-flex items-center gap-1 rounded-full border border-ink-200 bg-surface/95 px-3 py-1 text-xs text-ink-600 shadow-card backdrop-blur hover:bg-ink-50"
+              className="absolute bottom-3 left-1/2 -translate-x-1/2 inline-flex items-center gap-1 rounded-full border border-ink-200 bg-surface/95 px-3 py-1 text-xs text-ink-600 shadow-card backdrop-blur hover:bg-ink-50"
             >
               {t("chat.scrollToBottom")}
               <span aria-hidden>↓</span>
@@ -2254,6 +2280,7 @@ function ChatRoom({
           className="border-t border-ink-100 p-3 flex items-end gap-2"
         >
           <textarea
+            ref={inputRef}
             className="textarea flex-1 resize-none h-20"
             placeholder={t("chat.inputPlaceholder")}
             value={input}

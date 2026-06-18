@@ -39,6 +39,7 @@ import {
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
+import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useStickyScroll } from "@/lib/useStickyScroll";
 import {
   api,
@@ -1086,6 +1087,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const [input, setInput] = useSessionBackedState(`hermes:${agentId}:input`, "", {
     isClosed: (v) => v.trim() === "",
   });
+  const inputRef = useAutoGrowTextarea(input, { minHeightPx: 80, maxHeightPx: 240 });
   const [workdir, setWorkdir] = useState(
     () => localStorage.getItem(`hermes-workdir-${agentId}`) || DEFAULT_WORKDIR,
   );
@@ -1121,6 +1123,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
   // Index (into the displayed, non-system message list) before which a "new
   // messages" divider is drawn on re-entry; -1 = none. Computed once at load.
   const [newDividerAt, setNewDividerAt] = useState(-1);
+  // Divider anchor used to jump to the first unseen message block when the user
+  // returns to this chat and new messages arrived while away.
+  const newDividerRef = useRef<HTMLDivElement | null>(null);
+  const didJumpToNewDividerRef = useRef(false);
   // Latest transcript, so the unmount cleanup can persist how many messages the
   // user had seen when they navigated away.
   const messagesRef = useRef<ChatMsg[]>([]);
@@ -1129,6 +1135,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
   // localStorage scope for the transcript cache. Namespaced under `hermes:` so
   // it can't collide with an OpenClaw agent's cache for the same id.
   const chatScope = `hermes:${agentId}`;
+
+  useEffect(() => {
+    didJumpToNewDividerRef.current = false;
+  }, [chatScope]);
 
   useEffect(() => {
     // How many messages the user had already seen before this visit — read once,
@@ -1201,6 +1211,20 @@ function ChatRoom({ agentId }: { agentId: string }) {
   useEffect(() => {
     stickIfAtBottom();
   }, [messages, recovering, stickIfAtBottom]);
+
+  // On re-entry, if we have unread messages, start the viewport from the
+  // "new messages" divider instead of forcing the latest tail.
+  useEffect(() => {
+    if (newDividerAt < 0 || didJumpToNewDividerRef.current) return;
+    const divider = newDividerRef.current;
+    if (!divider) return;
+    const raf = window.requestAnimationFrame(() => {
+      divider.scrollIntoView({ block: "start" });
+      handleScroll();
+      didJumpToNewDividerRef.current = true;
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [newDividerAt, messages.length, recovering, handleScroll]);
 
   // Reconnect to a turn whose SSE stream was detached (tab switch / refresh):
   // poll GET /chat/status and keep going *as long as the server says running*
@@ -1581,7 +1605,9 @@ function ChatRoom({ agentId }: { agentId: string }) {
               .map((m, i, list) => (
                 <Fragment key={i}>
                   {i === newDividerAt && (
-                    <NewMessagesDivider label={t("chat.newMessages")} />
+                    <div ref={newDividerRef}>
+                      <NewMessagesDivider label={t("chat.newMessages")} />
+                    </div>
                   )}
                   <ChatBubble
                     msg={m}
@@ -1620,7 +1646,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
             <button
               type="button"
               onClick={scrollToBottom}
-              className="absolute bottom-3 right-4 inline-flex items-center gap-1 rounded-full border border-ink-200 bg-surface/95 px-3 py-1 text-xs text-ink-600 shadow-card backdrop-blur hover:bg-ink-50"
+              className="absolute bottom-3 left-1/2 -translate-x-1/2 inline-flex items-center gap-1 rounded-full border border-ink-200 bg-surface/95 px-3 py-1 text-xs text-ink-600 shadow-card backdrop-blur hover:bg-ink-50"
             >
               {t("chat.scrollToBottom")}
               <span aria-hidden>↓</span>
@@ -1651,6 +1677,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
           </div>
           <div className="flex items-end gap-2">
             <textarea
+              ref={inputRef}
               className="textarea h-20 flex-1 resize-none"
               placeholder={t("chat.inputPlaceholder")}
               value={input}

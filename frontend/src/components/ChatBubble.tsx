@@ -58,8 +58,8 @@ export function NewMessagesDivider({ label }: { label: string }) {
 }
 
 /** Placeholder shown in the assistant bubble while a turn is still running:
- *  typing dots for the first 10s, then a reassurance line so a slow turn never
- *  looks stuck. Shared by the OpenClaw and Hermes chat bubbles. */
+ *  typing dots for the first 10s, then a marquee reassurance line so a slow
+ *  turn never looks stuck. Shared by the OpenClaw and Hermes chat bubbles. */
 export function PendingReply() {
   const { t } = useTranslation();
   const [waitedLong, setWaitedLong] = useState(false);
@@ -68,7 +68,9 @@ export function PendingReply() {
     return () => window.clearTimeout(id);
   }, []);
   return waitedLong ? (
-    <span className="text-ink-400">{t("chat.stillThinking")}</span>
+    <span className="csflow-thinking-marquee text-ink-400">
+      <span className="csflow-thinking-marquee-text">{t("chat.stillThinking")}</span>
+    </span>
   ) : (
     <TypingDots />
   );
