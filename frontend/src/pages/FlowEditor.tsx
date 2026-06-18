@@ -2151,11 +2151,11 @@ export function FlowEditor() {
                         ),
                       )}
                     devMode={devMode}
-                    onToggleAutoMerge={() =>
+                    onSetAutoMerge={(enabled) =>
                       setTasks((prev) =>
                         prev.map((item) =>
                           item.rowKey === row.rowKey
-                            ? { ...item, autoMerge: !item.autoMerge }
+                            ? { ...item, autoMerge: enabled }
                             : item,
                         ),
                       )}
@@ -2304,7 +2304,7 @@ function TaskListRow({
   onRemove,
   onToggleCheckpoint,
   devMode,
-  onToggleAutoMerge,
+  onSetAutoMerge,
   onMove,
 }: {
   row: TaskRow;
@@ -2319,7 +2319,7 @@ function TaskListRow({
   onRemove: () => void;
   onToggleCheckpoint: () => void;
   devMode: boolean;
-  onToggleAutoMerge: () => void;
+  onSetAutoMerge: (enabled: boolean) => void;
   onMove: (dir: -1 | 1) => void;
 }) {
   const { t } = useTranslation();
@@ -2360,27 +2360,47 @@ function TaskListRow({
                 // OpenClaw is forced to auto-merge regardless of stored value.
                 const autoMergeOn = ownerIsOpenclaw || row.autoMerge;
                 return (
-                  <button
-                    type="button"
-                    disabled={ownerIsOpenclaw}
-                    title={
-                      ownerIsOpenclaw
-                        ? t("flowEditor.taskFields.autoMergeOpenclawLocked")
-                        : undefined
-                    }
-                    className={cn(
-                      "shrink-0 rounded-md border px-2.5 py-1 text-xs font-semibold transition",
-                      autoMergeOn
-                        ? "border-purple-500 bg-purple-500 text-white shadow-[0_10px_18px_-10px_rgba(147,51,234,0.85)] hover:bg-purple-600"
-                        : "border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100",
-                      ownerIsOpenclaw && "cursor-not-allowed opacity-80 hover:bg-purple-500",
-                    )}
-                    onClick={ownerIsOpenclaw ? undefined : onToggleAutoMerge}
-                  >
-                    {autoMergeOn
-                      ? t("flowEditor.taskFields.autoMergeEnabledShort")
-                      : t("flowEditor.taskFields.autoMergeDisabledShort")}
-                  </button>
+                  <span className="inline-flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={autoMergeOn}
+                      aria-label={t("flowEditor.taskFields.autoMergeEnabledShort")}
+                      disabled={ownerIsOpenclaw}
+                      title={
+                        ownerIsOpenclaw
+                          ? t("flowEditor.taskFields.autoMergeOpenclawLocked")
+                          : undefined
+                      }
+                      className={cn(
+                        "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
+                        autoMergeOn ? "bg-purple-500" : "bg-ink-300",
+                        ownerIsOpenclaw && "cursor-not-allowed opacity-80",
+                      )}
+                      onClick={
+                        ownerIsOpenclaw
+                          ? undefined
+                          : () => onSetAutoMerge(!row.autoMerge)
+                      }
+                    >
+                      <span
+                        className={cn(
+                          "inline-block h-4 w-4 transform rounded-full bg-surface shadow transition-transform",
+                          autoMergeOn ? "translate-x-4" : "translate-x-0.5",
+                        )}
+                      />
+                    </button>
+                    <span
+                      className={cn(
+                        "text-xs font-semibold whitespace-nowrap",
+                        autoMergeOn ? "text-purple-700" : "text-ink-500",
+                      )}
+                    >
+                      {autoMergeOn
+                        ? t("flowEditor.taskFields.autoMergeEnabledShort")
+                        : t("flowEditor.taskFields.autoMergeDisabledShort")}
+                    </span>
+                  </span>
                 );
               })()}
               {!isSummary && (
