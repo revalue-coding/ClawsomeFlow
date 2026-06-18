@@ -340,7 +340,7 @@ def test_worker_dispatch_non_scheduled_omits_self_merge() -> None:
 
 
 def test_worker_dispatch_scheduled_includes_self_merge_and_post_merge_paths() -> None:
-    ctx = _ctx(is_scheduled=True)
+    ctx = _ctx(self_merge=True)
     msg = prompts.build_worker_dispatch(ctx)
     assert "**Self-merge:**" in msg
     assert "resolve conflicts yourself" in msg
@@ -360,7 +360,7 @@ def test_leader_dispatch_scheduled_includes_self_merge() -> None:
         task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
         worktree=_wt(agent="leader", branch="clawteam/csflow-x/leader",
                      path="/tmp/wt/leader", main="/tmp/main", base="main"),
-        is_scheduled=True,
+        self_merge=True,
     )
     msg = prompts.build_leader_dispatch(ctx)
     assert "**Self-merge:**" in msg
@@ -380,7 +380,7 @@ def test_leader_scheduled_final_reply_must_cite_baseline_paths() -> None:
         task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
         worktree=_wt(agent="leader", branch="clawteam/csflow-x/leader",
                      path="/tmp/wt/leader", main="/tmp/main", base="main"),
-        is_scheduled=True,
+        self_merge=True,
     )
     msg = prompts.build_leader_dispatch(ctx)
     assert "MUST self-check" in msg

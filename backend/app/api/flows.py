@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api._auth import current_user
 from app.api.errors import ApiError
+from app.flow_modes import flow_mode
 from app.logging_setup import get_logger
 from app.models import AgentKind, Flow, FlowSpec, iso_utc
 from app.storage import StorageBackend, StorageVersionConflict, get_storage
@@ -64,6 +65,8 @@ class FlowSummary(_CamelModel):
     leader_kind: str | None = None
     # True when spec.variables["csflow.easy_mode"] is "true" (省心模式).
     easy_mode: bool = False
+    # True when spec.variables["csflow.dev_mode"] is "true" (开发者模式).
+    dev_mode: bool = False
 
 
 class FlowDetail(_CamelModel):
@@ -190,7 +193,17 @@ def _spec_easy_mode(flow: Flow) -> bool:
         variables = (flow.spec or {}).get("variables") or {}
         if not isinstance(variables, dict):
             return False
-        return str(variables.get("csflow.easy_mode", "")).strip().lower() == "true"
+        return flow_mode(variables) == "easy"
+    except Exception:
+        return False
+
+
+def _spec_dev_mode(flow: Flow) -> bool:
+    try:
+        variables = (flow.spec or {}).get("variables") or {}
+        if not isinstance(variables, dict):
+            return False
+        return flow_mode(variables) == "dev"
     except Exception:
         return False
 
@@ -235,6 +248,7 @@ def _to_summary(flow: Flow) -> FlowSummary:
         leader_agent_id=leader_id,
         leader_kind=leader_kind,
         easy_mode=_spec_easy_mode(flow),
+        dev_mode=_spec_dev_mode(flow),
     )
 
 

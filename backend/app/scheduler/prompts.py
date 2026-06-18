@@ -114,11 +114,13 @@ class DispatchContext:
     # see ``RunController._compose_dispatch_context``. **First-level only.**
     upstream_outputs: list[UpstreamOutput] = field(default_factory=list)
 
-    # True for runs triggered by a timed schedule. Scheduled runs require every
-    # task (worker + leader) to self-merge into the baseline branch and to
-    # report deliverables using post-merge absolute paths; the user merge-review
-    # and complaint phases are skipped (see scheduler/finalize.py).
-    is_scheduled: bool = False
+    # True when THIS task must self-merge its worktree branch into the baseline
+    # branch in-task (resolved per task by app/flow_modes.py::task_self_merges —
+    # easy mode, dev-mode auto-merge tasks, OpenClaw under dev mode, and every
+    # task of a scheduled normal run). When set, the dispatch adds the self-merge
+    # block and tells the worker to cite post-merge baseline absolute paths
+    # (the worktree is deleted at run end).
+    self_merge: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -373,7 +375,7 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
     )
     next_no += 1
 
-    if ctx.is_scheduled:
+    if ctx.self_merge:
         merge_steps, next_no = _scheduled_self_merge_steps(ctx, next_no)
         steps.extend(merge_steps)
 
@@ -550,11 +552,11 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     ]
     next_no = 3
 
-    if ctx.is_scheduled:
+    if ctx.self_merge:
         merge_steps, next_no = _scheduled_self_merge_steps(ctx, next_no)
         steps.extend(merge_steps)
 
-    if ctx.is_scheduled:
+    if ctx.self_merge:
         steps.append(
             f"{next_no}. **MUST self-check:** every absolute path in your final reply MUST be a "
             f"post-merge path under the baseline workspace `{repo_root}` on `{base}` (NEVER the "
@@ -569,7 +571,7 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     next_no += 1
 
     reply_paths = (
-        "post-merge baseline absolute paths" if ctx.is_scheduled else "absolute paths"
+        "post-merge baseline absolute paths" if ctx.self_merge else "absolute paths"
     )
     steps.append(
         f"{next_no}. `clawteam inbox send {team} {ctx.agent.id} "

@@ -238,6 +238,9 @@ export interface FlowTask {
   /** Output-summary requirement (backend handles merge + persistence; frontend only renders two fields). */
   outputSummaryRequirement?: string | null;
   requiresHumanCheckpoint?: boolean;
+  /** Developer-mode per-task auto-merge switch (only meaningful in 开发者模式).
+   *  Omitted / undefined defaults to true (auto-merge enabled). */
+  devAutoMerge?: boolean;
   dependsOn?: string[];
   isLeaderSummary?: boolean;
   timeoutSeconds?: number;
@@ -264,6 +267,8 @@ export interface FlowSummary {
   leaderKind?: string | null;
   /** True when spec.variables csflow.easy_mode is enabled (省心模式). */
   easyMode?: boolean;
+  /** True when spec.variables csflow.dev_mode is enabled (开发者模式). */
+  devMode?: boolean;
 }
 
 export interface FlowDetail extends FlowSummary {

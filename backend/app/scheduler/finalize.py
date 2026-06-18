@@ -40,6 +40,7 @@ from app.integrations.clawteam_mcp import (
     get_mcp_client,
 )
 from app.config import load_config
+from app.flow_modes import flow_mode
 from app.logging_setup import get_logger
 from app.models import (
     DEFAULT_TARGET_BRANCH,
@@ -196,6 +197,39 @@ async def finalize_run(
                 run_id=ipt.run.id,
                 team=ipt.run.team_name,
                 team_cleaned=out.team_cleaned,
+            )
+            return out
+
+        # Easy ("省心") / developer ("开发者") mode, manual trigger: every merge
+        # was performed in-task (easy → all tasks self-merge; dev → auto-merge
+        # tasks + OpenClaw self-merge, no-merge task worktrees are discarded by
+        # terminal cleanup). So there is no user merge-review (awaiting_user_review)
+        # — but, unlike a scheduled run, a manual run STILL enters the user
+        # complaint phase. Go to awaiting_user_complaint with a completed terminal
+        # marker; the worktree of every no-merge dev task is removed by the
+        # terminal team cleanup at run end.
+        mode = flow_mode((ipt.flow.spec or {}).get("variables") or {})
+        if mode in ("easy", "dev"):
+            out.final_status = RunStatus.awaiting_user_complaint
+            out.detail = (
+                f"{mode} mode: in-task self-merge; review skipped, awaiting complaint input"
+            )
+            ipt.run.status = RunStatus.awaiting_user_complaint
+            ipt.run.pending_merges = None
+            merged_inputs = dict(ipt.run.inputs or {})
+            merged_inputs[_POST_COMPLAINT_STATUS_KEY] = RunStatus.completed.value
+            merged_inputs.pop(_POST_REVIEW_TERMINAL_STATUS_KEY, None)
+            ipt.run.inputs = merged_inputs
+            if ipt.run.finished_at is None:
+                ipt.run.finished_at = datetime.now(timezone.utc)
+            # Run is not terminal yet (awaiting complaint), so tail cleanup is a
+            # no-op now; team/worktree cleanup happens when the complaint phase
+            # finishes (controller._finish_after_complaint_phase).
+            logger.info(
+                "finalize_run_mode_awaiting_complaint",
+                run_id=ipt.run.id,
+                team=ipt.run.team_name,
+                mode=mode,
             )
             return out
 

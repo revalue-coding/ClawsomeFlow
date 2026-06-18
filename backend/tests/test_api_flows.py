@@ -164,6 +164,32 @@ def test_list_includes_easy_mode_flag(client: TestClient, repo: str) -> None:
     assert items["normal-flow"]["easyMode"] is False
 
 
+def test_list_includes_dev_mode_flag(client: TestClient, repo: str) -> None:
+    payload = _flow_payload(repo, name="dev-flow")
+    payload["spec"]["variables"] = {"csflow.dev_mode": "true"}
+    client.post("/api/flows", json=payload)
+    payload2 = _flow_payload(repo, name="plain-flow")
+    client.post("/api/flows", json=payload2)
+    items = {f["name"]: f for f in client.get("/api/flows").json()["items"]}
+    assert items["dev-flow"]["devMode"] is True
+    assert items["dev-flow"]["easyMode"] is False
+    assert items["plain-flow"]["devMode"] is False
+
+
+def test_dev_auto_merge_round_trips_through_crud(client: TestClient, repo: str) -> None:
+    payload = _flow_payload(repo, name="dev-merge-flow")
+    payload["spec"]["variables"] = {"csflow.dev_mode": "true"}
+    payload["spec"]["tasks"][0]["devAutoMerge"] = False  # worker task: no auto-merge
+    # leader summary keeps the default (omitted) → True.
+    resp = client.post("/api/flows", json=payload)
+    assert resp.status_code == 201, resp.text
+    flow_id = resp.json()["id"]
+    detail = client.get(f"/api/flows/{flow_id}").json()
+    tasks = {t["id"]: t for t in detail["spec"]["tasks"]}
+    assert tasks["t1"]["devAutoMerge"] is False
+    assert tasks["ts"]["devAutoMerge"] is True
+
+
 def test_list_q_filter(client: TestClient, repo: str) -> None:
     client.post("/api/flows", json=_flow_payload(repo, name="customer-flow"))
     client.post("/api/flows", json=_flow_payload(repo, name="risk-flow"))

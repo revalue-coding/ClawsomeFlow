@@ -559,6 +559,41 @@ async def test_scheduled_run_skips_review_and_complaint_completes_directly() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode_key", ["csflow.easy_mode", "csflow.dev_mode"])
+async def test_easy_or_dev_manual_skips_review_enters_complaint(mode_key: str) -> None:
+    """Easy / developer mode on a MANUAL run (is_scheduled=False): tasks
+    self-merged in-task, so no merge-review and no finalize merge calls — but the
+    run still enters the complaint phase (awaiting_user_complaint → completed),
+    unlike a scheduled run which terminates directly."""
+    run, flow, spec = _make_run_and_spec(agents_kw=[
+        {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": False, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+        {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": True, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+    ])
+    # Manual run (is_scheduled stays False) with the mode flag set in spec vars.
+    flow.spec = {**(flow.spec or {}), "variables": {mode_key: "true"}}
+    cli = _StubCli()
+    # Non-empty diff would normally create a pending merge for a manual agent.
+    mcp = _StubMcp(diffs={"alice": {"files": 3}})
+    out = await fin.finalize_run(
+        fin.FinalizeInput(run=run, flow=flow, agents=spec.agents,
+                          leader_agent_id="leader", has_failed_tasks=False),
+        storage=get_storage(), cli=cli, mcp=mcp,
+        worktree_lookup=_StubLookup(items=[_wt("alice")]),
+    )
+    assert out.final_status == RunStatus.awaiting_user_complaint
+    assert run.status == RunStatus.awaiting_user_complaint
+    assert out.pending_merges == []
+    assert run.pending_merges is None
+    assert cli.merge_calls == []
+    assert (run.inputs or {}).get("_csflow_post_complaint_final_status") == "completed"
+    assert run.finished_at is not None
+
+
+@pytest.mark.asyncio
 async def test_aborted_run_status_overrides_all() -> None:
     run, flow, spec = _make_run_and_spec(agents_kw=[
         {"id": "alice", "kind": AgentKind.claude, "repo": "/r",

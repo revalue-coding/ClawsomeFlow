@@ -11,6 +11,12 @@ export const FLOW_RUNTIME_PARAM_FIELDS_KEY = "csflow.runtime.param_fields";
 // run (self-merge in-task, skip user review + complaint). See backend
 // app/api/runs.py::trigger_run.
 export const FLOW_EASY_MODE_KEY = "csflow.easy_mode";
+// "开发者模式" (developer mode). Stored in the spec's ``variables`` dict like easy
+// mode. When ON, each subtask decides whether the agent self-merges (see
+// FlowTask.devAutoMerge); the user merge-review phase is skipped (a manual run
+// still enters the complaint phase). Mutually exclusive with easy mode in the
+// UI. See backend app/flow_modes.py.
+export const FLOW_DEV_MODE_KEY = "csflow.dev_mode";
 
 function normalizeFields(fields: string[]): string[] {
   const seen = new Set<string>();
@@ -48,6 +54,20 @@ export function setEasyMode(spec: FlowSpec, on: boolean): FlowSpec {
   const nextVariables: Record<string, string> = { ...(spec.variables ?? {}) };
   if (on) nextVariables[FLOW_EASY_MODE_KEY] = "true";
   else delete nextVariables[FLOW_EASY_MODE_KEY];
+  return {
+    ...spec,
+    variables: Object.keys(nextVariables).length > 0 ? nextVariables : {},
+  };
+}
+
+export function getDevMode(spec: FlowSpec | null | undefined): boolean {
+  return String(spec?.variables?.[FLOW_DEV_MODE_KEY] ?? "").trim().toLowerCase() === "true";
+}
+
+export function setDevMode(spec: FlowSpec, on: boolean): FlowSpec {
+  const nextVariables: Record<string, string> = { ...(spec.variables ?? {}) };
+  if (on) nextVariables[FLOW_DEV_MODE_KEY] = "true";
+  else delete nextVariables[FLOW_DEV_MODE_KEY];
   return {
     ...spec,
     variables: Object.keys(nextVariables).length > 0 ? nextVariables : {},

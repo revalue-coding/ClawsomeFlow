@@ -302,6 +302,13 @@ export function FlowList() {
                             aria-label={t("flowEditor.easyMode")}
                           />
                         )}
+                        {f.devMode && (
+                          <span
+                            className="h-2 w-2 shrink-0 rounded-full bg-purple-500"
+                            title={t("flowEditor.devModeSub")}
+                            aria-label={t("flowEditor.devMode")}
+                          />
+                        )}
                       </div>
                       <div className="text-[11px] text-ink-400 font-mono mt-0.5">
                         {f.id}

@@ -166,10 +166,15 @@ const en = {
     titleEdit: "Edit Flow",
     flowBasics: "Flow basics",
     easyMode: "Easy mode",
-    easyModeSub: "Agent auto-merges all changes and skips the complaint phase",
+    easyModeSub: "Agent auto-merges all changes; complaint phase still runs",
     easyModeNotice:
-      "Easy mode lets the agent intelligently merge all changes (including when multiple tasks run in parallel) and skips the user complaint phase. Human checkpoints in the flow are still reviewed by you.",
+      "Easy mode lets the agent intelligently merge all changes (including when multiple tasks run in parallel) without per-merge review; once everything finishes it still enters the user complaint phase so you can give consolidated feedback. Human checkpoints in the flow are still reviewed by you. A timed run instead finishes directly and skips the complaint phase.",
     easyModeAck: "Got it",
+    devMode: "Developer mode",
+    devModeSub: "Per-subtask auto-merge control; complaint phase still runs",
+    devModeNotice:
+      "Developer mode is designed for software developers: it lets you decide, per subtask, whether the agent auto-merges its changes. Each subtask runs in a worktree created from the main repo's target branch. If your task plans to open a PR directly from the worktree, we recommend disabling auto-merge into the main repo's target branch for that subtask. A subtask with auto-merge disabled has its worktree directory deleted automatically after the task finishes.",
+    devModeAck: "Got it",
     flowName: "Flow name",
     name: "Flow name",
     namePlaceholder: "e.g. customer-research v2",
@@ -388,6 +393,9 @@ const en = {
       requiresHumanCheckpointEnabledShort: "Checkpoint",
       requiresHumanCheckpointEnableAction: "Add checkpoint",
       requiresHumanCheckpointDisableAction: "Remove checkpoint",
+      autoMergeEnabledShort: "Auto-merge",
+      autoMergeDisabledShort: "No merge",
+      autoMergeOpenclawLocked: "OpenClaw subtasks always auto-merge and can't be changed",
       remove: "Remove task",
     },
     decompose: {
@@ -492,7 +500,7 @@ const en = {
   scheduledFlows: {
     title: "Timed Flows",
     description:
-      "Timed Flow runs automatically merge their changes into the local baseline branch and skip the user-complaint phase.",
+      "Timed runs are unattended: by default the agent merges all changes and the run finishes directly without a user complaint phase. If the Flow has developer mode on, each subtask follows its own auto-merge setting and the run still finishes directly. Human checkpoints in the flow are still reviewed by you.",
     createButton: "+ Timed Task",
     createTitle: "Create Timed Task",
     editTitle: "Edit Timed Task",

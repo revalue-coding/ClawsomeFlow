@@ -137,11 +137,12 @@ def _stub_start_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(engine_mod.FlowScheduler, "start_run", fake_start_run)
 
 
-def test_trigger_easy_mode_marks_run_scheduled(
+def test_trigger_easy_mode_does_not_mark_run_scheduled(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """省心模式: a manual run for an easy-mode flow is created as is_scheduled
-    (reusing the self-merge + skip review/complaint path)."""
+    """省心模式: a MANUAL run is never ``is_scheduled`` (that flag means a timed
+    trigger only). Easy-mode self-merge + skip-review now derives from the Flow
+    mode, and a manual easy-mode run still enters the complaint phase."""
     storage = get_storage()
     spec = FlowSpec(
         agents=[
@@ -164,7 +165,7 @@ def test_trigger_easy_mode_marks_run_scheduled(
     assert r.status_code == 202, r.text
     run_row = get_storage().run_get(r.json()["id"])
     assert run_row is not None
-    assert run_row.is_scheduled is True
+    assert run_row.is_scheduled is False
 
 
 def test_trigger_without_easy_mode_run_not_scheduled(

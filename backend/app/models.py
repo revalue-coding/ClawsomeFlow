@@ -388,6 +388,11 @@ class FlowTask(_ApiBase):
     depends_on: list[str] = Field(default_factory=list)
     is_leader_summary: bool = False
     requires_human_checkpoint: bool = False
+    # Developer-mode ("开发者模式") per-task auto-merge switch. Only consulted
+    # when the Flow is in developer mode (see app/flow_modes.py); ignored
+    # otherwise. Default True (auto-merge enabled). OpenClaw tasks are forced to
+    # self-merge regardless of this value. Allowed on the leader summary task.
+    dev_auto_merge: bool = True
     timeout_seconds: int = 14400  # 240 min (4h) default
 
     @field_validator("id")

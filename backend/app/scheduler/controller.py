@@ -58,6 +58,7 @@ from app.integrations.openclaw_install import (
     repair_pending_scope_upgrades,
 )
 from app.config import load_config
+from app.flow_modes import flow_mode, task_self_merges
 from app.models import (
     AgentKind,
     Flow,
@@ -2885,14 +2886,26 @@ class RunController:
             if previous_summary
             else "(no previously matched inbox summary)"
         )
-        # In "省心/auto-merge" mode (is_scheduled), every task self-merges into the
-        # baseline branch in-task — there is no user merge review. A re-executed
-        # checkpoint task must self-merge too, otherwise its corrected output never
-        # reaches the baseline. In normal (manual-merge) runs we omit this so the
-        # user still merges via the UI. Mirrors prompts._scheduled_self_merge_steps.
-        is_scheduled = bool(getattr(self.run, "is_scheduled", False))
+        # When this task self-merges in-task (easy mode, dev-mode auto-merge task,
+        # OpenClaw under dev mode, or any task of a scheduled normal run), a
+        # re-executed checkpoint task must self-merge too, otherwise its corrected
+        # output never reaches the baseline. In manual-merge runs we omit this so
+        # the user still merges via the UI. Mirrors prompts._scheduled_self_merge_steps.
+        rerun_book = self._tasks.get(upstream_item.task_id)
+        rerun_task = rerun_book.task if rerun_book else None
+        rerun_agent = self._agents.get(upstream_item.owner_agent_id)
+        self_merge = bool(
+            rerun_task is not None
+            and rerun_agent is not None
+            and task_self_merges(
+                mode=self._flow_mode(),
+                run_is_scheduled=bool(getattr(self.run, "is_scheduled", False)),
+                task=rerun_task,
+                agent=rerun_agent,
+            )
+        )
         self_merge_block = ""
-        if is_scheduled:
+        if self_merge:
             sess = self._sessions.get(upstream_item.owner_agent_id)
             wt = sess.worktree if sess else None
             wt_path = wt.worktree_path if wt else "<worktree-path>"
@@ -2913,7 +2926,7 @@ class RunController:
                 f"   Cite paths under `{repo_root}` only — not `{wt_path}`.\n"
             )
         # Number the inbox/update steps after the optional self-merge block.
-        inbox_no, update_no, fail_no = (3, 4, 5) if is_scheduled else (2, 3, 4)
+        inbox_no, update_no, fail_no = (3, 4, 5) if self_merge else (2, 3, 4)
         return (
             "## ClawsomeFlow Manual Checkpoint Rerun\n"
             f"- team: `{self.team_name}`\n"
@@ -3103,7 +3116,19 @@ class RunController:
             f"{execution_requirements}"
         )
 
+    def _flow_mode(self) -> str:
+        """Resolve the Flow execution mode from the spec variables."""
+        variables = getattr(self.spec, "variables", None) or {}
+        return flow_mode(variables)
+
     def _merge_requirement_agents(self) -> list[FlowAgent]:
+        # In easy / developer mode every merge is performed in-task (easy → all
+        # tasks self-merge; dev → auto-merge tasks + OpenClaw self-merge, no-merge
+        # tasks are intentionally discarded). So the complaint phase must NOT
+        # re-dispatch standalone merge-requirement tasks. Only normal-mode manual
+        # runs defer OpenClaw merges to the complaint/satisfaction stage.
+        if self._flow_mode() in ("easy", "dev"):
+            return []
         return [agent for agent in self.spec.agents if agent.kind == AgentKind.openclaw]
 
     async def _dispatch_merge_requirements(
@@ -3431,7 +3456,12 @@ class RunController:
             worker_worktrees=worker_worktrees,
             worker_reports=worker_reports,
             upstream_outputs=upstream_outputs,
-            is_scheduled=bool(getattr(self.run, "is_scheduled", False)),
+            self_merge=task_self_merges(
+                mode=self._flow_mode(),
+                run_is_scheduled=bool(getattr(self.run, "is_scheduled", False)),
+                task=task,
+                agent=agent,
+            ),
         )
 
     def _render_report_summary(self, report: WorkerReport | None) -> str | None:

@@ -167,10 +167,15 @@ const zh = {
     titleEdit: "编辑 Flow",
     flowBasics: "Flow 基础信息",
     easyMode: "省心模式",
-    easyModeSub: "由 Agent 智能合入全部修改，并跳过用户投诉环节",
+    easyModeSub: "由 Agent 智能合入全部修改，完成后仍会进入投诉环节",
     easyModeNotice:
-      "省心模式将由 Agent 智能合入全部修改（多任务并行仍然适用），并跳过用户投诉环节。任务流中的人工检查点依然由您来审核。",
+      "省心模式将由 Agent 智能合入全部修改（多任务并行仍然适用），无需您逐个审核合入；全部完成后仍会进入用户投诉环节，便于您统一反馈。任务流中的人工检查点依然由您来审核。定时执行时则会直接结束，不进入投诉环节。",
     easyModeAck: "我知道了",
+    devMode: "开发者模式",
+    devModeSub: "可逐子任务设置是否自动合入；完成后进入投诉环节",
+    devModeNotice:
+      "开发者模式专为软件开发者设计，允许开发者针对子任务定制是否自动合入修改。子任务的执行会基于主仓库的目标分支创建worktree，如果您的任务计划在worktree中直接提交PR，建议在编排任务时禁止Agent自动合入修改到主仓库的目标分支。被禁止的子任务将在任务执行完后自动删除worktree目录",
+    devModeAck: "我知道了",
     flowName: "Flow 名称",
     name: "Flow 名称",
     namePlaceholder: "如：客户调研 v2",
@@ -384,6 +389,9 @@ const zh = {
       requiresHumanCheckpointEnabledShort: "检查点",
       requiresHumanCheckpointEnableAction: "添加人工检查点",
       requiresHumanCheckpointDisableAction: "移除人工检查点",
+      autoMergeEnabledShort: "自动合入",
+      autoMergeDisabledShort: "禁止合入",
+      autoMergeOpenclawLocked: "Openclaw Agent 子任务固定自动合入，不可修改",
       remove: "移除任务",
     },
     decompose: {
@@ -486,7 +494,7 @@ const zh = {
   scheduledFlows: {
     title: "定时Flows",
     description:
-      "定时执行的任务流将进入省心模式：即便是多任务并行，Agent也能智能合入全部修改，同时会跳过用户投诉环节。注意，任务流中插入的人工检查点依然由您来审核",
+      "定时执行为无人值守模式：默认由 Agent 智能合入全部修改，全部完成后直接结束，不进入用户投诉环节。若该 Flow 开启了开发者模式，则按各子任务的自动合入设置执行，同样在完成后直接结束。任务流中插入的人工检查点依然由您来审核。",
     createButton: "+定时任务",
     createTitle: "新建定时任务",
     editTitle: "编辑定时任务",

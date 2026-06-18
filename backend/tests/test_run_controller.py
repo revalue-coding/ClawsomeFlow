@@ -4184,3 +4184,33 @@ async def test_checkpoint_abort_emits_checkpoint_cleared_event(fake_lookup) -> N
 
 async def _empty_snapshots() -> list[TaskSnapshot]:
     return []
+
+
+def _merge_req_controller(spec: FlowSpec, fake_lookup) -> RunController:
+    run = _persist_flow_and_run(spec)
+    return RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots,
+        leader_inbox_provider=None,
+    )
+
+
+def test_merge_requirement_agents_normal_returns_openclaw(fake_lookup) -> None:
+    # OpenClaw leader → normal mode defers its merge to the complaint phase.
+    spec = _make_worker_plus_openclaw_leader_spec()
+    rc = _merge_req_controller(spec, fake_lookup)
+    assert [a.id for a in rc._merge_requirement_agents()] == ["leader"]
+
+
+@pytest.mark.parametrize("mode_key", ["csflow.easy_mode", "csflow.dev_mode"])
+def test_merge_requirement_agents_easy_dev_returns_empty(fake_lookup, mode_key: str) -> None:
+    # Easy / dev mode merge in-task, so the complaint phase must not re-dispatch
+    # standalone merge-requirement tasks — even with an OpenClaw agent present.
+    spec = _make_worker_plus_openclaw_leader_spec()
+    spec.variables = {mode_key: "true"}
+    rc = _merge_req_controller(spec, fake_lookup)
+    assert rc._merge_requirement_agents() == []

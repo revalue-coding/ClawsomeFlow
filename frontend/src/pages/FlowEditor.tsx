@@ -46,6 +46,8 @@ import {
   setRunInputFields,
   getEasyMode,
   setEasyMode,
+  getDevMode,
+  setDevMode,
 } from "@/lib/flowRuntime";
 import {
   clearSessionBackedKeys,
@@ -87,6 +89,9 @@ interface TaskRow {
   description: string;
   outputSummaryRequirement: string;
   requiresHumanCheckpoint: boolean;
+  /** Developer-mode per-task auto-merge switch. Default true. Ignored unless
+   *  the Flow is in developer mode; OpenClaw owners are forced to auto-merge. */
+  autoMerge: boolean;
   ownerKind: OwnerKind;
   ownerId: string;
   ownerRepo: string;
@@ -171,6 +176,7 @@ function blankRow(): TaskRow {
     description: "",
     outputSummaryRequirement: "",
     requiresHumanCheckpoint: false,
+    autoMerge: true,
     ownerKind: "claude",
     ownerId: "",
     ownerRepo: "",
@@ -680,12 +686,18 @@ export function FlowEditor() {
     draftKey("runInputFields"),
     [],
   );
-  // "省心模式" (easy mode): persisted in spec.variables; default OFF.
+  // "省心模式" (easy mode) / "开发者模式" (developer mode): persisted in
+  // spec.variables; default OFF; mutually exclusive (see toggle handlers).
   const [easyMode, setEasyModeState] = useSessionBackedState<boolean>(
     draftKey("easyMode"),
     false,
   );
   const [easyModeNoticeOpen, setEasyModeNoticeOpen] = useState(false);
+  const [devMode, setDevModeState] = useSessionBackedState<boolean>(
+    draftKey("devMode"),
+    false,
+  );
+  const [devModeNoticeOpen, setDevModeNoticeOpen] = useState(false);
   const [runInputFieldDraft, setRunInputFieldDraft] = useState("");
   const [runInputFieldError, setRunInputFieldError] = useState<string | null>(null);
   const [version, setVersion] = useSessionBackedState<number | null>(draftKey("version"), null);
@@ -768,6 +780,7 @@ export function FlowEditor() {
         setDescription(flow.description);
         setRunInputFieldsState(getRunInputFields(flow.spec));
         setEasyModeState(getEasyMode(flow.spec));
+        setDevModeState(getDevMode(flow.spec));
         setVersion(flow.version);
         const rows = specToRows(flow.spec);
         setTasks(rows);
@@ -1294,7 +1307,10 @@ export function FlowEditor() {
       name,
       description,
       cleanupTeamOnFinish: true,
-      spec: setEasyMode(rowsToSpec(tasks, runInputFields), easyMode),
+      spec: setDevMode(
+        setEasyMode(rowsToSpec(tasks, runInputFields), easyMode),
+        devMode,
+      ),
     };
   }
 
@@ -1665,9 +1681,10 @@ export function FlowEditor() {
 
       <Card>
         <CardTitle>{t("flowEditor.flowBasics")}</CardTitle>
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-emerald-100/90 bg-emerald-50/60 px-3 py-2">
+        <div className="mb-2 flex items-center justify-between rounded-lg border border-emerald-100/90 bg-emerald-50/60 px-3 py-2">
           <div className="pr-3">
             <div className="text-sm font-medium text-ink-800">{t("flowEditor.easyMode")}</div>
+            <div className="text-xs text-ink-500">{t("flowEditor.easyModeSub")}</div>
           </div>
           <button
             type="button"
@@ -1676,7 +1693,11 @@ export function FlowEditor() {
             onClick={() => {
               const next = !easyMode;
               setEasyModeState(next);
-              if (next) setEasyModeNoticeOpen(true);
+              // Mutually exclusive with developer mode.
+              if (next) {
+                setDevModeState(false);
+                setEasyModeNoticeOpen(true);
+              }
             }}
             className={cn(
               "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
@@ -1687,6 +1708,37 @@ export function FlowEditor() {
               className={cn(
                 "inline-block h-5 w-5 transform rounded-full bg-surface shadow transition-transform",
                 easyMode ? "translate-x-5" : "translate-x-1",
+              )}
+            />
+          </button>
+        </div>
+        <div className="mb-4 flex items-center justify-between rounded-lg border border-purple-100/90 bg-purple-50/60 px-3 py-2">
+          <div className="pr-3">
+            <div className="text-sm font-medium text-ink-800">{t("flowEditor.devMode")}</div>
+            <div className="text-xs text-ink-500">{t("flowEditor.devModeSub")}</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={devMode}
+            onClick={() => {
+              const next = !devMode;
+              setDevModeState(next);
+              // Mutually exclusive with easy mode.
+              if (next) {
+                setEasyModeState(false);
+                setDevModeNoticeOpen(true);
+              }
+            }}
+            className={cn(
+              "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
+              devMode ? "bg-purple-500" : "bg-ink-300",
+            )}
+          >
+            <span
+              className={cn(
+                "inline-block h-5 w-5 transform rounded-full bg-surface shadow transition-transform",
+                devMode ? "translate-x-5" : "translate-x-1",
               )}
             />
           </button>
@@ -1702,6 +1754,20 @@ export function FlowEditor() {
           <div className="mt-4 flex justify-end">
             <button className="btn btn-primary" onClick={() => setEasyModeNoticeOpen(false)}>
               {t("flowEditor.easyModeAck")}
+            </button>
+          </div>
+        </Modal>
+        <Modal
+          open={devModeNoticeOpen}
+          onClose={() => setDevModeNoticeOpen(false)}
+          title={t("flowEditor.devMode")}
+        >
+          <p className="whitespace-pre-line text-sm text-ink-700">
+            {t("flowEditor.devModeNotice")}
+          </p>
+          <div className="mt-4 flex justify-end">
+            <button className="btn btn-primary" onClick={() => setDevModeNoticeOpen(false)}>
+              {t("flowEditor.devModeAck")}
             </button>
           </div>
         </Modal>
@@ -2084,6 +2150,15 @@ export function FlowEditor() {
                             : item,
                         ),
                       )}
+                    devMode={devMode}
+                    onToggleAutoMerge={() =>
+                      setTasks((prev) =>
+                        prev.map((item) =>
+                          item.rowKey === row.rowKey
+                            ? { ...item, autoMerge: !item.autoMerge }
+                            : item,
+                        ),
+                      )}
                     onMove={(dir) => moveRow(row.rowKey, dir)}
                   />
                 );
@@ -2228,6 +2303,8 @@ function TaskListRow({
   onEdit,
   onRemove,
   onToggleCheckpoint,
+  devMode,
+  onToggleAutoMerge,
   onMove,
 }: {
   row: TaskRow;
@@ -2241,6 +2318,8 @@ function TaskListRow({
   onEdit: () => void;
   onRemove: () => void;
   onToggleCheckpoint: () => void;
+  devMode: boolean;
+  onToggleAutoMerge: () => void;
   onMove: (dir: -1 | 1) => void;
 }) {
   const { t } = useTranslation();
@@ -2276,6 +2355,34 @@ function TaskListRow({
                   ⛳ {t("flowEditor.taskFields.requiresHumanCheckpointEnabledShort")}
                 </span>
               )}
+              {devMode && (() => {
+                const ownerIsOpenclaw = row.ownerKind === "openclaw";
+                // OpenClaw is forced to auto-merge regardless of stored value.
+                const autoMergeOn = ownerIsOpenclaw || row.autoMerge;
+                return (
+                  <button
+                    type="button"
+                    disabled={ownerIsOpenclaw}
+                    title={
+                      ownerIsOpenclaw
+                        ? t("flowEditor.taskFields.autoMergeOpenclawLocked")
+                        : undefined
+                    }
+                    className={cn(
+                      "shrink-0 rounded-md border px-2.5 py-1 text-xs font-semibold transition",
+                      autoMergeOn
+                        ? "border-purple-500 bg-purple-500 text-white shadow-[0_10px_18px_-10px_rgba(147,51,234,0.85)] hover:bg-purple-600"
+                        : "border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100",
+                      ownerIsOpenclaw && "cursor-not-allowed opacity-80 hover:bg-purple-500",
+                    )}
+                    onClick={ownerIsOpenclaw ? undefined : onToggleAutoMerge}
+                  >
+                    {autoMergeOn
+                      ? t("flowEditor.taskFields.autoMergeEnabledShort")
+                      : t("flowEditor.taskFields.autoMergeDisabledShort")}
+                  </button>
+                );
+              })()}
               {!isSummary && (
                 <button
                   type="button"
@@ -4125,6 +4232,9 @@ function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
     description: r.description,
     outputSummaryRequirement: r.outputSummaryRequirement.trim() || null,
     requiresHumanCheckpoint: !r.isLeaderSummary && !!r.requiresHumanCheckpoint,
+    // Developer-mode per-task auto-merge (default true). Persisted regardless of
+    // mode; the backend ignores it unless the Flow is in developer mode.
+    devAutoMerge: r.autoMerge !== false,
     dependsOn: r.dependsOn,
     isLeaderSummary: r.isLeaderSummary,
     timeoutSeconds: r.timeoutSeconds || DEFAULT_TIMEOUT_SECONDS,
@@ -4641,6 +4751,7 @@ function proposalToRows(
       requiresHumanCheckpoint: !!(
         tk.requiresHumanCheckpoint ?? tk.requires_human_checkpoint
       ),
+      autoMerge: (tk.devAutoMerge ?? tk.dev_auto_merge) !== false,
       ownerKind: meta.kind,
       ownerId,
       ownerRepo: isNonOpenclawKind(meta.kind) ? meta.repo : "",
@@ -4671,6 +4782,7 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       description: tk.description ?? "",
       outputSummaryRequirement: tk.outputSummaryRequirement ?? "",
       requiresHumanCheckpoint: !!tk.requiresHumanCheckpoint,
+      autoMerge: tk.devAutoMerge !== false,
       ownerKind,
       ownerId: tk.ownerAgentId,
       ownerRepo: isNonOpenclawKind(ownerKind) ? a?.repo ?? "" : "",
