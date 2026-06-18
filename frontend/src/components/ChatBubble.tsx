@@ -2,12 +2,21 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ChatMarkdown } from "@/components/ChatMarkdown";
+import type { ChatAttachmentMeta } from "@/lib/api";
 import { formatChatTime } from "@/lib/chatHistory";
 
 export interface ChatBubbleMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  attachments?: ChatAttachmentMeta[];
   ts?: number;
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${Math.round(bytes)} B`;
 }
 
 function TypingDots() {
@@ -127,8 +136,28 @@ export function ChatBubble({
           )
         ) : pending ? (
           <PendingReply />
-        ) : (
+        ) : isUser && msg.attachments && msg.attachments.length > 0 ? null : (
           <span className="text-ink-400">{noTextReply}</span>
+        )}
+        {msg.attachments && msg.attachments.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {msg.attachments.map((item) => (
+              <div
+                key={item.id}
+                className={
+                  isUser
+                    ? "rounded-md bg-white/15 px-2 py-1 text-[11px] text-white/90"
+                    : "rounded-md bg-ink-50 px-2 py-1 text-[11px] text-ink-600"
+                }
+                title={item.relativePath}
+              >
+                <span className="font-medium">{item.name}</span>
+                <span className={isUser ? "ml-2 text-white/70" : "ml-2 text-ink-400"}>
+                  {formatAttachmentSize(item.sizeBytes)}
+                </span>
+              </div>
+            ))}
+          </div>
         )}
       </div>
       {showFooter && (

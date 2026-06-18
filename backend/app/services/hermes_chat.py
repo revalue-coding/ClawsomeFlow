@@ -155,7 +155,12 @@ def kill_chat(session_key: str) -> bool:
 
 
 def start_chat(
-    agent_id: str, *, message: str, workdir: str, resume: bool, session_key: str
+    agent_id: str,
+    *,
+    message: str,
+    workdir: str,
+    resume: bool,
+    session_key: str,
 ) -> ChatJob:
     """Spawn a tracked chat turn and start its progress poller.
 
@@ -172,7 +177,8 @@ def start_chat(
     # one (prevents two hermes processes writing the same profile session).
     kill_chat(session_key)
 
-    argv = [exe, "-p", aid, "--yolo", *(["-c"] if resume else []), "-z", message]
+    argv = [exe, "-p", aid, "--yolo", *(["-c"] if resume else [])]
+    argv.extend(["-z", message])
     proc = subprocess.Popen(  # noqa: S603 — args are constructed, not shell
         argv,
         cwd=str(wd),

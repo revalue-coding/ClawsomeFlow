@@ -123,6 +123,59 @@ async function request<T>(
   return parsed as T;
 }
 
+function apiErrorFromResponse(res: Response, parsed: unknown): ApiError {
+  const err: ErrorEnvelope = isRecord(parsed) ? parsed : {};
+  const detailMessage = formatFastApiDetail(err.detail);
+  const code =
+    (typeof err.error === "string" && err.error.trim())
+      ? err.error
+      : (detailMessage ? "VALIDATION_ERROR" : "UNKNOWN");
+  const message =
+    (typeof err.message === "string" && err.message.trim())
+      ? err.message
+      : (detailMessage ?? `HTTP ${res.status}`);
+  const details = isRecord(err.details)
+    ? err.details
+    : err.detail !== undefined
+    ? { detail: err.detail }
+    : {};
+  return new ApiError(res.status, code, message, details);
+}
+
+async function uploadBinary<T>(
+  url: string,
+  file: File,
+  init: RequestInit = {},
+): Promise<T> {
+  let res: Response;
+  const contentType = file.type || "application/octet-stream";
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": contentType,
+        ...(init.headers ?? {}),
+      },
+      body: file,
+      ...init,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    throw new ApiError(0, "NETWORK_ERROR", e instanceof Error ? e.message : String(e));
+  }
+  const text = await res.text();
+  let parsed: unknown = undefined;
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = text;
+    }
+  }
+  if (!res.ok) throw apiErrorFromResponse(res, parsed);
+  return parsed as T;
+}
+
 // ── Domain types ──────────────────────────────────────────────────────
 
 export type AgentKind =
@@ -526,6 +579,28 @@ export interface AgentStoreAuthActionResponse {
 export interface ChatHistoryMessage {
   role: "system" | "user" | "assistant";
   content: string;
+  attachments?: ChatAttachmentMeta[];
+}
+
+export type ChatAttachmentRoute = "path_injection" | "native";
+
+export interface ChatAttachmentMeta {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  absolutePath: string;
+  relativePath: string;
+  route: ChatAttachmentRoute;
+}
+
+export interface ChatAttachmentUploadResult {
+  attachment: ChatAttachmentMeta;
+  limits: {
+    maxCount: number;
+    maxBytesPerFile: number;
+    maxTotalBytes: number;
+  };
 }
 
 /** One progress entry for an in-flight chat turn (formatted via i18n). Shared by
@@ -1082,6 +1157,7 @@ export const api = {
     id: string,
     body: {
       messages: { role: "system" | "user" | "assistant"; content: string }[];
+      attachments?: ChatAttachmentMeta[];
       stream?: boolean;
       modelOverride?: string;
     },
@@ -1093,6 +1169,18 @@ export const api = {
       body: JSON.stringify(body),
       ...init,
     }),
+  uploadOpenclawChatAttachment: (
+    id: string,
+    file: File,
+    init?: RequestInit,
+  ) => {
+    const query = new URLSearchParams({ filename: file.name });
+    return uploadBinary<ChatAttachmentUploadResult>(
+      `/api/openclaw/agents/${id}/chat/attachments?${query.toString()}`,
+      file,
+      init,
+    );
+  },
   getOpenclawAgentChatHistory: (id: string) =>
     request<{ messages: ChatHistoryMessage[] }>(
       "GET",
@@ -1244,7 +1332,7 @@ export const api = {
     ),
   chatWithHermesAgent: (
     id: string,
-    body: { message: string; workdir: string },
+    body: { message: string; workdir: string; attachments?: ChatAttachmentMeta[] },
     init?: RequestInit,
   ) =>
     fetch(`/api/hermes/agents/${id}/chat`, {
@@ -1253,6 +1341,22 @@ export const api = {
       body: JSON.stringify(body),
       ...init,
     }),
+  uploadHermesChatAttachment: (
+    id: string,
+    workdir: string,
+    file: File,
+    init?: RequestInit,
+  ) => {
+    const query = new URLSearchParams({
+      filename: file.name,
+      workdir,
+    });
+    return uploadBinary<ChatAttachmentUploadResult>(
+      `/api/hermes/agents/${id}/chat/attachments?${query.toString()}`,
+      file,
+      init,
+    );
+  },
   getHermesAgentChatHistory: (id: string) =>
     request<{ messages: ChatHistoryMessage[] }>(
       "GET",

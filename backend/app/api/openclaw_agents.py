@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path as FsPath
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, Depends, Path, Query
+from fastapi import APIRouter, Body, Depends, Path, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -59,6 +59,7 @@ from app.logging_setup import get_logger
 from app.models import OpenclawAgent, iso_utc
 from app.operations import get_op_registry
 from app.scheduler.naming import openclaw_user_chat_session_id
+from app.services import chat_attachments as attachment_svc
 from app.services import openclaw_agents as svc
 from app.services import openclaw_chat as chat_progress
 from app.services import openclaw_chat_history as chat_history
@@ -105,7 +106,7 @@ _SYSTEM_TIMEZONE_CANDIDATES = (
     FsPath("/var/db/timezone/zoneinfo"),  # macOS
 )
 _SETTINGS_CACHE_TTL_SEC = 10.0
-_SETTINGS_CACHE: dict[tuple[str, str], tuple[float, "OpenclawAgentSettingsResponse"]] = {}
+_SETTINGS_CACHE: dict[tuple[str, str], tuple[float, OpenclawAgentSettingsResponse]] = {}
 # Settings/skill/cron handlers are sync ``def`` → FastAPI runs them in a
 # threadpool, so the cache is touched by multiple threads concurrently. Guard
 # every access (incl. the invalidate scan) to avoid lost writes and
@@ -302,7 +303,7 @@ async def _wait_until_agent_create_cleanup_visible(
         )
 
 
-def _settings_cache_get(*, user: str, agent_id: str) -> "OpenclawAgentSettingsResponse" | None:
+def _settings_cache_get(*, user: str, agent_id: str) -> OpenclawAgentSettingsResponse | None:
     key = (user, agent_id)
     with _SETTINGS_CACHE_LOCK:
         item = _SETTINGS_CACHE.get(key)
@@ -319,7 +320,7 @@ def _settings_cache_put(
     *,
     user: str,
     agent_id: str,
-    payload: "OpenclawAgentSettingsResponse",
+    payload: OpenclawAgentSettingsResponse,
 ) -> None:
     with _SETTINGS_CACHE_LOCK:
         _SETTINGS_CACHE[(user, agent_id)] = (time.time(), payload.model_copy(deep=True))
@@ -2658,16 +2659,33 @@ def update_agent_custom_section(
 class ChatMessage(_CamelModel):
     role: str = Field(..., pattern="^(system|user|assistant)$")
     content: str
+    attachments: list[ChatAttachment] | None = None
+
+
+class ChatAttachment(_CamelModel):
+    id: str
+    name: str
+    mime_type: str = ""
+    size_bytes: int = 0
+    absolute_path: str
+    relative_path: str
+    route: Literal["path_injection", "native"] = "path_injection"
 
 
 class ChatPayload(_CamelModel):
     messages: list[ChatMessage] = Field(..., min_length=1)
+    attachments: list[ChatAttachment] = Field(default_factory=list)
     stream: bool = True
     model_override: str | None = None
 
 
 class ChatHistoryResponse(_CamelModel):
     messages: list[ChatMessage]
+
+
+class ChatAttachmentUploadResponse(_CamelModel):
+    attachment: ChatAttachment
+    limits: dict[str, int]
 
 
 def _session_key(user: str, agent_id: str) -> str:
@@ -2716,6 +2734,121 @@ def _ensure_chat_target_access(agent_id: str, user: str, storage: StorageBackend
     row = svc.get_agent(agent_id, storage=storage)
     _ensure_owner(row, user)
     return row
+
+
+def _to_chat_attachment(
+    item: attachment_svc.StoredAttachment,
+    *,
+    route: Literal["path_injection", "native"],
+) -> ChatAttachment:
+    return ChatAttachment(
+        id=item.id,
+        name=item.name,
+        mime_type=item.mime_type,
+        size_bytes=item.size_bytes,
+        absolute_path=item.absolute_path,
+        relative_path=item.relative_path,
+        route=route,
+    )
+
+
+async def _store_openclaw_chat_upload(
+    *,
+    request: Request,
+    workspace: FsPath,
+    filename: str,
+) -> attachment_svc.StoredAttachment:
+    content_length = request.headers.get("content-length", "").strip()
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError:
+            declared_size = -1
+        if declared_size > attachment_svc.MAX_ATTACHMENT_SIZE_BYTES:
+            raise ApiError(
+                "ATTACHMENT_TOO_LARGE",
+                "uploaded file exceeds size limit",
+                status_code=413,
+                details={"maxBytes": attachment_svc.MAX_ATTACHMENT_SIZE_BYTES},
+            )
+    body = await request.body()
+    try:
+        return attachment_svc.store_upload_bytes(
+            base_dir=workspace,
+            raw_filename=filename,
+            mime_type=request.headers.get("content-type", ""),
+            content=body,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        code = "INVALID_ATTACHMENT"
+        status = 400
+        if "size limit" in msg:
+            code = "ATTACHMENT_TOO_LARGE"
+            status = 413
+        raise ApiError(code, msg, status_code=status) from exc
+
+
+def _resolve_openclaw_payload_attachments(
+    *,
+    workspace: FsPath,
+    attachments: list[ChatAttachment],
+) -> list[attachment_svc.StoredAttachment]:
+    resolved: list[attachment_svc.StoredAttachment] = []
+    for item in attachments:
+        try:
+            resolved.append(
+                attachment_svc.resolve_existing_attachment(
+                    base_dir=workspace,
+                    absolute_path=item.absolute_path,
+                    name=item.name,
+                    mime_type=item.mime_type,
+                )
+            )
+        except ValueError as exc:
+            raise ApiError("INVALID_ATTACHMENT", str(exc), status_code=400) from exc
+    try:
+        attachment_svc.validate_batch_limits(resolved)
+    except ValueError as exc:
+        message = str(exc)
+        code = "INVALID_ATTACHMENT"
+        status = 400
+        if "count exceeds limit" in message:
+            code = "ATTACHMENT_COUNT_EXCEEDED"
+            status = 400
+        elif "total size exceeds limit" in message:
+            code = "ATTACHMENT_TOTAL_SIZE_EXCEEDED"
+            status = 413
+        raise ApiError(
+            code,
+            message,
+            status_code=status,
+            details={
+                "maxCount": attachment_svc.MAX_ATTACHMENT_COUNT,
+                "maxBytesPerFile": attachment_svc.MAX_ATTACHMENT_SIZE_BYTES,
+                "maxTotalBytes": attachment_svc.MAX_ATTACHMENT_TOTAL_BYTES,
+            },
+        ) from exc
+    return resolved
+
+
+def _attachments_for_history(
+    items: list[attachment_svc.StoredAttachment],
+    *,
+    route: Literal["path_injection", "native"],
+) -> list[chat_history.ChatAttachmentMeta]:
+    return [
+        {
+            "id": item.id,
+            "name": item.name,
+            "mime_type": item.mime_type,
+            "size_bytes": item.size_bytes,
+            "absolute_path": item.absolute_path,
+            "relative_path": item.relative_path,
+            "route": route,
+        }
+        for item in items
+    ]
 
 
 def _pick_latest_user_message(messages: list[dict[str, Any]]) -> dict[str, str]:
@@ -3182,15 +3315,18 @@ async def _chat_via_cli(
     # returns the final answer).
     chat_progress.start_progress(agent_id, session_key)
 
+    async def _run_completion_once() -> dict[str, Any]:
+        return await _chat_completion_via_cli(
+            agent_id=agent_id,
+            session_key=session_key,
+            message=turn["content"],
+            model_override=payload.model_override,
+            timeout_sec=_chat_cli_timeout_seconds(),
+        )
+
     if not payload.stream:
         try:
-            response = await _chat_completion_via_cli(
-                agent_id=agent_id,
-                session_key=session_key,
-                message=turn["content"],
-                model_override=payload.model_override,
-                timeout_sec=_chat_cli_timeout_seconds(),
-            )
+            response = await _run_completion_once()
         except Exception:
             chat_progress.finish_progress(session_key, status="error")
             raise
@@ -3205,13 +3341,7 @@ async def _chat_via_cli(
         # Detached from the SSE request: a client disconnect still lands the
         # reply in history + the turn registry (the status poll recovers it).
         try:
-            response = await _chat_completion_via_cli(
-                agent_id=agent_id,
-                session_key=session_key,
-                message=turn["content"],
-                model_override=payload.model_override,
-                timeout_sec=_chat_cli_timeout_seconds(),
-            )
+            response = await _run_completion_once()
             text = _normalize_assistant_text(_extract_chunk_text(response))
             await chat_history.append_message(session_key, role="assistant", content=text)
             chat_progress.finish_progress(session_key, status="done", final=text)
@@ -3263,7 +3393,11 @@ async def _chat_via_cli(
     )
 
 
-@router.get("/{agent_id}/chat-history", response_model=ChatHistoryResponse)
+@router.get(
+    "/{agent_id}/chat-history",
+    response_model=ChatHistoryResponse,
+    response_model_exclude_none=True,
+)
 async def chat_history_view(
     agent_id: Annotated[str, Path()],
     user: UserDep,
@@ -3290,6 +3424,31 @@ async def chat_status(
     return turn.snapshot()
 
 
+@router.post("/{agent_id}/chat/attachments", response_model=ChatAttachmentUploadResponse)
+async def upload_chat_attachment(
+    agent_id: Annotated[str, Path()],
+    filename: Annotated[str, Query(min_length=1, max_length=255)],
+    request: Request,
+    user: UserDep,
+    storage: StorageDep,
+) -> ChatAttachmentUploadResponse:
+    row = _ensure_chat_target_access(agent_id, user, storage)
+    workspace = _agent_workspace_dir(row)
+    stored = await _store_openclaw_chat_upload(
+        request=request,
+        workspace=workspace,
+        filename=filename,
+    )
+    return ChatAttachmentUploadResponse(
+        attachment=_to_chat_attachment(stored, route="path_injection"),
+        limits={
+            "maxCount": attachment_svc.MAX_ATTACHMENT_COUNT,
+            "maxBytesPerFile": attachment_svc.MAX_ATTACHMENT_SIZE_BYTES,
+            "maxTotalBytes": attachment_svc.MAX_ATTACHMENT_TOTAL_BYTES,
+        },
+    )
+
+
 @router.post("/{agent_id}/chat")
 async def chat_with_agent(
     agent_id: Annotated[str, Path()],
@@ -3298,16 +3457,41 @@ async def chat_with_agent(
     storage: StorageDep,
 ):
     # Verify the agent exists (and is ours) BEFORE we open a bridge.
-    _ensure_chat_target_access(agent_id, user, storage)
+    row = _ensure_chat_target_access(agent_id, user, storage)
     # NOTE: the workspace is intentionally NOT auto-committed before a chat turn.
     # Committing chat-driven workspace changes is the agent's own responsibility.
     session_key = _session_key(user, agent_id)
     incoming = [m.model_dump(mode="python") for m in payload.messages]
-    turn = _pick_latest_user_message(incoming)
+    try:
+        turn = _pick_latest_user_message(incoming)
+    except ApiError:
+        if payload.attachments:
+            turn = {"role": "user", "content": ""}
+        else:
+            raise
+    original_user_text = turn["content"]
+
+    workspace = _agent_workspace_dir(row)
+    resolved_attachments = _resolve_openclaw_payload_attachments(
+        workspace=workspace,
+        attachments=payload.attachments,
+    )
+    if resolved_attachments:
+        prompt_head = original_user_text.strip() or "Please inspect the uploaded files."
+        injected_message = attachment_svc.build_path_injection_message(
+            user_message=prompt_head,
+            attachments=resolved_attachments,
+        )
+        turn = {"role": "user", "content": injected_message}
+
     await chat_history.append_message(
         session_key,
         role=turn["role"],
-        content=turn["content"],
+        content=original_user_text,
+        attachments=_attachments_for_history(
+            resolved_attachments,
+            route="path_injection",
+        ),
     )
     return await _chat_via_cli(
         agent_id=agent_id,

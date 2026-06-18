@@ -764,6 +764,20 @@ const en = {
     stopped: "(Generation stopped)",
     regenerate: "Regenerate",
     scrollToBottom: "Back to latest",
+    attachments: {
+      add: "Add files",
+      dropHint: "Drag files here, or click to select",
+      remove: "Remove",
+      uploading: "Uploading attachments…",
+      uploadFailed: "Attachment upload failed: {{message}}",
+      tooMany: "You can attach up to {{max}} files per message.",
+      tooLarge: "{{name}} exceeds the {{maxMb}}MB limit.",
+      emptyFile: "{{name}} is empty and cannot be uploaded.",
+      folderAbsolutePathUnavailable:
+        "This browser cannot read the dropped folder's absolute path. Use a local desktop session or paste the absolute path manually.",
+      folderPathLimited:
+        "Browser security limits prevent reading the absolute folder path; a detectable folder path was pasted into the input, please adjust it if needed.",
+    },
     youLabel: "You",
     agentLabel: "Agent",
     error: "Chat error: {{message}}",

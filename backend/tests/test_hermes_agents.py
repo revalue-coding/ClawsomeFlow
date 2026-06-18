@@ -1222,6 +1222,262 @@ def test_api_chat_requires_workdir(
     assert r.status_code == 400
 
 
+def test_api_chat_without_attachments_unaffected(
+    client: TestClient,
+    hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="chat-no-attach-probe", name="C", profile_root="x", created_by_user=owner)
+    )
+    workdir = tmp_path / "hermes-chat-no-attach-probe"
+    workdir.mkdir(parents=True, exist_ok=True)
+    from app.api import hermes_agents as router_mod
+
+    class _DoneJob:
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "status": "done",
+                "steps": [],
+                "progress": {"toolCalls": 0, "apiCalls": 0, "messageCount": 0, "elapsedSec": 0.0},
+                "final": "ok",
+                "error": "",
+                "startedAtMono": 0.0,
+            }
+
+    def _fake_start_chat(
+        agent_id: str,
+        *,
+        message: str,
+        workdir: str,
+        resume: bool,
+        session_key: str,
+        attachment_paths: list[str] | None = None,
+        native_attachment_flag: str | None = None,
+    ):
+        del agent_id, workdir, resume, session_key, attachment_paths, native_attachment_flag
+        assert message == "plain message"
+        return _DoneJob()
+
+    monkeypatch.setattr(router_mod.chat_svc, "start_chat", _fake_start_chat)
+    r = client.post(
+        "/api/hermes/agents/chat-no-attach-probe/chat",
+        json={"message": "plain message", "workdir": str(workdir)},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_api_chat_attachment_upload_and_path_injection(
+    client: TestClient,
+    hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="chat-att-path", name="C", profile_root="x", created_by_user=owner)
+    )
+    workdir = tmp_path / "hermes-chat-path"
+    workdir.mkdir(parents=True, exist_ok=True)
+    from app.api import hermes_agents as router_mod
+
+    captured: dict[str, object] = {}
+
+    class _DoneJob:
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "status": "done",
+                "steps": [],
+                "progress": {"toolCalls": 0, "apiCalls": 0, "messageCount": 0, "elapsedSec": 0.0},
+                "final": "ok",
+                "error": "",
+                "startedAtMono": 0.0,
+            }
+
+    def _fake_start_chat(
+        agent_id: str,
+        *,
+        message: str,
+        workdir: str,
+        resume: bool,
+        session_key: str,
+        attachment_paths: list[str] | None = None,
+        native_attachment_flag: str | None = None,
+    ):
+        captured.update(
+            {
+                "agent_id": agent_id,
+                "message": message,
+                "workdir": workdir,
+                "resume": resume,
+                "session_key": session_key,
+                "attachment_paths": attachment_paths,
+                "native_attachment_flag": native_attachment_flag,
+            }
+        )
+        return _DoneJob()
+
+    monkeypatch.setattr(router_mod.chat_svc, "start_chat", _fake_start_chat)
+    uploaded = client.post(
+        "/api/hermes/agents/chat-att-path/chat/attachments",
+        params={"filename": "note.md", "workdir": str(workdir)},
+        data=b"# note\n",
+        headers={"Content-Type": "text/markdown"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    uploaded_body = uploaded.json()
+    assert uploaded_body["attachment"]["route"] == "path_injection"
+    attachment = uploaded_body["attachment"]
+    run = client.post(
+        "/api/hermes/agents/chat-att-path/chat",
+        json={
+            "message": "use this file",
+            "workdir": str(workdir),
+            "attachments": [attachment],
+        },
+    )
+    assert run.status_code == 200, run.text
+    assert "ClawsomeFlow Uploaded Attachments" in str(captured["message"])
+    assert captured["attachment_paths"] is None
+
+
+def test_api_chat_attachment_uses_path_injection_only(
+    client: TestClient,
+    hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="chat-att-force-path", name="C", profile_root="x", created_by_user=owner)
+    )
+    workdir = tmp_path / "hermes-chat-force-path"
+    workdir.mkdir(parents=True, exist_ok=True)
+    from app.api import hermes_agents as router_mod
+
+    captured: dict[str, object] = {}
+
+    class _DoneJob:
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "status": "done",
+                "steps": [],
+                "progress": {"toolCalls": 0, "apiCalls": 0, "messageCount": 0, "elapsedSec": 0.0},
+                "final": "ok",
+                "error": "",
+                "startedAtMono": 0.0,
+            }
+
+    def _fake_start_chat(
+        agent_id: str,
+        *,
+        message: str,
+        workdir: str,
+        resume: bool,
+        session_key: str,
+        attachment_paths: list[str] | None = None,
+        native_attachment_flag: str | None = None,
+    ):
+        captured.update(
+            {
+                "agent_id": agent_id,
+                "message": message,
+                "workdir": workdir,
+                "resume": resume,
+                "session_key": session_key,
+                "attachment_paths": attachment_paths,
+                "native_attachment_flag": native_attachment_flag,
+            }
+        )
+        return _DoneJob()
+
+    monkeypatch.setattr(router_mod.chat_svc, "start_chat", _fake_start_chat)
+    uploaded = client.post(
+        "/api/hermes/agents/chat-att-force-path/chat/attachments",
+        params={"filename": "photo.png", "workdir": str(workdir)},
+        data=b"png",
+        headers={"Content-Type": "image/png"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    attachment = uploaded.json()["attachment"]
+    run = client.post(
+        "/api/hermes/agents/chat-att-force-path/chat",
+        json={
+            "message": "force path injection",
+            "workdir": str(workdir),
+            "attachments": [attachment],
+        },
+    )
+    assert run.status_code == 200, run.text
+    assert "ClawsomeFlow Uploaded Attachments" in str(captured["message"])
+    assert captured["native_attachment_flag"] is None
+    assert captured["attachment_paths"] is None
+
+
+def test_api_chat_accepts_attachments_without_text_message(
+    client: TestClient,
+    hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="chat-att-empty", name="C", profile_root="x", created_by_user=owner)
+    )
+    workdir = tmp_path / "hermes-chat-empty"
+    workdir.mkdir(parents=True, exist_ok=True)
+    from app.api import hermes_agents as router_mod
+
+    captured: dict[str, object] = {}
+
+    class _DoneJob:
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "status": "done",
+                "steps": [],
+                "progress": {"toolCalls": 0, "apiCalls": 0, "messageCount": 0, "elapsedSec": 0.0},
+                "final": "ok",
+                "error": "",
+                "startedAtMono": 0.0,
+            }
+
+    def _fake_start_chat(
+        agent_id: str,
+        *,
+        message: str,
+        workdir: str,
+        resume: bool,
+        session_key: str,
+        attachment_paths: list[str] | None = None,
+        native_attachment_flag: str | None = None,
+    ):
+        del agent_id, workdir, resume, session_key, attachment_paths, native_attachment_flag
+        captured["message"] = message
+        return _DoneJob()
+
+    monkeypatch.setattr(router_mod.chat_svc, "start_chat", _fake_start_chat)
+    uploaded = client.post(
+        "/api/hermes/agents/chat-att-empty/chat/attachments",
+        params={"filename": "doc.md", "workdir": str(workdir)},
+        data=b"doc",
+        headers={"Content-Type": "text/markdown"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    attachment = uploaded.json()["attachment"]
+    run = client.post(
+        "/api/hermes/agents/chat-att-empty/chat",
+        json={
+            "message": "",
+            "workdir": str(workdir),
+            "attachments": [attachment],
+        },
+    )
+    assert run.status_code == 200, run.text
+    assert "Please inspect the uploaded files." in str(captured["message"])
+
+
 def test_api_create_cron_rejects_missing_workdir(
     client: TestClient, hermes_home: Path, tmp_path: Path
 ) -> None:

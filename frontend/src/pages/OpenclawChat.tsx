@@ -11,13 +11,25 @@
  * can choose any of their OpenClaw agents.
  */
 
-import { Fragment, FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+  type ReactNode,
+} from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
 import {
   ApiError,
+  ChatAttachmentMeta,
   isNetworkError,
   type ChatProgress,
   type ChatStep,
@@ -53,6 +65,7 @@ import {
 import { DesktopIcon, EditIcon, PlusIcon, RefreshIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
+import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
 import {
   clearChatHistory,
   formatChatTime,
@@ -71,6 +84,7 @@ import { useStickyScroll } from "@/lib/useStickyScroll";
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
+  attachments?: ChatAttachmentMeta[];
   ts?: number;
 }
 
@@ -98,6 +112,9 @@ const SETTINGS_CACHE_TTL_MS = 15_000;
 const CREATE_CANCEL_VERIFY_TIMEOUT_MS = 30 * 1000;
 const CREATE_CANCEL_VERIFY_POLL_MS = 800;
 const SETTINGS_CACHE = new Map<string, _SettingsCacheEntry>();
+const CHAT_MAX_ATTACHMENTS = 8;
+const CHAT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const OPENCLAW_PENDING_FILES_CACHE = new Map<string, File[]>();
 
 type CreateCancelState = {
   agentId: string;
@@ -1700,10 +1717,139 @@ function ChatRoom({
   // user had seen when they navigated away.
   const messagesRef = useRef<Message[]>([]);
   messagesRef.current = messages;
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const pendingFilesRef = useRef<File[]>([]);
+  pendingFilesRef.current = pendingFiles;
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const addPendingFiles = useCallback((incoming: File[]) => {
+    if (incoming.length === 0) return;
+    setActionError(null);
+    const next = [...pendingFilesRef.current];
+    let errorText: string | null = null;
+    for (const file of incoming) {
+      const duplicate = next.some(
+        (existing) =>
+          existing.name === file.name &&
+          existing.size === file.size &&
+          existing.lastModified === file.lastModified,
+      );
+      if (duplicate) continue;
+      if (file.size <= 0) {
+        errorText ??= t("chat.attachments.emptyFile", { name: file.name });
+        continue;
+      }
+      if (file.size > CHAT_MAX_ATTACHMENT_BYTES) {
+        errorText ??= t("chat.attachments.tooLarge", {
+          name: file.name,
+          maxMb: Math.round(CHAT_MAX_ATTACHMENT_BYTES / (1024 * 1024)),
+        });
+        continue;
+      }
+      if (next.length >= CHAT_MAX_ATTACHMENTS) {
+        errorText ??= t("chat.attachments.tooMany", { max: CHAT_MAX_ATTACHMENTS });
+        break;
+      }
+      next.push(file);
+    }
+    setPendingFiles(next);
+    if (errorText) setActionError(errorText);
+  }, [t]);
+
+  const insertTextAtCursor = useCallback((text: string) => {
+    if (!text) return;
+    const textarea = inputRef.current;
+    if (!textarea) {
+      setInput((prev) => `${prev}${text}`);
+      return;
+    }
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? start;
+    const next = `${textarea.value.slice(0, start)}${text}${textarea.value.slice(end)}`;
+    setInput(next);
+    window.requestAnimationFrame(() => {
+      const node = inputRef.current;
+      if (!node) return;
+      const caret = start + text.length;
+      node.focus();
+      node.setSelectionRange(caret, caret);
+    });
+  }, [inputRef, setInput]);
+
+  const appendFolderPathToInput = useCallback((folderPath: string) => {
+    const text = folderPath.trim();
+    if (!text) return;
+    insertTextAtCursor(text);
+  }, [insertTextAtCursor]);
+
+  const onDropAttachmentArea = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDraggingFiles(false);
+    if (streaming || resetting || uploadingAttachments) return;
+    const folder = resolveDroppedFolderPath(event.dataTransfer);
+    if (folder?.hasFolder) {
+      if (folder.absolutePath) {
+        appendFolderPathToInput(folder.absolutePath);
+        setActionError(null);
+      } else {
+        setActionError(t("chat.attachments.folderAbsolutePathUnavailable"));
+      }
+      return;
+    }
+    addPendingFiles(Array.from(event.dataTransfer.files ?? []));
+  }, [
+    addPendingFiles,
+    appendFolderPathToInput,
+    resetting,
+    streaming,
+    t,
+    uploadingAttachments,
+  ]);
+
+  const onSelectAttachmentFiles = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    addPendingFiles(files);
+    event.target.value = "";
+  }, [addPendingFiles]);
+
+  const removePendingFile = useCallback((idx: number) => {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  const uploadPendingFiles = useCallback(async () => {
+    if (pendingFilesRef.current.length === 0) return [] as ChatAttachmentMeta[];
+    setUploadingAttachments(true);
+    try {
+      const out: ChatAttachmentMeta[] = [];
+      for (const file of pendingFilesRef.current) {
+        const uploaded = await api.uploadOpenclawChatAttachment(agentId, file);
+        out.push(uploaded.attachment);
+      }
+      return out;
+    } finally {
+      setUploadingAttachments(false);
+    }
+  }, [agentId]);
 
   useEffect(() => {
     didJumpToNewDividerRef.current = false;
   }, [agentId]);
+
+  useEffect(() => {
+    const cached = OPENCLAW_PENDING_FILES_CACHE.get(agentId);
+    setPendingFiles(cached ? [...cached] : []);
+    setDraggingFiles(false);
+  }, [agentId]);
+
+  useEffect(() => {
+    if (pendingFiles.length > 0) {
+      OPENCLAW_PENDING_FILES_CACHE.set(agentId, pendingFiles);
+    } else {
+      OPENCLAW_PENDING_FILES_CACHE.delete(agentId);
+    }
+  }, [agentId, pendingFiles]);
 
   useEffect(() => {
     api
@@ -1751,6 +1897,7 @@ function ChatRoom({
         const server: Message[] = hist.messages.map((m) => ({
           role: m.role,
           content: m.content,
+          attachments: m.attachments ?? [],
         }));
         // Server history has no timestamps; backfill from the local cache (which
         // persists ts) by matching position + content so times survive a refresh.
@@ -1795,6 +1942,7 @@ function ChatRoom({
         const server: Message[] = hist.messages.map((m) => ({
           role: m.role,
           content: m.content,
+          attachments: m.attachments ?? [],
         }));
         const last = server[server.length - 1];
         if (last && last.role === "assistant" && last.content.trim() !== "") {
@@ -1879,16 +2027,28 @@ function ChatRoom({
 
   // Core streaming turn. ``appendUser`` is false on regenerate (the user message
   // is already in the transcript — we only replace the assistant reply).
-  async function runTurn(text: string, opts: { appendUser: boolean }) {
+  async function runTurn(
+    text: string,
+    opts: { appendUser: boolean; attachments?: ChatAttachmentMeta[] },
+  ) {
     setActionError(null);
     setRecovering(false); // a fresh send supersedes any in-flight recovery poll
     setSteps([]);
     setProgress(null);
     setNewDividerAt(-1); // engaging with the chat clears the "new messages" mark
     setStreaming(true);
+    const turnAttachments = opts.attachments ?? [];
     setMessages((m) => {
       const base = opts.appendUser
-        ? [...m, { role: "user" as const, content: text, ts: Date.now() }]
+        ? [
+            ...m,
+            {
+              role: "user" as const,
+              content: text,
+              attachments: turnAttachments,
+              ts: Date.now(),
+            },
+          ]
         : m;
       // Add an empty assistant message to stream into (timestamped once it lands).
       return [...base, { role: "assistant" as const, content: "" }];
@@ -1904,6 +2064,7 @@ function ChatRoom({
           // Session context is maintained by backend session_key.
           // Send only this turn's message to avoid client-side context replay.
           messages: [{ role: "user", content: text }],
+          attachments: turnAttachments,
           stream: true,
         },
         { signal: controller.signal },
@@ -1995,10 +2156,22 @@ function ChatRoom({
 
   async function onSend(e: FormEvent) {
     e.preventDefault();
+    if (streaming || uploadingAttachments) return;
     const text = input.trim();
-    if (!text || streaming) return;
+    if (!text && pendingFiles.length === 0) return;
+    let uploadedAttachments: ChatAttachmentMeta[] = [];
+    if (pendingFiles.length > 0) {
+      try {
+        uploadedAttachments = await uploadPendingFiles();
+      } catch (e) {
+        const message = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+        setActionError(t("chat.attachments.uploadFailed", { message }));
+        return;
+      }
+    }
     setInput("");
-    await runTurn(text, { appendUser: true });
+    setPendingFiles([]);
+    await runTurn(text, { appendUser: true, attachments: uploadedAttachments });
   }
 
   async function stopTurn() {
@@ -2011,7 +2184,7 @@ function ChatRoom({
   }
 
   async function regenerate() {
-    if (streaming || resetting) return;
+    if (streaming || resetting || uploadingAttachments) return;
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
     // Drop the trailing assistant reply; runTurn appends a fresh one.
@@ -2020,11 +2193,14 @@ function ChatRoom({
       if (out.length && out[out.length - 1].role === "assistant") out.pop();
       return out;
     });
-    await runTurn(lastUser.content, { appendUser: false });
+    await runTurn(lastUser.content, {
+      appendUser: false,
+      attachments: lastUser.attachments ?? [],
+    });
   }
 
   async function onResetConversation() {
-    if (streaming || resetting) return;
+    if (streaming || resetting || uploadingAttachments) return;
     setActionError(null);
     setResetting(true);
     try {
@@ -2035,6 +2211,7 @@ function ChatRoom({
       setMessages([]);
       setNewDividerAt(-1);
       setInput("");
+      setPendingFiles([]);
       clearChatHistory(agentId);
     } catch (e) {
       setActionError(e instanceof ApiError ? e.message : String(e));
@@ -2284,48 +2461,110 @@ function ChatRoom({
         </div>
         <form
           onSubmit={onSend}
-          className="border-t border-ink-100 p-3 flex items-end gap-2"
+          className="space-y-2 border-t border-ink-100 p-3"
         >
-          <textarea
-            ref={inputRef}
-            className="textarea flex-1 resize-none h-20"
-            placeholder={t("chat.inputPlaceholder")}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              handleChatTextareaEnterKey(e, () => {
-                if (!streaming) {
-                  (e.currentTarget.form as HTMLFormElement).requestSubmit();
-                }
-              });
+          <div
+            className={cn(
+              "rounded-lg border border-dashed px-3 py-2 transition",
+              draggingFiles ? "border-brand-400 bg-brand-50/40" : "border-ink-200 bg-ink-50/40",
+            )}
+            onDragOver={(event: DragEvent<HTMLDivElement>) => {
+              event.preventDefault();
+              if (!draggingFiles) setDraggingFiles(true);
             }}
-            disabled={streaming}
-          />
-          <button
-            type="button"
-            className="btn-outline"
-            disabled={streaming || resetting}
-            onClick={onResetConversation}
+            onDragLeave={() => setDraggingFiles(false)}
+            onDrop={onDropAttachmentArea}
           >
-            {resetting ? t("chat.resetting") : t("chat.reset")}
-          </button>
-          {streaming ? (
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={onSelectAttachmentFiles}
+            />
+            <div className="flex flex-wrap items-center gap-2 text-xs text-ink-500">
+              <button
+                type="button"
+                className="btn-outline !px-2 !py-1 text-xs"
+                disabled={streaming || resetting || uploadingAttachments}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {t("chat.attachments.add")}
+              </button>
+              <span>{t("chat.attachments.dropHint")}</span>
+              {uploadingAttachments && (
+                <span className="text-brand-600">{t("chat.attachments.uploading")}</span>
+              )}
+            </div>
+            {pendingFiles.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {pendingFiles.map((file, idx) => (
+                  <div
+                    key={`${file.name}-${file.size}-${file.lastModified}-${idx}`}
+                    className="flex items-center justify-between rounded-md border border-ink-200 bg-surface px-2 py-1 text-xs text-ink-600"
+                  >
+                    <span className="truncate" title={file.name}>
+                      {file.name} · {formatLocalFileSize(file.size)}
+                    </span>
+                    <button
+                      type="button"
+                      className="ml-2 shrink-0 text-ink-400 hover:text-ink-700"
+                      onClick={() => removePendingFile(idx)}
+                      disabled={streaming || resetting || uploadingAttachments}
+                      title={t("chat.attachments.remove")}
+                    >
+                      {t("chat.attachments.remove")}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="flex items-end gap-2">
+            <textarea
+              ref={inputRef}
+              className="textarea h-20 flex-1 resize-none"
+              placeholder={t("chat.inputPlaceholder")}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                handleChatTextareaEnterKey(e, () => {
+                  if (!streaming && !uploadingAttachments) {
+                    (e.currentTarget.form as HTMLFormElement).requestSubmit();
+                  }
+                });
+              }}
+              disabled={streaming || uploadingAttachments}
+            />
             <button
               type="button"
-              className="btn-outline border-rose-300 text-rose-600 hover:bg-rose-50"
-              onClick={() => void stopTurn()}
+              className="btn-outline"
+              disabled={streaming || resetting || uploadingAttachments}
+              onClick={onResetConversation}
             >
-              {t("chat.stop")}
+              {resetting ? t("chat.resetting") : t("chat.reset")}
             </button>
-          ) : (
-            <button
-              type="submit"
-              className="btn-primary"
-              disabled={!input.trim()}
-            >
-              {t("chat.send")}
-            </button>
-          )}
+            {streaming ? (
+              <button
+                type="button"
+                className="btn-outline border-rose-300 text-rose-600 hover:bg-rose-50"
+                onClick={() => void stopTurn()}
+              >
+                {t("chat.stop")}
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={
+                  uploadingAttachments ||
+                  (!input.trim() && pendingFiles.length === 0)
+                }
+              >
+                {t("chat.send")}
+              </button>
+            )}
+          </div>
         </form>
       </Card>
 
@@ -3695,6 +3934,13 @@ function buildAgentMyDesktopPath(workspacePath: string): string {
   return `${base}${sep}my-desktop`;
 }
 
+function formatLocalFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${Math.round(bytes)} B`;
+}
+
 function Bubble({
   msg,
   pending,
@@ -3724,8 +3970,28 @@ function Bubble({
           )
         ) : pending ? (
           <PendingReply />
-        ) : (
+        ) : isUser && msg.attachments && msg.attachments.length > 0 ? null : (
           <span className="text-ink-400">{noTextReply}</span>
+        )}
+        {msg.attachments && msg.attachments.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {msg.attachments.map((item) => (
+              <div
+                key={item.id}
+                className={
+                  isUser
+                    ? "rounded-md bg-white/15 px-2 py-1 text-[11px] text-white/90"
+                    : "rounded-md bg-ink-50 px-2 py-1 text-[11px] text-ink-600"
+                }
+                title={item.relativePath}
+              >
+                <span className="font-medium">{item.name}</span>
+                <span className={isUser ? "ml-2 text-white/70" : "ml-2 text-ink-400"}>
+                  {formatLocalFileSize(item.sizeBytes)}
+                </span>
+              </div>
+            ))}
+          </div>
         )}
       </div>
       {showFooter && (

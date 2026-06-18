@@ -31,11 +31,12 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import Annotated
+from pathlib import Path as FsPath
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Body, Depends, Path, Query
+from fastapi import APIRouter, Body, Depends, Path, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from app.api._auth import current_user
@@ -44,6 +45,7 @@ from app.logging_setup import get_logger
 from app.models import HermesAgent, iso_utc
 from app.operations import get_op_registry
 from app.scheduler.naming import hermes_user_chat_session_id
+from app.services import chat_attachments as attachment_svc
 from app.services import hermes_agents as svc
 from app.services import hermes_chat as chat_svc
 from app.services import hermes_dashboard as dash_svc
@@ -266,15 +268,32 @@ class EditCronPayload(_CamelModel):
 class ChatPayload(_CamelModel):
     message: str
     workdir: str
+    attachments: list[ChatAttachment] = Field(default_factory=list)
+
+
+class ChatAttachment(_CamelModel):
+    id: str
+    name: str
+    mime_type: str = ""
+    size_bytes: int = 0
+    absolute_path: str
+    relative_path: str
+    route: Literal["path_injection", "native"] = "path_injection"
 
 
 class ChatMessage(_CamelModel):
     role: str
     content: str
+    attachments: list[ChatAttachment] | None = None
 
 
 class ChatHistoryResponse(_CamelModel):
     messages: list[ChatMessage]
+
+
+class ChatAttachmentUploadResponse(_CamelModel):
+    attachment: ChatAttachment
+    limits: dict[str, int]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -330,6 +349,128 @@ def _get_owned(agent_id: str, user: str, storage: StorageBackend) -> HermesAgent
 
 def _session_key(user: str, agent_id: str) -> str:
     return hermes_user_chat_session_id(user, agent_id)
+
+
+def _resolve_workdir_path(workdir: str) -> FsPath:
+    try:
+        path = svc._existing_directory(workdir, field_name="workdir")
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return FsPath(path).expanduser().resolve(strict=False)
+
+
+def _to_chat_attachment(
+    item: attachment_svc.StoredAttachment,
+    *,
+    route: Literal["path_injection", "native"],
+) -> ChatAttachment:
+    return ChatAttachment(
+        id=item.id,
+        name=item.name,
+        mime_type=item.mime_type,
+        size_bytes=item.size_bytes,
+        absolute_path=item.absolute_path,
+        relative_path=item.relative_path,
+        route=route,
+    )
+
+
+async def _store_hermes_chat_upload(
+    *,
+    request: Request,
+    workdir: FsPath,
+    filename: str,
+) -> attachment_svc.StoredAttachment:
+    content_length = request.headers.get("content-length", "").strip()
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError:
+            declared_size = -1
+        if declared_size > attachment_svc.MAX_ATTACHMENT_SIZE_BYTES:
+            raise ApiError(
+                "ATTACHMENT_TOO_LARGE",
+                "uploaded file exceeds size limit",
+                status_code=413,
+                details={"maxBytes": attachment_svc.MAX_ATTACHMENT_SIZE_BYTES},
+            )
+    body = await request.body()
+    try:
+        return attachment_svc.store_upload_bytes(
+            base_dir=workdir,
+            raw_filename=filename,
+            mime_type=request.headers.get("content-type", ""),
+            content=body,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        code = "INVALID_ATTACHMENT"
+        status = 400
+        if "size limit" in message:
+            code = "ATTACHMENT_TOO_LARGE"
+            status = 413
+        raise ApiError(code, message, status_code=status) from exc
+
+
+def _resolve_hermes_payload_attachments(
+    *,
+    workdir: FsPath,
+    attachments: list[ChatAttachment],
+) -> list[attachment_svc.StoredAttachment]:
+    resolved: list[attachment_svc.StoredAttachment] = []
+    for item in attachments:
+        try:
+            resolved.append(
+                attachment_svc.resolve_existing_attachment(
+                    base_dir=workdir,
+                    absolute_path=item.absolute_path,
+                    name=item.name,
+                    mime_type=item.mime_type,
+                )
+            )
+        except ValueError as exc:
+            raise ApiError("INVALID_ATTACHMENT", str(exc), status_code=400) from exc
+    try:
+        attachment_svc.validate_batch_limits(resolved)
+    except ValueError as exc:
+        message = str(exc)
+        code = "INVALID_ATTACHMENT"
+        status = 400
+        if "count exceeds limit" in message:
+            code = "ATTACHMENT_COUNT_EXCEEDED"
+        elif "total size exceeds limit" in message:
+            code = "ATTACHMENT_TOTAL_SIZE_EXCEEDED"
+            status = 413
+        raise ApiError(
+            code,
+            message,
+            status_code=status,
+            details={
+                "maxCount": attachment_svc.MAX_ATTACHMENT_COUNT,
+                "maxBytesPerFile": attachment_svc.MAX_ATTACHMENT_SIZE_BYTES,
+                "maxTotalBytes": attachment_svc.MAX_ATTACHMENT_TOTAL_BYTES,
+            },
+        ) from exc
+    return resolved
+
+
+def _attachments_for_history(
+    items: list[attachment_svc.StoredAttachment],
+    *,
+    route: Literal["path_injection", "native"],
+) -> list[chat_history.ChatAttachmentMeta]:
+    return [
+        {
+            "id": item.id,
+            "name": item.name,
+            "mime_type": item.mime_type,
+            "size_bytes": item.size_bytes,
+            "absolute_path": item.absolute_path,
+            "relative_path": item.relative_path,
+            "route": route,
+        }
+        for item in items
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -827,13 +968,43 @@ def cron_action(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@router.get("/{agent_id}/chat-history", response_model=ChatHistoryResponse)
+@router.get(
+    "/{agent_id}/chat-history",
+    response_model=ChatHistoryResponse,
+    response_model_exclude_none=True,
+)
 async def chat_history_view(
     agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,
 ) -> ChatHistoryResponse:
     _get_owned(agent_id, user, storage)
     rows = await chat_history.list_messages(_session_key(user, agent_id))
     return ChatHistoryResponse(messages=[ChatMessage(**m) for m in rows])
+
+
+@router.post("/{agent_id}/chat/attachments", response_model=ChatAttachmentUploadResponse)
+async def upload_chat_attachment(
+    agent_id: Annotated[str, Path()],
+    filename: Annotated[str, Query(min_length=1, max_length=255)],
+    workdir: Annotated[str, Query(min_length=1)],
+    request: Request,
+    user: UserDep,
+    storage: StorageDep,
+) -> ChatAttachmentUploadResponse:
+    _get_owned(agent_id, user, storage)
+    workdir_path = _resolve_workdir_path(workdir)
+    stored = await _store_hermes_chat_upload(
+        request=request,
+        workdir=workdir_path,
+        filename=filename,
+    )
+    return ChatAttachmentUploadResponse(
+        attachment=_to_chat_attachment(stored, route="path_injection"),
+        limits={
+            "maxCount": attachment_svc.MAX_ATTACHMENT_COUNT,
+            "maxBytesPerFile": attachment_svc.MAX_ATTACHMENT_SIZE_BYTES,
+            "maxTotalBytes": attachment_svc.MAX_ATTACHMENT_TOTAL_BYTES,
+        },
+    )
 
 
 async def _finalize_chat_history(job: chat_svc.ChatJob, session_key: str) -> None:
@@ -857,20 +1028,46 @@ async def chat_with_agent(
     _get_owned(agent_id, user, storage)
     message = (payload.message or "").strip()
     workdir = (payload.workdir or "").strip()
-    if not message:
-        raise ApiError("INVALID_PAYLOAD", "message is required", status_code=400)
     if not workdir:
         raise ApiError("INVALID_PAYLOAD", "workdir is required", status_code=400)
+    workdir_path = _resolve_workdir_path(workdir)
+    resolved_attachments = _resolve_hermes_payload_attachments(
+        workdir=workdir_path,
+        attachments=payload.attachments,
+    )
+    if not message and not resolved_attachments:
+        raise ApiError("INVALID_PAYLOAD", "message is required", status_code=400)
+
+    runtime_message = message
+    if resolved_attachments:
+        prompt_head = message or "Please inspect the uploaded files."
+        injected = attachment_svc.build_path_injection_message(
+            user_message=prompt_head,
+            attachments=resolved_attachments,
+        )
+        runtime_message = injected
 
     session_key = _session_key(user, agent_id)
     # Resume the existing session whenever this conversation already has turns.
     # ``/reset`` clears history → next turn starts a fresh session.
     resume = len(await chat_history.list_messages(session_key)) > 0
-    await chat_history.append_message(session_key, role="user", content=message)
+    await chat_history.append_message(
+        session_key,
+        role="user",
+        content=message,
+        attachments=_attachments_for_history(
+            resolved_attachments,
+            route="path_injection",
+        ),
+    )
 
     try:
         job = chat_svc.start_chat(
-            agent_id, message=message, workdir=workdir, resume=resume, session_key=session_key
+            agent_id,
+            message=runtime_message,
+            workdir=workdir,
+            resume=resume,
+            session_key=session_key,
         )
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc

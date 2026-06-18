@@ -1579,6 +1579,195 @@ async def test_chat_history_marks_no_text_reply(
 
 
 @pytest.mark.asyncio
+async def test_chat_attachment_upload_and_path_injection(
+    client: TestClient,
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    await svc_agents.commit_agent(svc_agents.CommitInput(id="chat-attach-path", name="C"), user="alice")
+    from app.api import openclaw_agents as router_mod
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_cli_chat_completion(
+        *,
+        agent_id: str,
+        session_key: str,
+        message: str,
+        model_override: str | None,
+        attachment_paths: list[str] | None = None,
+        native_attachment_flag: str | None = None,
+        timeout_sec: float = 120.0,
+    ) -> dict[str, Any]:
+        del agent_id, session_key, model_override, timeout_sec
+        captured["message"] = message
+        captured["attachment_paths"] = attachment_paths
+        captured["native_attachment_flag"] = native_attachment_flag
+        return {"id": "x", "choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
+    uploaded = client.post(
+        "/api/openclaw/agents/chat-attach-path/chat/attachments?filename=brief.md",
+        data=b"# Brief\n",
+        headers={"Content-Type": "text/markdown"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    uploaded_body = uploaded.json()
+    assert uploaded_body["attachment"]["route"] == "path_injection"
+    attachment = uploaded_body["attachment"]
+    run = client.post(
+        "/api/openclaw/agents/chat-attach-path/chat",
+        json={
+            "messages": [{"role": "user", "content": "please read files"}],
+            "attachments": [attachment],
+            "stream": False,
+        },
+    )
+    assert run.status_code == 200, run.text
+    assert "ClawsomeFlow Uploaded Attachments" in captured["message"]
+    assert captured["attachment_paths"] is None
+    hist = client.get("/api/openclaw/agents/chat-attach-path/chat-history")
+    assert hist.status_code == 200, hist.text
+    first = hist.json()["messages"][0]
+    assert first["role"] == "user"
+    assert first["attachments"][0]["name"] == "brief.md"
+
+
+@pytest.mark.asyncio
+async def test_chat_attachment_never_uses_native_passthrough(
+    client: TestClient,
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    await svc_agents.commit_agent(
+        svc_agents.CommitInput(id="chat-attach-force-path", name="C"),
+        user="alice",
+    )
+    from app.api import openclaw_agents as router_mod
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_cli_chat_completion(
+        *,
+        agent_id: str,
+        session_key: str,
+        message: str,
+        model_override: str | None,
+        attachment_paths: list[str] | None = None,
+        native_attachment_flag: str | None = None,
+        timeout_sec: float = 120.0,
+    ) -> dict[str, Any]:
+        del agent_id, session_key, model_override, timeout_sec
+        captured["message"] = message
+        captured["attachment_paths"] = attachment_paths
+        captured["native_attachment_flag"] = native_attachment_flag
+        return {"id": "x", "choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
+    uploaded = client.post(
+        "/api/openclaw/agents/chat-attach-force-path/chat/attachments?filename=photo.png",
+        data=b"fakepng",
+        headers={"Content-Type": "image/png"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    attachment = uploaded.json()["attachment"]
+    run = client.post(
+        "/api/openclaw/agents/chat-attach-force-path/chat",
+        json={
+            "messages": [{"role": "user", "content": "force path injection"}],
+            "attachments": [attachment],
+            "stream": False,
+        },
+    )
+    assert run.status_code == 200, run.text
+    assert "ClawsomeFlow Uploaded Attachments" in captured["message"]
+    assert captured["native_attachment_flag"] is None
+    assert captured["attachment_paths"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_with_attachments_uses_path_injection_only(
+    client: TestClient,
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    await svc_agents.commit_agent(
+        svc_agents.CommitInput(id="chat-no-probe-with-attachment", name="C"),
+        user="alice",
+    )
+    from app.api import openclaw_agents as router_mod
+
+    async def _fake_cli_chat_completion(
+        *,
+        agent_id: str,
+        session_key: str,
+        message: str,
+        model_override: str | None,
+        attachment_paths: list[str] | None = None,
+        native_attachment_flag: str | None = None,
+        timeout_sec: float = 120.0,
+    ) -> dict[str, Any]:
+        del agent_id, session_key, model_override, timeout_sec
+        assert attachment_paths is None
+        assert native_attachment_flag is None
+        return {"id": "x", "choices": [{"message": {"content": message}}]}
+
+    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
+    uploaded = client.post(
+        "/api/openclaw/agents/chat-no-probe-with-attachment/chat/attachments?filename=context.md",
+        data=b"context",
+        headers={"Content-Type": "text/markdown"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    attachment = uploaded.json()["attachment"]
+    run = client.post(
+        "/api/openclaw/agents/chat-no-probe-with-attachment/chat",
+        json={
+            "messages": [{"role": "user", "content": "please use attachment"}],
+            "attachments": [attachment],
+            "stream": False,
+        },
+    )
+    assert run.status_code == 200, run.text
+
+
+@pytest.mark.asyncio
+async def test_chat_without_attachments_unaffected(
+    client: TestClient,
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    await svc_agents.commit_agent(svc_agents.CommitInput(id="chat-no-attach-probe", name="C"), user="alice")
+    from app.api import openclaw_agents as router_mod
+
+    async def _fake_cli_chat_completion(
+        *,
+        agent_id: str,
+        session_key: str,
+        message: str,
+        model_override: str | None,
+        timeout_sec: float = 120.0,
+    ) -> dict[str, Any]:
+        del agent_id, session_key, model_override, timeout_sec
+        return {"id": "x", "choices": [{"message": {"content": message}}]}
+
+    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
+    run = client.post(
+        "/api/openclaw/agents/chat-no-attach-probe/chat",
+        json={"messages": [{"role": "user", "content": "plain message"}], "stream": False},
+    )
+    assert run.status_code == 200, run.text
+
+
+@pytest.mark.asyncio
 async def test_reset_session_sends_plain_slash_reset_only(
     client: TestClient,
     fake_openclaw_home: Path,

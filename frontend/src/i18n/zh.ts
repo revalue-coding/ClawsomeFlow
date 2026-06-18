@@ -753,6 +753,20 @@ const zh = {
     stopped: "（已停止生成）",
     regenerate: "重新生成",
     scrollToBottom: "回到底部",
+    attachments: {
+      add: "添加文件",
+      dropHint: "可拖拽文件到此，或点击选择",
+      remove: "移除",
+      uploading: "正在上传附件…",
+      uploadFailed: "附件上传失败：{{message}}",
+      tooMany: "单条消息最多添加 {{max}} 个附件。",
+      tooLarge: "{{name}} 超过 {{maxMb}}MB 大小限制。",
+      emptyFile: "{{name}} 为空文件，无法上传。",
+      folderAbsolutePathUnavailable:
+        "当前浏览器无法读取该文件夹的绝对路径，请在本机客户端拖拽，或手动复制绝对路径后粘贴到输入框。",
+      folderPathLimited:
+        "浏览器安全限制导致无法读取文件夹绝对路径，已将可识别的目录路径粘贴到输入框，请按需手动修正。",
+    },
     youLabel: "你",
     agentLabel: "智能体",
     error: "对话出错：{{message}}",

@@ -7,9 +7,12 @@
  * wipe the bucket.
  */
 
+import type { ChatAttachmentMeta, ChatAttachmentRoute } from "@/lib/api";
+
 export interface PersistedMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  attachments?: ChatAttachmentMeta[];
   /** Epoch ms when the message was sent/received (client clock). Optional:
    *  server-recovered messages and older cached entries have no timestamp. */
   ts?: number;
@@ -34,6 +37,26 @@ function storageKey(scope: string): string {
   return `csflow:chat-history:${scope}`;
 }
 
+function normaliseAttachments(value: unknown): ChatAttachmentMeta[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value
+    .filter((row): row is Record<string, unknown> => !!row && typeof row === "object")
+    .map((row) => {
+      const route: ChatAttachmentRoute = row.route === "native" ? "native" : "path_injection";
+      return {
+        id: typeof row.id === "string" ? row.id : "",
+        name: typeof row.name === "string" ? row.name : "",
+        mimeType: typeof row.mimeType === "string" ? row.mimeType : "",
+        sizeBytes: typeof row.sizeBytes === "number" ? row.sizeBytes : 0,
+        absolutePath: typeof row.absolutePath === "string" ? row.absolutePath : "",
+        relativePath: typeof row.relativePath === "string" ? row.relativePath : "",
+        route,
+      };
+    })
+    .filter((row) => row.id && row.name && row.absolutePath && row.relativePath);
+  return out.length > 0 ? out : undefined;
+}
+
 export function loadChatHistory(scope: string): PersistedMessage[] {
   try {
     const raw = localStorage.getItem(storageKey(scope));
@@ -42,12 +65,18 @@ export function loadChatHistory(scope: string): PersistedMessage[] {
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter(
-        (m): m is PersistedMessage =>
+        (m): m is Record<string, unknown> =>
           !!m &&
           typeof m === "object" &&
           (m.role === "user" || m.role === "assistant" || m.role === "system") &&
           typeof m.content === "string",
       )
+      .map((m) => ({
+        role: m.role as PersistedMessage["role"],
+        content: m.content as string,
+        ts: typeof m.ts === "number" ? m.ts : undefined,
+        attachments: normaliseAttachments(m.attachments),
+      }))
       .slice(-HISTORY_LIMIT);
   } catch {
     return [];

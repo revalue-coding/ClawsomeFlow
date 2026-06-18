@@ -5,7 +5,16 @@
  * a per-chat working-directory picker, and a "my-profile" button (opens the
  * profile root). No Import&Optimize / Agent Store / "to Hermes" button.
  */
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
@@ -38,12 +47,14 @@ import {
   settledCount,
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
+import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
 import { cn } from "@/lib/cn";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useStickyScroll } from "@/lib/useStickyScroll";
 import {
   api,
   ApiError,
+  type ChatAttachmentMeta,
   isNetworkError,
   type ChatHistoryMessage,
   type HermesAgentSummary,
@@ -65,6 +76,9 @@ const DEFAULT_WORKDIR = "~";
 // verify-by-list loop so the popup doesn't close before the agent is gone.
 const CREATE_CANCEL_VERIFY_TIMEOUT_MS = 30 * 1000;
 const CREATE_CANCEL_VERIFY_POLL_MS = 800;
+const CHAT_MAX_ATTACHMENTS = 8;
+const CHAT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const HERMES_PENDING_FILES_CACHE = new Map<string, File[]>();
 
 type CreateCancelState = {
   agentId: string;
@@ -147,6 +161,13 @@ function errText(e: unknown): string {
   }
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+function formatLocalFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${Math.round(bytes)} B`;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1065,6 +1086,7 @@ function RemoveModal({
 interface ChatMsg {
   role: "user" | "assistant" | "system";
   content: string;
+  attachments?: ChatAttachmentMeta[];
   ts?: number;
 }
 
@@ -1131,6 +1153,122 @@ function ChatRoom({ agentId }: { agentId: string }) {
   // user had seen when they navigated away.
   const messagesRef = useRef<ChatMsg[]>([]);
   messagesRef.current = messages;
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const pendingFilesRef = useRef<File[]>([]);
+  pendingFilesRef.current = pendingFiles;
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const addPendingFiles = useCallback((incoming: File[]) => {
+    if (incoming.length === 0) return;
+    setError("");
+    const next = [...pendingFilesRef.current];
+    let errorText: string | null = null;
+    for (const file of incoming) {
+      const duplicate = next.some(
+        (existing) =>
+          existing.name === file.name &&
+          existing.size === file.size &&
+          existing.lastModified === file.lastModified,
+      );
+      if (duplicate) continue;
+      if (file.size <= 0) {
+        errorText ??= t("chat.attachments.emptyFile", { name: file.name });
+        continue;
+      }
+      if (file.size > CHAT_MAX_ATTACHMENT_BYTES) {
+        errorText ??= t("chat.attachments.tooLarge", {
+          name: file.name,
+          maxMb: Math.round(CHAT_MAX_ATTACHMENT_BYTES / (1024 * 1024)),
+        });
+        continue;
+      }
+      if (next.length >= CHAT_MAX_ATTACHMENTS) {
+        errorText ??= t("chat.attachments.tooMany", { max: CHAT_MAX_ATTACHMENTS });
+        break;
+      }
+      next.push(file);
+    }
+    setPendingFiles(next);
+    if (errorText) setError(errorText);
+  }, [t]);
+
+  const insertTextAtCursor = useCallback((text: string) => {
+    if (!text) return;
+    const textarea = inputRef.current;
+    if (!textarea) {
+      setInput((prev) => `${prev}${text}`);
+      return;
+    }
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? start;
+    const next = `${textarea.value.slice(0, start)}${text}${textarea.value.slice(end)}`;
+    setInput(next);
+    window.requestAnimationFrame(() => {
+      const node = inputRef.current;
+      if (!node) return;
+      const caret = start + text.length;
+      node.focus();
+      node.setSelectionRange(caret, caret);
+    });
+  }, [inputRef, setInput]);
+
+  const appendFolderPathToInput = useCallback((folderPath: string) => {
+    const text = folderPath.trim();
+    if (!text) return;
+    insertTextAtCursor(text);
+  }, [insertTextAtCursor]);
+
+  const onDropAttachmentArea = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDraggingFiles(false);
+    if (sending || resetting || uploadingAttachments) return;
+    const folder = resolveDroppedFolderPath(event.dataTransfer);
+    if (folder?.hasFolder) {
+      if (folder.absolutePath) {
+        appendFolderPathToInput(folder.absolutePath);
+        setError("");
+      } else {
+        setError(t("chat.attachments.folderAbsolutePathUnavailable"));
+      }
+      return;
+    }
+    addPendingFiles(Array.from(event.dataTransfer.files ?? []));
+  }, [
+    addPendingFiles,
+    appendFolderPathToInput,
+    resetting,
+    sending,
+    t,
+    uploadingAttachments,
+  ]);
+
+  const onSelectAttachmentFiles = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    addPendingFiles(files);
+    event.target.value = "";
+  }, [addPendingFiles]);
+
+  const removePendingFile = useCallback((idx: number) => {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  const uploadPendingFiles = useCallback(async () => {
+    if (pendingFilesRef.current.length === 0) return [] as ChatAttachmentMeta[];
+    if (!workdir.trim()) throw new Error(t("hermes.workdirNeeded"));
+    setUploadingAttachments(true);
+    try {
+      const out: ChatAttachmentMeta[] = [];
+      for (const file of pendingFilesRef.current) {
+        const uploaded = await api.uploadHermesChatAttachment(agentId, workdir, file);
+        out.push(uploaded.attachment);
+      }
+      return out;
+    } finally {
+      setUploadingAttachments(false);
+    }
+  }, [agentId, workdir, t]);
 
   // localStorage scope for the transcript cache. Namespaced under `hermes:` so
   // it can't collide with an OpenClaw agent's cache for the same id.
@@ -1139,6 +1277,20 @@ function ChatRoom({ agentId }: { agentId: string }) {
   useEffect(() => {
     didJumpToNewDividerRef.current = false;
   }, [chatScope]);
+
+  useEffect(() => {
+    const cached = HERMES_PENDING_FILES_CACHE.get(agentId);
+    setPendingFiles(cached ? [...cached] : []);
+    setDraggingFiles(false);
+  }, [agentId, chatScope]);
+
+  useEffect(() => {
+    if (pendingFiles.length > 0) {
+      HERMES_PENDING_FILES_CACHE.set(agentId, pendingFiles);
+    } else {
+      HERMES_PENDING_FILES_CACHE.delete(agentId);
+    }
+  }, [agentId, pendingFiles]);
 
   useEffect(() => {
     // How many messages the user had already seen before this visit — read once,
@@ -1150,6 +1302,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
       const cached: ChatMsg[] = loadChatHistory(chatScope).map((m) => ({
         role: m.role,
         content: m.content,
+        attachments: m.attachments ?? [],
         ts: m.ts,
       }));
       if (cached.length > 0) setMessages(cached);
@@ -1169,6 +1322,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
         const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
           role: m.role,
           content: m.content,
+          attachments: m.attachments ?? [],
         }));
         // Server history has no timestamps; backfill from the local cache (which
         // persists ts) by matching position + content so times survive a refresh.
@@ -1249,6 +1403,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
         const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
           role: m.role,
           content: m.content,
+          attachments: m.attachments ?? [],
         }));
         const last = server[server.length - 1];
         if (last && last.role === "assistant" && last.content.trim() !== "") {
@@ -1367,7 +1522,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
 
   // Core streaming turn. ``appendUser`` is false on regenerate (the user message
   // is already in the transcript — we only replace the assistant reply).
-  const runTurn = async (message: string, opts: { appendUser: boolean }) => {
+  const runTurn = async (
+    message: string,
+    opts: { appendUser: boolean; attachments?: ChatAttachmentMeta[] },
+  ) => {
     if (!workdir) {
       setError(t("hermes.workdirNeeded"));
       return;
@@ -1378,9 +1536,18 @@ function ChatRoom({ agentId }: { agentId: string }) {
     setProgress(null);
     setNewDividerAt(-1); // engaging with the chat clears the "new messages" mark
     setSending(true);
+    const turnAttachments = opts.attachments ?? [];
     setMessages((prev) => {
       const base = opts.appendUser
-        ? [...prev, { role: "user" as const, content: message, ts: Date.now() }]
+        ? [
+            ...prev,
+            {
+              role: "user" as const,
+              content: message,
+              attachments: turnAttachments,
+              ts: Date.now(),
+            },
+          ]
         : prev;
       return [...base, { role: "assistant" as const, content: "" }];
     });
@@ -1392,7 +1559,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
     try {
       const res = await api.chatWithHermesAgent(
         agentId,
-        { message, workdir },
+        { message, workdir, attachments: turnAttachments },
         { signal: controller.signal },
       );
       if (!res.ok || !res.body) {
@@ -1476,10 +1643,22 @@ function ChatRoom({ agentId }: { agentId: string }) {
   };
 
   const send = async () => {
+    if (sending || resetting || uploadingAttachments) return;
     const message = input.trim();
-    if (!message) return;
+    if (!message && pendingFiles.length === 0) return;
+    let uploadedAttachments: ChatAttachmentMeta[] = [];
+    if (pendingFiles.length > 0) {
+      try {
+        uploadedAttachments = await uploadPendingFiles();
+      } catch (e) {
+        const msg = e instanceof ApiError ? `${e.code}: ${e.message}` : errText(e);
+        setError(t("chat.attachments.uploadFailed", { message: msg }));
+        return;
+      }
+    }
     setInput("");
-    await runTurn(message, { appendUser: true });
+    setPendingFiles([]);
+    await runTurn(message, { appendUser: true, attachments: uploadedAttachments });
   };
 
   const stop = async () => {
@@ -1492,7 +1671,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
   };
 
   const regenerate = async () => {
-    if (sending || resetting) return;
+    if (sending || resetting || uploadingAttachments) return;
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
     // Drop the trailing assistant reply; runTurn appends a fresh one.
@@ -1501,11 +1680,14 @@ function ChatRoom({ agentId }: { agentId: string }) {
       if (next.length && next[next.length - 1].role === "assistant") next.pop();
       return next;
     });
-    await runTurn(lastUser.content, { appendUser: false });
+    await runTurn(lastUser.content, {
+      appendUser: false,
+      attachments: lastUser.attachments ?? [],
+    });
   };
 
   const reset = async () => {
-    if (sending || resetting) return;
+    if (sending || resetting || uploadingAttachments) return;
     setResetting(true);
     setError("");
     try {
@@ -1517,6 +1699,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
       setMessages([]);
       setNewDividerAt(-1);
       setInput("");
+      setPendingFiles([]);
     } catch (e) {
       setError(errText(e));
     } finally {
@@ -1663,7 +1846,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (!sending && !resetting) void send();
+            if (!sending && !resetting && !uploadingAttachments) void send();
           }}
           className="space-y-2 border-t border-ink-100 p-3"
         >
@@ -1682,6 +1865,63 @@ function ChatRoom({ agentId }: { agentId: string }) {
               onChange={(e) => updateWorkdir(e.target.value)}
             />
           </div>
+          <div
+            className={cn(
+              "rounded-lg border border-dashed px-3 py-2 transition",
+              draggingFiles ? "border-brand-400 bg-brand-50/40" : "border-ink-200 bg-ink-50/40",
+            )}
+            onDragOver={(event: DragEvent<HTMLDivElement>) => {
+              event.preventDefault();
+              if (!draggingFiles) setDraggingFiles(true);
+            }}
+            onDragLeave={() => setDraggingFiles(false)}
+            onDrop={onDropAttachmentArea}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={onSelectAttachmentFiles}
+            />
+            <div className="flex flex-wrap items-center gap-2 text-xs text-ink-500">
+              <button
+                type="button"
+                className="btn-outline shrink-0 !px-2 !py-1 text-xs"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sending || resetting || uploadingAttachments}
+              >
+                {t("chat.attachments.add")}
+              </button>
+              <span>{t("chat.attachments.dropHint")}</span>
+              {uploadingAttachments && (
+                <span className="text-brand-600">{t("chat.attachments.uploading")}</span>
+              )}
+            </div>
+            {pendingFiles.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {pendingFiles.map((file, idx) => (
+                  <div
+                    key={`${file.name}-${file.size}-${file.lastModified}-${idx}`}
+                    className="flex items-center justify-between rounded-md border border-ink-200 bg-surface px-2 py-1 text-xs text-ink-600"
+                  >
+                    <span className="truncate" title={file.name}>
+                      {file.name} · {formatLocalFileSize(file.size)}
+                    </span>
+                    <button
+                      type="button"
+                      className="ml-2 shrink-0 text-ink-400 hover:text-ink-700"
+                      onClick={() => removePendingFile(idx)}
+                      disabled={sending || resetting || uploadingAttachments}
+                      title={t("chat.attachments.remove")}
+                    >
+                      {t("chat.attachments.remove")}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="flex items-end gap-2">
             <textarea
               ref={inputRef}
@@ -1691,17 +1931,17 @@ function ChatRoom({ agentId }: { agentId: string }) {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 handleChatTextareaEnterKey(e, () => {
-                  if (!sending && !resetting) {
+                  if (!sending && !resetting && !uploadingAttachments) {
                     (e.currentTarget.form as HTMLFormElement).requestSubmit();
                   }
                 });
               }}
-              disabled={sending || resetting}
+              disabled={sending || resetting || uploadingAttachments}
             />
             <button
               type="button"
               className="btn-outline"
-              disabled={sending || resetting}
+              disabled={sending || resetting || uploadingAttachments}
               onClick={() => void reset()}
             >
               {resetting ? t("chat.resetting") : t("chat.reset")}
@@ -1718,7 +1958,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
               <button
                 type="submit"
                 className="btn-primary"
-                disabled={resetting || !input.trim()}
+                disabled={resetting || uploadingAttachments || (!input.trim() && pendingFiles.length === 0)}
               >
                 {t("chat.send")}
               </button>
