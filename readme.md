@@ -281,7 +281,7 @@ If ClawsomeFlow helps you coordinate your Agent team, **please give us a ⭐ Sta
 Got questions about using ClawsomeFlow, or curious about building an **OPC (One-Person Company)**? Come hang out with us — scan the QR code below to join our WeChat discussion group:
 
 <p align="center">
-  <img src="./docs/assets/wechat-group-qr.png" alt="ClawsomeFlow WeChat Group" width="240" />
+  <img src="./docs/assets/wechat-group-qr.png?v=2" alt="ClawsomeFlow WeChat Group" width="240" />
 </p>
 
 ---

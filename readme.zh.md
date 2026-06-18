@@ -275,7 +275,7 @@ bash scripts/stop-contributor.sh
 对 ClawsomeFlow 的使用有疑问，或者对成立 **OPC（一人公司）** 感兴趣？欢迎来和我们一起交流 —— 扫描下方二维码加入微信讨论社群：
 
 <p align="center">
-  <img src="./docs/assets/wechat-group-qr.png" alt="ClawsomeFlow 微信交流群" width="240" />
+  <img src="./docs/assets/wechat-group-qr.png?v=2" alt="ClawsomeFlow 微信交流群" width="240" />
 </p>
 
 ---
