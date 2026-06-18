@@ -882,18 +882,18 @@ async def chat_with_agent(
 
     async def _stream():
         emitted = 0
-        last_counts: tuple[int, int, int] | None = None
         while True:
             snap = job.snapshot()
             steps = snap["steps"]
             for step in steps[emitted:]:
                 yield f"data: {json.dumps({'step': step})}\n\n"
             emitted = len(steps)
-            prog = snap["progress"]
-            counts = (prog["toolCalls"], prog["apiCalls"], prog["messageCount"])
-            if counts != last_counts:
-                yield f"data: {json.dumps({'progress': prog})}\n\n"
-                last_counts = counts
+            # Emit progress on EVERY tick (not only when tool/api/message counts
+            # change). ``elapsedSec`` advances every poll, so this keeps the live
+            # timer + counters moving and the stream from sitting idle — fixes the
+            # "progress freezes until refresh" symptom during a long model turn
+            # that makes no new tool calls.
+            yield f"data: {json.dumps({'progress': snap['progress']})}\n\n"
             if snap["status"] != "running":
                 if snap["status"] == "done":
                     if snap["final"]:
@@ -904,7 +904,17 @@ async def chat_with_agent(
                 return
             await asyncio.sleep(0.5)
 
-    return StreamingResponse(_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        # Defeat response buffering (e.g. a reverse proxy) so SSE events reach the
+        # browser as they are produced instead of all-at-once at turn end.
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/{agent_id}/chat/status")

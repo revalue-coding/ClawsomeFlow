@@ -1060,6 +1060,7 @@ function RemoveModal({
 interface ChatMsg {
   role: "user" | "assistant" | "system";
   content: string;
+  ts?: number;
 }
 
 function ChatRoom({ agentId }: { agentId: string }) {
@@ -1117,6 +1118,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
       const cached: ChatMsg[] = loadChatHistory(chatScope).map((m) => ({
         role: m.role,
         content: m.content,
+        ts: m.ts,
       }));
       if (cached.length > 0) setMessages(cached);
       try {
@@ -1136,7 +1138,14 @@ function ChatRoom({ agentId }: { agentId: string }) {
           role: m.role,
           content: m.content,
         }));
-        const merged = reconcileTranscript(cached, server);
+        // Server history has no timestamps; backfill from the local cache (which
+        // persists ts) by matching position + content so times survive a refresh.
+        const merged = reconcileTranscript(cached, server).map((m, i) => {
+          const c = cached[i];
+          return c && c.role === m.role && c.content === m.content && c.ts
+            ? { ...m, ts: c.ts }
+            : m;
+        });
         setMessages(merged);
         if (merged.length > 0) saveChatHistory(chatScope, merged);
         // A trailing user turn means a reply is still being produced server-side
@@ -1190,10 +1199,11 @@ function ChatRoom({ agentId }: { agentId: string }) {
     const adoptFinal = (text: string) => {
       setMessages((prev) => {
         const next = [...prev];
+        const ts = Date.now();
         if (next.length > 0 && next[next.length - 1].role === "assistant") {
-          next[next.length - 1] = { role: "assistant", content: text };
+          next[next.length - 1] = { role: "assistant", content: text, ts };
         } else {
-          next.push({ role: "assistant", content: text });
+          next.push({ role: "assistant", content: text, ts });
         }
         saveChatHistory(chatScope, next);
         return next;
@@ -1305,7 +1315,11 @@ function ChatRoom({ agentId }: { agentId: string }) {
     setProgress(null);
     setSending(true);
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: message }, { role: "assistant", content: "" }]);
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: message, ts: Date.now() },
+      { role: "assistant", content: "" },
+    ]);
     try {
       const res = await api.chatWithHermesAgent(agentId, { message, workdir });
       if (!res.ok || !res.body) {
@@ -1349,6 +1363,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
                 next[next.length - 1] = {
                   role: "assistant",
                   content: next[next.length - 1].content + obj.delta,
+                  ts: Date.now(),
                 };
                 return next;
               });

@@ -10,9 +10,25 @@
 export interface PersistedMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  /** Epoch ms when the message was sent/received (client clock). Optional:
+   *  server-recovered messages and older cached entries have no timestamp. */
+  ts?: number;
 }
 
 export const HISTORY_LIMIT = 20;
+
+/** Format a chat message timestamp as a short local time (e.g. "14:05"). */
+export function formatChatTime(ts?: number): string {
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return "";
+  try {
+    return new Date(ts).toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
+}
 
 function storageKey(scope: string): string {
   return `csflow:chat-history:${scope}`;

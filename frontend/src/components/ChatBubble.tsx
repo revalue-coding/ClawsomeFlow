@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 
 import { ChatMarkdown } from "@/components/ChatMarkdown";
+import { formatChatTime } from "@/lib/chatHistory";
 
 export interface ChatBubbleMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  ts?: number;
 }
 
 function TypingDots() {
@@ -26,8 +28,9 @@ export function ChatBubble({
   noTextReply: string;
 }) {
   const isUser = msg.role === "user";
+  const time = !pending ? formatChatTime(msg.ts) : "";
   return (
-    <div className={isUser ? "flex justify-end" : "flex justify-start"}>
+    <div className={isUser ? "flex flex-col items-end" : "flex flex-col items-start"}>
       <div
         className={
           isUser
@@ -47,6 +50,7 @@ export function ChatBubble({
           <span className="text-ink-400">{noTextReply}</span>
         )}
       </div>
+      {time && <span className="mt-1 px-1 text-[11px] text-ink-400">{time}</span>}
     </div>
   );
 }

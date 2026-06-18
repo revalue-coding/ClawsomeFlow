@@ -3,6 +3,7 @@
  * Shared by the OpenClaw and Hermes chat pages: shows elapsed time + counters
  * and the ordered list of trajectory steps (tool calls / progress lines)
  * surfaced from the agent's session store while the turn runs. */
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { ChatProgress, ChatStep } from "@/lib/api";
@@ -15,7 +16,29 @@ export function ChatStepTrail({
   progress: ChatProgress | null;
 }) {
   const { t } = useTranslation();
-  const elapsed = Math.round(progress?.elapsedSec ?? 0);
+
+  // Tick the elapsed counter client-side every second, re-anchoring on the
+  // server's ``elapsedSec`` whenever a fresh progress event arrives. Relying on
+  // the server value alone made the timer look frozen (it historically only
+  // advanced when tool/api counts changed); a local tick keeps it smooth and
+  // never frozen regardless of SSE cadence.
+  const anchorRef = useRef({ wall: Date.now(), base: progress?.elapsedSec ?? 0 });
+  const [now, setNow] = useState(() => Date.now());
+  const serverElapsed = progress?.elapsedSec;
+  useEffect(() => {
+    if (typeof serverElapsed === "number") {
+      anchorRef.current = { wall: Date.now(), base: serverElapsed };
+      setNow(Date.now());
+    }
+  }, [serverElapsed]);
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const elapsed = Math.max(
+    0,
+    Math.round(anchorRef.current.base + (now - anchorRef.current.wall) / 1000),
+  );
   return (
     <div className="rounded-lg border border-brand-200 bg-brand-50/60 px-3 py-2 text-xs text-ink-600">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-medium text-brand-700">

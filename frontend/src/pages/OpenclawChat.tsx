@@ -54,6 +54,7 @@ import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import {
   clearChatHistory,
+  formatChatTime,
   loadChatHistory,
   reconcileTranscript,
   saveChatHistory,
@@ -64,6 +65,7 @@ import { useOpRecovery } from "@/lib/useOpRecovery";
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
+  ts?: number;
 }
 
 type SettingsTab = "skills" | "cron" | "hooks" | "agents";
@@ -1717,7 +1719,14 @@ function ChatRoom({
           role: m.role,
           content: m.content,
         }));
-        const merged = reconcileTranscript(cached, server);
+        // Server history has no timestamps; backfill from the local cache (which
+        // persists ts) by matching position + content so times survive a refresh.
+        const merged = reconcileTranscript(cached, server).map((m, i) => {
+          const c = cached[i];
+          return c && c.role === m.role && c.content === m.content && c.ts
+            ? { ...m, ts: c.ts }
+            : m;
+        });
         setMessages(merged);
         if (merged.length > 0) saveChatHistory(agentId, merged);
         // A trailing user turn means a reply is still being produced
@@ -1814,19 +1823,19 @@ function ChatRoom({
     setRecovering(false); // a fresh send supersedes any in-flight recovery poll
     setSteps([]);
     setProgress(null);
-    const turnMessage: Message = { role: "user", content: text };
+    const turnMessage: Message = { role: "user", content: text, ts: Date.now() };
     const next: Message[] = [...messages, turnMessage];
     setMessages(next);
     setInput("");
     setStreaming(true);
-    // Add an empty assistant message to stream into.
+    // Add an empty assistant message to stream into (timestamped once it lands).
     setMessages((m) => [...m, { role: "assistant", content: "" }]);
 
     try {
       const resp = await api.chatWithOpenclawAgent(agentId, {
         // Session context is maintained by backend session_key.
         // Send only this turn's message to avoid client-side context replay.
-        messages: [turnMessage],
+        messages: [{ role: turnMessage.role, content: turnMessage.content }],
         stream: true,
       });
       if (!resp.ok) {
@@ -1867,6 +1876,7 @@ function ChatRoom({
                 out[out.length - 1] = {
                   role: "assistant",
                   content: out[out.length - 1].content + delta,
+                  ts: Date.now(),
                 };
                 return out;
               });
@@ -1882,6 +1892,7 @@ function ChatRoom({
         out[out.length - 1] = {
           role: "assistant",
           content: `(error) ${e instanceof Error ? e.message : String(e)}`,
+          ts: Date.now(),
         };
         return out;
       });
@@ -3526,8 +3537,9 @@ function Bubble({
   noTextReply: string;
 }) {
   const isUser = msg.role === "user";
+  const time = !pending ? formatChatTime(msg.ts) : "";
   return (
-    <div className={isUser ? "flex justify-end" : "flex justify-start"}>
+    <div className={isUser ? "flex flex-col items-end" : "flex flex-col items-start"}>
       <div
         className={
           isUser
@@ -3547,6 +3559,7 @@ function Bubble({
           <span className="text-ink-400">{noTextReply}</span>
         )}
       </div>
+      {time && <span className="mt-1 px-1 text-[11px] text-ink-400">{time}</span>}
     </div>
   );
 }

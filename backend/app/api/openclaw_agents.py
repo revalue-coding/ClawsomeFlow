@@ -3229,6 +3229,11 @@ async def _chat_via_cli(
             for step in snap["steps"][emitted:]:
                 yield f"data: {json.dumps({'step': step})}\n\n"
             emitted = len(snap["steps"])
+            # Emit progress on every tick so the live elapsed timer + counters
+            # keep moving (previously the running stream emitted only steps, so
+            # the timer stayed frozen at 0 until a refresh hit the status poll).
+            if snap.get("progress"):
+                yield f"data: {json.dumps({'progress': snap['progress']})}\n\n"
             if snap["status"] != "running":
                 if snap["status"] == "done":
                     text = snap["final"]
@@ -3248,7 +3253,13 @@ async def _chat_via_cli(
     return StreamingResponse(
         _event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
+        # Defeat response buffering (e.g. a reverse proxy) so SSE events reach the
+        # browser as they are produced instead of all-at-once at turn end.
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
