@@ -62,11 +62,11 @@ def _ctx(**overrides) -> prompts.DispatchContext:
 
 def _upstream(task_id="t-upstream", subject="Crawl data",
               from_agent="crawler", path="/tmp/wt/crawler",
-              branch="clawteam/csflow-x/crawler", base="main",
+              branch="clawteam/csflow-x/crawler", base="main", repo_root="/tmp/main",
               summary="抓了 12,438 条样本到 data/raw.csv (commit a7f3e2c)") -> prompts.UpstreamOutput:
     return prompts.UpstreamOutput(
         task_id=task_id, subject=subject, from_agent=from_agent,
-        worktree_path=path, branch_name=branch, base_branch=base,
+        worktree_path=path, branch_name=branch, base_branch=base, repo_root=repo_root,
         summary=summary,
     )
 
@@ -116,7 +116,8 @@ def test_worker_dispatch_openclaw_self_does_not_merge_in_task_prompt() -> None:
         agent=_agent(kind=AgentKind.openclaw, merge=MergeStrategy.agent_self),
     ))
     assert "git checkout main" not in msg
-    assert "git merge --no-ff" not in msg
+    # The generic merge reference is present, but no auto-merge MANDATE for this task.
+    assert "**Self-merge:**" not in msg
     assert "If merge conflicts occur, resolve them yourself" not in msg
 
 
@@ -124,7 +125,7 @@ def test_worker_dispatch_tui_does_not_merge() -> None:
     """TUI agents (claude/codex/...) never run merge steps in worker prompt;
     that's owned by finalize_run per merge_strategy."""
     msg = prompts.build_worker_dispatch(_ctx())  # default = claude / manual
-    assert "git merge --no-ff" not in msg
+    assert "**Self-merge:**" not in msg  # no auto-merge mandate (manual run)
     assert "If merge conflicts occur, resolve them yourself" not in msg
 
 
@@ -140,8 +141,9 @@ def test_worker_dispatch_hermes_uses_generic_tui_shape() -> None:
     assert "never write in the baseline-branch workspace" not in msg
     assert "If this task requires changes to workspace content" not in msg
     assert "my-desktop/" not in msg
-    # No merge steps in the worker prompt (manual strategy owns merge at finalize).
-    assert "git merge --no-ff" not in msg
+    # No auto-merge MANDATE in the worker prompt (manual strategy owns merge at finalize);
+    # the generic merge reference may still appear.
+    assert "**Self-merge:**" not in msg
 
 
 def test_worker_dispatch_openclaw_skip_does_not_merge() -> None:
@@ -149,7 +151,7 @@ def test_worker_dispatch_openclaw_skip_does_not_merge() -> None:
     msg = prompts.build_worker_dispatch(_ctx(
         agent=_agent(kind=AgentKind.openclaw, merge=MergeStrategy.skip),
     ))
-    assert "git merge --no-ff" not in msg
+    assert "**Self-merge:**" not in msg
 
 
 def test_leader_completion_steps_focus_on_deliverable_without_merge_guidance() -> None:
@@ -159,6 +161,8 @@ def test_leader_completion_steps_focus_on_deliverable_without_merge_guidance() -
         agent=_agent(id="leader", leader=True),  # default kind=claude (TUI)
         task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
     ))
+    # Normal-mode leader (merge_reference defaults False) → no generic merge block.
+    assert "## Git Merge & Repo Lock Reference" not in msg
     assert "## Merge Suggestions" not in msg
     assert "merge suggestion" not in msg.lower()
     # TUI agents work directly in the repo worktree — no my-desktop/ dumping.
@@ -239,7 +243,7 @@ def test_leader_openclaw_self_merge_omits_merge_steps_in_summary_prompt() -> Non
             base="main",
         ),
     ))
-    assert "git merge --no-ff" not in msg
+    assert "**Self-merge:**" not in msg  # no auto-merge mandate in summary prompt
     assert "git checkout main" not in msg
     assert "test -f <absolute-path>" in msg
 
@@ -293,6 +297,7 @@ def test_leader_dispatch_includes_extra_blocks() -> None:
     ]:
         assert h in msg, h
     assert "alice" in msg and "bob" in msg
+    assert "base branch `main`" in msg  # baseline branch surfaced per worker worktree
     assert "Build a tiny widget." in msg
     assert "target_user" in msg
 
@@ -335,7 +340,7 @@ def test_worker_dispatch_non_scheduled_omits_self_merge() -> None:
     """Default (manual) runs must NOT carry self-merge steps (zero regression)."""
     msg = prompts.build_worker_dispatch(_ctx())
     assert "Scheduled run — self-merge" not in msg
-    assert "git merge --no-ff" not in msg
+    assert "**Self-merge:**" not in msg  # mandate absent; generic reference may appear
     assert "post-merge absolute path" not in msg
 
 
@@ -422,6 +427,7 @@ def test_upstream_block_renders_one_dependency() -> None:
     assert 'task `t-upstream` "Crawl data" by agent `crawler`' in msg
     assert "/tmp/wt/crawler" in msg
     assert "clawteam/csflow-x/crawler" in msg
+    assert "base branch `main`" in msg  # baseline branch must be surfaced
     assert "12,438 条样本" in msg
     # The "To inspect upstream changes" git-log/git-diff footer was removed.
     assert "To inspect upstream changes" not in msg
@@ -498,3 +504,65 @@ def test_leader_dispatch_does_not_duplicate_upstream_block() -> None:
     # The leader builder doesn't render the upstream block at all.
     assert "## Direct Upstream Outputs" not in msg
     assert "## Worker Reports" in msg
+
+
+# ── generic git-merge / repo-lock reference (dev/easy modes only) ──────
+
+
+def test_generic_merge_reference_absent_by_default() -> None:
+    """Normal mode (merge_reference defaults False) → no generic merge block."""
+    assert "## Git Merge & Repo Lock Reference" not in prompts.build_worker_dispatch(_ctx())
+    assert "## Git Merge & Repo Lock Reference" not in prompts.build_leader_dispatch(_ctx(
+        agent=_agent(id="leader", leader=True),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+    ))
+
+
+def test_worker_dispatch_includes_generic_merge_reference_when_enabled() -> None:
+    """dev/easy dispatch (merge_reference=True) carries the generic how-to."""
+    msg = prompts.build_worker_dispatch(_ctx(merge_reference=True))
+    assert "## Git Merge & Repo Lock Reference" in msg
+    assert "Reference only" in msg
+    # Runtime-generic command: agent fills REPO/SRC/DST; lock computed for REPO.
+    assert "REPO=" in msg and "SRC=" in msg and "DST=" in msg
+    assert "flock -x" in msg
+    # Lock is computed at runtime (not a single hardcoded lock).
+    assert "sha256sum" in msg
+    assert "merge target only" in msg
+    assert msg.find("## Git Merge & Repo Lock Reference") < msg.find("## Task #")
+
+
+def test_leader_dispatch_includes_generic_merge_reference_when_enabled() -> None:
+    msg = prompts.build_leader_dispatch(_ctx(
+        agent=_agent(id="leader", leader=True),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+        merge_reference=True,
+    ))
+    assert "## Git Merge & Repo Lock Reference" in msg
+    assert "REPO=" in msg and "SRC=" in msg and "DST=" in msg
+
+
+def test_generic_reference_is_not_a_mandate() -> None:
+    """The block alone never mandates a merge (no self-merge step)."""
+    msg = prompts.build_worker_dispatch(_ctx(merge_reference=True))  # self_merge False
+    assert "## Git Merge & Repo Lock Reference" in msg
+    assert "**Self-merge:**" not in msg
+
+
+def test_generic_reference_coexists_with_mandate() -> None:
+    """dev auto-merge task: generic reference AND the mandatory self-merge step."""
+    msg = prompts.build_worker_dispatch(_ctx(merge_reference=True, self_merge=True))
+    assert "## Git Merge & Repo Lock Reference" in msg
+    assert "**Self-merge:**" in msg
+    # The mandate targets the agent's OWN branch (concrete, no placeholder).
+    assert "git merge --no-ff clawteam/csflow-x/alice" in msg
+
+
+def test_upstream_repo_root_shown_only_when_merge_reference() -> None:
+    """repo_root (merge target) appears in the upstream block only when enabled."""
+    base = dict(task=_task(id="t-down", deps=("t-upstream",)),
+                upstream_outputs=[_upstream()])
+    off = prompts.build_worker_dispatch(_ctx(**base))
+    on = prompts.build_worker_dispatch(_ctx(merge_reference=True, **base))
+    assert "repo root (merge target): `/tmp/main`" not in off
+    assert "repo root (merge target): `/tmp/main`" in on

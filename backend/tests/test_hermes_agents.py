@@ -463,6 +463,58 @@ def test_api_open_dashboard(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     assert r.json()["url"] == "http://127.0.0.1:9119/chat"
 
 
+def test_start_gateway_runs_install_then_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_profile(agent_id: str, args: list[str], **_kw):  # noqa: ANN001
+        calls.append([agent_id, *args])
+        if args == ["gateway", "install"]:
+            return 0, "installed", ""
+        if args == ["gateway", "start"]:
+            return 0, "gateway listening at http://127.0.0.1:9120", ""
+        raise AssertionError(f"unexpected args: {args}")
+
+    monkeypatch.setattr(svc, "_hermes_profile", _fake_profile)
+    msg = svc.start_gateway("helper")
+    assert calls == [
+        ["helper", "gateway", "install"],
+        ["helper", "gateway", "start"],
+    ]
+    assert "gateway listening" in msg
+
+
+def test_start_gateway_start_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_profile(agent_id: str, args: list[str], **_kw):  # noqa: ANN001
+        calls.append([agent_id, *args])
+        if args == ["gateway", "install"]:
+            return 0, "installed", ""
+        if args == ["gateway", "start"]:
+            return 1, "", "boom"
+        return 1, "", "unexpected"
+
+    monkeypatch.setattr(svc, "_hermes_profile", _fake_profile)
+    with pytest.raises(svc.ProfileOpFailed) as exc:
+        svc.start_gateway("helper")
+    assert "gateway start" in str(exc.value)
+    assert calls == [
+        ["helper", "gateway", "install"],
+        ["helper", "gateway", "start"],
+    ]
+
+
+def test_api_start_gateway(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="gw1", name="Gateway Agent", profile_root="x", created_by_user=owner)
+    )
+    monkeypatch.setattr(svc, "start_gateway", lambda _aid: "gateway started")
+    r = client.post("/api/hermes/agents/gw1/gateway/start")
+    assert r.status_code == 200, r.text
+    assert r.json()["message"] == "gateway started"
+
+
 def test_api_runtime_status_mode_passthrough(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

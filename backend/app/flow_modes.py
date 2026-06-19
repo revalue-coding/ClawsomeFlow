@@ -92,10 +92,26 @@ def task_self_merges(
     return bool(run_is_scheduled)
 
 
+def merge_reference_enabled(*, mode: FlowMode) -> bool:
+    """Whether to inject the generic merge + repo-lock reference into a dispatch.
+
+    **dev / easy modes only** — every task (incl. the leader) gets it, because the
+    generic reference is the developer-mode collaboration primitive (a task
+    description may direct cross-worktree merges / PRs).
+
+    **Normal mode never gets it**, including scheduled-normal auto-merge tasks:
+    those only ever merge *their own* branch, which the task's existing self-merge
+    instruction already covers — they do not need the generic cross-worktree
+    how-to, and omitting it keeps normal-mode prompts lean.
+    """
+    return mode in ("dev", "easy")
+
+
 __all__ = [
     "FLOW_DEV_MODE_KEY",
     "FLOW_EASY_MODE_KEY",
     "FlowMode",
     "flow_mode",
+    "merge_reference_enabled",
     "task_self_merges",
 ]

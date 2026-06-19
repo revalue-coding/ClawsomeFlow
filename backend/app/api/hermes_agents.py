@@ -124,6 +124,10 @@ class HermesDashboardOpenResponse(_CamelModel):
     url: str
 
 
+class HermesGatewayStartResponse(_CamelModel):
+    message: str
+
+
 class HermesClaimableAgent(_CamelModel):
     id: str
     description: str = ""
@@ -517,6 +521,20 @@ def open_dashboard(
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
     return HermesDashboardOpenResponse(url=url)
+
+
+@router.post("/{agent_id}/gateway/start", response_model=HermesGatewayStartResponse)
+def start_gateway(
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> HermesGatewayStartResponse:
+    _get_owned(agent_id, user, storage)
+    try:
+        message = svc.start_gateway(agent_id)
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return HermesGatewayStartResponse(message=message)
 
 
 @router.get("/claimable", response_model=HermesClaimableListResponse)

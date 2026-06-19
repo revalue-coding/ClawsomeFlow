@@ -58,7 +58,7 @@ from app.integrations.openclaw_install import (
     repair_pending_scope_upgrades,
 )
 from app.config import load_config
-from app.flow_modes import flow_mode, task_self_merges
+from app.flow_modes import flow_mode, merge_reference_enabled, task_self_merges
 from app.models import (
     AgentKind,
     Flow,
@@ -490,7 +490,7 @@ class RunController:
                 task_id=tid,
                 payload={"target_status": "in_progress", "source": "checkpoint_rerun"},
             )
-        prompt = self._build_checkpoint_rerun_prompt(
+        prompt = await self._build_checkpoint_rerun_prompt(
             downstream_task_id=downstream_task_id,
             upstream_item=item,
             feedback=text,
@@ -1416,11 +1416,7 @@ class RunController:
         session = await self._ensure_session_idle(agent)
 
         ctx = await self._compose_dispatch_context(agent, book.task)
-
-        if agent.is_leader and book.task.is_leader_summary:
-            message = build_leader_dispatch(ctx)
-        else:
-            message = build_worker_dispatch(ctx)
+        message = self._render_dispatch_message(agent, book.task, ctx)
 
         before = session.state.value
         outcome: DispatchOutcome = await session.dispatch(
@@ -2872,62 +2868,30 @@ class RunController:
             f"custom dispatch failed for {agent.id}: {retry.detail or outcome.detail}"
         )
 
-    def _build_checkpoint_rerun_prompt(
+    async def _build_checkpoint_rerun_prompt(
         self,
         *,
         downstream_task_id: str,
         upstream_item: _CheckpointItem,
         feedback: str,
     ) -> str:
-        ct_task_id = self._clawteam_task_id(upstream_item.task_id) or upstream_item.task_id
+        """Rerun message = feedback preamble + the **exact** dispatch message the
+        task would receive on first dispatch.
+
+        Invariant (user requirement): rerun-injected execution requirements must
+        be identical to the initial dispatch in every case. We therefore reuse
+        ``_compose_dispatch_context`` + ``_render_dispatch_message`` rather than
+        hand-mirroring the self-merge / inbox / completion steps (which is what
+        previously drifted). The preamble only adds rerun-specific context
+        (feedback + previous summary); it never restates execution requirements.
+        """
         previous_summary = (upstream_item.summary or "").strip()
         previous_block = (
             previous_summary
             if previous_summary
             else "(no previously matched inbox summary)"
         )
-        # When this task self-merges in-task (easy mode, dev-mode auto-merge task,
-        # OpenClaw under dev mode, or any task of a scheduled normal run), a
-        # re-executed checkpoint task must self-merge too, otherwise its corrected
-        # output never reaches the baseline. In manual-merge runs we omit this so
-        # the user still merges via the UI. Mirrors prompts._scheduled_self_merge_steps.
-        rerun_book = self._tasks.get(upstream_item.task_id)
-        rerun_task = rerun_book.task if rerun_book else None
-        rerun_agent = self._agents.get(upstream_item.owner_agent_id)
-        self_merge = bool(
-            rerun_task is not None
-            and rerun_agent is not None
-            and task_self_merges(
-                mode=self._flow_mode(),
-                run_is_scheduled=bool(getattr(self.run, "is_scheduled", False)),
-                task=rerun_task,
-                agent=rerun_agent,
-            )
-        )
-        self_merge_block = ""
-        if self_merge:
-            sess = self._sessions.get(upstream_item.owner_agent_id)
-            wt = sess.worktree if sess else None
-            wt_path = wt.worktree_path if wt else "<worktree-path>"
-            repo_root = wt.repo_root if wt else "<baseline-workspace>"
-            branch = wt.branch_name if wt else "<branch>"
-            base = wt.base_branch if wt else "<base>"
-            merge_line = self_merge_instruction(
-                repo_root=repo_root,
-                base_branch=base,
-                feature_branch=branch,
-                merge_message=f"csflow: scheduled merge {branch}",
-            )
-            self_merge_block = (
-                "2) Commit worktree changes, then self-merge (no user merge review):\n"
-                f"   `cd {wt_path} && git add -A && git commit -m "
-                f"'checkpoint rerun {upstream_item.task_id}'`\n"
-                f"   {merge_line}\n"
-                f"   Cite paths under `{repo_root}` only — not `{wt_path}`.\n"
-            )
-        # Number the inbox/update steps after the optional self-merge block.
-        inbox_no, update_no, fail_no = (3, 4, 5) if self_merge else (2, 3, 4)
-        return (
+        preamble = (
             "## ClawsomeFlow Manual Checkpoint Rerun\n"
             f"- team: `{self.team_name}`\n"
             f"- upstream_task_id: `{upstream_item.task_id}`\n"
@@ -2937,22 +2901,20 @@ class RunController:
             f"{feedback}\n\n"
             "Previous upstream output summary:\n"
             f"{previous_block}\n\n"
-            "Execution requirements:\n"
-            "1) Re-execute this upstream task according to the feedback.\n"
-            f"{self_merge_block}"
-            f"{inbox_no}) After rerun completes, you MUST send the new output to leader inbox "
-            "using the exact prefix:\n"
-            f"   `task {upstream_item.task_id} done: <new summary>`\n"
-            "   The `<new summary>` MUST include a concise work summary and absolute "
-            "paths of important changed docs/files.\n"
-            f"   via `clawteam inbox send {self.team_name} {self._leader_id} "
-            f"\"task {upstream_item.task_id} done: <new summary>\" "
-            f"--from {upstream_item.owner_agent_id}`.\n"
-            f"{update_no}) VERY IMPORTANT! you MUST execute:\n"
-            f"   `clawteam task update {self.team_name} {ct_task_id} --status completed`.\n"
-            f"{fail_no}) If rerun fails, still send an inbox message with the same prefix and "
-            f"include `FAILED:` details, then still execute the same completed command in step {update_no}."
+            "Re-execute this task according to the feedback. **The full execution "
+            "requirements below are identical to the original dispatch — follow them "
+            "exactly** (commit, merge if the checklist requires it, inbox the leader, "
+            "mark the task completed)."
         )
+        book = self._tasks.get(upstream_item.task_id)
+        agent = self._agents.get(upstream_item.owner_agent_id)
+        if book is None or agent is None:
+            # Degraded fallback (should not happen in practice): no task/agent to
+            # compose a dispatch for — return the preamble alone.
+            return preamble
+        ctx = await self._compose_dispatch_context(agent, book.task)
+        dispatch_message = self._render_dispatch_message(agent, book.task, ctx)
+        return preamble + "\n\n" + dispatch_message
 
     async def _wait_for_clawteam_tasks_completed(
         self,
@@ -3336,6 +3298,19 @@ class RunController:
 
     # ── dispatch context composition ─────────────────────────────────
 
+    def _render_dispatch_message(
+        self, agent: FlowAgent, task: FlowTask, ctx: DispatchContext,
+    ) -> str:
+        """Pick the dispatch builder exactly as the initial dispatch does.
+
+        Shared by ``_dispatch_one`` and the checkpoint-rerun path so a rerun's
+        execution requirements are byte-for-byte identical to the first dispatch
+        (DEV.md invariant: rerun == initial dispatch + feedback preamble).
+        """
+        if agent.is_leader and task.is_leader_summary:
+            return build_leader_dispatch(ctx)
+        return build_worker_dispatch(ctx)
+
     async def _compose_dispatch_context(
         self, agent: FlowAgent, task: FlowTask,
     ) -> DispatchContext:
@@ -3431,6 +3406,7 @@ class RunController:
                     worktree_path=str(wt_info.worktree_path) if wt_info else None,
                     branch_name=wt_info.branch_name if wt_info else None,
                     base_branch=wt_info.base_branch if wt_info else None,
+                    repo_root=wt_info.repo_root if wt_info else None,
                     summary=summary_bundle,
                 ))
 
@@ -3441,6 +3417,14 @@ class RunController:
         ct_task_id: str | None = None
         if self.compile_result is not None:
             ct_task_id = self.compile_result.flow_to_clawteam.get(task.id)
+
+        mode = self._flow_mode()
+        self_merge = task_self_merges(
+            mode=mode,
+            run_is_scheduled=bool(getattr(self.run, "is_scheduled", False)),
+            task=task,
+            agent=agent,
+        )
 
         return DispatchContext(
             run_id=self.run.id,
@@ -3456,12 +3440,8 @@ class RunController:
             worker_worktrees=worker_worktrees,
             worker_reports=worker_reports,
             upstream_outputs=upstream_outputs,
-            self_merge=task_self_merges(
-                mode=self._flow_mode(),
-                run_is_scheduled=bool(getattr(self.run, "is_scheduled", False)),
-                task=task,
-                agent=agent,
-            ),
+            self_merge=self_merge,
+            merge_reference=merge_reference_enabled(mode=mode),
         )
 
     def _render_report_summary(self, report: WorkerReport | None) -> str | None:

@@ -54,7 +54,7 @@
 ## 🎯 Who Should Try It?
 
 - Software teams building a **local, multi-branch engineering agent squad** — where specialists can develop in parallel and still converge cleanly;
-- Builders who want **real software collaboration among multiple agents** (plan, implement, review, converge), not just one more chat window;
+- Builders who want **real collaboration among multiple agents** (plan, implement, review, converge), not just one more chat window;
 - Founders and operators designing an **AI-native company**, where repeatable execution can be delegated to orchestrated agent teams;
 - Ambitious creators pursuing **super-individual leverage** — one person steering many specialized agents with clear guardrails;
 - Engineering-minded folks who are **done with prompt-only black-box orchestration** and want predictable behavior with controllable cost.
@@ -71,20 +71,22 @@ ClawsomeFlow turns scattered AI agents into a controllable engineering system �
 
 | 🔐 Isolation & rollback by default | 📊 Observability you can audit | 🔄 A system that improves itself |
 |---|---|---|
-| Built on Git worktree isolation, each agent develops in its own workspace and branch — naturally suited for safe parallel multi-agent work without cross-talk or accidental writes. It supports intelligent merge and rollback, plus optional human checkpoints for in-flight course correction. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
+| Built on Git worktree isolation, each agent develops in its own workspace and branch — naturally suited for safe parallel multi-agent work without cross-talk or accidental writes. A **built-in cross-process repo lock guarantees the absolute reliability of parallel multi-branch development**: every merge (scheduler- or agent-initiated) is serialized on the same lock, so concurrent baseline merges never corrupt git metadata. It supports intelligent merge and rollback, plus optional human checkpoints for in-flight course correction. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
 
 ClawsomeFlow inherits the following capabilities from ClawTeam:
 
 - **Git Worktree-based parallel isolation**: each Agent has an independent branch and directory, naturally fitting multi-agent parallel development; supports intelligent merge and rollback, plus optional human checkpoints for behavior correction at any time.
 - **Inter-Agent messaging**: point-to-point inbox and broadcast, so team members share progress in real time.
 
-> On top of this, ClawsomeFlow adds **AI combined with precise orchestration, deep OpenClaw adaptation, failure convergence, human guardrails and Web productization**.
+> On top of this, ClawsomeFlow adds **AI combined with precise orchestration, Harness Engineering, deep OpenClaw/Hermes adaptation, a built-in cross-process repo lock for absolutely reliable parallel multi-branch merging (something ClawTeam leaves uncontrolled), and Web productization**.
 
 ---
 
 ## 🛠️ How It Works
 
 From a sentence to a shipped result. You stay in charge of the goal; ClawsomeFlow handles the coordination, the parallelism, and the recovery when things go wrong.
+
+![ClawsomeFlow task orchestration framework](./docs/assets/flow-orchestration-overview.png)
 
 1. **Describe your goal** — Tell ClawsomeFlow what you want in plain language, or compose a Flow visually as a graph of tasks and dependencies.
 2. **Agents run in parallel** — The scheduler actively dispatches ready tasks to the right agents, each in its own isolated workspace, and drives them to completion.
@@ -93,12 +95,30 @@ From a sentence to a shipped result. You stay in charge of the goal; ClawsomeFlo
 
 ---
 
+## 🧪 Developer Mode
+
+Developer mode gives **software-development collaboration projects** a far more flexible way to work together. The key idea: **every subtask is handed the agents and worktrees it depends on, and can act on them however its description says** — read, diff, merge a branch, or open a PR.
+
+- **Upstream context for every subtask**: for each direct dependency, a subtask is injected with the upstream **agent id, worktree path, branch and base branch**. It can then flexibly build on that work — inspect it, merge that branch, or raise a PR for it — driven entirely by your task description.
+- **Cross-branch collaboration in plain language**: just write *"merge upstream agent X's worktree branch into branch Y"* or *"open a PR for X"* in a downstream task. The agent already has X's worktree/branch/base info plus a generic locked-merge recipe, so it knows exactly what to merge and how.
+- **Built-in lock = absolute parallel-merge reliability**: every merge is serialized through a built-in cross-process repo lock (the same one the scheduler uses), so many branches can develop and merge in parallel without ever racing or corrupting the repo. ClawTeam has no repo-level merge lock and cannot guarantee this.
+- **Per-subtask auto-merge control**: turn auto-merge into the baseline branch ON/OFF per subtask.
+- **Unique worktree per agent**: each agent works from its own worktree and independent branch off the baseline.
+- **PR-friendly flow**: keep auto-merge OFF on subtasks whose branches you want to land via PR or manual review.
+- **Automatic cleanup**: worktree directories are cleaned up after the Run ends.
+
+### 🎨 Flow Runtime Collaboration Architecture (EN)
+
+![Flow Runtime Collaboration Architecture (EN)](./docs/assets/flow-runtime-collab-en.png)
+
+---
+
 ## 🤖 Supported Agents
 
 | Agent | Kind | Runtime | Status |
 |---|---|---|---|
 | **OpenClaw** | `openclaw` | TUI | ⭐ Deeply adapted |
-| **Hermes** | `hermes` | TUI | ✅ Full support |
+| **Hermes** | `hermes` | TUI | ⭐ Deeply adapted |
 | **Claude Code** | `claude` | TUI | ✅ Full support |
 | **Codex** | `codex` | TUI | ✅ Full support |
 | **Cursor** | `cursor` | TUI | ✅ Full support |
@@ -123,7 +143,7 @@ ClawsomeFlow's approach is direct: **migrate coordination from natural language 
 | Dimension | Other Multi-Agent Orchestration Platforms | ✅ ClawsomeFlow |
 |---|---|---|
 | **Task orchestration fit** | Mostly framework-specific, bound to a single ecosystem | Task orchestration is **deeply adapted to OpenClaw Agents**, while also being compatible with any CLI Agent (Claude / Codex / Cursor, etc.) collaborating in the same graph |
-| **Concurrency & isolation** | Easy contention in parallel, workspace conflicts, context cross-talk | Solves OpenClaw collaboration instability: **workspace isolation and rollback under multi-task parallelism, and thoroughly resolves session conflicts** |
+| **Concurrency & isolation** | Easy contention in parallel, workspace conflicts, context cross-talk | Solves OpenClaw collaboration instability: **workspace isolation and rollback under multi-task parallelism, and thoroughly resolves session conflicts**; a **built-in cross-process repo lock makes parallel multi-branch development and merging absolutely reliable** |
 | **Control approach** | Pure Prompt self-scheduling (black box) or pure code (heavy) | **AI combined with precise orchestration**: get everything done in natural language while the scheduler precisely controls behavior (dispatch / retry / timeout / abort) |
 | **Engineering harness** | Generally missing; failures rely on Agent improvisation | **Harness engineering**: human checkpoints, rollbackable results, complaint-loop mechanism, periodic entropy management |
 | **Failure recovery** | Relies on Agent self-healing, uncertain outcome | Clear retry / skip / abort strategies, recovery paths folded into a standard state machine |
@@ -147,6 +167,7 @@ ClawsomeFlow is built on top of **ClawTeam**.
 | **Collaboration driver** | Agents self-poll and self-schedule in the Prompt | Server-side scheduler actively dispatches, deterministic execution |
 | **Task model** | Kanban + dependency chain | DAG Flow compilation, Leader summarizes and converges |
 | **OpenClaw adaptation** | Supported as an optional CLI Agent | Deeply adapted, resolving session and workspace concurrency conflicts |
+| **Parallel-merge reliability** | **No repo-level merge lock** — concurrent baseline merges race and can corrupt git metadata; completely uncontrolled | **Built-in cross-process repo lock guarantees the absolute reliability of parallel multi-branch development** — every merge (scheduler or agent) is serialized on the same lock, so you can even direct cross-branch merges/PRs in natural language without risk |
 | **Failure & guardrails** | Basic lifecycle protocol | Human checkpoints / rollback / complaint-loop / entropy management |
 | **Skill configuration** | Requires extra skill setup on the Agent platform | No extra skill configuration needed, works out of the box |
 | **Persistent specialist members** | Swarm intelligence can't flexibly schedule persistent, platform-managed agents | Create persistent members with their own expertise and continuous self-learning on **Hermes / OpenClaw / Claude Code** and more, then invoke them on demand |
@@ -261,7 +282,7 @@ bash scripts/stop-contributor.sh
 | Phase | Content | Status |
 |---|---|---|
 | **P0** | **Agent Store** — a shareable marketplace for ready-made Agents, Teams and Flow templates: install, reuse, and contribute domain experts in one click. | 🚧 In progress |
-| **P1** | **Broader Agent platform support** — onboard more CLI Agent runtimes and keep pace with emerging ecosystems, so any Agent can join the same graph. | 📅 Planned |
+| **P1** | **Broader Agent platform support** — onboard more CLI Agent runtimes and keep pace with emerging ecosystems, so any Agent can join the same graph. | 🚧 In progress |
 | **P2** | **Mobile & server mode** — a mobile-friendly console plus multi-user server deployment, to monitor and intervene in Runs anywhere. | 💡 Exploring |
 | **P3** | **Cloud & SSH Agents** — drive Agents on remote / cloud hosts over SSH, scaling collaboration beyond a single machine. | 💡 Exploring |
 

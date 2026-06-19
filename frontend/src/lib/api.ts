@@ -1222,6 +1222,8 @@ export const api = {
         agentId ? `?agentId=${encodeURIComponent(agentId)}` : ""
       }`,
     ),
+  startHermesAgentGateway: (id: string) =>
+    request<{ message: string }>("POST", `/api/hermes/agents/${id}/gateway/start`),
   createHermesAgent: (
     payload: {
       id?: string;

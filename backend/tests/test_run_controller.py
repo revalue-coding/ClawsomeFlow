@@ -490,7 +490,7 @@ async def test_crashed_with_worktree_resumes(fake_lookup) -> None:
     assert sess.state == SessionState.Idle
 
 
-def _rerun_prompt_for(run, spec, fake_lookup) -> str:
+async def _rerun_prompt_for(run, spec, fake_lookup) -> str:
     from app.scheduler.controller import _CheckpointItem
 
     rc = RunController(
@@ -508,30 +508,35 @@ def _rerun_prompt_for(run, spec, fake_lookup) -> str:
         worktree_path="/tmp/wt/alice", repo_root="/tmp/main", base_branch="main",
     )
     item = _CheckpointItem(task_id="t1", subject="x", owner_agent_id="alice")
-    return rc._build_checkpoint_rerun_prompt(
+    # Rerun message == feedback preamble + the exact initial-dispatch message.
+    return await rc._build_checkpoint_rerun_prompt(
         downstream_task_id="ts", upstream_item=item, feedback="please fix the chart",
     )
 
 
-def test_checkpoint_rerun_prompt_includes_self_merge_when_scheduled(fake_lookup) -> None:
+@pytest.mark.asyncio
+async def test_checkpoint_rerun_prompt_includes_self_merge_when_scheduled(fake_lookup) -> None:
     """省心/auto-merge run: a checkpoint rerun must self-merge to baseline."""
     spec = _make_spec()
     run = _persist_flow_and_run(spec)
     run.is_scheduled = True
-    prompt = _rerun_prompt_for(run, spec, fake_lookup)
-    assert "self-merge" in prompt
+    prompt = await _rerun_prompt_for(run, spec, fake_lookup)
+    assert "self-merge" in prompt.lower()
     assert "flock -x" in prompt
     assert "git merge --no-ff clawteam/t/alice" in prompt
     assert "please fix the chart" in prompt  # user feedback still embedded
+    # Rerun reuses the real dispatch message verbatim (identical execution reqs).
+    assert "## Completion Checklist" in prompt
 
 
-def test_checkpoint_rerun_prompt_omits_self_merge_when_not_scheduled(fake_lookup) -> None:
+@pytest.mark.asyncio
+async def test_checkpoint_rerun_prompt_omits_self_merge_when_not_scheduled(fake_lookup) -> None:
     """Normal (manual-merge) run: rerun prompt must NOT self-merge (user merges)."""
     spec = _make_spec()
     run = _persist_flow_and_run(spec)  # is_scheduled defaults False
-    prompt = _rerun_prompt_for(run, spec, fake_lookup)
+    prompt = await _rerun_prompt_for(run, spec, fake_lookup)
     assert "git merge --no-ff" not in prompt
-    assert "self-merge" not in prompt
+    assert "**Self-merge:**" not in prompt
     assert "please fix the chart" in prompt
 
 

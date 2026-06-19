@@ -174,7 +174,7 @@ const zh = {
     devMode: "开发者模式",
     devModeSub: "可逐子任务设置是否自动合入；完成后进入投诉环节",
     devModeNotice:
-      "开发者模式专为软件开发者设计，允许开发者针对子任务定制是否自动合入修改。子任务的执行会基于主仓库的目标分支创建worktree，如果您的任务计划在worktree中直接提交PR，建议在编排任务时禁止Agent自动合入修改到主仓库的目标分支。被禁止的子任务将在任务执行完后自动删除worktree目录",
+      "开发者模式专为软件开发者优化，允许对子任务定制“是否自动合入修改到基线分支”。Agent执行任务时会为自己创建唯一worktree（基于基线分支创建独立分支），如果您计划让Agent在worktree中直接提交PR或需要更灵活地定制协作方式，建议在编排任务时禁止Agent自动合入修改。注意，Run结束后worktree目录将被自动删除",
     devModeAck: "我知道了",
     flowName: "Flow 名称",
     name: "Flow 名称",
@@ -266,7 +266,8 @@ const zh = {
     emptyTasks: "暂无任务。点击右上角“新增任务”开始编排。",
     summaryTaskDefaultSubject: "Summary",
     summaryTaskBadge: "Summary 任务",
-    summaryTaskLocked: "由所选 leader 自动生成；切换 leader 即更新归属，不能删除。",
+    summaryTaskLocked:
+      "由所选 leader 自动生成无法删除，其所依赖的子任务执行Agent将向其汇报工作并告知自己的worktree目录和分支，方便leader进一步组织信息。",
     summaryNoDepsWarning:
       "Summary 任务当前没有依赖任务，请在“依赖任务”中选择需要审查和汇总上报的上游任务。",
     graphTitle: "任务依赖图",
@@ -332,6 +333,8 @@ const zh = {
       subjectPlaceholder: "Dashboard 上展示的简短标题",
       description: "任务详细说明 *",
       descriptionPlaceholder: "Worker 收到本任务时需要完成的全部工作。",
+      descriptionCollabHint:
+        "提示：可在说明中直接指挥上游协作，例如「将 [agent] 的 worktree 分支合入 xxx 分支」或「为 [agent] 提交 PR」。可指挥的 [agent] 仅限本任务的上游依赖 Agent —— 其 worktree 路径 / 分支 / 基线分支会自动注入到本任务提示词中。",
       outputSummary: "输出摘要要求",
       outputSummaryHint: "（可选；摘要将发送给下游依赖任务）",
       outputSummaryHintSummary: "（可选）",
@@ -392,6 +395,7 @@ const zh = {
       autoMergeEnabledShort: "自动合入",
       autoMergeDisabledShort: "禁止合入",
       autoMergeOpenclawLocked: "Openclaw Agent 子任务固定自动合入，不可修改",
+      autoMergeSyncedNotice: "已同步修改该Agent其他子任务的合入状态",
       remove: "移除任务",
     },
     decompose: {
@@ -940,6 +944,12 @@ const zh = {
     openFailed: "打开 profile 目录失败：{{message}}",
     back: "返回",
     settings: "设置",
+    gateway: {
+      startButton: "开启 Gateway",
+      starting: "开启中…",
+      started: "Gateway 已开启",
+      startFailed: "Gateway 开启失败：{{message}}",
+    },
     reset: "重置",
     send: "发送",
     sending: "发送中…",
@@ -1078,6 +1088,7 @@ const zh = {
       },
       cron: {
         unavailable: "该 Agent 不支持定时任务。",
+        gatewayHint: "Hermes下定时任务的执行需要打开对应Agent的gateway",
         empty: "暂无定时任务。",
         create: "新建任务",
         schedule: "调度（如 30m、every 2h、0 9 * * *）",

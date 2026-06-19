@@ -698,6 +698,8 @@ export function FlowEditor() {
     false,
   );
   const [devModeNoticeOpen, setDevModeNoticeOpen] = useState(false);
+  const [autoMergeSyncNoticeOpen, setAutoMergeSyncNoticeOpen] = useState(false);
+  const autoMergeSyncNoticeTimerRef = useRef<number | null>(null);
   const [runInputFieldDraft, setRunInputFieldDraft] = useState("");
   const [runInputFieldError, setRunInputFieldError] = useState<string | null>(null);
   const [version, setVersion] = useSessionBackedState<number | null>(draftKey("version"), null);
@@ -748,6 +750,25 @@ export function FlowEditor() {
     | null
   >("flow-editor:editing", null, { isClosed: (value) => value === null });
   const remoteBrowser = isRemoteBrowser();
+
+  function showAutoMergeSyncNotice() {
+    setAutoMergeSyncNoticeOpen(true);
+    if (autoMergeSyncNoticeTimerRef.current !== null) {
+      window.clearTimeout(autoMergeSyncNoticeTimerRef.current);
+    }
+    autoMergeSyncNoticeTimerRef.current = window.setTimeout(() => {
+      setAutoMergeSyncNoticeOpen(false);
+      autoMergeSyncNoticeTimerRef.current = null;
+    }, 1000);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (autoMergeSyncNoticeTimerRef.current !== null) {
+        window.clearTimeout(autoMergeSyncNoticeTimerRef.current);
+      }
+    };
+  }, []);
 
   // Load option lists.
   useEffect(() => {
@@ -2149,14 +2170,24 @@ export function FlowEditor() {
                         ),
                       )}
                     devMode={devMode}
-                    onSetAutoMerge={(enabled) =>
-                      setTasks((prev) =>
-                        prev.map((item) =>
-                          item.rowKey === row.rowKey
-                            ? { ...item, autoMerge: enabled }
-                            : item,
-                        ),
-                      )}
+                    onSetAutoMerge={(enabled) => {
+                      const targetOwner = ownerKey(row);
+                      let syncedOthers = 0;
+                      let changedAny = false;
+                      const nextTasks = tasks.map((item) => {
+                        if (item.isLeaderSummary || ownerKey(item) !== targetOwner) {
+                          return item;
+                        }
+                        if (item.autoMerge === enabled) {
+                          return item;
+                        }
+                        changedAny = true;
+                        if (item.rowKey !== row.rowKey) syncedOthers += 1;
+                        return { ...item, autoMerge: enabled };
+                      });
+                      if (changedAny) setTasks(nextTasks);
+                      if (syncedOthers > 0) showAutoMergeSyncNotice();
+                    }}
                     onMove={(dir) => moveRow(row.rowKey, dir)}
                   />
                 );
@@ -2166,6 +2197,14 @@ export function FlowEditor() {
           </div>
         )}
       </Card>
+
+      {autoMergeSyncNoticeOpen && (
+        <div className="pointer-events-none fixed right-4 top-20 z-40">
+          <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 shadow-card">
+            {t("flowEditor.taskFields.autoMergeSyncedNotice")}
+          </div>
+        </div>
+      )}
 
       {mergeOpen && (
         <MergeFlowsModal
@@ -3008,6 +3047,9 @@ function TaskFormBody({
             {t("flowEditor.taskFields.summaryDescriptionHint")}
           </div>
         )}
+        <div className="text-xs text-ink-500 mt-1">
+          {t("flowEditor.taskFields.descriptionCollabHint")}
+        </div>
       </div>
       <div className="md:col-span-2">
         <label className="label">

@@ -1090,6 +1090,11 @@ interface ChatMsg {
   ts?: number;
 }
 
+type GatewayNotice = {
+  kind: "success" | "error";
+  text: string;
+};
+
 function ChatRoom({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const { alert } = useDialog();
@@ -1133,6 +1138,11 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const [showSettings, setShowSettings] = useSessionBackedModalFlag(`hermes:${agentId}:settings:open`);
   const [opening, setOpening] = useState(false);
   const [dashboardBusy, setDashboardBusy] = useState(false);
+  const [gatewayBusy, setGatewayBusy] = useState(false);
+  const [gatewayNotice, setGatewayNotice] = useState<GatewayNotice | null>(null);
+  const gatewayNoticeTimerRef = useRef<number | null>(null);
+  // Synchronous click lock: prevents double-trigger before state rerender.
+  const gatewayStartLockRef = useRef(false);
   const {
     ref: scrollRef,
     atBottom,
@@ -1707,6 +1717,43 @@ function ChatRoom({ agentId }: { agentId: string }) {
     }
   };
 
+  const showGatewayNotice = useCallback((kind: GatewayNotice["kind"], text: string) => {
+    setGatewayNotice({ kind, text });
+    if (gatewayNoticeTimerRef.current !== null) {
+      window.clearTimeout(gatewayNoticeTimerRef.current);
+    }
+    gatewayNoticeTimerRef.current = window.setTimeout(() => {
+      setGatewayNotice(null);
+      gatewayNoticeTimerRef.current = null;
+    }, 2000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (gatewayNoticeTimerRef.current !== null) {
+        window.clearTimeout(gatewayNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const startGateway = async () => {
+    if (gatewayStartLockRef.current) return;
+    gatewayStartLockRef.current = true;
+    setGatewayBusy(true);
+    try {
+      const out = await api.startHermesAgentGateway(agentId);
+      showGatewayNotice("success", out.message || t("hermes.gateway.started"));
+    } catch (e) {
+      showGatewayNotice(
+        "error",
+        t("hermes.gateway.startFailed", { message: errText(e) }),
+      );
+    } finally {
+      gatewayStartLockRef.current = false;
+      setGatewayBusy(false);
+    }
+  };
+
   return (
     <div className="flex h-[calc(100vh-6rem)] min-h-0 flex-col gap-5 overflow-hidden">
       <div className="flex items-start justify-between gap-3">
@@ -1740,6 +1787,34 @@ function ChatRoom({ agentId }: { agentId: string }) {
           </div>
         </div>
         <div className="inline-flex shrink-0 items-center gap-2">
+          <div className="relative">
+            <button
+              type="button"
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-full
+                       bg-gradient-to-r from-amber-500 to-orange-500
+                       px-4 py-0 text-sm font-semibold text-white
+                       shadow-[0_0_24px_-6px_rgba(245,158,11,0.95)]
+                       ring-1 ring-amber-300/70
+                       hover:from-amber-600 hover:to-orange-600
+                       transition-all disabled:cursor-not-allowed disabled:opacity-70"
+              disabled={gatewayBusy}
+              onClick={() => void startGateway()}
+            >
+              {gatewayBusy ? t("hermes.gateway.starting") : t("hermes.gateway.startButton")}
+            </button>
+            {gatewayNotice && (
+              <span
+                className={cn(
+                  "pointer-events-none absolute right-0 top-[calc(100%+0.35rem)] z-20 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs shadow-card",
+                  gatewayNotice.kind === "success"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-rose-200 bg-rose-50 text-rose-700",
+                )}
+              >
+                {gatewayNotice.text}
+              </span>
+            )}
+          </div>
           <button
             type="button"
             className="btn-outline inline-flex h-10 items-center justify-center px-4 py-0 text-sm font-medium"
@@ -2876,6 +2951,9 @@ function CronTab({ agentId }: { agentId: string }) {
   return (
     <div className="space-y-4">
       {error && <ErrorBox>{error}</ErrorBox>}
+      <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+        {t("hermes.settingsModal.cron.gatewayHint")}
+      </p>
       {jobs.length === 0 ? (
         <p className="text-sm text-ink-500">{t("hermes.settingsModal.cron.empty")}</p>
       ) : (

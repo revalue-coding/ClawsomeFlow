@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from app.models import AgentKind, FlowAgent, FlowTask
-from app.repo_merge_lock import self_merge_instruction
+from app.repo_merge_lock import merge_lock_reference, self_merge_instruction
 from app.worktree.lookup import WorktreeInfo
 
 
@@ -73,6 +73,7 @@ class UpstreamOutput:
     branch_name: str | None
     base_branch: str | None
     summary: str | None  # strict-match upstream completion summary, if known
+    repo_root: str | None = None  # baseline repo path (shown only when merge_reference)
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,13 @@ class DispatchContext:
     # (the worktree is deleted at run end).
     self_merge: bool = False
 
+    # True in dev/easy modes only (flow_modes.merge_reference_enabled): inject the
+    # generic merge + repo-lock reference and the upstream/worker repo_root values
+    # needed to target a cross-worktree merge. Normal mode keeps it False (even a
+    # scheduled-normal auto-merge task — that only self-merges its own branch via
+    # the existing self-merge step), so normal-mode prompts stay lean.
+    merge_reference: bool = False
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Public builders
@@ -137,13 +145,17 @@ def build_worker_dispatch(ctx: DispatchContext) -> str:
       3. ``## Workspace Context`` (worktree path; OpenClaw extras)
       4. ``## Direct Upstream Outputs`` (only when ``ctx.upstream_outputs`` is non-empty;
          **first-level depends_on only** — never transitively further upstream)
-      5. ``## Task #{id}: {subject}`` + description + ``## Completion Checklist``
+      5. ``## Git Merge & Repo Lock Reference`` (generic, non-mandatory how-to —
+         only when ``ctx.merge_reference``; the *mandate* to merge stays in the
+         checklist)
+      6. ``## Task #{id}: {subject}`` + description + ``## Completion Checklist``
     """
     blocks = [
         _scheduling_context_block(ctx),
         _identity_block(ctx),
         _work_context_block(ctx),
         _upstream_outputs_block(ctx),
+        _git_merge_reference_block(ctx),
         _task_block(ctx),
         _worker_completion_steps(ctx),
     ]
@@ -158,6 +170,8 @@ def build_leader_dispatch(ctx: DispatchContext) -> str:
       5. ``## Flow Goal``
       6. ``## Worker Worktrees and Branches`` (only summary dependencies)
       7. ``## Worker Reports`` (only summary dependencies)
+      8. ``## Git Merge & Repo Lock Reference`` (generic how-to; only when
+         ``ctx.merge_reference``)
     """
     blocks = [
         _scheduling_context_block(ctx),
@@ -166,10 +180,12 @@ def build_leader_dispatch(ctx: DispatchContext) -> str:
         _flow_goal_block(ctx),
         _worker_worktrees_block(ctx),
         _worker_reports_block(ctx),
+        _git_merge_reference_block(ctx),
         _task_block(ctx),
         _leader_completion_steps(ctx),
     ]
-    return "\n\n".join(blocks).strip() + "\n"
+    # Drop empty blocks (e.g. _git_merge_reference_block when merge_reference is off).
+    return "\n\n".join(b for b in blocks if b).strip() + "\n"
 
 
 def build_openclaw_self_merge(ctx: DispatchContext) -> str:
@@ -266,8 +282,8 @@ def _upstream_outputs_block(ctx: DispatchContext) -> str:
     The block lists, per direct upstream:
 
     * upstream task id + subject + owning agent
-    * upstream worktree path + branch (if known) — so the worker can
-      ``cd <path> && git diff <base>...HEAD`` to inspect changes
+    * upstream worktree path + branch + base branch (if known) — so the worker
+      can ``cd <path> && git diff <base>...HEAD`` to inspect changes
     * the upstream's strict-match completion summary (from leader inbox;
       sender + task_id must both match this upstream task)
     """
@@ -280,8 +296,17 @@ def _upstream_outputs_block(ctx: DispatchContext) -> str:
             f"- task `{u.task_id}` \"{u.subject}\" by agent `{u.from_agent}`"
         )
         if u.worktree_path:
-            branch = f" (branch `{u.branch_name}`)" if u.branch_name else ""
-            lines.append(f"  - worktree: `{u.worktree_path}`{branch}")
+            quals: list[str] = []
+            if u.branch_name:
+                quals.append(f"branch `{u.branch_name}`")
+            if u.base_branch:
+                quals.append(f"base branch `{u.base_branch}`")
+            suffix = f" ({', '.join(quals)})" if quals else ""
+            lines.append(f"  - worktree: `{u.worktree_path}`{suffix}")
+            # repo_root is only useful for targeting a merge — surface it only when
+            # this dispatch may merge (see Git Merge & Repo Lock Reference).
+            if ctx.merge_reference and u.repo_root:
+                lines.append(f"  - repo root (merge target): `{u.repo_root}`")
         else:
             lines.append("  - worktree: _(unknown — agent session may have been disposed)_")
         if u.summary:
@@ -290,6 +315,22 @@ def _upstream_outputs_block(ctx: DispatchContext) -> str:
             lines.append("  - completion summary: _(missing; inspect upstream worktree git history)_")
 
     return "\n".join(lines)
+
+
+def _git_merge_reference_block(ctx: DispatchContext) -> str:
+    """Generic merge + repo-lock convention — injected only when
+    ``ctx.merge_reference`` (dev/easy modes only).
+
+    Returns ``""`` (dropped by the block join) otherwise, so normal-mode
+    prompts stay lean and merge-free. Pure reference material (see
+    :func:`app.repo_merge_lock.merge_lock_reference`): it documents the *generic
+    method* for merging any upstream branch into any developer-specified repo —
+    it NEVER mandates a merge (the obligation lives only in the auto-merge task's
+    completion checklist).
+    """
+    if not ctx.merge_reference:
+        return ""
+    return "## Git Merge & Repo Lock Reference\n" + merge_lock_reference()
 
 
 def _task_block(ctx: DispatchContext) -> str:
@@ -472,10 +513,17 @@ def _worker_worktrees_block(ctx: DispatchContext) -> str:
     # workspace: the leader has no business reading or writing there (the merge
     # is ClawsomeFlow's job), and naming it only tempts the leader to reference /
     # copy into baseline paths (see run-40aaf5dde2c5).
-    lines = [
-        f"- **{w.agent_name}** → worktree `{w.worktree_path}` (branch `{w.branch_name}`)"
-        for w in ctx.worker_worktrees
-    ]
+    lines = []
+    for w in ctx.worker_worktrees:
+        base = f", base branch `{w.base_branch}`" if w.base_branch else ""
+        lines.append(
+            f"- **{w.agent_name}** → worktree `{w.worktree_path}` "
+            f"(branch `{w.branch_name}`{base})"
+        )
+        # repo_root only matters for targeting a merge — surface it only when this
+        # dispatch may merge (keeps the original anti pre-copy guard for the rest).
+        if ctx.merge_reference and w.repo_root:
+            lines.append(f"  - repo root (merge target): `{w.repo_root}`")
     return "## Worker Worktrees and Branches\n" + "\n".join(lines)
 
 

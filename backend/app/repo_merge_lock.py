@@ -8,8 +8,14 @@ on-disk ``flock`` file so baseline ``git checkout``/``git merge`` on a shared
 Public helpers:
 * :func:`main_repo_lock_path` — stable lock file path for a main repo.
 * :func:`main_repo_lock_explanation` — prompt text for agent self-merge steps.
+* :func:`merge_lock_reference` — generic (non-mandatory) merge + repo-lock how-to
+  injected into dispatch prompts that may merge (developer-mode collaboration).
+* :func:`build_generic_locked_merge_command` — runtime-generic locked merge
+  one-liner; agent fills REPO/SRC/DST and the lock is computed for whichever repo
+  is targeted (used by :func:`merge_lock_reference`).
 * :func:`build_flocked_baseline_merge_command` — cross-platform locked merge
-  one-liner (``flock`` on Linux, ``mkdir`` spinlock fallback on macOS).
+  one-liner for a *known* repo/branches (``flock`` Linux, ``mkdir`` macOS;
+  used by the mandatory self-merge step).
 * :func:`main_repo_file_lock` — sync context manager (used from async via wrapper).
 * :func:`async_main_repo_file_lock` — async context manager for scheduler paths.
 """
@@ -75,6 +81,63 @@ def self_merge_instruction(
         f"Merge `{feature_branch}` → `{base_branch}` at `{repo}`. "
         f"Run locked: `{cmd}`. "
         "If merge fails: resolve conflicts yourself (no lock), commit, re-run the locked command."
+    )
+
+
+def build_generic_locked_merge_command() -> str:
+    """Runtime-generic locked merge: the agent fills ``REPO``/``SRC``/``DST`` and
+    the repo lock is computed **at run time from $REPO**, so the *correct per-repo*
+    lock is always held — no matter which repo the developer's task targets. A
+    build-time fixed lock would serialise the wrong repo ("拿错锁了").
+
+    The hash matches :func:`main_repo_lock_path` exactly (sha256 of the expanded
+    repo path, first 16 hex chars), so this resolves to the SAME lock file the
+    in-process scheduler ``flock``s — mutual exclusion holds across processes.
+    Requires ``REPO`` to be an absolute path (no ``~``) so the shell hash equals
+    the Python one. Cross-platform: ``flock`` (Linux) / ``mkdir`` spinlock
+    (macOS); ``sha256sum`` / ``shasum``.
+    """
+    ld = shlex.quote(str(clawsomeflow_home_path() / _LOCKS_SUBDIR))
+    git = (
+        'cd "$REPO" && git checkout "$DST" && (git pull --ff-only || true) && '
+        'git merge --no-ff "$SRC" -m "csflow: merge $SRC into $DST"'
+    )
+    return (
+        "REPO='<abs-repo>'; SRC='<source-branch>'; DST='<dest-branch>'; "
+        f"LD={ld}; "
+        'H=$(printf %s "$REPO" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16); '
+        'L="$LD/$H.lock"; mkdir -p "$LD"; '
+        f'if command -v flock >/dev/null 2>&1; then ( flock -x 9 || exit 1; {git} ) 9>"$L"; '
+        'else d="$L.d"; n=0; while ! mkdir "$d" 2>/dev/null; do sleep 0.2; n=$((n+1)); '
+        '[ "$n" -ge 600 ] && break; done; '
+        "trap 'rmdir \"$d\" 2>/dev/null || true' EXIT INT TERM; "
+        f"{git}; fi"
+    )
+
+
+def merge_lock_reference() -> str:
+    """Concise, generic merge + repo-lock how-to injected into dispatch prompts in
+    dev/easy modes only (see ``flow_modes.merge_reference_enabled``).
+
+    Reference material, never a mandate: the obligation to merge lives only in the
+    auto-merge task's completion checklist. It gives a **generic method** (fill
+    ``REPO``/``SRC``/``DST``; lock auto-computed for whichever repo is targeted),
+    not a fixed lock, so a task can direct an agent to merge any upstream agent's
+    worktree branch into any developer-specified repo/branch — or open a PR.
+    """
+    cmd = build_generic_locked_merge_command()
+    return (
+        "Any merge into a shared branch must hold that repo's lock, or concurrent agents "
+        "corrupt git metadata. **Reference only — merge or open a PR only if this is an "
+        "auto-merge task or the task tells you to.**\n"
+        "- Merge `SRC` branch into `DST` branch of repo `REPO` — fill the three vars (`REPO` = "
+        "absolute path), run verbatim; the correct lock is auto-computed for `REPO`:\n"
+        f"  `{cmd}`\n"
+        "- Take `REPO`/`SRC`/`DST` from the upstream/worker info above (each lists its repo, "
+        "branch and base branch) per this task's instructions; `SRC` must be reachable from `REPO`.\n"
+        "- Conflict: resolve, `git add -A && git commit`, then re-run.\n"
+        "- PR: `git push` the branch, then open the PR via your platform CLI/UI.\n"
+        "- A repo path is a merge target only — never copy deliverables there; keep them in your worktree."
     )
 
 
@@ -175,8 +238,10 @@ async def async_main_repo_file_lock(repo: str) -> AsyncIterator[None]:
 __all__ = [
     "async_main_repo_file_lock",
     "build_flocked_baseline_merge_command",
+    "build_generic_locked_merge_command",
     "main_repo_file_lock",
     "main_repo_lock_explanation",
     "main_repo_lock_path",
+    "merge_lock_reference",
     "self_merge_instruction",
 ]

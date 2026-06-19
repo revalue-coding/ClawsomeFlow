@@ -8,6 +8,7 @@ from app.flow_modes import (
     FLOW_DEV_MODE_KEY,
     FLOW_EASY_MODE_KEY,
     flow_mode,
+    merge_reference_enabled,
     task_self_merges,
 )
 from app.models import AgentKind, FlowAgent, FlowTask, MergeStrategy, OnFailure
@@ -117,3 +118,12 @@ def test_dev_mode_summary_task_honours_flag() -> None:
         mode="dev", run_is_scheduled=False,
         task=_task(auto_merge=False, is_summary=True), agent=_agent(),
     ) is False
+
+
+def test_merge_reference_enabled_dev_and_easy_only() -> None:
+    # Generic merge/repo-lock reference is a dev/easy-mode collaboration primitive.
+    assert merge_reference_enabled(mode="dev") is True
+    assert merge_reference_enabled(mode="easy") is True
+    # Normal mode never gets it — even scheduled-normal auto-merge tasks rely on
+    # their own self-merge instruction instead.
+    assert merge_reference_enabled(mode="normal") is False

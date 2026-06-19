@@ -983,6 +983,43 @@ def is_managed(agent_id: str, *, storage: StorageBackend) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Gateway
+# ──────────────────────────────────────────────────────────────────────
+
+
+def start_gateway(agent_id: str) -> str:
+    """Install/start Hermes gateway for one managed profile.
+
+    Runs the same operator-facing commands as documented in the UI:
+
+    * ``hermes -p <id> gateway install``
+    * ``hermes -p <id> gateway start``
+    """
+    aid = _validate_agent_id(agent_id)
+
+    install_args = ["gateway", "install"]
+    rc, out, err = _hermes_profile(aid, install_args)
+    if rc != 0:
+        msg = (_strip_ansi(err) or _strip_ansi(out)).strip()
+        raise ProfileOpFailed(
+            f"`hermes -p {aid} gateway install` failed: {msg}",
+            details={"command": f"hermes -p {aid} gateway install"},
+        )
+
+    start_args = ["gateway", "start"]
+    rc, out, err = _hermes_profile(aid, start_args)
+    if rc != 0:
+        msg = (_strip_ansi(err) or _strip_ansi(out)).strip()
+        raise ProfileOpFailed(
+            f"`hermes -p {aid} gateway start` failed: {msg}",
+            details={"command": f"hermes -p {aid} gateway start"},
+        )
+
+    message = (_strip_ansi(out) or _strip_ansi(err)).strip()
+    return message or "gateway started"
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Settings — SOUL.md (identity)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -1819,6 +1856,7 @@ __all__ = [
     "update_agent",
     "delete_agent",
     "is_managed",
+    "start_gateway",
     "read_soul",
     "write_soul",
     "read_model",

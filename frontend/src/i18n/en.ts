@@ -173,7 +173,7 @@ const en = {
     devMode: "Developer mode",
     devModeSub: "Per-subtask auto-merge control; complaint phase still runs",
     devModeNotice:
-      "Developer mode is designed for software developers: it lets you decide, per subtask, whether the agent auto-merges its changes. Each subtask runs in a worktree created from the main repo's target branch. If your task plans to open a PR directly from the worktree, we recommend disabling auto-merge into the main repo's target branch for that subtask. A subtask with auto-merge disabled has its worktree directory deleted automatically after the task finishes.",
+      "Developer mode is optimized for software developers, and lets you customize whether each subtask auto-merges changes into the baseline branch. During execution, each agent creates its own unique worktree (an independent branch created from the baseline branch). If you plan to submit PRs directly from worktrees, or need more flexible collaboration control, we recommend disabling agent auto-merge when orchestrating tasks. Note: worktree directories are deleted automatically after the run ends.",
     devModeAck: "Got it",
     flowName: "Flow name",
     name: "Flow name",
@@ -267,7 +267,8 @@ const en = {
     emptyTasks: "No tasks yet. Click \"Add task\" at the top right to start authoring.",
     summaryTaskDefaultSubject: "Summary",
     summaryTaskBadge: "Summary task",
-    summaryTaskLocked: "Auto-generated for the selected leader; changing the leader reassigns it. Cannot be deleted.",
+    summaryTaskLocked:
+      "Auto-generated for the selected leader and cannot be deleted. Agents executing its dependent subtasks report their work and share their own worktree directories and branches with the leader for further synthesis.",
     summaryNoDepsWarning:
       "Summary currently has no dependencies; pick the upstream tasks to review and report on in \"Depends on\".",
     graphTitle: "Task dependency graph",
@@ -333,6 +334,8 @@ const en = {
       subjectPlaceholder: "Short title shown in dashboards",
       description: "Detailed instruction *",
       descriptionPlaceholder: "All work the worker must complete when receiving this task.",
+      descriptionCollabHint:
+        "Tip: you can direct upstream collaboration right here, e.g. \"merge [agent]'s worktree branch into xxx\" or \"open a PR for [agent]\". The [agent] you may direct is limited to this task's upstream dependency agents — their worktree path / branch / base branch are auto-injected into this task's prompt.",
       outputSummary: "Output summary requirement",
       outputSummaryHint: "(optional; the summary will be sent to downstream dependent tasks)",
       outputSummaryHintSummary: "(optional)",
@@ -396,6 +399,7 @@ const en = {
       autoMergeEnabledShort: "Auto-merge",
       autoMergeDisabledShort: "No merge",
       autoMergeOpenclawLocked: "OpenClaw subtasks always auto-merge and can't be changed",
+      autoMergeSyncedNotice: "Synced merge status for this agent's other subtasks",
       remove: "Remove task",
     },
     decompose: {
@@ -953,6 +957,12 @@ const en = {
     openFailed: "Failed to open the profile folder: {{message}}",
     back: "Back",
     settings: "Settings",
+    gateway: {
+      startButton: "Start Gateway",
+      starting: "Starting…",
+      started: "Gateway started",
+      startFailed: "Failed to start gateway: {{message}}",
+    },
     reset: "Reset",
     send: "Send",
     sending: "Sending…",
@@ -1095,6 +1105,7 @@ const en = {
       },
       cron: {
         unavailable: "Cron is not available for this agent.",
+        gatewayHint: "Hermes scheduled jobs require opening the corresponding agent gateway.",
         empty: "No scheduled jobs.",
         create: "New job",
         schedule: "Schedule (e.g. 30m, every 2h, 0 9 * * *)",
