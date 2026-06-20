@@ -9,12 +9,12 @@ It is deployed by explicit mapping rules (not mirrored as a whole tree):
 - `csflow upgrade`
 - auto-upgrade path in `csflow start`
 
+> Note: the global agent tool scripts moved OUT of this directory to the
+> top-level `clawsomeflow-agent-tools/` (they are not OpenClaw-specific and are
+> deployed unconditionally). See that directory's README.
+
 ## Structure
 
-- `clawsomeflow-agent-tools/`
-  - Shared scripts that OpenClaw agents may call
-  - Scripts are grouped by module in `scripts/<module>/`
-  - Synced to `~/.clawsomeflow/.clawsomeflow-agent-tools/`
 - `common-agent-source/`
   - `agent-common-rules.md`, `skills/`, and `cron-jobs/` for ClawsomeFlow-managed agents
   - Includes built-in self-maintenance skills for definition + skills/heartbeat tuning

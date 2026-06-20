@@ -612,6 +612,8 @@ const en = {
     mergeFailureKindUnknown: "Unknown error",
     dismiss: "Dismiss",
     eventsTitle: "Live events",
+    sessionStartFailed:
+      "Agent session failed to start (agent {{agent}}, task {{task}}, phase {{phase}}):\n{{error}}",
     boardTitle: "Task Execution Board",
     boardHint: "",
     boardTabList: "List",
@@ -640,7 +642,7 @@ const en = {
     leaderReplyHint: "",
     leaderReplyMissing: "No leader work report captured yet (check live events below).",
     leaderReplyFootnote:
-      "All outputs and document updates will be automatically merged into each agent workspace after the task flow completes.",
+      "All outputs and document updates will be automatically merged into each agent workspace after the task flow completes, unless you manually discard changes or abort the run.",
     eventTypeColumn: "Type",
     eventTimestampColumn: "Time",
     eventAgentColumn: "Agent",

@@ -172,6 +172,30 @@ def test_run_upgrade_unmarked_home_writes_marker(
     assert report.redeploy_performed is True
 
 
+def test_run_upgrade_deploys_agent_tools_even_without_openclaw(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """Upgrade parity: the global agent-tools dir (incl. the locked-merge script)
+    is deployed unconditionally — even when OpenClaw is absent/skipped — so
+    TUI-only / OpenClaw-absent upgrade users converge with fresh deploys.
+
+    Regression guard: the dir used to be created ONLY by the OpenClaw install,
+    so it was missing for these users."""
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+
+    report = upgrade.run_upgrade(
+        config=fake_config, target_version="1.2.3", include_openclaw=False,
+    )
+    assert report.ok is True
+
+    tools = paths.openclaw_agent_tools_dir()
+    assert tools.is_dir()
+    assert (tools / "scripts" / "git" / "csflow-locked-merge.py").exists()
+
+
 def test_run_upgrade_seeds_opencode_permission_when_installed(
     tmp_clawsomeflow_home: Path,
     tmp_path: Path,
@@ -221,6 +245,51 @@ def test_run_upgrade_seeds_qoder_codebuddy_trust_when_installed(
     assert json.loads((home / ".codebuddy" / "settings.json").read_text())["trustAll"] is True
     qoder = json.loads((home / ".qoder" / "settings.json").read_text())
     assert str(home) in qoder["permissions"]["trustDirectories"]
+
+
+def test_run_upgrade_sets_clawteam_spawn_ready_timeout(
+    tmp_clawsomeflow_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """Upgrade-path parity: ClawTeam spawn_ready_timeout lowered from stock 30s."""
+    import json
+
+    from app.integrations import clawteam_spawn_config as csc
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+    cfg = tmp_path / ".clawteam" / "config.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(json.dumps({"spawn_ready_timeout": 30.0}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(csc, "clawteam_config_path", lambda: cfg)
+
+    report = upgrade.run_upgrade(config=fake_config, target_version="1.2.3")
+    assert report.ok is True
+    assert json.loads(cfg.read_text())["spawn_ready_timeout"] == 2.0
+
+
+def test_run_upgrade_spawn_ready_timeout_failure_does_not_block(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """spawn_ready_timeout init is best-effort — failures must not abort upgrade."""
+    from app.integrations import clawteam_spawn_config as csc
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+
+    def _boom(**kwargs):
+        del kwargs
+        raise RuntimeError("simulated config write failure")
+
+    monkeypatch.setattr(csc, "ensure_spawn_ready_timeout", _boom)
+
+    report = upgrade.run_upgrade(config=fake_config, target_version="1.2.3")
+    assert report.ok is True
+    assert any("spawn_ready_timeout" in w for w in report.repair_warnings)
 
 
 def test_run_upgrade_skips_old_migrations(

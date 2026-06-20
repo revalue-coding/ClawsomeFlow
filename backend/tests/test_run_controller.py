@@ -522,8 +522,8 @@ async def test_checkpoint_rerun_prompt_includes_self_merge_when_scheduled(fake_l
     run.is_scheduled = True
     prompt = await _rerun_prompt_for(run, spec, fake_lookup)
     assert "self-merge" in prompt.lower()
-    assert "flock -x" in prompt
-    assert "git merge --no-ff clawteam/t/alice" in prompt
+    assert "csflow-locked-merge.py" in prompt
+    assert "clawteam/t/alice" in prompt  # feature branch passed to the tool
     assert "please fix the chart" in prompt  # user feedback still embedded
     # Rerun reuses the real dispatch message verbatim (identical execution reqs).
     assert "## Completion Checklist" in prompt
@@ -2818,6 +2818,124 @@ async def test_complaint_dispatch_routes_hermes_to_headless(
     )
     await rc._dispatch_complaint_task(agent=hermes_agent, task_id="c1", message="m")
     assert routed["kind"] == "hermes"
+
+
+@pytest.mark.asyncio
+async def test_complaint_phase_excludes_temporary_hermes_workers(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(
+                id="oc-worker",
+                kind=AgentKind.openclaw,
+                is_leader=False,
+                merge_strategy=MergeStrategy.agent_self,
+                on_failure=OnFailure.retry,
+                max_retries=2,
+            ),
+            FlowAgent(
+                id="hermes-temp",
+                kind=AgentKind.hermes,
+                is_leader=False,
+                is_temporary=True,
+                merge_strategy=MergeStrategy.manual,
+                on_failure=OnFailure.retry,
+                max_retries=2,
+            ),
+            FlowAgent(
+                id="leader",
+                kind=AgentKind.openclaw,
+                is_leader=True,
+                merge_strategy=MergeStrategy.agent_self,
+                on_failure=OnFailure.retry,
+                max_retries=2,
+            ),
+        ],
+        tasks=[
+            FlowTask(
+                id="ts",
+                owner_agent_id="leader",
+                subject="summary",
+                description="d",
+                depends_on=[],
+                is_leader_summary=True,
+            ),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    run.status = RunStatus.complaint_processing
+    run.inputs = {"_csflow_post_complaint_final_status": "completed"}
+    get_storage().run_update(run)
+
+    class _Mcp:
+        async def task_create(self, team, subject, *, owner, description="", metadata=None):
+            del team, description, metadata
+            if "Handle user complaint" in subject and owner == "leader":
+                return {"id": "ct-leader-1"}
+            if subject.startswith("Handle user complaint:"):
+                return {"id": f"ct-fix-{owner}"}
+            return {"id": f"ct-{owner}"}
+
+        async def task_get(self, team, task_id):
+            del team, task_id
+            return {"status": "completed"}
+
+        async def mailbox_peek(self, team, agent_id):
+            del team
+            if agent_id == "oc-worker":
+                return [{
+                    "from": "leader",
+                    "content": "[csflow-complaint-relay:ct-leader-1:oc-worker] fix it",
+                }]
+            return []
+
+    async def fake_get_mcp_client(*, user: str):
+        del user
+        return _Mcp()
+
+    fix_dispatched: list[str] = []
+
+    async def fake_dispatch_complaint_task(*, agent, task_id, message):
+        del task_id, message
+        fix_dispatched.append(agent.id)
+
+    async def fake_dispatch_merge_requirements(**kwargs):
+        del kwargs
+        return []
+
+    async def fake_wait_merge(*, mcp, task_ids, phase):
+        del mcp, task_ids, phase
+        return None
+
+    async def noop_tail_cleanup(**kwargs):
+        del kwargs
+        class _Out:
+            team_cleaned = False
+            cleaned_openclaw_agents: list[str] = []
+            failed_openclaw_agents: list[str] = []
+        return _Out()
+
+    monkeypatch.setattr("app.integrations.clawteam_mcp.get_mcp_client", fake_get_mcp_client)
+    monkeypatch.setattr(ctrl_mod, "run_terminal_tail_cleanup", noop_tail_cleanup)
+
+    rc = RunController(
+        run=run,
+        spec=spec,
+        flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+    )
+    monkeypatch.setattr(rc, "_dispatch_complaint_task", fake_dispatch_complaint_task)
+    monkeypatch.setattr(rc, "_dispatch_merge_requirements", fake_dispatch_merge_requirements)
+    monkeypatch.setattr(rc, "_wait_for_merge_requirement_tasks", fake_wait_merge)
+
+    await rc.run_user_complaint_phase(complaint_text="请改进质量")
+
+    assert "oc-worker" in fix_dispatched
+    assert "hermes-temp" not in fix_dispatched
 
 
 @pytest.mark.asyncio

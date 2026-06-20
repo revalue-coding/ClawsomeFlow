@@ -224,7 +224,8 @@ async def test_tui_manual_includes_non_openclaw_leader_for_review() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tui_auto_runs_merge_immediately() -> None:
+async def test_tui_legacy_auto_merge_strategy_goes_to_review_not_scheduler_merge() -> None:
+    """``merge_strategy=auto`` is legacy; normal finalize never calls workspace_merge."""
     run, flow, spec = _make_run_and_spec(agents_kw=[
         {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
          "is_leader": False, "merge_strategy": MergeStrategy.auto,
@@ -238,13 +239,11 @@ async def test_tui_auto_runs_merge_immediately() -> None:
         fin.FinalizeInput(run=run, flow=flow, agents=spec.agents,
                           leader_agent_id="leader", has_failed_tasks=False),
         storage=get_storage(), cli=cli, mcp=_StubMcp(),
-        worktree_lookup=_StubLookup(items=[]),
+        worktree_lookup=_StubLookup(items=[_wt("alice")]),
     )
-    assert {c["agent"] for c in cli.merge_calls} == {"alice"}
-    assert cli.merge_calls[0].get("target") == "master"
-    assert cli.merge_calls[0].get("repo") == "/r"
-    assert out.final_status == RunStatus.awaiting_user_complaint
-    assert (run.inputs or {}).get("_csflow_post_complaint_final_status") == "completed"
+    assert cli.merge_calls == []
+    assert out.final_status == RunStatus.awaiting_user_review
+    assert {p.agent_id for p in out.pending_merges} == {"alice"}
     assert run.finished_at is not None
 
 
@@ -345,61 +344,69 @@ async def test_tui_manual_diff_uses_worktree_repo_root_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tui_auto_with_conflict_yields_completed_with_conflicts() -> None:
+async def test_tui_manual_uncommitted_changes_still_create_pending_merge() -> None:
     run, flow, spec = _make_run_and_spec(agents_kw=[
         {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
-         "is_leader": False, "merge_strategy": MergeStrategy.auto,
+         "is_leader": False, "merge_strategy": MergeStrategy.manual,
          "on_failure": OnFailure.retry, "max_retries": 2},
         {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
          "is_leader": True, "merge_strategy": MergeStrategy.manual,
          "on_failure": OnFailure.retry, "max_retries": 2},
     ])
-    cli = _StubCli(merge_results={"alice": (False, "merge conflict")})
+    lookup = _StubLookup(items=[_wt("alice")])
+    cli = _StubCli(dirty_worktrees={"/tmp/wt/alice": ["?? my-desktop/reports/result.md"]})
+    mcp = _StubMcp(diffs={"alice": {"files_changed": [], "commit_count": 0}})
     out = await fin.finalize_run(
-        fin.FinalizeInput(run=run, flow=flow, agents=spec.agents,
-                          leader_agent_id="leader", has_failed_tasks=False),
-        storage=get_storage(), cli=cli, mcp=_StubMcp(),
-        worktree_lookup=_StubLookup(items=[]),
+        fin.FinalizeInput(
+            run=run,
+            flow=flow,
+            agents=spec.agents,
+            leader_agent_id="leader",
+            has_failed_tasks=False,
+        ),
+        storage=get_storage(),
+        cli=cli,
+        mcp=mcp,
+        worktree_lookup=lookup,
     )
-    assert out.final_status == RunStatus.awaiting_user_complaint
-    assert "alice" in out.auto_merge_conflicts
-    assert out.auto_merge_errors == []
-    assert (run.inputs or {}).get("_csflow_post_complaint_final_status") == "completed_with_conflicts"
-    assert run.finished_at is not None
-    events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
-    merge_ev = next((e for e in events if e.type == "merge_conflict"), None)
-    assert merge_ev is not None
-    payload = merge_ev.payload or {}
-    assert payload.get("source_branch") == f"clawteam/{run.team_name}/alice"
-    assert payload.get("target_branch") == "master"
+    assert out.final_status == RunStatus.awaiting_user_review
+    assert len(out.pending_merges) == 1
+    diff = out.pending_merges[0].diff_summary
+    assert diff.get("has_uncommitted_changes") is True
+    assert diff.get("uncommitted_entry_count") == 1
 
 
 @pytest.mark.asyncio
-async def test_tui_auto_with_environment_error_emits_merge_error() -> None:
+async def test_tui_manual_diff_uses_worktree_repo_root_context() -> None:
     run, flow, spec = _make_run_and_spec(agents_kw=[
         {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
-         "is_leader": False, "merge_strategy": MergeStrategy.auto,
+         "is_leader": False, "merge_strategy": MergeStrategy.manual,
          "on_failure": OnFailure.retry, "max_retries": 2},
         {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
          "is_leader": True, "merge_strategy": MergeStrategy.manual,
          "on_failure": OnFailure.retry, "max_retries": 2},
     ])
-    cli = _StubCli(merge_results={"alice": (False, "workspace metadata missing repo_root")})
-    out = await fin.finalize_run(
-        fin.FinalizeInput(run=run, flow=flow, agents=spec.agents,
-                          leader_agent_id="leader", has_failed_tasks=False),
-        storage=get_storage(), cli=cli, mcp=_StubMcp(),
-        worktree_lookup=_StubLookup(items=[]),
+    lookup = _StubLookup(items=[_wt("alice")])
+    mcp = _StubMcp(
+        diffs={"alice": {"files_changed": [], "commit_count": 0}},
+        diffs_by_repo={("alice", "/tmp/main"): {"files": 2}},
     )
-    assert out.final_status == RunStatus.awaiting_user_complaint
-    assert out.auto_merge_conflicts == []
-    assert "alice" in out.auto_merge_errors
-    events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
-    merge_ev = next((e for e in events if e.type == "merge_error"), None)
-    assert merge_ev is not None
-    payload = merge_ev.payload or {}
-    assert payload.get("source_branch") == f"clawteam/{run.team_name}/alice"
-    assert payload.get("target_branch") == "master"
+    out = await fin.finalize_run(
+        fin.FinalizeInput(
+            run=run,
+            flow=flow,
+            agents=spec.agents,
+            leader_agent_id="leader",
+            has_failed_tasks=False,
+        ),
+        storage=get_storage(),
+        cli=_StubCli(),
+        mcp=mcp,
+        worktree_lookup=lookup,
+    )
+    assert out.final_status == RunStatus.awaiting_user_review
+    assert len(out.pending_merges) == 1
+    assert out.pending_merges[0].diff_summary["files"] == 2
 
 
 @pytest.mark.asyncio

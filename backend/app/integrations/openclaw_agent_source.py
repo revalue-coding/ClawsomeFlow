@@ -1,16 +1,18 @@
-"""Deploy ``openclaw-agent-source/`` artifacts into ``~/.clawsomeflow/``.
+"""Deploy bundled agent source artifacts into ``~/.clawsomeflow/``.
 
 Repository layout (source of truth):
 
+    clawsomeflow-agent-tools/...        # GLOBAL tools — top-level, NOT openclaw-only
     openclaw-agent-source/
-      clawsomeflow-agent-tools/...
       common-agent-source/
         agent-common-rules.md
         skills/...
 
 Runtime mapping under ``~/.clawsomeflow/``:
 
-* ``clawsomeflow-agent-tools`` -> ``.clawsomeflow-agent-tools/``
+* ``clawsomeflow-agent-tools`` -> ``.clawsomeflow-agent-tools/`` (deployed
+  unconditionally at init/upgrade — every agent kind, incl. temporary TUI
+  agents, references these global scripts by absolute path)
 * ``common-agent-source``       -> ``.common-agent-source/``
 
 This intentionally avoids mirroring the whole source tree into one hidden
@@ -38,7 +40,8 @@ from app.logging_setup import get_logger
 logger = get_logger("openclaw_agent_source")
 
 
-TOOLS_SOURCE_REL = "clawsomeflow-agent-tools"
+TOOLS_SOURCE_DIRNAME = "clawsomeflow-agent-tools"
+TOOLS_PACKAGE_NAME = "clawsomeflow_agent_tools"
 COMMON_SOURCE_REL = "common-agent-source"
 COMMON_RULES_FILE = "agent-common-rules.md"
 COMMON_SKILLS_SUBDIR = "skills"
@@ -65,9 +68,31 @@ def bundled_agent_source_dir() -> Path:
         ) from exc
 
 
+def bundled_agent_tools_source_dir() -> Path:
+    """Locate the bundled top-level ``clawsomeflow-agent-tools/`` tree.
+
+    Lives at the repo root (NOT under ``openclaw-agent-source/``) because these
+    tools are global, not OpenClaw-specific. Resolves to the repo checkout in
+    dev, or the packaged ``clawsomeflow_agent_tools`` resource in a wheel.
+    """
+    here = Path(__file__).resolve()
+    repo_candidate = here.parents[3] / TOOLS_SOURCE_DIRNAME
+    if repo_candidate.exists():
+        return repo_candidate
+    try:
+        return Path(importlib.resources.files(TOOLS_PACKAGE_NAME))
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            f"Cannot locate bundled {TOOLS_SOURCE_DIRNAME}/. "
+            f"Tried {repo_candidate} and packaged '{TOOLS_PACKAGE_NAME}'."
+        ) from exc
+
+
 def deploy_agent_tools_bundle() -> Path:
     """Sync global tools into ``~/.clawsomeflow/.clawsomeflow-agent-tools/``."""
-    src = _source_subdir(TOOLS_SOURCE_REL)
+    src = bundled_agent_tools_source_dir()
+    if not src.is_dir():
+        raise FileNotFoundError(f"agent tools source directory not found: {src}")
     dst = paths.openclaw_agent_tools_dir()
     _sync_exact_dir(src, dst)
     logger.info("openclaw_agent_tools_deployed", src=str(src), dst=str(dst))
@@ -327,8 +352,10 @@ __all__ = [
     "COMMON_RULES_FILE",
     "COMMON_SKILLS_SUBDIR",
     "COMMON_SOURCE_REL",
-    "TOOLS_SOURCE_REL",
+    "TOOLS_PACKAGE_NAME",
+    "TOOLS_SOURCE_DIRNAME",
     "bundled_agent_source_dir",
+    "bundled_agent_tools_source_dir",
     "bundled_common_rules_path",
     "deploy_agent_tools_bundle",
     "deploy_common_agent_source",

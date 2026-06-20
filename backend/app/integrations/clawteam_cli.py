@@ -22,6 +22,7 @@ import asyncio
 import json
 import os
 import shlex
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -37,6 +38,14 @@ from app.user_context import get_request_user
 # ``clawteam`` skill teaches workers to self-poll which would bypass the
 # scheduler. Future names are added here when an equally-bad skill ships.
 BANNED_SKILLS: frozenset[str] = frozenset({"clawteam"})
+
+# The in-process ``clawteam_main_repo`` lock is held across branch prep +
+# ``git worktree add`` (spawn) or checkout + merge (workspace_merge). Both can
+# legitimately wait behind a long-running peer on the SAME main repo, so the
+# wait is bounded generously (12h) rather than at the 30s default — a 30s
+# timeout would spuriously fail a spawn/merge that was merely queued, not stuck.
+# Pairs with the 8h cross-process file lock in ``repo_merge_lock``.
+CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS = 12 * 3600
 
 
 class CliInvocationError(Exception):
@@ -281,38 +290,51 @@ class ClawTeamCli:
             has_skill=bool(args.skills),
         )
 
-        # Two locks, acquired in a globally consistent order
-        # (``clawteam_main_repo`` → ``team_spawn``) so no spawn/merge can
-        # deadlock against another:
-        #   * ``clawteam_main_repo`` guards all git metadata on the main repo —
-        #     held continuously across branch prep (commit/checkout) AND the
-        #     ``git worktree add`` that ClawTeam runs inside ``clawteam spawn``,
-        #     so the worktree-creation lock is never released mid-flight.
+        # Three locks, acquired in a globally consistent order
+        # (``clawteam_main_repo`` → repo file lock → ``team_spawn``) so no
+        # spawn/merge can deadlock against another:
+        #   * ``clawteam_main_repo`` (in-process) serialises spawn vs merge vs
+        #     spawn WITHIN this csflow process.
+        #   * the cross-process repo **file lock** (same ``<hash>.lock`` an agent
+        #     self-merge ``flock``s) is the ONLY thing that excludes git metadata
+        #     work in *other* processes. Branch prep (checkout) + ``git worktree
+        #     add`` mutate the shared working tree / ``.git`` exactly like a merge,
+        #     so a worktree-creating spawn MUST hold it too — otherwise a
+        #     scheduler spawn could race an agent self-merge on the same repo.
+        #     Only taken when ``workspace`` (resume with ``--no-workspace`` neither
+        #     checks out nor adds a worktree, so it touches no shared git state).
         #   * ``team_spawn`` only guards tmux session/window creation races, so
         #     it is held for the minimum window: just the spawn invocation.
-        async with self._locks.lock(f"clawteam_main_repo:{main_repo_for_lock}"):
-            # Prep the main repo for EVERY worktree-creating spawn (workspace=True),
-            # whether or not a target branch is requested. ``_ensure_repo_on_target_branch``
-            # auto-commits any pending changes ("csflow auto commit") so the new
-            # worktree branches off a committed state, and — when a target branch is
-            # given — guarantees the switch succeeds before the worktree is built.
-            if args.workspace:
-                current_branch, switched = await _ensure_repo_on_target_branch(
-                    repo=args.repo,
-                    target_branch=target_branch,
-                    env=env,
-                )
-                if switched:
-                    self._log.info(
-                        "spawn_repo_branch_switched",
+        repo_file_lock = (
+            async_main_repo_file_lock(args.repo) if args.workspace else nullcontext()
+        )
+        async with self._locks.lock(
+            f"clawteam_main_repo:{main_repo_for_lock}",
+            timeout=CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS,
+        ):
+            async with repo_file_lock:
+                # Prep the main repo for EVERY worktree-creating spawn (workspace=True),
+                # whether or not a target branch is requested. ``_ensure_repo_on_target_branch``
+                # auto-commits any pending changes ("csflow auto commit") so the new
+                # worktree branches off a committed state, and — when a target branch is
+                # given — guarantees the switch succeeds before the worktree is built.
+                if args.workspace:
+                    current_branch, switched = await _ensure_repo_on_target_branch(
                         repo=args.repo,
-                        from_branch=current_branch,
-                        to_branch=target_branch,
-                        team=args.team,
-                        agent_name=args.agent_name,
+                        target_branch=target_branch,
+                        env=env,
                     )
-            async with self._locks.lock(f"team_spawn:{args.team}"):
-                exit_code, stdout, stderr = await _run(argv, env=env)
+                    if switched:
+                        self._log.info(
+                            "spawn_repo_branch_switched",
+                            repo=args.repo,
+                            from_branch=current_branch,
+                            to_branch=target_branch,
+                            team=args.team,
+                            agent_name=args.agent_name,
+                        )
+                async with self._locks.lock(f"team_spawn:{args.team}"):
+                    exit_code, stdout, stderr = await _run(argv, env=env)
 
         logging_setup.spawn_cmd_executed(
             cmd_argv=argv, exit_code=exit_code, stderr=stderr, stdout=stdout,
@@ -509,7 +531,14 @@ class ClawTeamCli:
 
         repo_root = _expand_repo(repo_root)
         env = self._env()
-        async with self._locks.lock(f"clawteam_main_repo:{repo_root}"):
+        # Branch-scoped network fetch only — does not touch HEAD/worktree; safe outside lock.
+        await _best_effort_git_fetch(
+            repo=repo_root, branch=target_branch, env=env,
+        )
+        async with self._locks.lock(
+            f"clawteam_main_repo:{repo_root}",
+            timeout=CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS,
+        ):
             async with async_main_repo_file_lock(repo_root):
                 merge_head_code, _, _ = await _run_in_cwd(
                     ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
@@ -570,9 +599,9 @@ class ClawTeamCli:
                     )
                     return False, combined
 
-                await _run_in_cwd(
-                    ["git", "pull", "--ff-only"],
-                    cwd=repo_root,
+                await _fast_forward_origin_branch_if_available(
+                    repo=repo_root,
+                    branch=target_branch,
                     env=env,
                 )
 
@@ -949,6 +978,31 @@ async def _run_in_cwd(
 
 
 _AUTO_COMMIT_MESSAGE = "csflow auto commit"
+
+
+async def _best_effort_git_fetch(
+    *, repo: str, branch: str, env: dict[str, str],
+) -> None:
+    """Fetch ``origin/<branch>`` before the merge lock (network-only; no HEAD change)."""
+    await _run_in_cwd(["git", "fetch", "origin", branch], cwd=repo, env=env)
+
+
+async def _fast_forward_origin_branch_if_available(
+    *,
+    repo: str,
+    branch: str,
+    env: dict[str, str],
+) -> None:
+    """Fast-forward *branch* to ``origin/<branch>`` inside the merge lock.
+
+    Single ``git merge --ff-only`` call (no prior ref probe). Failures are ignored —
+    best-effort baseline sync, same spirit as the former in-lock ``git pull``.
+    """
+    await _run_in_cwd(
+        ["git", "merge", "--ff-only", f"origin/{branch}"],
+        cwd=repo,
+        env=env,
+    )
 
 
 async def _auto_commit_if_dirty(

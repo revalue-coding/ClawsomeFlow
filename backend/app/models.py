@@ -171,7 +171,7 @@ class MergeStrategy(str, Enum):
     """How a worker's worktree is merged back to its main repo."""
 
     manual = "manual"            # TUI default; user decides via UI
-    auto = "auto"                # TUI option; scheduler executes automatic merge
+    auto = "auto"                # Legacy alias — treated like manual at finalize
     skip = "skip"                # Don't merge; don't cleanup
     agent_self = "agent_self"    # OpenClaw default; agent merges in each task's completion steps
 

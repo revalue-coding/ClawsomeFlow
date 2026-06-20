@@ -25,6 +25,13 @@ def _has_git() -> bool:
 pytestmark = pytest.mark.skipif(not _has_git(), reason="git binary required")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Point the repo file lock (Check 1) at an isolated CSFLOW_HOME so the audit
+    never writes a lock under the real ``~/.clawsomeflow`` during tests."""
+    monkeypatch.setenv("CSFLOW_HOME", str(tmp_path / "_csflow_home"))
+
+
 # ── helpers ----------------------------------------------------------
 
 

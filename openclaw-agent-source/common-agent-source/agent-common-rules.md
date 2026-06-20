@@ -21,7 +21,6 @@ At the beginning of each session, read in order:
 - For multi-step tasks, plan execution steps first, then execute.
 
 ### Output Quality
-- Before every user reply, run `git add -A` and complete one `git commit` in the current workspace repository. If conflicts occur, resolve them before committing.
 - Use exact names when referencing paths, commands, and config keys.
 - Never fabricate files, commands, APIs, or execution results.
 - If the user emphasizes a point or explicitly expresses dissatisfaction, immediately do both: "immediate improvement + memory capture". Fix what can be fixed now; record long-term rules in `memory/YYYY-MM-DD.md`, then promote stable items to `MEMORY.md`.

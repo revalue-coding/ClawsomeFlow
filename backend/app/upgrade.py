@@ -591,6 +591,36 @@ def run_upgrade(
         report.repair_warnings.append(f"temp-agent trust config init: {exc}")
         logger.warning("upgrade_temp_agent_trust_failed", error=str(exc))
 
+    # 0e2. ClawTeam spawn_ready_timeout (``~/.clawteam/config.json``). Stock 30s
+    # makes ``_confirm_workspace_trust_if_prompted`` spin the full window when no
+    # trust dialog is shown, holding repo locks unnecessarily. Lower to 2s on the
+    # upgrade path so upgrade-only users converge (load_config reads the file, not
+    # env). Best-effort: never blocks upgrade.
+    try:
+        from app.integrations.clawteam_spawn_config import ensure_spawn_ready_timeout
+
+        if ensure_spawn_ready_timeout():
+            logger.info("upgrade_clawteam_spawn_ready_timeout_set")
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"clawteam spawn_ready_timeout: {exc}")
+        logger.warning("upgrade_clawteam_spawn_ready_timeout_failed", error=str(exc))
+
+    # 0f. Global agent tools (``.clawsomeflow-agent-tools/``). These are NOT
+    # OpenClaw-specific — every agent kind references them by absolute path (e.g.
+    # the locked self-merge tool ``csflow-locked-merge.py``). Deploy here,
+    # unconditionally and OpenClaw-independently, so upgrade-only users (incl.
+    # those without OpenClaw, whose step-3 install is skipped) end up identical to
+    # fresh deploys: the dir was previously created ONLY by the OpenClaw install,
+    # so it was missing for TUI-only users. Idempotent (exact mirror).
+    try:
+        from app.integrations.openclaw_agent_source import deploy_agent_tools_bundle
+
+        deploy_agent_tools_bundle()
+        logger.info("upgrade_agent_tools_deployed")
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"agent tools deploy: {exc}")
+        logger.warning("upgrade_agent_tools_deploy_failed", error=str(exc))
+
     # 0. Editable-source frontend build (optional).
     if include_frontend_build:
         status, detail = _build_frontend_bundle_if_editable()

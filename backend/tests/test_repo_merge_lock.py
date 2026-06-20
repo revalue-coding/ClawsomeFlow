@@ -8,7 +8,10 @@ import pytest
 
 from app.repo_merge_lock import (
     build_flocked_baseline_merge_command,
+    build_generic_locked_merge_command,
+    main_repo_file_lock,
     main_repo_lock_path,
+    merge_script_path,
     self_merge_instruction,
 )
 
@@ -28,72 +31,48 @@ def test_main_repo_lock_path_expands_tilde(monkeypatch: pytest.MonkeyPatch, tmp_
     assert main_repo_lock_path("~/proj") == main_repo_lock_path(str(home / "proj"))
 
 
-def test_build_flocked_baseline_merge_command_wraps_git_steps() -> None:
+def test_build_baseline_merge_command_invokes_locked_merge_tool() -> None:
     cmd = build_flocked_baseline_merge_command(
         repo_root="/tmp/repo",
         base_branch="main",
         feature_branch="clawteam/t/a",
         merge_message="csflow: scheduled merge clawteam/t/a",
     )
-    # Cross-platform: flock on Linux, mkdir spinlock fallback on macOS.
-    assert "command -v flock" in cmd
-    assert "flock -x " in cmd
-    assert "mkdir" in cmd
-    assert "git checkout main" in cmd
-    assert "git pull --ff-only" in cmd
-    assert "git merge --no-ff clawteam/t/a" in cmd
-
-
-def test_build_flocked_baseline_merge_command_has_flat_quoting() -> None:
-    """Regression: the command must NOT nest ``bash -c`` inside ``bash -c``.
-
-    The old form double-wrapped the git steps, producing the unreadable
-    ``'"'"'"'"'"'"'"'"'`` quote pyramid that agents mangled into a shell quote
-    parse error. The merge message must be quoted exactly once and the command
-    must be a plain compound statement (no outer ``bash -c`` wrapper)."""
-    cmd = build_flocked_baseline_merge_command(
-        repo_root="/tmp/repo",
-        base_branch="main",
-        feature_branch="clawteam/t/a",
-        merge_message="csflow: scheduled merge clawteam/t/a",
-    )
-    # No nested-shell wrapping at all.
+    # The agent only invokes the fixed tool with plain argv (path + 4 args) —
+    # no inline locking/git apparatus to mangle on relay.
+    assert "python3 " in cmd
+    assert "csflow-locked-merge.py" in cmd
+    # Order is <repo> <feature(src)> <base(dst)> <message>.
+    assert "/tmp/repo clawteam/t/a main " in cmd
+    # Message is quoted exactly once; no nested-shell / quote pyramid.
+    assert "'csflow: scheduled merge clawteam/t/a'" in cmd
     assert "bash -c" not in cmd
-    # The single-quote escape pyramid (more than one level of '"'"') must be gone.
     assert "'\"'\"'\"'\"'" not in cmd
-    # The merge message survives as a single, plain single-quoted token.
-    assert "-m 'csflow: scheduled merge clawteam/t/a'" in cmd
-    # Lock is held via an fd subshell, not a nested shell command.
-    assert "( flock -x 9" in cmd
+    # No leftover inline flock / python -c locking in the agent-facing command.
+    assert "flock" not in cmd
+    assert "python3 -c" not in cmd
 
 
-def test_baseline_merge_command_works_without_flock(
+def test_build_generic_merge_command_invokes_tool_with_placeholders() -> None:
+    cmd = build_generic_locked_merge_command()
+    assert "csflow-locked-merge.py" in cmd
+    assert "<abs-repo>" in cmd and "<source-branch>" in cmd and "<dest-branch>" in cmd
+    assert "flock" not in cmd
+
+
+def test_locked_merge_tool_performs_merge_under_lock(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """macOS parity: with no `flock` on PATH the mkdir-spinlock fallback still
-    performs the merge. The run-ac4ec5fbfe7b host was macOS, which ships no
-    `flock`, so a bare `flock -x …` would never have run the merge."""
-    import shutil
+    """Real end-to-end: the deployed tool flocks the SAME lock file as the
+    scheduler and merges src into dst."""
     import subprocess
 
-    needed = ["bash", "sh", "git", "mkdir", "sleep", "rmdir"]
-    resolved = {b: shutil.which(b) for b in needed}
-    if any(v is None for v in resolved.values()):
-        pytest.skip("missing core utilities for the merge-without-flock test")
-
-    # A PATH that contains the essentials but NOT flock → forces the fallback.
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    for name, real in resolved.items():
-        (bindir / name).symlink_to(real)  # type: ignore[arg-type]
-    assert shutil.which("flock", path=str(bindir)) is None
-
     monkeypatch.setenv("CSFLOW_HOME", str(tmp_path / "csflow_home"))
-
     repo = tmp_path / "repo"
     repo.mkdir()
     env = {
-        "PATH": str(bindir),
+        "PATH": __import__("os").environ["PATH"],
+        "CSFLOW_HOME": str(tmp_path / "csflow_home"),
         "HOME": str(tmp_path),
         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
@@ -101,8 +80,7 @@ def test_baseline_merge_command_works_without_flock(
 
     def run(cmd: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            cmd, cwd=repo, env=env, shell=True,
-            capture_output=True, text=True,
+            cmd, cwd=repo, env=env, shell=True, capture_output=True, text=True,
         )
 
     run("git -c init.defaultBranch=main init -q")
@@ -113,19 +91,51 @@ def test_baseline_merge_command_works_without_flock(
     run("git add -A && git commit -q -m feat")
     run("git checkout -q main")
 
-    cmd = build_flocked_baseline_merge_command(
-        repo_root=str(repo),
-        base_branch="main",
-        feature_branch="feature",
-        merge_message="csflow: test merge",
-    )
-    res = run(cmd)
-    assert res.returncode == 0, res.stderr
+    # Resolve the repo-checkout source path of the tool (not the deployed copy).
+    from app.integrations.openclaw_agent_source import bundled_agent_tools_source_dir
 
-    # The merge landed on main: the feature file is present on the base branch.
+    tool = bundled_agent_tools_source_dir() / "scripts" / "git" / "csflow-locked-merge.py"
+    res = run(
+        f"python3 {tool} {repo} feature main 'csflow: test merge'"
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "result=success" in res.stdout
+    # Merge landed on main, and the lock file path matches the Python helper.
     assert (repo / "feature.txt").exists()
-    log = run("git log --oneline main")
-    assert "csflow: test merge" in log.stdout
+    assert main_repo_lock_path(str(repo)).exists()
+
+
+def test_main_repo_file_lock_times_out_when_held(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The cross-process file lock is bounded: a contended acquire raises
+    TimeoutError instead of blocking forever (the old behaviour)."""
+    import threading
+
+    monkeypatch.setenv("CSFLOW_HOME", str(tmp_path))
+    repo = "/tmp/repo"
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with main_repo_file_lock(repo, timeout=5.0):
+            held.set()
+            release.wait(5.0)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        assert held.wait(5.0)
+        with pytest.raises(TimeoutError):
+            with main_repo_file_lock(repo, timeout=0.5):
+                pass
+    finally:
+        release.set()
+        t.join(5.0)
+
+    # Once released, the lock is acquirable again (no leaked/stale state).
+    with main_repo_file_lock(repo, timeout=5.0):
+        pass
 
 
 def test_self_merge_instruction_is_concise() -> None:
@@ -135,6 +145,16 @@ def test_self_merge_instruction_is_concise() -> None:
         feature_branch="clawteam/t/a",
         merge_message="csflow: scheduled merge clawteam/t/a",
     )
-    assert "flock -x" in text
-    assert "resolve conflicts yourself (no lock)" in text
-    assert "re-run the locked command" in text
+    assert "csflow-locked-merge.py" in text
+    assert "first priority" in text
+    assert "re-run the SAME command" in text
+    assert "Do not manually `git pull`" in text
+    assert "run ONLY the locked-merge command" in text
+
+
+def test_merge_lock_reference_discourages_manual_baseline_git() -> None:
+    from app.repo_merge_lock import merge_lock_reference
+
+    text = merge_lock_reference()
+    assert "Do not manually `git pull`" in text
+    assert "run ONLY the locked-merge command" in text

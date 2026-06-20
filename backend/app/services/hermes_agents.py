@@ -135,6 +135,7 @@ def _run_hermes(
     *,
     cwd: str | Path | None = None,
     timeout: float = _CLI_TIMEOUT_SEC,
+    stdin: str | None = None,
 ) -> tuple[int, str, str]:
     """Run ``hermes <args>`` and return (rc, stdout, stderr). Never raises on
     non-zero exit — callers decide. Raises :class:`HermesUnavailable` only when
@@ -148,6 +149,7 @@ def _run_hermes(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            input=stdin,
             timeout=timeout,
             env=os.environ.copy(),
         )
@@ -986,19 +988,22 @@ def is_managed(agent_id: str, *, storage: StorageBackend) -> bool:
 # Gateway
 # ──────────────────────────────────────────────────────────────────────
 
+# ``gateway install`` prompts twice on Linux (start now + start on login/boot).
+_GATEWAY_INSTALL_STDIN = "y\ny\n"
+
 
 def start_gateway(agent_id: str) -> str:
     """Install/start Hermes gateway for one managed profile.
 
     Runs the same operator-facing commands as documented in the UI:
 
-    * ``hermes -p <id> gateway install``
+    * ``hermes -p <id> gateway install`` (non-interactive: auto-accept prompts)
     * ``hermes -p <id> gateway start``
     """
     aid = _validate_agent_id(agent_id)
 
     install_args = ["gateway", "install"]
-    rc, out, err = _hermes_profile(aid, install_args)
+    rc, out, err = _hermes_profile(aid, install_args, stdin=_GATEWAY_INSTALL_STDIN)
     if rc != 0:
         msg = (_strip_ansi(err) or _strip_ansi(out)).strip()
         raise ProfileOpFailed(

@@ -585,10 +585,14 @@ class RunController:
         # platforms are intentionally excluded for now). Only OpenClaw is also a
         # merge target; Hermes complaint output is NOT merged (worktree removed
         # by the unified terminal cleanup).
+        # Complaint fix targets: persistent OpenClaw/Hermes workers only (non-leader).
+        # Temporary inline agents are excluded — complaint refinement is for managed
+        # platform agents only.
         complaint_targets = [
             a for a in self.spec.agents
             if (
                 not a.is_leader
+                and not a.is_temporary
                 and a.kind in (AgentKind.openclaw, AgentKind.hermes)
                 and a.id != self._leader_id
             )
@@ -613,7 +617,7 @@ class RunController:
         if not complaint_targets:
             self._emit_event(
                 "run_complaint_phase_skipped",
-                payload={"reason": "no_openclaw_targets"},
+                payload={"reason": "no_persistent_openclaw_or_hermes_targets"},
             )
             merge_task_ids = await self._dispatch_merge_requirements(
                 mcp=mcp,

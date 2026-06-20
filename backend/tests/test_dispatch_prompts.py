@@ -123,7 +123,7 @@ def test_worker_dispatch_openclaw_self_does_not_merge_in_task_prompt() -> None:
 
 def test_worker_dispatch_tui_does_not_merge() -> None:
     """TUI agents (claude/codex/...) never run merge steps in worker prompt;
-    that's owned by finalize_run per merge_strategy."""
+    that's owned by finalize_run (user merge review for non-OpenClaw)."""
     msg = prompts.build_worker_dispatch(_ctx())  # default = claude / manual
     assert "**Self-merge:**" not in msg  # no auto-merge mandate (manual run)
     assert "If merge conflicts occur, resolve them yourself" not in msg
@@ -326,8 +326,8 @@ def test_self_merge_dispatch_includes_main_repo_block_and_steps() -> None:
     )
     msg = prompts.build_openclaw_self_merge(ctx)
     assert "## Baseline Workspace (self-merge)" in msg
-    assert "git merge --no-ff" in msg
-    assert "flock -x" in msg
+    # Locked merge is delegated to the fixed tool (no inline git/locking).
+    assert "csflow-locked-merge.py" in msg
     assert "resolve conflicts yourself" in msg
     assert "VERY IMPORTANT:" in msg
     assert "5. **End this turn**" in msg
@@ -349,8 +349,9 @@ def test_worker_dispatch_scheduled_includes_self_merge_and_post_merge_paths() ->
     msg = prompts.build_worker_dispatch(ctx)
     assert "**Self-merge:**" in msg
     assert "resolve conflicts yourself" in msg
-    assert "flock -x" in msg
-    assert "git merge --no-ff clawteam/csflow-x/alice" in msg
+    assert "csflow-locked-merge.py" in msg
+    # Feature branch is passed to the tool as the src arg.
+    assert "clawteam/csflow-x/alice" in msg
     # Post-merge absolute path requirement points at the baseline workspace.
     assert "Cite paths under `/tmp/main`" in msg or "paths under `/tmp/main`" in msg
     merge_pos = msg.find("**Self-merge:**")
@@ -370,7 +371,7 @@ def test_leader_dispatch_scheduled_includes_self_merge() -> None:
     msg = prompts.build_leader_dispatch(ctx)
     assert "**Self-merge:**" in msg
     assert "resolve conflicts yourself" in msg
-    assert "git merge --no-ff clawteam/csflow-x/leader" in msg
+    assert "clawteam/csflow-x/leader" in msg  # feature branch passed to the merge tool
     assert "paths under `/tmp/main`" in msg
     merge_pos = msg.find("**Self-merge:**")
     reply_pos = msg.find("leader final reply:")
@@ -523,11 +524,10 @@ def test_worker_dispatch_includes_generic_merge_reference_when_enabled() -> None
     msg = prompts.build_worker_dispatch(_ctx(merge_reference=True))
     assert "## Git Merge & Repo Lock Reference" in msg
     assert "Reference only" in msg
-    # Runtime-generic command: agent fills REPO/SRC/DST; lock computed for REPO.
-    assert "REPO=" in msg and "SRC=" in msg and "DST=" in msg
-    assert "flock -x" in msg
-    # Lock is computed at runtime (not a single hardcoded lock).
-    assert "sha256sum" in msg
+    # Runtime-generic invocation: agent fills REPO/SRC/DST placeholders; the tool
+    # computes the correct per-repo lock at runtime.
+    assert "csflow-locked-merge.py" in msg
+    assert "<abs-repo>" in msg and "<source-branch>" in msg and "<dest-branch>" in msg
     assert "merge target only" in msg
     assert msg.find("## Git Merge & Repo Lock Reference") < msg.find("## Task #")
 
@@ -539,7 +539,7 @@ def test_leader_dispatch_includes_generic_merge_reference_when_enabled() -> None
         merge_reference=True,
     ))
     assert "## Git Merge & Repo Lock Reference" in msg
-    assert "REPO=" in msg and "SRC=" in msg and "DST=" in msg
+    assert "<abs-repo>" in msg and "<source-branch>" in msg and "<dest-branch>" in msg
 
 
 def test_generic_reference_is_not_a_mandate() -> None:
@@ -555,7 +555,7 @@ def test_generic_reference_coexists_with_mandate() -> None:
     assert "## Git Merge & Repo Lock Reference" in msg
     assert "**Self-merge:**" in msg
     # The mandate targets the agent's OWN branch (concrete, no placeholder).
-    assert "git merge --no-ff clawteam/csflow-x/alice" in msg
+    assert "clawteam/csflow-x/alice" in msg
 
 
 def test_upstream_repo_root_shown_only_when_merge_reference() -> None:

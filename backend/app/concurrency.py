@@ -81,9 +81,14 @@ class LockManager:
 
     @asynccontextmanager
     async def lock(self, key: str, *, timeout: float = 30.0) -> AsyncIterator[None]:
-        """Acquire *key* (raising on timeout). Logs wait time on release path."""
+        """Acquire *key* (raising on timeout). Logs wait time, or a timeout event."""
         started = time.monotonic()
-        await self._backend.acquire(key, timeout)
+        try:
+            await self._backend.acquire(key, timeout)
+        except asyncio.TimeoutError:
+            waited_ms = (time.monotonic() - started) * 1000
+            logging_setup.lock_timeout(key=key, waited_ms=waited_ms)
+            raise
         wait_ms = (time.monotonic() - started) * 1000
         logging_setup.lock_acquired(key=key, wait_ms=wait_ms)
         try:

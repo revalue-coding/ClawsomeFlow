@@ -11,6 +11,7 @@ import asyncio
 import pytest
 
 import app.scheduler.sessions.tmux_live as tmux_live_mod
+from app.scheduler.sessions.tmux_ready import TuiReadyResult
 from app.models import AgentKind, FlowAgent, MergeStrategy, OnFailure
 from app.scheduler.sessions.base import (
     DispatchOutcome,
@@ -327,9 +328,10 @@ async def test_tmux_live_resume_falls_back_to_fresh_cli_when_continue_unavailabl
     )
     readiness = iter([False, True])
 
-    async def _fake_wait(_target: str, *, timeout_sec: float) -> bool:
+    async def _fake_wait(_target: str, *, timeout_sec: float):
         del timeout_sec
-        return next(readiness)
+        ok = next(readiness)
+        return TuiReadyResult(ok=ok, reason_code="composer_ready" if ok else "tui_timeout")
 
     async def _fake_capture(_target: str, *, history_lines: int = 120) -> str:
         del history_lines
@@ -365,9 +367,9 @@ async def test_tmux_live_resume_raises_when_primary_and_fallback_both_fail(
         base_branch="main",
     )
 
-    async def _fake_wait(_target: str, *, timeout_sec: float) -> bool:
+    async def _fake_wait(_target: str, *, timeout_sec: float):
         del timeout_sec
-        return False
+        return TuiReadyResult(ok=False, reason_code="tui_timeout")
 
     async def _fake_capture(_target: str, *, history_lines: int = 120) -> str:
         del history_lines

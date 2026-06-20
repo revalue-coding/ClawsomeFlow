@@ -606,6 +606,8 @@ const zh = {
     mergeFailureKindUnknown: "未知错误",
     dismiss: "丢弃",
     eventsTitle: "实时事件",
+    sessionStartFailed:
+      "Agent 会话启动失败（agent {{agent}}，task {{task}}，阶段 {{phase}}）：\n{{error}}",
     boardTitle: "任务执行看板",
     boardHint: "",
     boardTabList: "列表",
@@ -633,7 +635,8 @@ const zh = {
     leaderReplyTitle: "Leader 工作汇报",
     leaderReplyHint: "",
     leaderReplyMissing: "暂未捕获到 Leader 工作汇报（可查看下方实时事件排查）。",
-    leaderReplyFootnote: "所有输出物及文档更新将在任务流执行结束后自动合入各Agent工作目录",
+    leaderReplyFootnote:
+      "所有输出物及文档更新将在任务流执行结束后自动合入各Agent工作目录，除非您手动“丢弃修改”或“中止任务流执行”",
     eventTypeColumn: "事件类型",
     eventTimestampColumn: "时间",
     eventAgentColumn: "Agent",

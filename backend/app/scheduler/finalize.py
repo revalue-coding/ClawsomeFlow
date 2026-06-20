@@ -2,10 +2,13 @@
 
 When the controller enters finalize, this module decides:
 
-* which merge actions run immediately (TUI auto),
-* which merge decisions are deferred to the user (TUI manual),
+* which non-OpenClaw agents need user merge review (normal manual runs),
 * and the next Run status (`awaiting_user_review`, `awaiting_user_complaint`,
   or terminal failure/abort).
+
+In-task self-merge (easy / dev / scheduled-normal) is **prompt-driven only** via
+``flow_modes.task_self_merges`` — this module never calls ``workspace_merge``
+except when the user resolves a pending merge via ``perform_manual_merge``.
 
 Cleanup policy:
 
@@ -100,8 +103,6 @@ class FinalizeOutcome:
 
     final_status: RunStatus
     pending_merges: list[PendingMerge] = field(default_factory=list)
-    auto_merge_conflicts: list[str] = field(default_factory=list)
-    auto_merge_errors: list[str] = field(default_factory=list)
     team_cleaned: bool = False
     detail: str = ""
 
@@ -238,14 +239,14 @@ async def finalize_run(
             ipt.run.team_name, non_openclaw_agents, worktree_lookup,
         )
 
-        # ── Non-OpenClaw: manual / auto / skip ------------------------------
-        manual_agents = [
+        # ── Non-OpenClaw: user merge review vs skip -----------------------
+        # Normal manual runs: every non-skipped TUI/Hermes agent goes to
+        # ``awaiting_user_review`` — never scheduler ``workspace_merge`` here.
+        # (``merge_strategy=auto`` is legacy; ``dev_auto_merge`` only affects
+        # dispatch prompts in dev mode via ``flow_modes.task_self_merges``.)
+        review_agents = [
             a for a in non_openclaw_agents
-            if a.merge_strategy == MergeStrategy.manual
-        ]
-        auto_agents = [
-            a for a in non_openclaw_agents
-            if a.merge_strategy == MergeStrategy.auto
+            if a.merge_strategy != MergeStrategy.skip
         ]
         skipped_agents = [
             a for a in non_openclaw_agents
@@ -255,77 +256,8 @@ async def finalize_run(
         for a in skipped_agents:
             logger.info("finalize_skip_tui", agent_id=a.id, reason="merge_strategy=skip")
 
-        for a in auto_agents:
-            wt = agent_worktrees.get(a.id)
-            diff = await _safe_diff(
-                mcp,
-                ipt.run.team_name,
-                a.id,
-                repo_root=wt.repo_root if wt else None,
-            )
-            dirty = await _safe_worktree_dirty(
-                cli,
-                agent_id=a.id,
-                worktree_path=wt.worktree_path if wt else None,
-            )
-            if not _has_mergeable_changes(diff=diff, dirty=dirty):
-                logger.info(
-                    "finalize_auto_merge_skipped_no_changes",
-                    agent_id=a.id,
-                    team=ipt.run.team_name,
-                )
-                _emit(
-                    storage,
-                    ipt.run.id,
-                    "auto_merge_skipped_no_changes",
-                    agent_id=a.id,
-                    payload={"diff": _compose_diff_summary(diff=diff, dirty=dirty)},
-                )
-                continue
-            source_branch = wt.branch_name if wt else f"clawteam/{ipt.run.team_name}/{a.id}"
-            target_branch = (a.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
-            diff_summary = _compose_diff_summary(diff=diff, dirty=dirty)
-            merge_repo = (wt.repo_root if wt else None) or (a.repo or None)
-            ok, msg = await cli.workspace_merge(
-                team=ipt.run.team_name,
-                agent=a.id,
-                repo=merge_repo,
-                target=target_branch,
-            )
-            if ok:
-                logger.info("finalize_auto_merge_ok", agent_id=a.id, team=ipt.run.team_name)
-                _emit(storage, ipt.run.id, "auto_merge_ok",
-                      agent_id=a.id, payload={
-                          "diff": diff_summary,
-                          "source_branch": source_branch,
-                          "target_branch": target_branch,
-                          "repo_root": merge_repo,
-                      })
-            else:
-                failure_kind = classify_merge_failure(msg)
-                event_type = "merge_conflict" if failure_kind == "conflict" else "merge_error"
-                if failure_kind == "conflict":
-                    out.auto_merge_conflicts.append(a.id)
-                else:
-                    out.auto_merge_errors.append(a.id)
-                _emit(
-                    storage,
-                    ipt.run.id,
-                    event_type,
-                    agent_id=a.id,
-                    payload={
-                        "stderr": msg[:1000],
-                        "diff": diff_summary,
-                        "source_branch": source_branch,
-                        "target_branch": target_branch,
-                        "repo_root": merge_repo,
-                        "failure_kind": failure_kind,
-                    },
-                )
-
-        # Manual: build pending_merges + flag the run for user review.
         pending: list[PendingMerge] = []
-        for a in manual_agents:
+        for a in review_agents:
             wt = agent_worktrees.get(a.id)
             raw_diff = await _safe_diff(
                 mcp,
@@ -402,27 +334,6 @@ async def finalize_run(
         elif ipt.has_failed_tasks:
             out.final_status = RunStatus.failed
             out.detail = "task failure(s) detected"
-        elif out.auto_merge_conflicts or out.auto_merge_errors:
-            post_complaint_status = RunStatus.completed_with_conflicts
-            out.final_status = RunStatus.awaiting_user_complaint
-            conflict_count = len(out.auto_merge_conflicts)
-            error_count = len(out.auto_merge_errors)
-            total_failures = conflict_count + error_count
-            if conflict_count and error_count:
-                out.detail = (
-                    f"{total_failures} auto merge(s) failed "
-                    f"({conflict_count} conflict, {error_count} environment error); "
-                    "awaiting complaint input"
-                )
-            elif conflict_count:
-                out.detail = (
-                    f"{conflict_count} auto merge(s) hit conflict; awaiting complaint input"
-                )
-            else:
-                out.detail = (
-                    f"{error_count} auto merge(s) failed due to environment error; "
-                    "awaiting complaint input"
-                )
         else:
             post_complaint_status = RunStatus.completed
             out.final_status = RunStatus.awaiting_user_complaint
@@ -474,8 +385,6 @@ async def finalize_run(
             run_id=ipt.run.id, team=ipt.run.team_name,
             final_status=out.final_status.value,
             pending_count=len(pending),
-            auto_conflicts=len(out.auto_merge_conflicts),
-            auto_errors=len(out.auto_merge_errors),
             team_cleaned=out.team_cleaned,
         )
         return out

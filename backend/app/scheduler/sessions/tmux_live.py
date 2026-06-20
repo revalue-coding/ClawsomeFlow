@@ -31,7 +31,11 @@ from app.integrations.clawteam_cli import (
 from app.logging_setup import get_logger
 from app.models import AgentKind, FlowAgent
 from app.scheduler.sessions.base import WorkerSession
-from app.scheduler.sessions.tmux_ready import tmux_capture_pane, wait_tui_ready
+from app.scheduler.sessions.tmux_ready import (
+    resolve_trust_platform,
+    tmux_capture_pane,
+    wait_tui_ready,
+)
 
 logger = get_logger("scheduler.sessions.tmux_live")
 
@@ -252,12 +256,22 @@ class TmuxLiveSession(WorkerSession):
             skip_permissions=self._skip_permissions(),
         )
         # Wait for the CLI to finish booting before any dispatch.
-        ok = await wait_tui_ready(self.tmux_target, timeout_sec=self._ready_timeout)
-        if not ok:
+        result = await wait_tui_ready(
+            self.tmux_target,
+            trust_platform=resolve_trust_platform(
+                agent_kind=self.agent.kind.value,
+                spawn_command=self._spawn_cmd,
+            ),
+            timeout_sec=self._ready_timeout,
+        )
+        if not result.ok:
             raise CliInvocationError(
-                argv=["wait_tui_ready"], exit_code=1,
-                stderr=f"TUI prompt never appeared in {self._ready_timeout}s "
-                       f"on tmux pane {self.tmux_target}",
+                argv=["wait_tui_ready", result.reason_code],
+                exit_code=1,
+                stderr=result.message
+                or f"TUI prompt never appeared in {self._ready_timeout}s "
+                f"on tmux pane {self.tmux_target}",
+                stdout=result.pane_tail,
             )
 
     async def _do_dispatch(self, *, message: str, task_id: str) -> None:
@@ -335,20 +349,25 @@ class TmuxLiveSession(WorkerSession):
             skills=(),
             skip_permissions=self._skip_permissions(),
         )
-        ok = await wait_tui_ready(self.tmux_target, timeout_sec=self._ready_timeout)
-        if ok:
+        result = await wait_tui_ready(
+            self.tmux_target,
+            trust_platform=resolve_trust_platform(
+                agent_kind=self.agent.kind.value,
+                spawn_command=self._spawn_cmd,
+            ),
+            timeout_sec=self._ready_timeout,
+        )
+        if result.ok:
             return
         pane_text = await tmux_capture_pane(self.tmux_target, history_lines=120)
-        stderr = (
+        stderr = result.message or (
             f"TUI prompt never appeared after {phase} on {self.tmux_target}"
         )
-        if pane_text.strip():
-            stderr += f"; last_pane_tail={pane_text[-300:]}"
         raise CliInvocationError(
-            argv=["wait_tui_ready", self.tmux_target, phase],
+            argv=["wait_tui_ready", result.reason_code, self.tmux_target, phase],
             exit_code=1,
             stderr=stderr,
-            stdout=pane_text[-2000:],
+            stdout=pane_text[-2000:] or result.pane_tail,
         )
 
     async def _do_shutdown(self) -> None:

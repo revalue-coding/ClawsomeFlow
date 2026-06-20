@@ -171,6 +171,15 @@ def init(
         ensure_qoder_trust_dirs()
     except Exception:  # pragma: no cover - defensive; never block init
         pass
+
+    # ClawTeam spawn_ready_timeout (see clawteam_spawn_config). Fresh-deploy
+    # convergence; ``csflow start`` also re-runs via run_upgrade.
+    try:
+        from app.integrations.clawteam_spawn_config import ensure_spawn_ready_timeout
+
+        ensure_spawn_ready_timeout()
+    except Exception:  # pragma: no cover - defensive; never block init
+        pass
     console.print(
         f"[green]✓[/green] Data home: [dim]{home_path}[/dim]"
     )
@@ -246,6 +255,18 @@ def init(
     except Exception as exc:
         console.print(f"[red]✗[/red] Storage init failed: {exc}")
         raise typer.Exit(code=1)
+
+    # Global agent tools are NOT OpenClaw-specific (every agent kind, incl.
+    # temporary TUI agents, references them by absolute path — e.g. the locked
+    # self-merge tool). Deploy unconditionally so a --skip-openclaw / TUI-only
+    # install still gets them. Idempotent (exact mirror).
+    try:
+        from app.integrations.openclaw_agent_source import deploy_agent_tools_bundle
+
+        tools_dst = deploy_agent_tools_bundle()
+        console.print(f"[green]✓[/green] Agent tools deployed: {tools_dst}")
+    except Exception as exc:
+        console.print(f"[yellow]⚠[/yellow] Agent tools deploy failed: {exc}")
 
     if skip_openclaw:
         console.print(

@@ -255,6 +255,21 @@ def lock_acquired(*, key: str, wait_ms: float) -> None:
         log.debug("lock_acquired", key=key, wait_ms=round(wait_ms, 2))
 
 
+def lock_timeout(*, key: str, waited_ms: float) -> None:
+    """A named lock (asyncio or file) timed out before it could be acquired."""
+    log = get_logger("concurrency")
+    log.error("lock_timeout", key=key, waited_ms=round(waited_ms, 2))
+
+
+def file_lock_acquired(*, path: str, wait_ms: float) -> None:
+    """Cross-process repo file lock acquisition; WARNING if wait > 1000ms."""
+    log = get_logger("concurrency")
+    if wait_ms > 1000:
+        log.warning("file_lock_acquired", path=path, wait_ms=round(wait_ms, 2))
+    else:
+        log.debug("file_lock_acquired", path=path, wait_ms=round(wait_ms, 2))
+
+
 def workspace_violation(
     *,
     agent_id: str,
@@ -317,6 +332,8 @@ __all__ = [
     "workspace_merge",
     "openclaw_json_modify",
     "lock_acquired",
+    "lock_timeout",
+    "file_lock_acquired",
     "workspace_violation",
     "run_state_transition",
     "task_state_transition",

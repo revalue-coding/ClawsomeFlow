@@ -34,8 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.concurrency import LockManager, get_lock_manager
 from app.logging_setup import get_logger, workspace_violation
 from app.models import AgentKind, FlowAgent, FlowTask, RunEvent
+from app.repo_merge_lock import async_main_repo_file_lock
 from app.storage import StorageBackend
 
 logger = get_logger("worktree.audit")
@@ -80,6 +82,7 @@ async def run_post_task_audit(
     worktree_path: str | None,
     storage: StorageBackend | None = None,
     run_id: str | None = None,
+    locks: LockManager | None = None,
 ) -> AuditResult:
     """Audit one OpenClaw task completion. Safe to call for any agent kind
     (returns immediately with ``skipped`` set when not applicable).
@@ -99,40 +102,62 @@ async def run_post_task_audit(
         return out
 
     # ── Check 1: main repo dirty? -----------------------------------
-    rc, dirty, stderr = await _git(main, "status", "--porcelain")
-    if rc != 0:
-        out.error = f"git status failed: {stderr.strip()[:200]}"
-        return out
-    if dirty.strip():
-        out.main_dirty = True
-        out.main_dirty_files = dirty.strip()[:1000]
-        # Policy: treat main-repo writes as a normal checkpoint path for now.
-        # We auto-commit instead of auto-stash, so users can review linear
-        # history directly on main.
-        rc2, _so2, se2 = await _git(main, "add", "-A")
-        if rc2 != 0:
-            out.error = (out.error + f"; auto-add failed: {se2.strip()[:200]}").strip("; ")
-            workspace_violation(
-                agent_id=agent.id, task_id=task.id, dirty_files=out.main_dirty_files,
-            )
-        else:
-            msg = f"[csflow] main-write checkpoint task {task.id}"
-            rc3, _so3, se3 = await _git(
-                main, "commit", "--allow-empty", "-m", msg,
-            )
-            if rc3 == 0 or "nothing to commit" in (se3 or "").lower():
-                rc4, sha, se4 = await _git(main, "rev-parse", "HEAD")
-                if rc4 == 0:
-                    out.main_auto_commit_sha = sha.strip()
-                else:
+    # This auto-commit writes the main repo's index/HEAD/refs, exactly like a
+    # spawn (checkout + worktree add) or a merge. It runs fire-and-forget,
+    # concurrent with the controller loop, so it MUST hold the SAME locks those
+    # paths hold — the in-process ``clawteam_main_repo:{repo}`` lock (resolved
+    # from the shared LockManager singleton so the asyncio.Lock object is the
+    # same one ``ClawTeamCli`` uses) AND the cross-process repo file lock — or it
+    # could race a concurrent spawn/merge on this main repo. Detection + commit
+    # are wrapped together so a clean→dirty flip cannot slip in between.
+    from app.integrations.clawteam_cli import CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS
+
+    lm = locks or get_lock_manager()
+    main_str = str(main)
+    async with lm.lock(
+        f"clawteam_main_repo:{main_str}",
+        timeout=CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS,
+    ):
+        async with async_main_repo_file_lock(main_str):
+            rc, dirty, stderr = await _git(main, "status", "--porcelain")
+            if rc != 0:
+                out.error = f"git status failed: {stderr.strip()[:200]}"
+                return out
+            if dirty.strip():
+                out.main_dirty = True
+                out.main_dirty_files = dirty.strip()[:1000]
+                # Policy: treat main-repo writes as a normal checkpoint path for
+                # now. We auto-commit instead of auto-stash, so users can review
+                # linear history directly on main.
+                rc2, _so2, se2 = await _git(main, "add", "-A")
+                if rc2 != 0:
                     out.error = (
-                        out.error + f"; rev-parse failed: {se4.strip()[:200]}"
+                        out.error + f"; auto-add failed: {se2.strip()[:200]}"
                     ).strip("; ")
-            else:
-                out.error = (out.error + f"; auto-commit failed: {se3.strip()[:200]}").strip("; ")
-                workspace_violation(
-                    agent_id=agent.id, task_id=task.id, dirty_files=out.main_dirty_files,
-                )
+                    workspace_violation(
+                        agent_id=agent.id, task_id=task.id, dirty_files=out.main_dirty_files,
+                    )
+                else:
+                    msg = f"[csflow] main-write checkpoint task {task.id}"
+                    rc3, _so3, se3 = await _git(
+                        main, "commit", "--allow-empty", "-m", msg,
+                    )
+                    if rc3 == 0 or "nothing to commit" in (se3 or "").lower():
+                        rc4, sha, se4 = await _git(main, "rev-parse", "HEAD")
+                        if rc4 == 0:
+                            out.main_auto_commit_sha = sha.strip()
+                        else:
+                            out.error = (
+                                out.error + f"; rev-parse failed: {se4.strip()[:200]}"
+                            ).strip("; ")
+                    else:
+                        out.error = (
+                            out.error + f"; auto-commit failed: {se3.strip()[:200]}"
+                        ).strip("; ")
+                        workspace_violation(
+                            agent_id=agent.id, task_id=task.id,
+                            dirty_files=out.main_dirty_files,
+                        )
 
     # ── Check 2: worktree carries this task's commit? ---------------
     if worktree_path:

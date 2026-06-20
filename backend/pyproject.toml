@@ -78,17 +78,21 @@ packages = ["app"]
 "../frontend/dist" = "app/_static"
 "../openclaw-agent-source" = "clawsomeflow_openclaw_agent_source"
 "clawsomeflow_openclaw_agent_source/__init__.py" = "clawsomeflow_openclaw_agent_source/__init__.py"
+"../clawsomeflow-agent-tools" = "clawsomeflow_agent_tools"
+"clawsomeflow_agent_tools/__init__.py" = "clawsomeflow_agent_tools/__init__.py"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "app/",
     "clawsomeflow_openclaw_agent_source/",
+    "clawsomeflow_agent_tools/",
     "tests/",
 ]
 
 [tool.hatch.build.targets.sdist.force-include]
 "../frontend/dist" = "../frontend/dist"
 "../openclaw-agent-source" = "../openclaw-agent-source"
+"../clawsomeflow-agent-tools" = "../clawsomeflow-agent-tools"
 "../readme.md" = "../readme.md"
 "../DEV.md" = "../DEV.md"
 "../API.md" = "../API.md"

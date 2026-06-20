@@ -448,13 +448,17 @@ async def test_workspace_merge_runs_git_and_cleanup(monkeypatch: pytest.MonkeyPa
         del env
         seen.append(argv)
         assert cwd == "/tmp/repo"
+        if argv == ["git", "fetch", "origin", "test"]:
+            return 0, "", ""
         if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+            if len(argv) > 4 and argv[4] == "MERGE_HEAD":
+                return 1, "", ""
             return 1, "", ""
         if argv[:2] == ["git", "checkout"]:
             return 0, "Switched", ""
         if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
             return 0, "test", ""
-        if argv[:3] == ["git", "pull", "--ff-only"]:
+        if argv == ["git", "merge", "--ff-only", "origin/test"]:
             return 0, "Already up to date.", ""
         if argv[:3] == ["git", "merge", "--no-ff"]:
             return 0, "Merge made by the 'ort' strategy.", ""
@@ -472,7 +476,8 @@ async def test_workspace_merge_runs_git_and_cleanup(monkeypatch: pytest.MonkeyPa
     )
     assert ok is True
     assert "Merge made by the 'ort' strategy." in output
-    assert seen[0][:4] == ["git", "rev-parse", "-q", "--verify"]
+    assert seen[0] == ["git", "fetch", "origin", "test"]
+    assert seen[1][:4] == ["git", "rev-parse", "-q", "--verify"]
     assert ["git", "checkout", "test"] in seen
     assert not any(argv[:3] == ["git", "status", "--porcelain"] for argv in seen)
     assert ["git", "merge", "--no-ff", "clawteam/csflow-x/alice", "-m", "[csflow] merge clawteam/csflow-x/alice for csflow-x/alice"] in seen
@@ -496,16 +501,20 @@ async def test_workspace_merge_does_not_precheck_dirty_baseline(monkeypatch: pyt
     async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):
         del cwd, env
         seen.append(argv)
+        if argv == ["git", "fetch", "origin", "main"]:
+            return 0, "", ""
         if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+            if len(argv) > 4 and argv[4] == "MERGE_HEAD":
+                return 1, "", ""
             return 1, "", ""
         if argv[:2] == ["git", "checkout"]:
             return 0, "", ""
         if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
             return 0, "main", ""
+        if argv == ["git", "merge", "--ff-only", "origin/main"]:
+            return 0, "", ""
         if argv[:3] == ["git", "status", "--porcelain"]:
             raise AssertionError("workspace_merge must not precheck baseline dirty state")
-        if argv[:3] == ["git", "pull", "--ff-only"]:
-            return 0, "", ""
         if argv[:3] == ["git", "merge", "--no-ff"]:
             return 0, "ok", ""
         raise AssertionError(f"unexpected argv: {argv}")
@@ -554,13 +563,17 @@ async def test_workspace_merge_conflict_runs_abort(monkeypatch: pytest.MonkeyPat
     async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):
         del cwd, env
         seen.append(argv)
+        if argv == ["git", "fetch", "origin", "main"]:
+            return 0, "", ""
         if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+            if len(argv) > 4 and argv[4] == "MERGE_HEAD":
+                return 1, "", ""
             return 1, "", ""
         if argv[:2] == ["git", "checkout"]:
             return 0, "", ""
         if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
             return 0, "main", ""
-        if argv[:3] == ["git", "pull", "--ff-only"]:
+        if argv == ["git", "merge", "--ff-only", "origin/main"]:
             return 0, "", ""
         if argv[:3] == ["git", "merge", "--no-ff"] and argv[-1] != "--abort":
             return 1, "", "CONFLICT (content): Merge conflict in README.md"
@@ -583,6 +596,76 @@ async def test_workspace_merge_conflict_runs_abort(monkeypatch: pytest.MonkeyPat
     assert ["git", "merge", "--abort"] in seen
     assert not any(argv[:3] == ["git", "status", "--porcelain"] for argv in seen)
     assert cleanup_called is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_merge_fetches_before_lock_and_ff_only_inside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+    lock_entered = False
+
+    async def _fake_workspace_list(self, *, team: str, repo: str | None = None):
+        del self, team, repo
+        return [{
+            "team_name": "csflow-x",
+            "agent_name": "alice",
+            "repo_root": "/tmp/repo",
+            "branch_name": "clawteam/csflow-x/alice",
+            "base_branch": "main",
+        }]
+
+    class _TrackingLock:
+        async def __aenter__(self):
+            nonlocal lock_entered
+            lock_entered = True
+            return None
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):
+        del cwd, env
+        seen.append(argv)
+        if argv == ["git", "fetch", "origin", "main"]:
+            assert lock_entered is False
+            return 0, "", ""
+        if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+            if len(argv) > 4 and argv[4] == "MERGE_HEAD":
+                assert lock_entered is True
+                return 1, "", ""
+            return 1, "", ""
+        if argv[:2] == ["git", "checkout"]:
+            assert lock_entered is True
+            return 0, "", ""
+        if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
+            return 0, "main", ""
+        if argv == ["git", "merge", "--ff-only", "origin/main"]:
+            assert lock_entered is True
+            return 0, "", ""
+        if argv[:3] == ["git", "merge", "--no-ff"]:
+            return 0, "ok", ""
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    cli = ClawTeamCli()
+    monkeypatch.setattr(ClawTeamCli, "workspace_list", _fake_workspace_list)
+    monkeypatch.setattr(cli_mod, "_run_in_cwd", _fake_run_in_cwd)
+    monkeypatch.setattr(
+        cli._locks,
+        "lock",
+        lambda *args, **kwargs: _TrackingLock(),
+    )
+
+    ok, _output = await cli.workspace_merge(
+        team="csflow-x",
+        agent="alice",
+        repo="/tmp/repo",
+        target="main",
+        cleanup=False,
+    )
+    assert ok is True
+    assert seen[0] == ["git", "fetch", "origin", "main"]
+    assert ["git", "merge", "--ff-only", "origin/main"] in seen
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@
  *   4. Live event stream (WebSocket /ws/{run_id} + REST backfill)
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
@@ -164,6 +164,7 @@ export function RunDetail() {
   const { id } = useParams();
   const { t } = useTranslation();
   const { confirm, alert } = useDialog();
+  const alertedSessionStartFails = useRef(new Set<number>());
   const [run, setRun] = useState<RunDetailT | null>(null);
   const [flowName, setFlowName] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -260,7 +261,25 @@ export function RunDetail() {
   useEffect(() => {
     if (!id) return;
     const handle = openRunStream(id, {
-      onEvent: (e) => setEvents((prev) => mergeById(prev, e)),
+      onEvent: (e) => {
+        setEvents((prev) => mergeById(prev, e));
+        if (
+          e.type === "task_session_start_failed"
+          && !alertedSessionStartFails.current.has(e.id)
+        ) {
+          alertedSessionStartFails.current.add(e.id);
+          const payload = e.payload as { error?: string; phase?: string };
+          const err = payload.error ?? e.type;
+          void alert(
+            t("runDetail.sessionStartFailed", {
+              agent: e.agentId ?? "?",
+              task: e.taskId ?? "?",
+              phase: payload.phase ?? "?",
+              error: err,
+            }),
+          );
+        }
+      },
       onStatus: setWsStatus,
     });
     return () => handle.close();
@@ -279,6 +298,7 @@ export function RunDetail() {
     setTerminalLoading(false);
     setTerminalError(null);
     setSelectedTerminalTaskId(null);
+    alertedSessionStartFails.current.clear();
   }, [id]);
 
   function beginCheckpointAction(taskId: string) {

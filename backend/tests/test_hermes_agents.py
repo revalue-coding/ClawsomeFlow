@@ -464,10 +464,10 @@ def test_api_open_dashboard(client: TestClient, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_start_gateway_runs_install_then_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def _fake_profile(agent_id: str, args: list[str], **_kw):  # noqa: ANN001
-        calls.append([agent_id, *args])
+    def _fake_profile(agent_id: str, args: list[str], **kw):  # noqa: ANN001
+        calls.append(([agent_id, *args], kw))
         if args == ["gateway", "install"]:
             return 0, "installed", ""
         if args == ["gateway", "start"]:
@@ -476,10 +476,10 @@ def test_start_gateway_runs_install_then_start(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(svc, "_hermes_profile", _fake_profile)
     msg = svc.start_gateway("helper")
-    assert calls == [
-        ["helper", "gateway", "install"],
-        ["helper", "gateway", "start"],
-    ]
+    assert calls[0][0] == ["helper", "gateway", "install"]
+    assert calls[0][1]["stdin"] == "y\ny\n"
+    assert calls[1][0] == ["helper", "gateway", "start"]
+    assert "stdin" not in calls[1][1]
     assert "gateway listening" in msg
 
 
