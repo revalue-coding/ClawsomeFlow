@@ -17,12 +17,24 @@ from app.validators.flow import (
     ERROR_INVALID_DAG,
     ERROR_INVALID_LEADER,
     ERROR_INVALID_REPO,
+    ERROR_INVALID_TARGET_BRANCH,
     ERROR_LEADER_OWNS_WORKER_TASK,
     ERROR_MISSING_AGENT_REPO,
     ERROR_MISSING_LEADER_SUMMARY,
     ERROR_OPENCLAW_AGENT_NOT_FOUND,
     ERROR_SUMMARY_NO_DEPENDENCY,
 )
+
+
+def _git_default_branch(repo: Path) -> str:
+    out = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip() or "main"
 
 
 def _make_spec(*, leader: bool = True, summary: bool = True) -> FlowSpec:
@@ -176,43 +188,58 @@ class TestPureValidation:
 
 
 class TestStorageAwareValidation:
+    @staticmethod
+    def _register_openclaw_leader(storage, agent_id: str = "oc-lead") -> None:
+        storage.openclaw_create(
+            OpenclawAgent(
+                id=agent_id,
+                name="Leader",
+                workspace_path=f"/tmp/{agent_id}/workspace",
+                created_by_user="alice",
+            )
+        )
+
     def test_repo_must_be_git_repo(self, tmp_path: Path) -> None:
+        storage = get_storage()
+        self._register_openclaw_leader(storage)
         not_a_repo = tmp_path / "plain"
         not_a_repo.mkdir()
         spec = FlowSpec(
             agents=[
+                FlowAgent(id="oc-lead", kind=AgentKind.openclaw, is_leader=True),
                 # cursor is non-OpenClaw (repo validation applies) but not
                 # managed-enforced, so this still exercises the repo checks.
-                FlowAgent(id="a", kind=AgentKind.cursor, repo=str(not_a_repo), is_leader=True),
                 FlowAgent(id="w", kind=AgentKind.cursor, repo=str(not_a_repo), is_leader=False),
             ],
             tasks=[
                 FlowTask(id="t0", owner_agent_id="w", subject="w"),
-                FlowTask(id="t1", owner_agent_id="a", subject="x",
+                FlowTask(id="t1", owner_agent_id="oc-lead", subject="x",
                          depends_on=["t0"], is_leader_summary=True),
             ],
         )
         with pytest.raises(FlowValidationError) as exc:
-            validate_flow_against_db(spec, get_storage())
+            validate_flow_against_db(spec, storage)
         assert exc.value.code == ERROR_INVALID_REPO
 
     def test_repo_without_initial_commit_rejected(self, tmp_path: Path) -> None:
+        storage = get_storage()
+        self._register_openclaw_leader(storage)
         repo = tmp_path / "empty-repo"
         repo.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
         spec = FlowSpec(
             agents=[
-                FlowAgent(id="a", kind=AgentKind.cursor, repo=str(repo), is_leader=True),
+                FlowAgent(id="oc-lead", kind=AgentKind.openclaw, is_leader=True),
                 FlowAgent(id="w", kind=AgentKind.cursor, repo=str(repo), is_leader=False),
             ],
             tasks=[
                 FlowTask(id="t0", owner_agent_id="w", subject="w"),
-                FlowTask(id="t1", owner_agent_id="a", subject="x",
+                FlowTask(id="t1", owner_agent_id="oc-lead", subject="x",
                          depends_on=["t0"], is_leader_summary=True),
             ],
         )
         with pytest.raises(FlowValidationError) as exc:
-            validate_flow_against_db(spec, get_storage())
+            validate_flow_against_db(spec, storage)
         assert exc.value.code == ERROR_INVALID_REPO
         assert exc.value.details["reason"] == "no_initial_commit"
 
@@ -236,9 +263,16 @@ class TestStorageAwareValidation:
             cwd=repo,
             check=True,
         )
+        branch = _git_default_branch(repo)
         spec = FlowSpec(
             agents=[
-                FlowAgent(id="a", kind=AgentKind.cursor, repo=str(repo), is_leader=True),
+                FlowAgent(
+                    id="a",
+                    kind=AgentKind.cursor,
+                    repo=str(repo),
+                    target_branch=branch,
+                    is_leader=True,
+                ),
                 FlowAgent(id="w", kind=AgentKind.cursor, repo=str(repo), is_leader=False),
             ],
             tasks=[
@@ -248,6 +282,91 @@ class TestStorageAwareValidation:
             ],
         )
         validate_flow_against_db(spec, get_storage())
+
+    def test_leader_target_branch_must_exist(self, tmp_path: Path) -> None:
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "README.md").write_text("hello\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=tester@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+            cwd=repo,
+            check=True,
+        )
+        branch = _git_default_branch(repo)
+        spec = FlowSpec(
+            agents=[
+                FlowAgent(
+                    id="a",
+                    kind=AgentKind.cursor,
+                    repo=str(repo),
+                    target_branch="missing-branch",
+                    is_leader=True,
+                ),
+                FlowAgent(id="w", kind=AgentKind.cursor, repo=str(repo), is_leader=False),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="w", subject="w"),
+                FlowTask(
+                    id="t1",
+                    owner_agent_id="a",
+                    subject="x",
+                    depends_on=["t0"],
+                    is_leader_summary=True,
+                ),
+            ],
+        )
+        with pytest.raises(FlowValidationError) as exc:
+            validate_flow_against_db(spec, get_storage())
+        assert exc.value.code == ERROR_INVALID_TARGET_BRANCH
+        assert exc.value.details["target_branch"] == "missing-branch"
+
+        spec.agents[0].target_branch = branch
+        validate_flow_against_db(spec, get_storage())
+
+    def test_worker_target_branch_must_be_nonempty(self) -> None:
+        spec = FlowSpec(
+            agents=[
+                FlowAgent(
+                    id="a",
+                    kind=AgentKind.claude,
+                    repo="/tmp/r",
+                    target_branch="main",
+                    is_leader=True,
+                ),
+                FlowAgent(
+                    id="w",
+                    kind=AgentKind.claude,
+                    repo="/tmp/r",
+                    target_branch="",
+                    is_leader=False,
+                ),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="w", subject="w"),
+                FlowTask(
+                    id="t1",
+                    owner_agent_id="a",
+                    subject="x",
+                    depends_on=["t0"],
+                    is_leader_summary=True,
+                ),
+            ],
+        )
+        with pytest.raises(FlowValidationError) as exc:
+            validate_flow_against_db(spec, get_storage())
+        assert exc.value.code == ERROR_INVALID_TARGET_BRANCH
+        assert exc.value.details["agent_id"] == "w"
 
     def test_openclaw_agent_must_exist(self) -> None:
         spec = FlowSpec(
@@ -312,10 +431,17 @@ class TestTemporaryAgents:
         """A temporary claude/hermes agent passes db validation WITHOUT any
         managed/Hermes registration (only the working-dir repo is required)."""
         repo = self._git_repo(tmp_path)
+        branch = _git_default_branch(repo)
         spec = FlowSpec(
             agents=[
-                FlowAgent(id="tmp-lead", kind=AgentKind.hermes, repo=str(repo),
-                          is_leader=True, is_temporary=True),
+                FlowAgent(
+                    id="tmp-lead",
+                    kind=AgentKind.hermes,
+                    repo=str(repo),
+                    target_branch=branch,
+                    is_leader=True,
+                    is_temporary=True,
+                ),
                 FlowAgent(id="tmp-worker", kind=AgentKind.claude, repo=str(repo),
                           is_leader=False, is_temporary=True),
             ],

@@ -22,6 +22,7 @@ from app.deployment import get_deployment_capabilities
 from app import paths
 from app.logging_setup import get_logger
 from app.models import DEFAULT_TARGET_BRANCH
+from app.integrations import git_repo as git_repo_util
 from app.services import update_check
 from app.storage import get_storage
 
@@ -425,49 +426,22 @@ def _open_directory_native(*, path: Path) -> None:
 
 
 def _is_git_repo(path: Path) -> bool:
-    return (path / ".git").exists()
+    return git_repo_util.is_git_repo(path)
 
 
 def _git_init_repo(path: Path) -> None:
     try:
-        try:
-            subprocess.run(
-                ["git", "init", "-q", "-b", DEFAULT_TARGET_BRANCH],
-                cwd=str(path),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            # Older git versions may not support `-b`; fallback to plain init.
-            if "unknown switch" in stderr.lower() or "unknown option" in stderr.lower():
-                subprocess.run(
-                    ["git", "init", "-q"],
-                    cwd=str(path),
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            else:
-                raise
-    except FileNotFoundError as exc:
+        git_repo_util.git_init_repo(path)
+    except RuntimeError as exc:
+        msg = str(exc)
+        code = "GIT_INIT_FAILED"
+        if "unavailable" in msg:
+            raise ApiError(code, msg, status_code=500, details={"path": str(path)}) from exc
         raise ApiError(
-            "GIT_INIT_FAILED",
-            "git command is unavailable",
-            status_code=500,
-            details={"path": str(path)},
-        ) from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()[:1000]
-        raise ApiError(
-            "GIT_INIT_FAILED",
+            code,
             "git init failed",
             status_code=500,
-            details={
-                "path": str(path),
-                "stderr": stderr,
-            },
+            details={"path": str(path), "stderr": msg},
         ) from exc
 
 
@@ -525,37 +499,11 @@ def _git_create_initial_commit(path: Path) -> None:
 
 
 def _git_local_branches(path: Path) -> list[str]:
-    try:
-        proc = subprocess.run(
-            ["git", "branch", "--format=%(refname:short)"],
-            cwd=str(path),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return []
-    out: list[str] = []
-    for line in (proc.stdout or "").splitlines():
-        name = line.strip()
-        if name:
-            out.append(name)
-    return out
+    return git_repo_util.list_local_branches(path)
 
 
 def _git_current_branch(path: Path) -> str | None:
-    try:
-        proc = subprocess.run(
-            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-            cwd=str(path),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
-    value = (proc.stdout or "").strip()
-    return value or None
+    return git_repo_util.current_branch(path)
 
 
 @router.get("/workspace-directories", response_model=WorkspaceDirectoryListResponse)

@@ -3268,7 +3268,13 @@ class RunController:
         branch = wt.branch_name if (wt and wt.branch_name) else f"clawteam/{self.team_name}/{agent.id}"
         if agent.kind == AgentKind.openclaw:
             repo_root = wt.repo_root if (wt and wt.repo_root) else self._openclaw_main_repo(agent)
-            base = wt.base_branch if (wt and wt.base_branch) else "main"
+            from app.integrations.git_repo import resolve_workspace_base_branch
+
+            base = (
+                wt.base_branch
+                if (wt and wt.base_branch)
+                else resolve_workspace_base_branch(repo_root)
+            )
         else:
             repo_root = wt.repo_root if (wt and wt.repo_root) else ((agent.repo or "").strip() or "<repo-root>")
             base = wt.base_branch if (wt and wt.base_branch) else ((agent.target_branch or "").strip() or "main")

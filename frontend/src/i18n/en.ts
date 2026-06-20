@@ -263,6 +263,7 @@ const en = {
       loading: "Loading repository branches…",
       editableHint: "Pick the target branch used for this Agent's spawn and manual merge target.",
       fetchFailed: "Failed to load repository branches: {{message}}",
+      notFound: "The selected target branch no longer exists in this repository. Please pick again.",
     },
     emptyTasks: "No tasks yet. Click \"Add task\" at the top right to start authoring.",
     summaryTaskDefaultSubject: "Summary",
@@ -372,6 +373,7 @@ const en = {
       claudeAgentNamePlaceholder: "e.g. coder-1",
       claudeRepoPath: "Workspace repo path *",
       targetBranch: "Target branch *",
+      pickBranch: "— pick a branch —",
       claudeRepoPlaceholder: "Absolute path to a git repo",
       claudeRepoPickerHint:
         "Directory selection uses a native picker from the local backend; manual typing is disabled here.",
@@ -421,6 +423,7 @@ const en = {
       result: "Suggested task structure",
       resultCounts: "{{taskCount}} task(s), {{agentCount}} agent(s)",
       apply: "Fill back into task list (overwrites current tasks)",
+      applying: "Validating branches…",
       keep: "Keep current",
       failed: "Decompose failed: {{message}}",
       timeoutFailed: "Decompose failed: no result returned within 30 minutes. Please retry.",

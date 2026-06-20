@@ -234,6 +234,34 @@ async def cancel_decompose(
     await svc.cancel_decompose_request(request_id, storage=storage)
 
 
+class DecomposeApplyResponse(_CamelModel):
+    agents: list[dict[str, Any]] = Field(default_factory=list)
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@public_router.post(
+    "/flows/decompose/{request_id}/apply",
+    response_model=DecomposeApplyResponse,
+)
+def apply_decompose(
+    request_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> DecomposeApplyResponse:
+    """Normalize worker-agent branches against git repos before editor apply."""
+    svc.reap_expired_requests(storage=storage)
+    try:
+        agents, tasks = svc.apply_decompose_proposal(
+            request_id,
+            user=user,
+            storage=storage,
+        )
+    except svc.DecomposeApplyError as exc:
+        raise ApiError(exc.code, exc.message, status_code=400,
+                       details=exc.details) from exc
+    return DecomposeApplyResponse(agents=agents, tasks=tasks)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Internal router (mounted in app.api.__init__ at /api/internal)
 # ──────────────────────────────────────────────────────────────────────

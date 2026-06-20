@@ -262,6 +262,7 @@ const zh = {
       loading: "正在读取仓库分支…",
       editableHint: "请选择该 Agent 启动与合入时使用的目标分支。",
       fetchFailed: "读取仓库分支失败：{{message}}",
+      notFound: "所选目标分支在该仓库中不存在，请重新选择。",
     },
     emptyTasks: "暂无任务。点击右上角“新增任务”开始编排。",
     summaryTaskDefaultSubject: "Summary",
@@ -371,6 +372,7 @@ const zh = {
       claudeAgentNamePlaceholder: "自定义一个即可",
       claudeRepoPath: "Workspace repo 路径 *",
       targetBranch: "指定分支 *",
+      pickBranch: "— 请选择分支 —",
       claudeRepoPlaceholder: "git 仓库的绝对路径",
       claudeRepoPickerHint:
         "目录通过本地后端弹出的原生目录选择框获取，此处不支持手动输入。",
@@ -415,6 +417,7 @@ const zh = {
       result: "建议的任务结构",
       resultCounts: "{{taskCount}} 个任务，{{agentCount}} 个智能体",
       apply: "回填到任务列表（覆盖现有任务）",
+      applying: "校验分支并回填…",
       keep: "保留现有",
       failed: "拆解失败：{{message}}",
       timeoutFailed: "拆解失败：30 分钟内未返回结果，请重试。",

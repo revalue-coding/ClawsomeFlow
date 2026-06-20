@@ -33,6 +33,7 @@ ERROR_OPENCLAW_AGENT_NOT_FOUND = "OPENCLAW_AGENT_NOT_FOUND"
 ERROR_HERMES_AGENT_NOT_FOUND = "HERMES_AGENT_NOT_FOUND"
 ERROR_MISSING_AGENT_REPO = "MISSING_AGENT_REPO"
 ERROR_INVALID_REPO = "INVALID_REPO"
+ERROR_INVALID_TARGET_BRANCH = "INVALID_TARGET_BRANCH"
 ERROR_DUPLICATE_AGENT_ID = "DUPLICATE_AGENT_ID"
 ERROR_DUPLICATE_TASK_ID = "DUPLICATE_TASK_ID"
 ERROR_TASK_OWNS_NOTHING = "TASK_OWNS_NOTHING"
@@ -271,6 +272,8 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
        in the Flow editor) AND still requires a working-directory ``repo``.
     """
     validate_flow_spec(spec)
+    _validate_non_openclaw_target_branches_nonempty(spec)
+    _validate_leader_target_branch_exists(spec)
     # Keep DB index in sync with managed openclaw.json entries before checking refs.
     from app.services.openclaw_agents import reindex_registered_agents
     reindex_registered_agents(storage=storage)
@@ -365,6 +368,51 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
                         "has_initial_commit": False,
                     },
                 )
+
+
+def _validate_non_openclaw_target_branches_nonempty(spec: FlowSpec) -> None:
+    """Every non-OpenClaw agent must have a non-empty target branch."""
+    for agent in spec.agents:
+        if agent.kind == AgentKind.openclaw:
+            continue
+        if not (agent.target_branch or "").strip():
+            raise FlowValidationError(
+                ERROR_INVALID_TARGET_BRANCH,
+                f"agent {agent.id!r}: target_branch is required for "
+                f"non-OpenClaw agents",
+                {"agent_id": agent.id, "kind": agent.kind.value},
+            )
+
+
+def _validate_leader_target_branch_exists(spec: FlowSpec) -> None:
+    """Leader (non-OpenClaw) target branch must exist in its repo."""
+    from app.integrations.git_repo import branch_exists_in_repo
+
+    leader = next((a for a in spec.agents if a.is_leader), None)
+    if leader is None or leader.kind == AgentKind.openclaw:
+        return
+    repo = (leader.repo or "").strip()
+    branch = (leader.target_branch or "").strip()
+    if not repo:
+        return
+    if not branch:
+        raise FlowValidationError(
+            ERROR_INVALID_TARGET_BRANCH,
+            f"leader agent {leader.id!r}: target_branch is required",
+            {"agent_id": leader.id, "kind": leader.kind.value},
+        )
+    if not branch_exists_in_repo(repo, branch):
+        raise FlowValidationError(
+            ERROR_INVALID_TARGET_BRANCH,
+            f"leader agent {leader.id!r}: target branch {branch!r} "
+            f"not found in repo {repo!r}",
+            {
+                "agent_id": leader.id,
+                "kind": leader.kind.value,
+                "repo": repo,
+                "target_branch": branch,
+            },
+        )
 
 
 def _repo_has_initial_commit(repo_path: Path) -> bool:

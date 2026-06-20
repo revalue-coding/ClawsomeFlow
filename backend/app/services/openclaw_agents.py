@@ -417,21 +417,18 @@ def _git_init_workspace(workspace: Path) -> None:
     ClawTeam something to base its worktrees on (no-commit repos can't be
     branched).
     """
+    from app.integrations.git_repo import git_init_repo
+
     workspace.mkdir(parents=True, exist_ok=True)
     if (workspace / ".git").exists():
         return
-    # Use subprocess (sync) — git operations are fast and we already hold no
-    # critical locks here.
+
     def _run(cmd: list[str]) -> None:
         subprocess.run(cmd, cwd=workspace, check=True, capture_output=True)
 
-    _run(["git", "init", "-b", "main"])
-    # Configure local committer so the empty commit doesn't pick up the user's
-    # global identity (relevant on bare CI hosts).
+    git_init_repo(workspace)
     _run(["git", "config", "user.email", "csflow@local"])
     _run(["git", "config", "user.name", "ClawsomeFlow"])
-    # Marker file so the empty commit has content (more reliable than --allow-empty
-    # across older git versions).
     marker = workspace / ".csflow-keep"
     marker.write_text(
         "This directory is the main workspace of an OpenClaw agent managed by "

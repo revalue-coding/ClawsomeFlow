@@ -183,7 +183,7 @@ async def test_tui_manual_creates_pending_merges_and_awaiting_review() -> None:
     assert out.pending_merges[0].diff_summary["files"] == 3
     assert out.pending_merges[0].diff_summary["has_uncommitted_changes"] is False
     assert out.pending_merges[0].diff_summary["uncommitted_entry_count"] == 0
-    assert out.pending_merges[0].target_branch == "master"
+    assert out.pending_merges[0].target_branch == "main"
     # Business completion point is leader summary done; do not delay finished_at
     # to user merge decisions.
     assert run.finished_at is not None
@@ -1004,7 +1004,7 @@ async def test_perform_manual_merge_conflict_marks_completed_with_conflicts() ->
     assert merge_ev is not None
     payload = merge_ev.payload or {}
     assert payload.get("source_branch") == "x"
-    assert payload.get("target_branch") == "master"
+    assert payload.get("target_branch") == "main"
 
 
 @pytest.mark.asyncio
@@ -1031,7 +1031,7 @@ async def test_perform_manual_merge_environment_error_emits_merge_error() -> Non
     assert merge_ev is not None
     payload = merge_ev.payload or {}
     assert payload.get("source_branch") == "x"
-    assert payload.get("target_branch") == "master"
+    assert payload.get("target_branch") == "main"
     assert cli.team_cleanup_calls == []
 
 

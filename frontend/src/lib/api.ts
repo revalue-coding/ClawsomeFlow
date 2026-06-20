@@ -1457,6 +1457,11 @@ export const api = {
     ),
   cancelDecompose: (requestId: string) =>
     request<void>("POST", `/api/flows/decompose/${requestId}/cancel`),
+  applyDecompose: (requestId: string) =>
+    request<{
+      agents: Record<string, unknown>[];
+      tasks: Record<string, unknown>[];
+    }>("POST", `/api/flows/decompose/${requestId}/apply`),
 
   // Local system helpers
   pickDirectory: (payload?: { title?: string; initialPath?: string | null }) =>

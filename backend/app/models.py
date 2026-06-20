@@ -40,9 +40,9 @@ from sqlmodel import JSON, Column, Field as SQLField, SQLModel
 # ──────────────────────────────────────────────────────────────────────
 
 # Default merge / spawn target for non-OpenClaw agents when unset in the spec.
-# After `ensure-git-repo` creates a repository, callers must use the actual
-# primary branch name returned by git (see system.ensure_git_repo).
-DEFAULT_TARGET_BRANCH = "master"
+# New repos are initialized on this branch (``git init -b main``). When a repo
+# already exists, ``resolve_target_branch`` picks an actual local branch.
+DEFAULT_TARGET_BRANCH = "main"
 
 
 def _now() -> datetime:
@@ -279,7 +279,7 @@ class FlowAgent(_ApiBase):
     profile: str | None = None
     command: list[str] | None = None  # only when kind == AgentKind.custom
     repo: str | None = None  # required for non-OpenClaw; auto for openclaw
-    target_branch: str | None = None  # required for non-OpenClaw; default master
+    target_branch: str | None = None  # required for non-OpenClaw; default main
     is_leader: bool = False
     merge_strategy: MergeStrategy | None = None  # default resolved by `default_merge_strategy`
     on_failure: OnFailure = OnFailure.retry
@@ -310,7 +310,7 @@ class FlowAgent(_ApiBase):
             return None
         text = v.strip()
         if not text:
-            return None
+            return ""
         if any(ch.isspace() for ch in text):
             raise ValueError("target_branch must not contain whitespace")
         return text
@@ -342,7 +342,7 @@ class FlowAgent(_ApiBase):
             raise ValueError(
                 f"agent {self.id!r}: kind=openclaw must NOT set 'target_branch'"
             )
-        if self.kind != AgentKind.openclaw and not self.target_branch:
+        if self.kind != AgentKind.openclaw and self.target_branch is None:
             self.target_branch = DEFAULT_TARGET_BRANCH
         # Custom kind requires a command.
         if self.kind == AgentKind.custom and not self.command:

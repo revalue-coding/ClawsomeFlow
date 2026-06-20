@@ -34,6 +34,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from app.config import Config, load_config
@@ -47,6 +48,7 @@ from app.integrations.openclaw_bridge import (
     OpenclawBridge,
     OpenclawBridgeError,
 )
+from app.integrations.git_repo import git_init_repo
 from app.logging_setup import get_logger
 from app.models import (
     DEFAULT_TARGET_BRANCH,
@@ -54,6 +56,7 @@ from app.models import (
     TaskDecomposeRequest,
     TaskDecomposeStatus,
 )
+from app.services.agent_branch import normalize_agent_branch_dicts
 from app.services.task_decompose_validation import (
     ProposalValidationError,
     validate_decompose_proposal,
@@ -146,12 +149,15 @@ def _ensure_ai_temp_agent_workdir() -> str:
     try:
         os.makedirs(path, exist_ok=True)
         if not os.path.isdir(os.path.join(path, ".git")):
-            def _run(cmd: list[str]) -> None:
-                subprocess.run(cmd, cwd=path, check=True, capture_output=True)
-
-            _run(["git", "init", "-b", "main"])
-            _run(["git", "config", "user.email", "csflow@local"])
-            _run(["git", "config", "user.name", "ClawsomeFlow"])
+            git_init_repo(Path(path))
+            subprocess.run(
+                ["git", "config", "user.email", "csflow@local"],
+                cwd=path, check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "ClawsomeFlow"],
+                cwd=path, check=True, capture_output=True,
+            )
             marker = os.path.join(path, ".csflow-keep")
             with open(marker, "w", encoding="utf-8") as fh:
                 fh.write(
@@ -159,8 +165,11 @@ def _ensure_ai_temp_agent_workdir() -> str:
                     "temporary agents. Worktree branches live under "
                     "~/.clawteam/workspaces/.\n"
                 )
-            _run(["git", "add", "-A"])
-            _run(["git", "commit", "-m", "[csflow] ai-decompose workspace initial commit"])
+            subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "[csflow] ai-decompose workspace initial commit"],
+                cwd=path, check=True, capture_output=True,
+            )
     except Exception as exc:  # best-effort: never block decomposition
         logger.warning(
             "decompose_temp_workdir_init_failed",
@@ -272,8 +281,6 @@ These are the user's existing persistent agents (platforms: OpenClaw + Hermes).
 **Always prefer assigning a worker task to one of these when one fits.** When you
 reuse a persistent agent, its `agents[]` entry must set `kind` to that agent's
 platform (`openclaw` or `hermes`) and `isTemporary: false`.
-If a worker task is assigned to a non-OpenClaw persistent agent, set its
-`repo` to `{temp_agent_workdir}` by default unless the goal clearly needs another path.
 
 {persistent_agents_yaml}
 
@@ -289,10 +296,15 @@ NEVER be a temporary agent.**
 For every temporary agent you define, its `agents[]` entry must set:
 - `kind`: one of the platforms listed above (never `openclaw`)
 - `isTemporary`: true
-- `repo`: `{temp_agent_workdir}` (default working directory for AI-assigned
-  temporary agents) unless the goal clearly requires another path
-- `targetBranch`: `main` unless the goal says otherwise
 - `id`: a fresh unique id not used by any persistent agent
+
+### Git workspace for every non-OpenClaw owner
+
+Any agent with `kind` != `openclaw` (persistent Hermes or temporary) must set:
+- `repo`: `{temp_agent_workdir}` by default unless the goal clearly requires another path
+- `targetBranch`: `main`
+
+OpenClaw agents must NOT set `repo` or `targetBranch`.
 
 ## Existing agents in editor (already drafted by the user; treat as hints)
 
@@ -329,7 +341,7 @@ a. Reuse a *persistent agent* from section 1 **only when it genuinely fits** the
    task (set `isTemporary: false`). Never force an ill-suited persistent agent
    onto a task just to reuse one.
 b. If no persistent agent fits, you MUST define a *temporary agent* per section 2
-   (set `isTemporary: true`, `kind` != `openclaw`, `repo` = `{temp_agent_workdir}`).
+   (set `isTemporary: true`, `kind` != `openclaw`; follow section 3 for repo/branch).
    Do NOT leave a worker task's `ownerAgentId` empty.
 c. Only if NO temporary platform is available above and no persistent agent fits,
    set `ownerAgentId` to an empty string `""` for the user to pick manually
@@ -393,8 +405,7 @@ user already has". Apply the Owner assignment policy literally and strictly:
 - Reuse a persistent agent from section 1 ONLY when it is a genuine fit for the
   task. Do NOT force an unrelated/ill-suited persistent agent onto a task.
 - Whenever no persistent agent is a clean fit, you MUST define a NEW temporary
-  agent for that task (section 2: `isTemporary: true`, `kind` != `openclaw`,
-  `repo` = the temporary working directory).
+  agent for that task (section 2 + section 3).
 - It is WRONG to return a DAG where every task is owned by a pre-existing
   persistent agent unless each of those agents is genuinely the best fit.\
 """
@@ -449,7 +460,7 @@ def _compose_messages(
         leader_agent_id=leader_target.id,
         leader_kind=leader_target.kind.value,
         leader_repo=leader_target.repo or "",
-        leader_target_branch=leader_target.target_branch or DEFAULT_TARGET_BRANCH,
+        leader_target_branch=leader_target.target_branch or "",
         api_base=api_base,
         token=token,
         result_language=language,
@@ -1069,7 +1080,7 @@ async def start_decompose_request(
             details={"field": "leader_agent_id"},
         )
 
-    existing_agents_payload = list(existing_agents or [])
+    existing_agents_payload = normalize_agent_branch_dicts(list(existing_agents or []))
     existing_tasks_payload = list(existing_tasks or [])
     leader_target = await _resolve_leader_target(
         leader_agent_id=leader_agent_id,
@@ -1531,11 +1542,45 @@ def mark_request_succeeded(
     if row is None:
         raise KeyError(request_id)
     row.status = TaskDecomposeStatus.succeeded
-    row.result_agents = agents
+    row.result_agents = normalize_agent_branch_dicts(agents)
     row.result_tasks = tasks
     row.error_code = None
     row.error_message = None
     return storage.task_decompose_update(row)
+
+
+class DecomposeApplyError(TaskDecomposeError):
+    code = "DECOMPOSE_APPLY_FAILED"
+
+
+def apply_decompose_proposal(
+    request_id: str,
+    *,
+    user: str,
+    storage: StorageBackend | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return branch-normalized worker-agent decompose results for the Flow editor."""
+    storage = storage or get_storage()
+    row = storage.task_decompose_get(request_id)
+    if row is None:
+        raise DecomposeApplyError(
+            f"decompose request {request_id!r} not found",
+            details={"request_id": request_id},
+        )
+    if row.user != user:
+        raise DecomposeApplyError(
+            "request belongs to a different user",
+            details={"request_id": request_id},
+        )
+    if row.status != TaskDecomposeStatus.succeeded:
+        raise DecomposeApplyError(
+            f"decompose request {request_id!r} is not succeeded "
+            f"(status={row.status.value})",
+            details={"request_id": request_id, "status": row.status.value},
+        )
+    agents = normalize_agent_branch_dicts(row.result_agents or [])
+    tasks = list(row.result_tasks or [])
+    return agents, tasks
 
 
 def mark_request_failed(
@@ -1629,7 +1674,9 @@ def _ensure_aware(dt: datetime) -> datetime:
 
 __all__ = [
     "BridgeFactory",
+    "apply_decompose_proposal",
     "cancel_decompose_request",
+    "DecomposeApplyError",
     "DecomposeStartResult",
     "LeaderAgentForbidden",
     "LeaderAgentNotFound",

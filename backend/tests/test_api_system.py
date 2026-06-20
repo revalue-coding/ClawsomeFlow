@@ -292,8 +292,8 @@ def test_repo_branches_non_git_defaults_master_readonly(tmp_path: Path) -> None:
     assert body["pathExists"] is True
     assert body["isGitRepo"] is False
     assert body["editable"] is False
-    assert body["currentBranch"] == "master"
-    assert body["branches"] == ["master"]
+    assert body["currentBranch"] == "main"
+    assert body["branches"] == ["main"]
 
 
 def test_repo_branches_lists_local_heads(tmp_path: Path) -> None:
@@ -315,7 +315,7 @@ def test_repo_branches_lists_local_heads(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=True,
-    ).stdout.strip() or "master"
+    ).stdout.strip() or "main"
     subprocess.run(["git", "checkout", "-b", "feature/demo"], cwd=target, check=True)
     subprocess.run(["git", "checkout", base_branch], cwd=target, check=True)
     with TestClient(create_app()) as client:

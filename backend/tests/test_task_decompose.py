@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -155,8 +156,8 @@ def test_prompt_lists_persistent_agents_and_platforms() -> None:
     assert "Persistent agents you may assign" in body
     assert "id=writer" in body and "kind=openclaw" in body
     assert "id=sage" in body and "kind=hermes" in body
-    assert "non-OpenClaw persistent agent" in body
-    assert "repo` to `~/csflow-ai-decompose` by default" in body
+    assert "Git workspace for every non-OpenClaw owner" in body
+    assert "targetBranch" in body
     # Available temporary platforms (probed) listed.
     assert "Temporary-agent platforms available" in body
     assert "  - claude" in body and "  - hermes" in body
@@ -1056,6 +1057,97 @@ async def test_mark_succeeded_persists_result(fake_openclaw_home: Path) -> None:
     assert out.status == TaskDecomposeStatus.succeeded
     assert out.result_tasks[0]["id"] == "t1"
     assert out.result_agents[0]["id"] == "w1"
+
+
+@pytest.mark.asyncio
+async def test_mark_succeeded_normalizes_invalid_target_branch(
+    fake_openclaw_home: Path, tmp_path: Path,
+) -> None:
+    import shutil as _shutil
+
+    if _shutil.which("git") is None:
+        pytest.skip("git not available")
+    repo = tmp_path / "wd"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=repo,
+        env={
+            **dict(__import__("os").environ),
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
+        check=True,
+    )
+    _seed_openclaw_agent("leader-4c")
+    res = await svc.start_decompose_request(
+        goal="x", leader_agent_id="leader-4c", user="alice",
+        api_base="http://x", bridge_factory=lambda cfg: _FakeBridge(),
+        background=False,
+    )
+    out = svc.mark_request_succeeded(
+        res.request_id,
+        agents=[{
+            "id": "w1",
+            "kind": "claude",
+            "repo": str(repo),
+            "targetBranch": "master",
+            "isTemporary": True,
+        }],
+        tasks=[{"id": "t1", "ownerAgentId": "w1", "subject": "x"}],
+    )
+    assert out.result_agents[0]["targetBranch"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_apply_decompose_proposal_normalizes_branches(
+    fake_openclaw_home: Path, tmp_path: Path,
+) -> None:
+    import shutil as _shutil
+
+    if _shutil.which("git") is None:
+        pytest.skip("git not available")
+    repo = tmp_path / "wd"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=repo,
+        env={
+            **dict(__import__("os").environ),
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
+        check=True,
+    )
+    _seed_openclaw_agent("leader-4d")
+    res = await svc.start_decompose_request(
+        goal="x", leader_agent_id="leader-4d", user="alice",
+        api_base="http://x", bridge_factory=lambda cfg: _FakeBridge(),
+        background=False,
+    )
+    svc.mark_request_succeeded(
+        res.request_id,
+        agents=[{
+            "id": "assistant",
+            "kind": "hermes",
+            "repo": str(repo),
+            "targetBranch": "master",
+            "isTemporary": False,
+        }],
+        tasks=[{"id": "t1", "ownerAgentId": "assistant", "subject": "x"}],
+    )
+    agents, tasks = svc.apply_decompose_proposal(
+        res.request_id,
+        user="alice",
+    )
+    assert agents[0]["targetBranch"] == "main"
+    assert tasks[0]["id"] == "t1"
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 import type { FlowSpec } from "@/lib/api";
 
 /** Default target branch when no repo is selected yet (non-OpenClaw agents). */
-export const DEFAULT_TARGET_BRANCH = "master";
+export const DEFAULT_TARGET_BRANCH = "main";
 
 export const FLOW_RUNTIME_REQUIREMENT_KEY = "csflow.runtime.requirement";
 export const FLOW_RUNTIME_PARAM_FIELDS_KEY = "csflow.runtime.param_fields";

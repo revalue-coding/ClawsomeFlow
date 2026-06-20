@@ -53,11 +53,11 @@
 
 ## 🎯 Who Should Try It?
 
-- Software teams building a **local, multi-branch engineering agent squad** — where specialists can develop in parallel and still converge cleanly;
-- Builders who want **real collaboration among multiple agents** (plan, implement, review, converge), not just one more chat window;
-- Founders and operators designing an **AI-native company**, where repeatable execution can be delegated to orchestrated agent teams;
-- Ambitious creators pursuing **super-individual leverage** — one person steering many specialized agents with clear guardrails;
-- Engineering-minded folks who are **done with prompt-only black-box orchestration** and want predictable behavior with controllable cost.
+- Building a software engineering agent team that can **develop in parallel across local branches**;
+- Developers and teams who need multiple agents to collaborate like a real team (plan, implement, verify, converge) — not just more chat windows;
+- Founders and operators building an **AI-native company**, delegating repeatable work to orchestrated agent teams;
+- Ambitious **super-individual** creators — one person steering many specialized agents to continuously amplify output;
+- Engineering-minded folks **done with prompt-only black-box orchestration** — predictable behavior, controllable cost, rollback guardrails.
 
 ---
 
@@ -71,14 +71,14 @@ ClawsomeFlow turns scattered AI agents into a controllable engineering system �
 
 | 🔐 Isolation & rollback by default | 📊 Observability you can audit | 🔄 A system that improves itself |
 |---|---|---|
-| Built on Git worktree isolation, each agent develops in its own workspace and branch — naturally suited for safe parallel multi-agent work without cross-talk or accidental writes. A **built-in cross-process repo lock guarantees the absolute reliability of parallel multi-branch development**: every merge (scheduler- or agent-initiated) is serialized on the same lock, so concurrent baseline merges never corrupt git metadata. It supports intelligent merge and rollback, plus optional human checkpoints for in-flight course correction. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
+| Built on Git worktree isolation with a **built-in cross-process repo lock**, ensuring absolute reliability of all agent collaboration behaviors; supports intelligent merge and rollback, plus optional human checkpoints for in-flight course correction. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
 
 ClawsomeFlow inherits the following capabilities from ClawTeam:
 
-- **Git Worktree-based parallel isolation**: each Agent has an independent branch and directory, naturally fitting multi-agent parallel development; supports intelligent merge and rollback, plus optional human checkpoints for behavior correction at any time.
+- **Git Worktree parallel isolation foundation**: each Agent has an independent branch and directory, naturally fitting multi-agent parallel development.
 - **Inter-Agent messaging**: point-to-point inbox and broadcast, so team members share progress in real time.
 
-> On top of this, ClawsomeFlow adds **AI combined with precise orchestration, Harness Engineering, deep OpenClaw/Hermes adaptation, a built-in cross-process repo lock for absolutely reliable parallel multi-branch merging (something ClawTeam leaves uncontrolled), and Web productization**.
+> On top of this, ClawsomeFlow adds **AI combined with precise orchestration, enhanced Harness engineering (built-in cross-process repo lock for absolutely reliable multi-branch parallel development, intelligent merge and rollback, complaint-loop mechanism, optional human checkpoints for in-flight correction), deep OpenClaw/Hermes adaptation, and Web productization**.
 
 ---
 
@@ -97,17 +97,14 @@ From a sentence to a shipped result. You stay in charge of the goal; ClawsomeFlo
 
 ## 🧪 Developer Mode
 
-Developer mode gives **software-development collaboration projects** a far more flexible way to work together. The key idea: **every subtask is handed the agents and worktrees it depends on, and can act on them however its description says** — read, diff, merge a branch, or open a PR.
+Developer mode offers **software-development collaboration projects** a more flexible way to collaborate.
 
-- **Upstream context for every subtask**: for each direct dependency, a subtask is injected with the upstream **agent id, worktree path, branch and base branch**. It can then flexibly build on that work — inspect it, merge that branch, or raise a PR for it — driven entirely by your task description.
-- **Cross-branch collaboration in plain language**: just write *"merge upstream agent X's worktree branch into branch Y"* or *"open a PR for X"* in a downstream task. The agent already has X's worktree/branch/base info plus a generic locked-merge recipe, so it knows exactly what to merge and how.
-- **Built-in lock = absolute parallel-merge reliability**: every merge is serialized through a built-in cross-process repo lock (the same one the scheduler uses), so many branches can develop and merge in parallel without ever racing or corrupting the repo. ClawTeam has no repo-level merge lock and cannot guarantee this.
-- **Per-subtask auto-merge control**: turn auto-merge into the baseline branch ON/OFF per subtask.
-- **Unique worktree per agent**: each agent works from its own worktree and independent branch off the baseline.
-- **PR-friendly flow**: keep auto-merge OFF on subtasks whose branches you want to land via PR or manual review.
-- **Automatic cleanup**: worktree directories are cleaned up after the Run ends.
-
-### 🎨 Flow Runtime Collaboration Architecture (EN)
+- **Upstream context for every subtask**: for each direct dependency, a subtask is injected with the upstream **agent id, worktree path, branch and base branch**, so it can flexibly build on that work — inspect it, merge that branch, or raise a PR for it — driven entirely by your task description.
+- **Cross-branch collaboration in plain language**: in a downstream task, just write *"merge upstream agent X's worktree branch into branch Y"* or *"open a PR for X"*.
+- **Built-in lock = absolute parallel-merge reliability**: many branches can develop and merge in parallel without ever racing or corrupting the repo. Whether the scheduler or an agent merges, every merge is serialized on the same lock — you can even direct cross-branch merges or PRs in plain language without risk.
+- **Per-subtask auto-merge control**: each subtask can independently toggle auto-merge into the baseline branch.
+- **Unique worktree per agent**: each agent creates its own worktree and independent branch from the baseline branch.
+- **PR-friendly flow**: for subtasks you want to land via PR or manual review, turn auto-merge OFF.
 
 ![Flow Runtime Collaboration Architecture (EN)](./docs/assets/flow-runtime-collab-en.png)
 
@@ -167,10 +164,9 @@ ClawsomeFlow is built on top of **ClawTeam**.
 | **Collaboration driver** | Agents self-poll and self-schedule in the Prompt | Server-side scheduler actively dispatches, deterministic execution |
 | **Task model** | Kanban + dependency chain | DAG Flow compilation, Leader summarizes and converges |
 | **OpenClaw adaptation** | Supported as an optional CLI Agent | Deeply adapted, resolving session and workspace concurrency conflicts |
-| **Parallel-merge reliability** | **No repo-level merge lock** — concurrent baseline merges race and can corrupt git metadata; completely uncontrolled | **Built-in cross-process repo lock guarantees the absolute reliability of parallel multi-branch development** — every merge (scheduler or agent) is serialized on the same lock, so you can even direct cross-branch merges/PRs in natural language without risk |
+| **Parallel-merge reliability** | **No repo-level merge lock** — concurrent baseline merges race and can corrupt git metadata; completely uncontrolled | **Built-in cross-process repo lock guarantees the absolute reliability of parallel multi-branch development** |
 | **Failure & guardrails** | Basic lifecycle protocol | Human checkpoints / rollback / complaint-loop / entropy management |
 | **Skill configuration** | Requires extra skill setup on the Agent platform | No extra skill configuration needed, works out of the box |
-| **Persistent specialist members** | Swarm intelligence can't flexibly schedule persistent, platform-managed agents | Create persistent members with their own expertise and continuous self-learning on **Hermes / OpenClaw / Claude Code** and more, then invoke them on demand |
 | **Usage form** | CLI + MCP + monitoring dashboard | Web UI + CLI, full-flow governance in natural language |
 
 ---

@@ -49,6 +49,7 @@ import {
   getDevMode,
   setDevMode,
 } from "@/lib/flowRuntime";
+import { ensureRepoAndListBranches } from "@/lib/flowRepoBranch";
 import {
   clearSessionBackedKeys,
   useSessionBackedModalFlag,
@@ -168,6 +169,23 @@ const newRowKey = () => Math.random().toString(36).slice(2, 10);
  *  editor session. */
 const newTaskId = () => `task-${newRowKey()}`;
 
+function repoBranchMessages(t: (key: string, opts?: Record<string, unknown>) => string) {
+  return {
+    reasonPathMissing: t("flowEditor.repoIssue.reasonPathMissing"),
+    reasonNotGitRepo: t("flowEditor.repoIssue.reasonNotGitRepo"),
+    reasonNoInitialCommit: t("flowEditor.repoIssue.reasonNoInitialCommit"),
+    reasonUnknown: t("flowEditor.repoIssue.reasonUnknown"),
+    confirmCreate: (args: { agentId: string; repo: string; reason: string }) =>
+      t("flowEditor.taskRepoCheck.confirmCreate", args),
+    reselectHint: t("flowEditor.taskRepoCheck.reselectHint"),
+    checkFailed: (args: { message: string }) =>
+      t("flowEditor.taskRepoCheck.checkFailed", args),
+    fetchFailed: (args: { message: string }) =>
+      t("flowEditor.taskBranchCheck.fetchFailed", args),
+    stillInvalid: t("flowEditor.taskRepoCheck.stillInvalid"),
+  };
+}
+
 function blankRow(): TaskRow {
   return {
     rowKey: newRowKey(),
@@ -180,7 +198,7 @@ function blankRow(): TaskRow {
     ownerKind: "claude",
     ownerId: "",
     ownerRepo: "",
-    ownerTargetBranch: DEFAULT_TARGET_BRANCH,
+    ownerTargetBranch: "",
     // Blank rows default to the "new" source → a temporary agent.
     ownerIsTemporary: true,
     dependsOn: [],
@@ -282,11 +300,10 @@ function sameRepoPathForCompare(a: string, b: string): boolean {
 }
 
 function tempAgentValue(a: { id: string; repo: string; targetBranch: string }): string {
-  const branch = a.targetBranch.trim() || DEFAULT_TARGET_BRANCH;
   return [
     a.id.trim(),
     normalizeRepoPathForCompare(a.repo),
-    branch,
+    a.targetBranch.trim(),
   ].join(TEMP_AGENT_VALUE_SEP);
 }
 
@@ -311,7 +328,7 @@ function flowTempAgentsForKind(
     const id = r.ownerId.trim();
     if (!id) continue;
     const repo = r.ownerRepo.trim();
-    const targetBranch = r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+    const targetBranch = r.ownerTargetBranch.trim();
     const key = tempAgentValue({ id, repo, targetBranch });
     if (seen.has(key)) continue;
     seen.add(key);
@@ -319,7 +336,7 @@ function flowTempAgentsForKind(
       id,
       repo,
       targetBranch,
-      label: `${id} (${repo || "—"} @ ${targetBranch})`,
+      label: `${id} (${repo || "—"} @ ${targetBranch || "—"})`,
     });
   }
   return out;
@@ -344,7 +361,7 @@ function findFlowOwnerWorkspace(
     if (!repo) continue;
     return {
       repo: r.ownerRepo,
-      targetBranch: r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
+      targetBranch: r.ownerTargetBranch.trim(),
     };
   }
   return null;
@@ -354,8 +371,7 @@ function ownerKey(
   row: Pick<TaskRow, "ownerKind" | "ownerId" | "ownerRepo" | "ownerTargetBranch">,
 ) {
   if (isOpenclawKind(row.ownerKind)) return `openclaw:${row.ownerId.trim()}`;
-  const branch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
-  return `${row.ownerKind}:${normalizeRepoPathForCompare(row.ownerRepo)}:${branch}:${row.ownerId.trim()}`;
+  return `${row.ownerKind}:${normalizeRepoPathForCompare(row.ownerRepo)}:${row.ownerTargetBranch.trim()}:${row.ownerId.trim()}`;
 }
 
 function ownerKindLabel(
@@ -562,8 +578,7 @@ function buildExistingOwnerOptions(
   } = opts;
   const normalizedLeaderId = leaderId.trim();
   const normalizedLeaderRepo = normalizeRepoPathForCompare(leaderRepo);
-  const normalizedLeaderTargetBranch =
-    leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+  const normalizedLeaderTargetBranch = leaderTargetBranch.trim();
   const leaderKey = normalizedLeaderId
     ? (leaderKind === "openclaw"
         ? `openclaw:${normalizedLeaderId}`
@@ -596,9 +611,7 @@ function buildExistingOwnerOptions(
     const kind = r.ownerKind;
     const repoRaw = isNonOpenclawKind(kind) ? r.ownerRepo.trim() : "";
     const repo = isNonOpenclawKind(kind) ? normalizeRepoPathForCompare(repoRaw) : "";
-    const targetBranch = isNonOpenclawKind(kind)
-      ? (r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
-      : "";
+    const targetBranch = isNonOpenclawKind(kind) ? r.ownerTargetBranch.trim() : "";
     const key = isOpenclawKind(kind)
       ? `openclaw:${id}`
       : `${kind}:${id}:${repo}:${targetBranch}`;
@@ -611,7 +624,7 @@ function buildExistingOwnerOptions(
       targetBranch,
       label: isOpenclawKind(kind)
         ? `${ownerKindLabel(kind, t)} · ${id}`
-        : `${ownerKindLabel(kind, t)} · ${id} (${repoRaw || "—"} @ ${targetBranch || DEFAULT_TARGET_BRANCH})`,
+        : `${ownerKindLabel(kind, t)} · ${id} (${repoRaw || "—"} @ ${targetBranch || "—"})`,
     });
   }
 
@@ -674,11 +687,9 @@ export function FlowEditor() {
   const [leaderRepo, setLeaderRepo] = useSessionBackedState(draftKey("leaderRepo"), "");
   const [leaderTargetBranch, setLeaderTargetBranch] = useSessionBackedState(
     draftKey("leaderTargetBranch"),
-    DEFAULT_TARGET_BRANCH,
+    "",
   );
-  const [leaderBranchOptions, setLeaderBranchOptions] = useState<string[]>([
-    DEFAULT_TARGET_BRANCH,
-  ]);
+  const [leaderBranchOptions, setLeaderBranchOptions] = useState<string[]>([]);
   const [leaderBranchEditable, setLeaderBranchEditable] = useState(false);
   const [leaderBranchLoading, setLeaderBranchLoading] = useState(false);
   const [leaderPickingRepo, setLeaderPickingRepo] = useState(false);
@@ -811,9 +822,7 @@ export function FlowEditor() {
           setLeaderKind(summary.ownerKind);
           setLeaderIsTemporary(summary.ownerKind !== "openclaw" && summary.ownerIsTemporary);
           setLeaderRepo(summary.ownerRepo);
-          setLeaderTargetBranch(
-            summary.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
-          );
+          setLeaderTargetBranch(summary.ownerTargetBranch.trim());
         }
         setHydrated(true);
       })
@@ -832,7 +841,7 @@ export function FlowEditor() {
       ? leaderRepo.trim()
       : "";
     const normalizedLeaderTargetBranch = isNonOpenclawKind(leaderKind)
-      ? (leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
+      ? leaderTargetBranch.trim()
       : "";
     const normalizedLeaderTemporary = leaderKind !== "openclaw" && leaderIsTemporary;
     setTasks((rows) => {
@@ -892,50 +901,43 @@ export function FlowEditor() {
     }
     const repo = leaderRepo.trim();
     if (!repo) {
-      setLeaderBranchOptions([DEFAULT_TARGET_BRANCH]);
+      setLeaderBranchOptions([]);
       setLeaderBranchEditable(false);
-      setLeaderTargetBranch((prev) =>
-        prev.trim() === DEFAULT_TARGET_BRANCH ? prev : DEFAULT_TARGET_BRANCH,
-      );
+      setLeaderTargetBranch((prev) => (prev ? "" : prev));
       return;
     }
     let cancelled = false;
     setLeaderBranchLoading(true);
-    void api
-      .listRepoBranches({ path: repo })
-      .then((meta) => {
-        if (cancelled) return;
-        const branches = meta.branches.length > 0
-          ? meta.branches
-          : [DEFAULT_TARGET_BRANCH];
-        const fallback =
-          meta.currentBranch?.trim() || branches[0] || DEFAULT_TARGET_BRANCH;
-        setLeaderBranchOptions(branches);
-        setLeaderBranchEditable(meta.editable);
-        setLeaderTargetBranch((prev) => {
-          const current = prev.trim();
-          const next = current && branches.includes(current)
-            ? current
-            : fallback;
-          return current === next ? prev : next;
-        });
-      })
-      .catch((e) => {
-        void e;
-        if (cancelled) return;
-        setLeaderBranchOptions([DEFAULT_TARGET_BRANCH]);
-        setLeaderBranchEditable(false);
-        setLeaderTargetBranch((prev) =>
-          prev.trim() === DEFAULT_TARGET_BRANCH ? prev : DEFAULT_TARGET_BRANCH,
-        );
-      })
-      .finally(() => {
-        if (!cancelled) setLeaderBranchLoading(false);
+    void (async () => {
+      const out = await ensureRepoAndListBranches({
+        repo,
+        agentLabel: leaderId.trim() || t("flowEditor.repoIssue.unknownAgent"),
+        confirmCreate: confirm,
+        messages: repoBranchMessages(t),
       });
+      if (cancelled) return;
+      if (!out.ok) {
+        setLeaderBranchOptions([]);
+        setLeaderBranchEditable(false);
+        setLeaderBranchLoading(false);
+        return;
+      }
+      setLeaderBranchOptions(out.result.branches);
+      setLeaderBranchEditable(out.result.editable);
+      if (out.result.path && out.result.path !== leaderRepo) {
+        setLeaderRepo(out.result.path);
+      }
+      setLeaderTargetBranch((prev) => {
+        const keep =
+          prev.trim() && out.result.branches.includes(prev.trim()) ? prev.trim() : "";
+        return keep;
+      });
+      setLeaderBranchLoading(false);
+    })();
     return () => {
       cancelled = true;
     };
-  }, [leaderKind, leaderRepo]);
+  }, [confirm, leaderId, leaderKind, leaderRepo, t]);
 
   // ── derived state -------------------------------------------------
 
@@ -1185,7 +1187,7 @@ export function FlowEditor() {
     }
     setLeaderKind("openclaw");
     setLeaderRepo("");
-    setLeaderTargetBranch(DEFAULT_TARGET_BRANCH);
+    setLeaderTargetBranch("");
     setLeaderId(normalized);
   }
 
@@ -1194,7 +1196,7 @@ export function FlowEditor() {
   function commitNewTask(row: TaskRow) {
     setTasks((rows) => {
       const ownerId = row.ownerId.trim();
-      const ownerTargetBranch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+      const ownerTargetBranch = row.ownerTargetBranch.trim();
       const rowForInsert = isNonOpenclawKind(row.ownerKind)
         ? { ...row, ownerTargetBranch }
         : row;
@@ -1207,7 +1209,7 @@ export function FlowEditor() {
             r.ownerId.trim() === ownerId &&
             (
               !sameRepoPathForCompare(r.ownerRepo, row.ownerRepo) ||
-              (r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH) !== ownerTargetBranch
+              r.ownerTargetBranch.trim() !== ownerTargetBranch
             ),
         );
       const baseRows = shouldPropagateOwnerWorkspace
@@ -1239,8 +1241,7 @@ export function FlowEditor() {
       const nextId = replacement.id.trim();
       const renamed = prevId.length > 0 && nextId.length > 0 && prevId !== nextId;
       const replacementOwnerId = replacement.ownerId.trim();
-      const replacementOwnerTargetBranch =
-        replacement.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+      const replacementOwnerTargetBranch = replacement.ownerTargetBranch.trim();
       const normalizedReplacement = isNonOpenclawKind(replacement.ownerKind)
         ? {
             ...replacement,
@@ -1257,8 +1258,7 @@ export function FlowEditor() {
             r.ownerId.trim() === replacementOwnerId &&
             (
               !sameRepoPathForCompare(r.ownerRepo, replacement.ownerRepo) ||
-              (r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
-                !== replacementOwnerTargetBranch
+              r.ownerTargetBranch.trim() !== replacementOwnerTargetBranch
             ),
         );
       return rows.map((r) => {
@@ -1624,6 +1624,10 @@ export function FlowEditor() {
       }
       const repoReady = await ensureLeaderRepoReadyForDecompose();
       if (!repoReady) return;
+      if (!leaderTargetBranch.trim()) {
+        setError(t("flowEditor.validation.claudeTargetBranchRequired"));
+        return;
+      }
     }
     setError(null);
     setDecomposeOpen(true);
@@ -1640,7 +1644,10 @@ export function FlowEditor() {
         title: t("flowEditor.taskFields.pickDirTitle"),
         initialPath: leaderRepo || undefined,
       });
-      if (out.path) setLeaderRepo(out.path);
+      if (out.path) {
+        setLeaderRepo(out.path);
+        setLeaderTargetBranch("");
+      }
     } catch (e) {
       const msg =
         e instanceof ApiError
@@ -1843,7 +1850,7 @@ export function FlowEditor() {
                       if (!PERSISTENT_OWNER_KINDS.includes(leaderKind)) {
                         setLeaderKind("openclaw");
                         setLeaderRepo("");
-                        setLeaderTargetBranch(DEFAULT_TARGET_BRANCH);
+                        setLeaderTargetBranch("");
                       }
                     }
                   }}
@@ -1863,7 +1870,7 @@ export function FlowEditor() {
                     setLeaderKind(nextKind);
                     if (nextKind === "openclaw") {
                       setLeaderRepo("");
-                      setLeaderTargetBranch(DEFAULT_TARGET_BRANCH);
+                      setLeaderTargetBranch("");
                     }
                   }}
                 >
@@ -1932,7 +1939,10 @@ export function FlowEditor() {
                       <select
                         className="select"
                         value={leaderRepo}
-                        onChange={(e) => setLeaderRepo(e.target.value)}
+                        onChange={(e) => {
+                          setLeaderRepo(e.target.value);
+                          setLeaderTargetBranch("");
+                        }}
                       >
                         <option value="">
                           {t("flowEditor.taskFields.claudeRepoServerPlaceholder")}
@@ -1959,7 +1969,10 @@ export function FlowEditor() {
                         className="input flex-1"
                         value={leaderRepo}
                         placeholder={t("flowEditor.taskFields.claudeRepoPlaceholder")}
-                        onChange={(e) => setLeaderRepo(e.target.value)}
+                        onChange={(e) => {
+                          setLeaderRepo(e.target.value);
+                          setLeaderTargetBranch("");
+                        }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
                             e.preventDefault();
@@ -1983,13 +1996,16 @@ export function FlowEditor() {
                   <label className="label">{t("flowEditor.leaderTargetBranchLabel")}</label>
                   <select
                     className="select"
-                    value={leaderTargetBranch || DEFAULT_TARGET_BRANCH}
-                    disabled={!leaderBranchEditable || leaderBranchLoading}
+                    value={leaderTargetBranch}
+                    disabled={!leaderBranchEditable || leaderBranchLoading || !leaderRepo.trim()}
                     onChange={(e) => setLeaderTargetBranch(e.target.value)}
                   >
-                    {(leaderBranchOptions.length > 0
-                      ? leaderBranchOptions
-                      : [DEFAULT_TARGET_BRANCH]).map((name) => (
+                    {!leaderTargetBranch && (
+                      <option value="">
+                        {t("flowEditor.taskFields.pickBranch")}
+                      </option>
+                    )}
+                    {leaderBranchOptions.map((name) => (
                       <option key={name} value={name}>
                         {name}
                       </option>
@@ -2199,7 +2215,7 @@ export function FlowEditor() {
       </Card>
 
       {autoMergeSyncNoticeOpen && (
-        <div className="pointer-events-none fixed right-4 top-20 z-40">
+        <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center">
           <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 shadow-card">
             {t("flowEditor.taskFields.autoMergeSyncedNotice")}
           </div>
@@ -2274,7 +2290,7 @@ export function FlowEditor() {
           leaderKind={leaderKind}
           leaderId={leaderId.trim()}
           leaderRepo={leaderRepo.trim()}
-          leaderTargetBranch={leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH}
+          leaderTargetBranch={leaderTargetBranch.trim()}
           deploymentMode={deploymentMode}
           workspaceDirOptions={workspaceDirOptions}
           onSave={(row) => {
@@ -2293,7 +2309,7 @@ export function FlowEditor() {
         leaderKind={leaderKind}
         leaderId={leaderId.trim()}
         leaderRepo={leaderRepo.trim()}
-        leaderTargetBranch={leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH}
+        leaderTargetBranch={leaderTargetBranch.trim()}
         existingRows={tasks}
         openclawAgents={openclawOptions}
         onClose={() => setDecomposeOpen(false)}
@@ -2305,7 +2321,7 @@ export function FlowEditor() {
               ? leaderRepo.trim()
               : "";
             const normalizedLeaderTargetBranch = isNonOpenclawKind(leaderKind)
-              ? (leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH)
+              ? leaderTargetBranch.trim()
               : "";
             rows[idx] = {
               ...rows[idx],
@@ -2593,9 +2609,7 @@ function TaskEditModal({
   const [draft, setDraft] = useState<TaskRow>(initialRow);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [repoChecking, setRepoChecking] = useState(false);
-  const [branchOptions, setBranchOptions] = useState<string[]>([
-    initialRow.ownerTargetBranch?.trim() || DEFAULT_TARGET_BRANCH,
-  ]);
+  const [branchOptions, setBranchOptions] = useState<string[]>([]);
   const [branchEditable, setBranchEditable] = useState(
     isNonOpenclawKind(initialRow.ownerKind),
   );
@@ -2629,7 +2643,7 @@ function TaskEditModal({
     const ownerId = row.ownerId.trim();
     if (!ownerId) return false;
     const repo = row.ownerRepo.trim();
-    const targetBranch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+    const targetBranch = row.ownerTargetBranch.trim();
     return tasks.some(
       (task) =>
         task.rowKey !== initialRow.rowKey &&
@@ -2637,7 +2651,7 @@ function TaskEditModal({
         task.ownerId.trim() === ownerId &&
         (
           !sameRepoPathForCompare(task.ownerRepo, repo) ||
-          (task.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH) !== targetBranch
+          task.ownerTargetBranch.trim() !== targetBranch
         ),
     );
   }
@@ -2650,53 +2664,52 @@ function TaskEditModal({
     }
     const repo = draft.ownerRepo.trim();
     if (!repo) {
-      setBranchOptions([DEFAULT_TARGET_BRANCH]);
+      setBranchOptions([]);
       setBranchEditable(false);
       setDraft((prev) =>
-        prev.ownerTargetBranch.trim() === DEFAULT_TARGET_BRANCH
-          ? prev
-          : { ...prev, ownerTargetBranch: DEFAULT_TARGET_BRANCH },
+        prev.ownerTargetBranch ? { ...prev, ownerTargetBranch: "" } : prev,
       );
       return;
     }
     let cancelled = false;
-    const errText = (e: unknown) =>
-      e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
     setBranchLoading(true);
-    void api
-      .listRepoBranches({ path: repo })
-      .then((meta) => {
-        if (cancelled) return;
-        const branches = meta.branches.length > 0 ? meta.branches : [DEFAULT_TARGET_BRANCH];
-        const fallback = meta.currentBranch?.trim() || branches[0] || DEFAULT_TARGET_BRANCH;
-        setBranchOptions(branches);
-        setBranchEditable(meta.editable);
-        setDraft((prev) => {
-          const current = prev.ownerTargetBranch.trim();
-          const next = current && branches.includes(current) ? current : fallback;
-          return current === next
-            ? prev
-            : { ...prev, ownerTargetBranch: next };
-        });
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setBranchOptions([DEFAULT_TARGET_BRANCH]);
-        setBranchEditable(false);
-        setDraft((prev) =>
-          prev.ownerTargetBranch.trim() === DEFAULT_TARGET_BRANCH
-            ? prev
-            : { ...prev, ownerTargetBranch: DEFAULT_TARGET_BRANCH },
-        );
-        setSaveError(t("flowEditor.taskBranchCheck.fetchFailed", { message: errText(e) }));
-      })
-      .finally(() => {
-        if (!cancelled) setBranchLoading(false);
+    void (async () => {
+      const out = await ensureRepoAndListBranches({
+        repo,
+        agentLabel: draft.ownerId.trim() || t("flowEditor.repoIssue.unknownAgent"),
+        confirmCreate: confirm,
+        messages: repoBranchMessages(t),
       });
+      if (cancelled) return;
+      if (!out.ok) {
+        setBranchOptions([]);
+        setBranchEditable(false);
+        if (!out.cancelled && out.error) {
+          setSaveError(out.error);
+        }
+        setBranchLoading(false);
+        return;
+      }
+      setBranchOptions(out.result.branches);
+      setBranchEditable(out.result.editable);
+      setDraft((prev) => {
+        const nextRepo = out.result.path || repo;
+        const keepBranch =
+          prev.ownerTargetBranch.trim()
+          && out.result.branches.includes(prev.ownerTargetBranch.trim())
+            ? prev.ownerTargetBranch.trim()
+            : "";
+        if (prev.ownerRepo === nextRepo && prev.ownerTargetBranch === keepBranch) {
+          return prev;
+        }
+        return { ...prev, ownerRepo: nextRepo, ownerTargetBranch: keepBranch };
+      });
+      setBranchLoading(false);
+    })();
     return () => {
       cancelled = true;
     };
-  }, [draft.ownerKind, draft.ownerRepo, t]);
+  }, [confirm, draft.ownerId, draft.ownerKind, draft.ownerRepo, t]);
 
   async function ensureNonOpenclawRepoReady(
     row: TaskRow,
@@ -2704,100 +2717,30 @@ function TaskEditModal({
     if (isOpenclawKind(row.ownerKind)) return row;
     const repo = row.ownerRepo.trim();
     if (!repo) return row;
-    const targetBranch = row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
-
-    const agentLabel = row.ownerId.trim() || t("flowEditor.repoIssue.unknownAgent");
-    const errText = (e: unknown) =>
-      e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
-
-    let checked;
-    try {
-      checked = await api.ensureGitRepo({
-        path: repo,
-        createDirIfMissing: false,
-        initializeIfMissing: false,
-      });
-    } catch (e) {
-      setSaveError(t("flowEditor.taskRepoCheck.checkFailed", { message: errText(e) }));
+    const branch = row.ownerTargetBranch.trim();
+    if (!branch) {
+      setSaveError(t("flowEditor.taskFieldRequired"));
       return null;
     }
-
-    const resolvedPath = checked.path || repo;
-    if (checked.pathExists && checked.isGitRepo && checked.hasInitialCommit) {
-      if (
-        resolvedPath === row.ownerRepo
-        && targetBranch === row.ownerTargetBranch
-      ) {
-        return row;
-      }
-      return {
-        ...row,
-        ownerRepo: resolvedPath,
-        ownerTargetBranch: targetBranch,
-      };
-    }
-    const reason = !checked.pathExists
-      ? t("flowEditor.repoIssue.reasonPathMissing")
-      : !checked.isGitRepo
-      ? t("flowEditor.repoIssue.reasonNotGitRepo")
-      : !checked.hasInitialCommit
-      ? t("flowEditor.repoIssue.reasonNoInitialCommit")
-      : t("flowEditor.repoIssue.reasonUnknown");
-    const shouldCreate = await confirm(
-      t("flowEditor.taskRepoCheck.confirmCreate", {
-        agentId: agentLabel,
-        repo: resolvedPath,
-        reason,
-      }),
-    );
-    if (!shouldCreate) {
-      setSaveError(t("flowEditor.taskRepoCheck.reselectHint"));
+    const out = await ensureRepoAndListBranches({
+      repo,
+      agentLabel: row.ownerId.trim() || t("flowEditor.repoIssue.unknownAgent"),
+      confirmCreate: confirm,
+      messages: repoBranchMessages(t),
+    });
+    if (!out.ok) {
+      if (out.error) setSaveError(out.error);
       return null;
     }
-    try {
-      const ensured = await api.ensureGitRepo({
-        path: resolvedPath,
-        createDirIfMissing: true,
-        initializeIfMissing: true,
-        createInitialCommitIfMissing: true,
-      });
-      if (!ensured.isGitRepo || !ensured.hasInitialCommit) {
-        setSaveError(t("flowEditor.taskRepoCheck.stillInvalid"));
-        return null;
-      }
-      const normalizedPath = ensured.path || resolvedPath;
-      let ownerTargetBranch = targetBranch;
-      if (ensured.initializedRepo || ensured.createdInitialCommit) {
-        const fromEnsure = ensured.currentBranch?.trim();
-        if (fromEnsure) {
-          ownerTargetBranch = fromEnsure;
-        } else {
-          try {
-            const meta = await api.listRepoBranches({ path: normalizedPath });
-            ownerTargetBranch =
-              meta.currentBranch?.trim()
-              || meta.branches[0]
-              || DEFAULT_TARGET_BRANCH;
-          } catch {
-            ownerTargetBranch = DEFAULT_TARGET_BRANCH;
-          }
-        }
-      }
-      if (
-        normalizedPath === row.ownerRepo
-        && ownerTargetBranch === row.ownerTargetBranch
-      ) {
-        return row;
-      }
-      return {
-        ...row,
-        ownerRepo: normalizedPath,
-        ownerTargetBranch,
-      };
-    } catch (e) {
-      setSaveError(t("flowEditor.taskRepoCheck.createFailed", { message: errText(e) }));
+    if (!out.result.branches.includes(branch)) {
+      setSaveError(t("flowEditor.taskBranchCheck.notFound"));
       return null;
     }
+    return {
+      ...row,
+      ownerRepo: out.result.path || repo,
+      ownerTargetBranch: branch,
+    };
   }
 
   async function attemptSave() {
@@ -2883,7 +2826,7 @@ function TaskEditModal({
               ownerKind: draft.ownerKind === "openclaw" ? "claude" : draft.ownerKind,
               ownerId: "",
               ownerRepo: "",
-              ownerTargetBranch: DEFAULT_TARGET_BRANCH,
+              ownerTargetBranch: "",
               ownerIsTemporary: true,
             });
             return;
@@ -2900,7 +2843,7 @@ function TaskEditModal({
             ownerRepo: nextKind === "openclaw" ? "" : draft.ownerRepo,
             ownerTargetBranch:
               nextKind === "openclaw"
-                ? DEFAULT_TARGET_BRANCH
+                ? ""
                 : draft.ownerTargetBranch,
             ownerIsTemporary: false,
           });
@@ -2974,6 +2917,10 @@ function TaskFormBody({
     ? t("flowEditor.taskBranchCheck.editableHint")
     : "";
 
+  function patchOwnerRepo(repo: string) {
+    onChange({ ownerRepo: repo, ownerTargetBranch: "" });
+  }
+
   const remoteBrowser = isRemoteBrowser();
 
   // Dependable list = every other non-summary task. Keeping summary tasks
@@ -2996,7 +2943,7 @@ function TaskFormBody({
         title: t("flowEditor.taskFields.pickDirTitle"),
         initialPath: row.ownerRepo || undefined,
       });
-      if (out.path) onChange({ ownerRepo: out.path });
+      if (out.path) patchOwnerRepo(out.path);
     } catch (e) {
       // Backend without a GUI display (the typical headless server case)
       // returns DIRECTORY_PICKER_UNAVAILABLE with a human-readable detail.
@@ -3035,6 +2982,11 @@ function TaskFormBody({
       </div>
       <div className="md:col-span-2">
         <label className="label">{t("flowEditor.taskFields.description")}</label>
+        {!isSummary && (
+          <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2 mb-2">
+            {t("flowEditor.taskFields.descriptionCollabHint")}
+          </div>
+        )}
         <textarea
           className="textarea h-24"
           placeholder={t("flowEditor.taskFields.descriptionPlaceholder")}
@@ -3047,9 +2999,6 @@ function TaskFormBody({
             {t("flowEditor.taskFields.summaryDescriptionHint")}
           </div>
         )}
-        <div className="text-xs text-ink-500 mt-1">
-          {t("flowEditor.taskFields.descriptionCollabHint")}
-        </div>
       </div>
       <div className="md:col-span-2">
         <label className="label">
@@ -3101,7 +3050,7 @@ function TaskFormBody({
               ownerKind: nextKind,
               ownerId: "",
               ...(nextKind === "openclaw"
-                ? { ownerRepo: "", ownerTargetBranch: DEFAULT_TARGET_BRANCH }
+                ? { ownerRepo: "", ownerTargetBranch: "" }
                 : {}),
             });
           }}
@@ -3141,8 +3090,7 @@ function TaskFormBody({
               ? tempAgentValue({
                   id: row.ownerId.trim(),
                   repo: row.ownerRepo.trim(),
-                  targetBranch:
-                    row.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
+                  targetBranch: row.ownerTargetBranch.trim(),
                 })
               : "";
             const selectValue = opts.some((o) => tempAgentValue(o) === current)
@@ -3250,7 +3198,7 @@ function TaskFormBody({
                     className="select"
                     value={row.ownerRepo}
                     disabled={ownerLocked}
-                    onChange={(e) => onChange({ ownerRepo: e.target.value })}
+                    onChange={(e) => patchOwnerRepo(e.target.value)}
                   >
                     <option value="">
                       {t("flowEditor.taskFields.claudeRepoServerPlaceholder")}
@@ -3278,7 +3226,7 @@ function TaskFormBody({
                     placeholder={t("flowEditor.taskFields.claudeRepoPlaceholder")}
                     value={row.ownerRepo}
                     readOnly={ownerLocked}
-                    onChange={(e) => onChange({ ownerRepo: e.target.value })}
+                    onChange={(e) => patchOwnerRepo(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         e.preventDefault();
@@ -3304,11 +3252,16 @@ function TaskFormBody({
               </label>
               <select
                 className="select"
-                value={row.ownerTargetBranch || DEFAULT_TARGET_BRANCH}
-                disabled={ownerLocked || !branchEditable || branchLoading}
+                value={row.ownerTargetBranch}
+                disabled={ownerLocked || !branchEditable || branchLoading || !row.ownerRepo.trim()}
                 onChange={(e) => onChange({ ownerTargetBranch: e.target.value })}
               >
-                {(branchOptions.length > 0 ? branchOptions : [DEFAULT_TARGET_BRANCH]).map((name) => (
+                {!row.ownerTargetBranch && (
+                  <option value="">
+                    {t("flowEditor.taskFields.pickBranch")}
+                  </option>
+                )}
+                {branchOptions.map((name) => (
                   <option key={name} value={name}>
                     {name}
                   </option>
@@ -4170,7 +4123,7 @@ function validate(
     if (isNonOpenclawKind(r.ownerKind) && r.ownerId.trim()) {
       const ownerKey = `${r.ownerKind}:${r.ownerId.trim()}`;
       const repo = r.ownerRepo.trim();
-      const branch = r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+      const branch = r.ownerTargetBranch.trim();
       const prev = ownerRepoBranch.get(ownerKey);
       if (!prev) {
         ownerRepoBranch.set(ownerKey, { repo, branch });
@@ -4272,7 +4225,7 @@ function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
             kind: r.ownerKind as AgentKind,
             isLeader,
             repo: r.ownerRepo.trim(),
-            targetBranch: r.ownerTargetBranch.trim() || DEFAULT_TARGET_BRANCH,
+            targetBranch: r.ownerTargetBranch.trim(),
             isTemporary: !!r.ownerIsTemporary,
           };
     byKey.set(k, agent);
@@ -4354,6 +4307,7 @@ function DecomposeModal({
   const [retrySeq, setRetrySeq] = useState(0);
   const [localTimeout, setLocalTimeout] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [applying, setApplying] = useState(false);
   const [confirmCloseOpen, setConfirmCloseOpen] = useState(false);
   const [dispatchStarted, setDispatchStarted] = useState(false);
   /** Wall-clock seconds since the modal opened. Drives the "elapsed
@@ -4387,8 +4341,7 @@ function DecomposeModal({
     const normalizedGoal = goal.trim();
     const normalizedLeaderId = leaderId.trim();
     const normalizedLeaderRepo = leaderRepo.trim();
-    const normalizedLeaderTargetBranch =
-      leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
+    const normalizedLeaderTargetBranch = leaderTargetBranch.trim();
     // Refresh restore path: if a request id is already persisted and this
     // isn't an explicit retry, re-attach polling instead of starting again.
     if (requestId && retrySeq === 0) return;
@@ -4508,11 +4461,20 @@ function DecomposeModal({
   }, [localTimeout, requestId]);
 
   function applyProposal() {
-    if (!status?.resultAgents || !status?.resultTasks) return;
-    onApply({
-      agents: status.resultAgents,
-      tasks: status.resultTasks,
-    });
+    if (!requestId || !status?.resultAgents || !status?.resultTasks) return;
+    setApplying(true);
+    setError(null);
+    void api
+      .applyDecompose(requestId)
+      .then((r) => {
+        onApply({ agents: r.agents, tasks: r.tasks });
+      })
+      .catch((e) => {
+        setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+      })
+      .finally(() => {
+        setApplying(false);
+      });
   }
 
   function retryDecompose() {
@@ -4618,8 +4580,12 @@ function DecomposeModal({
               >
                 {t("common.close")}
               </button>
-              <button className="btn-primary" onClick={applyProposal}>
-                ⬇ {t("flowEditor.decompose.apply")}
+              <button
+                className="btn-primary"
+                onClick={applyProposal}
+                disabled={applying}
+              >
+                ⬇ {applying ? t("flowEditor.decompose.applying") : t("flowEditor.decompose.apply")}
               </button>
             </div>
           </>
@@ -4741,7 +4707,7 @@ function rowsToHintAgents(rows: TaskRow[]): Record<string, unknown>[] {
       kind: r.ownerKind,
       repo: isNonOpenclawKind(r.ownerKind) ? r.ownerRepo : null,
       targetBranch: isNonOpenclawKind(r.ownerKind)
-        ? (r.ownerTargetBranch || DEFAULT_TARGET_BRANCH)
+        ? r.ownerTargetBranch.trim()
         : null,
       isLeader: r.isLeaderSummary,
     });
@@ -4765,9 +4731,11 @@ function proposalToRows(
     if (!aid) continue;
     const kind: OwnerKind = toOwnerKind(a.kind);
     const repo = String(a.repo ?? "");
-    const targetBranch = String(
-      a.targetBranch ?? a.target_branch ?? DEFAULT_TARGET_BRANCH,
-    ).trim() || DEFAULT_TARGET_BRANCH;
+    const rawBranch = a.targetBranch ?? a.target_branch;
+    const targetBranch =
+      rawBranch === null || rawBranch === undefined
+        ? ""
+        : String(rawBranch).trim();
     // Temporariness is derived from the registry, NOT from the decomposer's
     // self-reported flag (which it often gets wrong). A Hermes agent is
     // persistent ONLY when it matches a registered managed Hermes profile; an
@@ -4794,7 +4762,7 @@ function proposalToRows(
     const meta = byId.get(ownerId) ?? {
       kind: "claude" as OwnerKind,
       repo: "",
-      targetBranch: DEFAULT_TARGET_BRANCH,
+      targetBranch: "",
       isTemporary: true,
     };
     const dependsOn = Array.isArray(tk.dependsOn ?? tk.depends_on)
@@ -4816,7 +4784,7 @@ function proposalToRows(
       ownerId,
       ownerRepo: isNonOpenclawKind(meta.kind) ? meta.repo : "",
       ownerTargetBranch: isNonOpenclawKind(meta.kind)
-        ? (meta.targetBranch || DEFAULT_TARGET_BRANCH)
+        ? meta.targetBranch
         : "",
       ownerIsTemporary: meta.kind !== "openclaw" && meta.isTemporary,
       dependsOn,
@@ -4847,7 +4815,7 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       ownerId: tk.ownerAgentId,
       ownerRepo: isNonOpenclawKind(ownerKind) ? a?.repo ?? "" : "",
       ownerTargetBranch: isNonOpenclawKind(ownerKind)
-        ? (a?.targetBranch ?? DEFAULT_TARGET_BRANCH)
+        ? (a?.targetBranch ?? "")
         : "",
       // OpenClaw is never temporary; otherwise honor the persisted flag. A
       // MISSING flag (legacy pre-0.1.13 spec) defaults to temporary — matching
