@@ -49,9 +49,8 @@ Options:
 
 Result:
   - Installs Python 3.11 runtime.
+  - Installs clawteam ≥0.3 (git clone when PyPI only has ≤0.2.x) before clawsomeflow.
   - Installs latest stable clawsomeflow release into ~/.clawsomeflow/.venv (or prerelease with --pre).
-  - Installs git + tmux when a supported package manager is available.
-  - Installs latest clawteam from PyPI (no version pin) and verifies runtime + clawteam-mcp + MCP 1.x SDK.
   - OpenClaw / Claude / Codex / Cursor / Hermes are optional runtimes (not auto-installed by this script).
   - Writes launcher shims into ~/.local/bin (csflow / clawsomeflow / clawteam).
   - First-time install initializes ~/.clawsomeflow; rerun performs in-place upgrade.
@@ -198,18 +197,19 @@ ensure_runtime_venv() {
 }
 
 install_clawsomeflow() {
-  say "[4/10] Installing clawsomeflow into runtime venv"
+  say "[5/10] Installing clawsomeflow into runtime venv"
   local channel_label="stable"
   if [[ "${USE_PRE}" == "1" ]]; then
     channel_label="pre-release"
     "${VENV_BIN}/pip" install --upgrade --index-url "${PYPI_INDEX_URL}" --pre clawsomeflow || \
       fail "Failed to install clawsomeflow from PyPI (--pre)."
-    # --pre applies to the whole dependency tree; re-pin MCP 1.x explicitly.
-    ensure_mcp_sdk_compatible || true
   else
     install_latest_stable_clawsomeflow || \
       fail "Failed to install clawsomeflow from PyPI."
   fi
+  # ClawsomeFlow install may re-resolve deps (notably mcp with --pre); re-pin 1.x.
+  ensure_mcp_sdk_compatible
+  ensure_clawteam_stack 1
   local installed_version
   installed_version="$("${VENV_BIN}/csflow" version 2>/dev/null || true)"
   [[ -n "${installed_version}" ]] || fail "Failed to detect installed clawsomeflow version."
@@ -302,12 +302,31 @@ _try_install_pinned_stable_quietly() {
 
 ensure_mcp_sdk_compatible() {
   say "  -> pinning MCP Python SDK to 1.x (clawteam-mcp compatibility)"
+  "${VENV_BIN}/pip" install --upgrade 'mcp>=1.0.0,<2.0.0' \
+    || fail "Failed to pin MCP Python SDK to 1.x (clawteam-mcp compatibility)."
+  local mcp_ver=""
+  mcp_ver="$("${VENV_BIN}/pip" show mcp 2>/dev/null | sed -n 's/^Version: //p' | head -1)"
+  if [[ -n "${mcp_ver}" ]]; then
+    local major="${mcp_ver%%.*}"
+    if [[ "${major}" =~ ^[0-9]+$ ]] && (( major >= 2 )); then
+      fail "MCP Python SDK is incompatible with clawteam-mcp (need mcp>=1,<2)."
+    fi
+    return
+  fi
   if ! "${VENV_BIN}/python" - <<'PY'
-from app.integrations.mcp_compat import ensure_mcp_sdk_compatible
+import importlib.metadata as md
+import re
 import sys
-ok, detail = ensure_mcp_sdk_compatible()
-if not ok:
-    print(detail or "mcp sdk incompatible", file=sys.stderr)
+
+try:
+    raw = md.version("mcp")
+except md.PackageNotFoundError:
+    print("mcp package not installed after pip pin", file=sys.stderr)
+    raise SystemExit(1)
+major_match = re.search(r"(\d+)", raw)
+major = int(major_match.group(1)) if major_match else -1
+if major >= 2:
+    print(f"incompatible mcp {raw} (need 1.x)", file=sys.stderr)
     raise SystemExit(1)
 PY
   then
@@ -315,48 +334,68 @@ PY
   fi
 }
 
-ensure_clawteam_runtime() {
-  say "[5/10] Ensuring clawteam runtime capability"
-  if [[ -x "${VENV_BIN}/clawteam" ]] && "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1; then
-    :
-  else
-    local source_override="${CSFLOW_CLAWTEAM_SOURCE:-}"
-    if [[ -n "${source_override}" ]]; then
-      say "  -> trying configured clawteam source: ${source_override}"
-      "${VENV_BIN}/pip" install --upgrade "${source_override}" \
-        || fail "clawteam install from CSFLOW_CLAWTEAM_SOURCE failed"
-    elif [[ -f "${LOCAL_CLAWTEAM_SOURCE}/pyproject.toml" ]]; then
-      say "  -> trying local clawteam source: ${LOCAL_CLAWTEAM_SOURCE}"
-      "${VENV_BIN}/pip" install --upgrade "${LOCAL_CLAWTEAM_SOURCE}" \
-        || fail "clawteam install from local source failed"
-    else
-      say "  -> trying PyPI clawteam"
-      if ! "${VENV_BIN}/pip" install --upgrade --index-url "${PYPI_INDEX_URL}" clawteam; then
-        warn "PyPI clawteam install failed, will fallback to git clone source install."
-      fi
-    fi
+_clawteam_stack_ready() {
+  [[ -x "${VENV_BIN}/clawteam" ]] \
+    && "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1 \
+    && [[ -x "${VENV_BIN}/clawteam-mcp" ]]
+}
 
-    if ! [[ -x "${VENV_BIN}/clawteam" ]] || ! "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1; then
-      say "  -> PyPI/local clawteam lacks runtime, cloning upstream source"
-      local tmp_dir
-      tmp_dir="$(mktemp -d)"
-      if ! git clone --depth 1 https://github.com/HKUDS/ClawTeam.git "${tmp_dir}/ClawTeam"; then
-        rm -rf "${tmp_dir}"
-        fail "clawteam git clone failed"
-      fi
-      if ! "${VENV_BIN}/pip" install --upgrade "${tmp_dir}/ClawTeam"; then
-        rm -rf "${tmp_dir}"
-        fail "clawteam install from cloned source failed"
-      fi
-      rm -rf "${tmp_dir}"
+_install_clawteam_from_git() {
+  say "  -> cloning upstream ClawTeam source (PyPI may only ship ≤0.2.x)"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  if ! git clone --depth 1 https://github.com/HKUDS/ClawTeam.git "${tmp_dir}/ClawTeam"; then
+    rm -rf "${tmp_dir}"
+    fail "clawteam git clone failed (git and network required for clawteam ≥0.3)"
+  fi
+  if ! "${VENV_BIN}/pip" install --upgrade "${tmp_dir}/ClawTeam"; then
+    rm -rf "${tmp_dir}"
+    fail "clawteam install from cloned source failed"
+  fi
+  rm -rf "${tmp_dir}"
+}
+
+ensure_clawteam_stack() {
+  local pin_mcp="${1:-1}"
+  if _clawteam_stack_ready; then
+    if [[ "${pin_mcp}" == "1" ]]; then
+      ensure_mcp_sdk_compatible
     fi
+    return
+  fi
+
+  local source_override="${CSFLOW_CLAWTEAM_SOURCE:-}"
+  if [[ -n "${source_override}" ]]; then
+    say "  -> trying configured clawteam source: ${source_override}"
+    "${VENV_BIN}/pip" install --upgrade "${source_override}" \
+      || fail "clawteam install from CSFLOW_CLAWTEAM_SOURCE failed"
+  elif [[ -f "${LOCAL_CLAWTEAM_SOURCE}/pyproject.toml" ]]; then
+    say "  -> trying local clawteam source: ${LOCAL_CLAWTEAM_SOURCE}"
+    "${VENV_BIN}/pip" install --upgrade "${LOCAL_CLAWTEAM_SOURCE}" \
+      || fail "clawteam install from local source failed"
+  else
+    say "  -> trying PyPI clawteam (may be ≤0.2.x; will upgrade from git when needed)"
+    if ! "${VENV_BIN}/pip" install --upgrade --index-url "${PYPI_INDEX_URL}" clawteam; then
+      warn "PyPI clawteam install failed, will fallback to git clone source install."
+    fi
+  fi
+
+  if ! _clawteam_stack_ready; then
+    _install_clawteam_from_git
   fi
 
   [[ -x "${VENV_BIN}/clawteam" ]] || fail "clawteam install failed (binary missing)"
   "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1 \
     || fail "clawteam installed but runtime command missing"
-  ensure_mcp_sdk_compatible
+  if [[ "${pin_mcp}" == "1" ]]; then
+    ensure_mcp_sdk_compatible
+  fi
   [[ -x "${VENV_BIN}/clawteam-mcp" ]] || fail "clawteam-mcp missing after clawteam install (need clawteam ≥ 0.3)"
+}
+
+ensure_clawteam_runtime() {
+  say "[4/10] Ensuring clawteam runtime capability (≥0.3, before clawsomeflow)"
+  ensure_clawteam_stack 0
   say "  ✓ clawteam runtime + clawteam-mcp available"
 }
 
@@ -403,6 +442,8 @@ reconcile_installation() {
       "${VENV_BIN}/csflow" install --no-restart-service || fail "csflow install failed"
     fi
   fi
+  # upgrade-runtime / install may pip-touch the venv; re-verify clawteam stack.
+  ensure_clawteam_stack 1
 }
 
 write_user_service() {
@@ -469,11 +510,29 @@ enable_linger_if_possible() {
 
 verify_runtime_stack() {
   say "[9/10] Preflight: verifying required runtime stack"
-  if ! "${VENV_BIN}/python" - <<'PY'
+  command -v git >/dev/null 2>&1 || fail "git is required but not found in PATH."
+  command -v tmux >/dev/null 2>&1 || fail "tmux is required but not found in PATH."
+  ensure_clawteam_stack
+  if ! PATH="${VENV_BIN}:${HOME}/.local/bin:${PATH}" \
+    CSFLOW_HOME="${CSFLOW_HOME}" \
+    CSFLOW_VENV_DIR="${VENV_DIR}" \
+    "${VENV_BIN}/python" -c "import app.cli.deps" 2>/dev/null; then
+    say "  ✓ python, git, tmux, clawteam (+ MCP 1.x / clawteam-mcp)"
+    return
+  fi
+  if ! PATH="${VENV_BIN}:${HOME}/.local/bin:${PATH}" \
+    CSFLOW_HOME="${CSFLOW_HOME}" \
+    CSFLOW_VENV_DIR="${VENV_DIR}" \
+    "${VENV_BIN}/python" - <<'PY'
 from app.cli.deps import fatal_missing, run_all
 import sys
-missing = fatal_missing(run_all())
+results = run_all()
+missing = fatal_missing(results)
 if missing:
+    for name in missing:
+        status = results[name]
+        detail = status.detail or status.install_hint or "(no detail)"
+        print(f"  - {name}: {detail}", file=sys.stderr)
     print("Missing required dependencies:", ", ".join(missing), file=sys.stderr)
     raise SystemExit(1)
 PY
@@ -541,8 +600,8 @@ ensure_local_bin_in_path
 ensure_python311
 ensure_os_packages
 ensure_runtime_venv
-install_clawsomeflow
 ensure_clawteam_runtime
+install_clawsomeflow
 install_launchers
 reconcile_installation
 write_user_service

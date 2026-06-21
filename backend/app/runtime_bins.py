@@ -41,6 +41,20 @@ def current_entrypoint_bindir() -> Path | None:
     return None
 
 
+def _managed_venv_bindir() -> Path | None:
+    """``~/.clawsomeflow/.venv/bin`` when present (upgrade/doctor preflight)."""
+    override = os.environ.get("CSFLOW_VENV_DIR", "").strip()
+    if override:
+        bindir = Path(override).expanduser() / "bin"
+        if bindir.is_dir():
+            return bindir
+    home = os.environ.get("CSFLOW_HOME", "").strip()
+    if not home:
+        home = str(Path.home() / ".clawsomeflow")
+    bindir = Path(home).expanduser() / ".venv" / "bin"
+    return bindir if bindir.is_dir() else None
+
+
 def resolve_binary(name: str) -> str | None:
     """Resolve *name* with stable precedence.
 
@@ -59,6 +73,12 @@ def resolve_binary(name: str) -> str | None:
         found = shutil.which(overridden)
         if found:
             return found
+
+    managed_dir = _managed_venv_bindir()
+    if managed_dir is not None:
+        managed_sibling = managed_dir / name
+        if _is_executable(managed_sibling):
+            return str(managed_sibling.resolve())
 
     entrypoint_dir = current_entrypoint_bindir()
     if entrypoint_dir:

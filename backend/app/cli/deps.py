@@ -401,23 +401,25 @@ def check_clawteam() -> Status:
             detail="`clawteam` CLI not found.",
             install_hint=_hint_for("clawteam"),
         )
-    out = _run([clawteam_bin, "--version"])
-    if out is None:
-        return Status(
-            name="clawteam", ok=False, found_version=None,
-            detail=f"`clawteam` executable is unusable: {clawteam_bin}",
-            install_hint=_hint_for("clawteam"),
-        )
     runtime_help = _run([clawteam_bin, "runtime", "--help"])
     if runtime_help is None:
+        out = _run([clawteam_bin, "--version"])
+        version_hint = out or clawteam_bin
         return Status(
             name="clawteam", ok=False, found_version=out,
             detail=(
                 "Installed clawteam lacks `runtime` subcommand "
-                f"(resolved binary: {clawteam_bin})."
+                f"(resolved binary: {version_hint})."
             ),
             install_hint=_hint_for("clawteam"),
         )
+    # ``runtime`` is the hard gate (matches install-user.sh). ``--version`` is
+    # best-effort only — some installs (notably older macOS venv layouts) answer
+    # ``runtime --help`` but hang or fail on ``--version``.
+    out = (
+        _run([clawteam_bin, "--version"])
+        or f"{Path(clawteam_bin).name} (runtime OK; version output unavailable)"
+    )
     if not mcp_sdk_compatible():
         return Status(
             name="clawteam",

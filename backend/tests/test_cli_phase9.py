@@ -69,10 +69,10 @@ def test_deps_check_clawteam_uses_resolved_binary(
 
     def _fake_run(cmd: list[str], timeout: float = 5.0) -> str | None:
         calls.append(cmd)
-        if cmd == ["/opt/runtime/bin/clawteam", "--version"]:
-            return "clawteam 0.3.0"
         if cmd == ["/opt/runtime/bin/clawteam", "runtime", "--help"]:
             return "usage"
+        if cmd == ["/opt/runtime/bin/clawteam", "--version"]:
+            return "clawteam 0.3.0"
         return None
 
     monkeypatch.setattr(
@@ -92,9 +92,39 @@ def test_deps_check_clawteam_uses_resolved_binary(
     status = deps_mod.check_clawteam()
     assert status.ok is True
     assert calls[:2] == [
-        ["/opt/runtime/bin/clawteam", "--version"],
         ["/opt/runtime/bin/clawteam", "runtime", "--help"],
+        ["/opt/runtime/bin/clawteam", "--version"],
     ]
+
+
+def test_deps_check_clawteam_passes_when_version_unavailable_but_runtime_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.cli import deps as deps_mod
+
+    monkeypatch.setattr(
+        deps_mod,
+        "resolve_binary",
+        lambda name: (
+            "/opt/runtime/bin/clawteam"
+            if name == "clawteam"
+            else "/opt/runtime/bin/clawteam-mcp"
+            if name == "clawteam-mcp"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        deps_mod,
+        "_run",
+        lambda cmd, timeout=5.0: (
+            "usage" if cmd == ["/opt/runtime/bin/clawteam", "runtime", "--help"] else None
+        ),
+    )
+    monkeypatch.setattr(deps_mod, "mcp_sdk_compatible", lambda: True)
+
+    status = deps_mod.check_clawteam()
+    assert status.ok is True
+    assert "version output unavailable" in (status.found_version or "")
 
 
 def test_deps_check_clawteam_fails_on_mcp2_alpha(

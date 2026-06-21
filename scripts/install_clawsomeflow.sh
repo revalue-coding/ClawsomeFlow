@@ -110,8 +110,79 @@ ensure_local_bin_in_path() {
   esac
 }
 
-clawteam_runtime_ready() {
-  [[ -x "$VENV_DIR/bin/clawteam" ]] && "$VENV_DIR/bin/clawteam" runtime --help >/dev/null 2>&1
+clawteam_stack_ready() {
+  [[ -x "$VENV_DIR/bin/clawteam" ]] \
+    && "$VENV_DIR/bin/clawteam" runtime --help >/dev/null 2>&1 \
+    && [[ -x "$VENV_DIR/bin/clawteam-mcp" ]]
+}
+
+install_clawteam_stack() {
+  local pin_mcp="${1:-1}"
+  if clawteam_stack_ready; then
+    if [[ "${pin_mcp}" == "1" ]]; then
+      ensure_mcp_sdk_compatible || return 1
+    fi
+    return 0
+  fi
+
+  if [[ -n "${CSFLOW_CLAWTEAM_SOURCE:-}" ]]; then
+    "$VENV_DIR/bin/pip" install --upgrade "${CSFLOW_CLAWTEAM_SOURCE}" || return 1
+  elif [[ -f "${LOCAL_CLAWTEAM_SOURCE}/pyproject.toml" ]]; then
+    "$VENV_DIR/bin/pip" install --upgrade "${LOCAL_CLAWTEAM_SOURCE}" || return 1
+  else
+    "$VENV_DIR/bin/pip" install --upgrade --index-url "$PYPI_INDEX_URL" clawteam || true
+  fi
+
+  if ! clawteam_stack_ready; then
+    tmp_dir="$(mktemp -d)"
+    if ! git clone --depth 1 https://github.com/HKUDS/ClawTeam.git "${tmp_dir}/ClawTeam"; then
+      rm -rf "${tmp_dir}"
+      echo "clawteam git clone failed." >&2
+      return 1
+    fi
+    if ! "$VENV_DIR/bin/pip" install --upgrade "${tmp_dir}/ClawTeam"; then
+      rm -rf "${tmp_dir}"
+      echo "clawteam install from cloned source failed." >&2
+      return 1
+    fi
+    rm -rf "${tmp_dir}"
+  fi
+
+  "$VENV_DIR/bin/clawteam" runtime --help >/dev/null 2>&1 || return 1
+  if [[ "${pin_mcp}" == "1" ]]; then
+    ensure_mcp_sdk_compatible || return 1
+  fi
+  [[ -x "$VENV_DIR/bin/clawteam-mcp" ]] || return 1
+}
+
+ensure_mcp_sdk_compatible() {
+  "$VENV_DIR/bin/pip" install --upgrade 'mcp>=1.0.0,<2.0.0' || return 1
+  local mcp_ver=""
+  mcp_ver="$("$VENV_DIR/bin/pip" show mcp 2>/dev/null | sed -n 's/^Version: //p' | head -1)"
+  if [[ -n "${mcp_ver}" ]]; then
+    local major="${mcp_ver%%.*}"
+    if [[ "${major}" =~ ^[0-9]+$ ]] && (( major >= 2 )); then
+      return 1
+    fi
+    return 0
+  fi
+  if ! "$VENV_DIR/bin/python" - <<'PY'
+import importlib.metadata as md
+import re
+import sys
+
+try:
+    raw = md.version("mcp")
+except md.PackageNotFoundError:
+    raise SystemExit(1)
+major_match = re.search(r"(\d+)", raw)
+major = int(major_match.group(1)) if major_match else -1
+if major >= 2:
+    raise SystemExit(1)
+PY
+  then
+    return 1
+  fi
 }
 
 probe_existing_deployment() {
@@ -291,17 +362,6 @@ ensure_os_packages() {
   echo "Warning: git and tmux are required but could not be auto-installed." >&2
 }
 
-ensure_mcp_sdk_compatible() {
-  "$VENV_DIR/bin/python" - <<'PY'
-from app.integrations.mcp_compat import ensure_mcp_sdk_compatible
-import sys
-ok, detail = ensure_mcp_sdk_compatible()
-if not ok:
-    print(detail or "mcp sdk incompatible", file=sys.stderr)
-    raise SystemExit(1)
-PY
-}
-
 probe_existing_deployment
 ensure_os_packages
 mkdir -p "$(dirname "$VENV_DIR")"
@@ -310,12 +370,13 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
 fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
 
+if ! install_clawteam_stack 0; then
+  echo "Failed to install clawteam ≥0.3 (runtime + clawteam-mcp)." >&2
+  exit 1
+fi
+
 if [[ "$USE_PRE" == "1" ]]; then
   "$VENV_DIR/bin/pip" install --upgrade --index-url "$PYPI_INDEX_URL" --pre clawsomeflow
-  ensure_mcp_sdk_compatible || {
-    echo "MCP Python SDK pin failed after --pre install (need mcp>=1,<2)." >&2
-    exit 1
-  }
 else
   stable_version="$(resolve_latest_stable_version || true)"
   if [[ -n "${stable_version}" ]]; then
@@ -329,53 +390,12 @@ else
   fi
 fi
 
-if [[ -n "${CSFLOW_CLAWTEAM_SOURCE:-}" ]]; then
-  "$VENV_DIR/bin/pip" install --upgrade "${CSFLOW_CLAWTEAM_SOURCE}" || {
-    echo "clawteam install from CSFLOW_CLAWTEAM_SOURCE failed." >&2
-    exit 1
-  }
-fi
-
-if ! clawteam_runtime_ready; then
-  if [[ -f "${LOCAL_CLAWTEAM_SOURCE}/pyproject.toml" ]]; then
-    "$VENV_DIR/bin/pip" install --upgrade "${LOCAL_CLAWTEAM_SOURCE}" || {
-      echo "clawteam install from local source failed." >&2
-      exit 1
-    }
-  fi
-fi
-
-if ! clawteam_runtime_ready; then
-  "$VENV_DIR/bin/pip" install --upgrade --index-url "$PYPI_INDEX_URL" clawteam || true
-fi
-
-if ! clawteam_runtime_ready; then
-  tmp_dir="$(mktemp -d)"
-  if ! git clone --depth 1 https://github.com/HKUDS/ClawTeam.git "${tmp_dir}/ClawTeam"; then
-    rm -rf "${tmp_dir}"
-    echo "clawteam git clone failed." >&2
-    exit 1
-  fi
-  if ! "$VENV_DIR/bin/pip" install --upgrade "${tmp_dir}/ClawTeam"; then
-    rm -rf "${tmp_dir}"
-    echo "clawteam install from cloned source failed." >&2
-    exit 1
-  fi
-  rm -rf "${tmp_dir}"
-fi
-
-"$VENV_DIR/bin/clawteam" runtime --help >/dev/null 2>&1 || {
-  echo "clawteam installed but runtime command missing." >&2
-  exit 1
-}
-
 ensure_mcp_sdk_compatible || {
-  echo "MCP Python SDK is incompatible with clawteam-mcp." >&2
+  echo "MCP Python SDK pin failed (need mcp>=1,<2)." >&2
   exit 1
 }
-
-[[ -x "$VENV_DIR/bin/clawteam-mcp" ]] || {
-  echo "clawteam-mcp missing after clawteam install (need clawteam >= 0.3)." >&2
+install_clawteam_stack 1 || {
+  echo "clawteam stack verification failed after clawsomeflow install." >&2
   exit 1
 }
 

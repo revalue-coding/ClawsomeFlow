@@ -59,11 +59,17 @@ def _build_fake_env(
           ln -sf "${fake_bin}/csflow" "${venv_dir}/bin/csflow"
           ln -sf "${fake_bin}/clawsomeflow" "${venv_dir}/bin/clawsomeflow"
           ln -sf "${fake_bin}/clawteam" "${venv_dir}/bin/clawteam"
+          ln -sf "${fake_bin}/clawteam-mcp" "${venv_dir}/bin/clawteam-mcp"
           cat > "${venv_dir}/bin/pip" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 log_dir="${CSFLOW_TEST_LOG_DIR:?}"
 printf '%s\\n' "$*" >> "${log_dir}/pip.commands"
+if [[ "${1:-}" == "show" && "${2:-}" == "mcp" ]]; then
+  echo "Name: mcp"
+  echo "Version: 1.28.0"
+  exit 0
+fi
 report_path=""
 prev=""
 for arg in "$@"; do
@@ -114,6 +120,11 @@ EOF
         if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then
           shift 2
           printf '%s\\n' "$*" >> "${log_dir}/pip.commands"
+          if [[ "${1:-}" == "show" && "${2:-}" == "mcp" ]]; then
+            echo "Name: mcp"
+            echo "Version: 1.28.0"
+            exit 0
+          fi
           if [[ "${1:-}" == "--version" ]]; then
             exit 0
           fi
@@ -142,6 +153,16 @@ EOF
         if [[ "${1:-}" == "runtime" && "${2:-}" == "--help" ]]; then
           exit 0
         fi
+        if [[ "${1:-}" == "--version" ]]; then
+          exit 1
+        fi
+        exit 0
+        """,
+    )
+    _write_executable(
+        fake_bin / "clawteam-mcp",
+        """#!/usr/bin/env bash
+        set -euo pipefail
         exit 0
         """,
     )
