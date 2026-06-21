@@ -1,7 +1,7 @@
 {
   "name": "clawsomeflow-frontend",
   "private": true,
-  "version": "0.1.21b3",
+  "version": "0.1.21b4",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
