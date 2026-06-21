@@ -1487,7 +1487,7 @@ export const api = {
       "/api/system/ensure-git-repo",
       payload,
     ),
-  listRepoBranches: (payload: { path: string }) =>
+  listRepoBranches: (payload: { path: string; preserveBranch?: string }) =>
     request<RepoBranchesResult>(
       "POST",
       "/api/system/git-branches",

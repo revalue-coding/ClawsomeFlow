@@ -49,7 +49,7 @@ import {
   getDevMode,
   setDevMode,
 } from "@/lib/flowRuntime";
-import { ensureRepoAndListBranches } from "@/lib/flowRepoBranch";
+import { branchAfterRepoCheck, ensureRepoAndListBranches } from "@/lib/flowRepoBranch";
 import {
   clearSessionBackedKeys,
   useSessionBackedModalFlag,
@@ -912,9 +912,11 @@ export function FlowEditor() {
     }
     let cancelled = false;
     setLeaderBranchLoading(true);
+    const branchBeforeCheck = leaderTargetBranch;
     void (async () => {
       const out = await ensureRepoAndListBranches({
         repo,
+        preserveBranch: branchBeforeCheck,
         agentLabel: leaderId.trim() || t("flowEditor.repoIssue.unknownAgent"),
         confirmCreate: confirm,
         messages: repoBranchMessages(t),
@@ -931,17 +933,15 @@ export function FlowEditor() {
       if (out.result.path && out.result.path !== leaderRepo) {
         setLeaderRepo(out.result.path);
       }
-      setLeaderTargetBranch((prev) => {
-        const keep =
-          prev.trim() && out.result.branches.includes(prev.trim()) ? prev.trim() : "";
-        return keep;
-      });
+      setLeaderTargetBranch(
+        branchAfterRepoCheck(branchBeforeCheck, out.result.branches),
+      );
       setLeaderBranchLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [confirm, leaderId, leaderKind, leaderRepo, leaderRepoToCheck, t]);
+  }, [confirm, leaderId, leaderKind, leaderRepoToCheck, t]);
 
   // Seed branch validation once when restoring a draft or loaded flow repo path.
   useEffect(() => {
@@ -1527,8 +1527,10 @@ export function FlowEditor() {
       return false;
     }
     setLeaderRepoToCheck(repo);
+    const branchBeforeCheck = leaderTargetBranch;
     const out = await ensureRepoAndListBranches({
       repo,
+      preserveBranch: branchBeforeCheck,
       agentLabel: leaderId.trim() || t("flowEditor.repoIssue.unknownAgent"),
       confirmCreate: confirm,
       messages: repoBranchMessages(t),
@@ -1968,12 +1970,16 @@ export function FlowEditor() {
                     disabled={!leaderBranchEditable || leaderBranchLoading || !leaderRepo.trim()}
                     onChange={(e) => setLeaderTargetBranch(e.target.value)}
                   >
-                    {!leaderTargetBranch && (
-                      <option value="">
-                        {t("flowEditor.taskFields.pickBranch")}
-                      </option>
-                    )}
-                    {leaderBranchOptions.map((name) => (
+                {!leaderTargetBranch && (
+                  <option value="">
+                    {t("flowEditor.taskFields.pickBranch")}
+                  </option>
+                )}
+                {leaderTargetBranch &&
+                  !leaderBranchOptions.includes(leaderTargetBranch) && (
+                  <option value={leaderTargetBranch}>{leaderTargetBranch}</option>
+                )}
+                {leaderBranchOptions.map((name) => (
                       <option key={name} value={name}>
                         {name}
                       </option>
@@ -2586,7 +2592,9 @@ function TaskEditModal({
   );
   const [branchLoading, setBranchLoading] = useState(false);
   /** Repo path last committed for validation (blur / pick / select), not every keystroke. */
-  const [repoToCheck, setRepoToCheck] = useState("");
+  const [repoToCheck, setRepoToCheck] = useState(() =>
+    isOpenclawKind(initialRow.ownerKind) ? "" : initialRow.ownerRepo.trim(),
+  );
   const readOnly = mode === "view";
   const isSummary = draft.isLeaderSummary;
   const [ownerMode, setOwnerMode] = useState<OwnerMode>(() =>
@@ -2618,12 +2626,6 @@ function TaskEditModal({
     setDraft((d) => ({ ...d, ...p }));
   }
 
-  useEffect(() => {
-    if (isOpenclawKind(initialRow.ownerKind)) return;
-    const repo = initialRow.ownerRepo.trim();
-    if (repo) setRepoToCheck(repo);
-  }, [initialRow.ownerKind, initialRow.ownerRepo]);
-
   function hasOtherTaskWithSameAgentDifferentRepoOrBranch(row: TaskRow): boolean {
     if (!isNonOpenclawKind(row.ownerKind)) return false;
     const ownerId = row.ownerId.trim();
@@ -2652,16 +2654,22 @@ function TaskEditModal({
     if (!repo) {
       setBranchOptions([]);
       setBranchEditable(false);
+      // Only clear branch when the draft repo is also empty (user cleared path),
+      // not during modal open before repoToCheck is seeded.
       setDraft((prev) =>
-        prev.ownerTargetBranch ? { ...prev, ownerTargetBranch: "" } : prev,
+        !prev.ownerRepo.trim() && prev.ownerTargetBranch
+          ? { ...prev, ownerTargetBranch: "" }
+          : prev,
       );
       return;
     }
     let cancelled = false;
     setBranchLoading(true);
+    const branchBeforeCheck = draft.ownerTargetBranch;
     void (async () => {
       const out = await ensureRepoAndListBranches({
         repo,
+        preserveBranch: branchBeforeCheck,
         agentLabel: draft.ownerId.trim() || t("flowEditor.repoIssue.unknownAgent"),
         confirmCreate: confirm,
         messages: repoBranchMessages(t),
@@ -2680,11 +2688,10 @@ function TaskEditModal({
       setBranchEditable(out.result.editable);
       setDraft((prev) => {
         const nextRepo = out.result.path || repo;
-        const keepBranch =
-          prev.ownerTargetBranch.trim()
-          && out.result.branches.includes(prev.ownerTargetBranch.trim())
-            ? prev.ownerTargetBranch.trim()
-            : "";
+        const keepBranch = branchAfterRepoCheck(
+          branchBeforeCheck,
+          out.result.branches,
+        );
         if (prev.ownerRepo === nextRepo && prev.ownerTargetBranch === keepBranch) {
           return prev;
         }
@@ -2710,6 +2717,7 @@ function TaskEditModal({
     }
     const out = await ensureRepoAndListBranches({
       repo,
+      preserveBranch: branch,
       agentLabel: row.ownerId.trim() || t("flowEditor.repoIssue.unknownAgent"),
       confirmCreate: confirm,
       messages: repoBranchMessages(t),
@@ -3268,6 +3276,10 @@ function TaskFormBody({
                   <option value="">
                     {t("flowEditor.taskFields.pickBranch")}
                   </option>
+                )}
+                {row.ownerTargetBranch &&
+                  !branchOptions.includes(row.ownerTargetBranch) && (
+                  <option value={row.ownerTargetBranch}>{row.ownerTargetBranch}</option>
                 )}
                 {branchOptions.map((name) => (
                   <option key={name} value={name}>

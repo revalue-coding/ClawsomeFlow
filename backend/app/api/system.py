@@ -81,6 +81,7 @@ class EnsureGitRepoResponse(_CamelModel):
 
 class RepoBranchesPayload(_CamelModel):
     path: str
+    preserve_branch: str | None = None
 
 
 class RepoBranchesResponse(_CamelModel):
@@ -294,6 +295,13 @@ def repo_branches(
     current = _git_current_branch(target) or DEFAULT_TARGET_BRANCH
     if current and current not in branches:
         branches = [current, *branches]
+    preserve = (payload.preserve_branch or "").strip()
+    if (
+        preserve
+        and preserve not in branches
+        and git_repo_util.branch_exists_in_repo(target, preserve)
+    ):
+        branches = [preserve, *branches]
     if not branches:
         branches = [current]
     return RepoBranchesResponse(

@@ -359,3 +359,43 @@ def test_repo_branches_excludes_clawteam_agent_refs(tmp_path: Path) -> None:
     assert "feature/demo" in body["branches"]
     assert "main" in body["branches"]
 
+
+def test_repo_branches_preserve_existing_branch_even_when_filtered(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "git-branches-preserve"
+    with TestClient(create_app()) as client:
+        ensured = client.post(
+            "/api/system/ensure-git-repo",
+            json={
+                "path": str(target),
+                "createDirIfMissing": True,
+                "initializeIfMissing": True,
+                "createInitialCommitIfMissing": True,
+            },
+        )
+        assert ensured.status_code == 200, ensured.text
+    subprocess.run(["git", "branch", "clawteam/run-1/agent-a"], cwd=target, check=True)
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/api/system/git-branches",
+            json={
+                "path": str(target),
+                "preserveBranch": "clawteam/run-1/agent-a",
+            },
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "clawteam/run-1/agent-a" in body["branches"]
+
+    with TestClient(create_app()) as client:
+        r2 = client.post(
+            "/api/system/git-branches",
+            json={
+                "path": str(target),
+                "preserveBranch": "missing-branch",
+            },
+        )
+    assert r2.status_code == 200, r2.text
+    assert "missing-branch" not in r2.json()["branches"]
+

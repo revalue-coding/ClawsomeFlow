@@ -6,6 +6,13 @@ export type RepoEnsureResult = {
   editable: boolean;
 };
 
+/** After repo validation: keep a filled branch only when it still exists. */
+export function branchAfterRepoCheck(current: string, branches: string[]): string {
+  const trimmed = current.trim();
+  if (!trimmed) return "";
+  return branches.includes(trimmed) ? trimmed : "";
+}
+
 type RepoIssueReason =
   | "path_not_found"
   | "not_git_repo"
@@ -23,6 +30,8 @@ function repoIssueReason(
 
 export async function ensureRepoAndListBranches(params: {
   repo: string;
+  /** Branch already selected in the form; kept in the list when it still exists. */
+  preserveBranch?: string;
   agentLabel: string;
   confirmCreate: (message: string) => Promise<boolean>;
   messages: {
@@ -69,7 +78,10 @@ export async function ensureRepoAndListBranches(params: {
   let resolvedPath = checked.path || rawRepo;
   if (checked.pathExists && checked.isGitRepo && checked.hasInitialCommit) {
     try {
-      const meta = await api.listRepoBranches({ path: resolvedPath });
+      const meta = await api.listRepoBranches({
+        path: resolvedPath,
+        preserveBranch: params.preserveBranch?.trim() || undefined,
+      });
       return {
         ok: true,
         result: {
@@ -118,7 +130,10 @@ export async function ensureRepoAndListBranches(params: {
       return { ok: false, error: params.messages.stillInvalid };
     }
     resolvedPath = ensured.path || resolvedPath;
-    const meta = await api.listRepoBranches({ path: resolvedPath });
+    const meta = await api.listRepoBranches({
+      path: resolvedPath,
+      preserveBranch: params.preserveBranch?.trim() || undefined,
+    });
     return {
       ok: true,
       result: {
