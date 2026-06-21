@@ -515,6 +515,86 @@ def test_api_start_gateway(client: TestClient, monkeypatch: pytest.MonkeyPatch) 
     assert r.json()["message"] == "gateway started"
 
 
+def test_read_gateway_cwd_from_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile_root = tmp_path / "profiles" / "helper"
+    profile_root.mkdir(parents=True)
+    (profile_root / "config.yaml").write_text(
+        "terminal:\n  cwd: /data/projects/foo\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(svc, "_config_path", lambda _aid: profile_root / "config.yaml")
+    assert svc.read_gateway_cwd("helper") == {"cwd": "/data/projects/foo"}
+
+
+def test_write_gateway_cwd_sets_config_and_restarts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = tmp_path / "workspace"
+    workdir.mkdir()
+    profile_root = tmp_path / "profiles" / "helper"
+    profile_root.mkdir(parents=True)
+    cfg = profile_root / "config.yaml"
+    cfg.write_text("terminal:\n  cwd: /old\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def _fake_profile(agent_id: str, args: list[str], **_kw):  # noqa: ANN001
+        calls.append([agent_id, *args])
+        if args == ["config", "set", "terminal.cwd", str(workdir.resolve())]:
+            cfg.write_text(
+                f"terminal:\n  cwd: {workdir.resolve()}\n",
+                encoding="utf-8",
+            )
+            return 0, "ok", ""
+        if args == ["gateway", "restart"]:
+            return 1, "", "restart failed"
+        return 0, "", ""
+
+    monkeypatch.setattr(svc, "_hermes_profile", _fake_profile)
+    monkeypatch.setattr(svc, "_config_path", lambda _aid: cfg)
+
+    out = svc.write_gateway_cwd("helper", cwd=str(workdir))
+    assert out["cwd"] == str(workdir.resolve())
+    assert calls[0] == ["helper", "config", "set", "terminal.cwd", str(workdir.resolve())]
+    assert calls[1] == ["helper", "gateway", "restart"]
+
+
+def test_write_gateway_cwd_invalid_directory_raises() -> None:
+    with pytest.raises(svc.AgentIdInvalid) as exc:
+        svc.write_gateway_cwd("helper", cwd="/no/such/directory")
+    assert "cwd path does not exist" in str(exc.value)
+
+
+def test_api_gateway_settings(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="gw2", name="Gateway Agent 2", profile_root="x", created_by_user=owner)
+    )
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
+
+    monkeypatch.setattr(svc, "read_gateway_cwd", lambda _aid: {"cwd": ""})
+    monkeypatch.setattr(
+        svc,
+        "write_gateway_cwd",
+        lambda _aid, *, cwd: {"cwd": cwd},
+    )
+
+    r = client.get("/api/hermes/agents/gw2/settings/gateway")
+    assert r.status_code == 200, r.text
+    assert r.json()["cwd"] == ""
+
+    r = client.put(
+        "/api/hermes/agents/gw2/settings/gateway",
+        json={"cwd": str(workdir)},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["cwd"] == str(workdir)
+
+
 def test_api_runtime_status_mode_passthrough(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

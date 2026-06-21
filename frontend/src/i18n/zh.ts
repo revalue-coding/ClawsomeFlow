@@ -64,6 +64,29 @@ const zh = {
     nextPage: "下一页",
     pageInfo: "第 {{page}} / {{total}} 页",
   },
+  remoteClient: {
+    nativeDirectory: {
+      pick: {
+        remoteHostname:
+          "当前不是在本机浏览器中访问控制台（地址不是 localhost）。" +
+          "选择目录仅在浏览器与 ClawsomeFlow 位于同一台有桌面的机器上时可用。" +
+          "请手动粘贴服务器上的绝对路径（例如 /home/you/project）。",
+        serverNoGui:
+          "ClawsomeFlow 运行在无图形桌面的主机上（常见于无界面服务器，或通过 SSH 访问且服务器端无 DISPLAY）。" +
+          "此处无法弹出目录选择框。请手动粘贴该服务器上的绝对路径（例如 /home/you/project）。",
+        serverMode: "当前为 server 部署模式，原生目录选择器已禁用。请手动粘贴路径。",
+      },
+      open: {
+        remoteHostname:
+          "当前不是在本机浏览器中访问控制台，无法在系统文件管理器中打开文件夹。" +
+          "该功能仅在与 ClawsomeFlow 同一台有桌面的机器上可用。请 SSH 登录服务器操作，或在表单中粘贴路径。",
+        serverNoGui:
+          "ClawsomeFlow 运行在无图形桌面的主机上，无法从当前浏览器会话打开文件管理器。" +
+          "请 SSH 登录服务器操作，或手动粘贴路径。",
+        serverMode: "当前为 server 部署模式，无法在文件管理器中打开文件夹。",
+      },
+    },
+  },
   nav: {
     groupOrchestration: "任务流",
     groupAgents: "我的团队",
@@ -746,6 +769,8 @@ const zh = {
     toOpenclaw: "to OpenClaw",
     toOpenclawRemoteUnavailable:
       "OpenClaw 运行时在服务器本机，无法从远程 / SSH 浏览器会话打开。请在服务器本机操作，或使用 SSH 本地端口转发后再访问。",
+    toOpenclawGatewayUnavailable:
+      "无法获取 OpenClaw Gateway 地址，请先启动 OpenClaw 服务后重试。",
     runtimeUnavailableMessage: "您的系统中尚未检测到正在运行的Openclaw服务，请启动服务后重试",
     runtimeRetry: "重试",
     runtimeChecking: "检查中…",
@@ -782,6 +807,8 @@ const zh = {
       emptyFile: "{{name}} 为空文件，无法上传。",
       folderAbsolutePathUnavailable:
         "当前浏览器无法读取该文件夹的绝对路径，请在本机客户端拖拽，或手动复制绝对路径后粘贴到输入框。",
+      folderRemoteUnavailable:
+        "远程访问不支持拖拽文件夹，请手动粘贴服务器上的绝对路径。",
       folderPathLimited:
         "浏览器安全限制导致无法读取文件夹绝对路径，已将可识别的目录路径粘贴到输入框，请按需手动修正。",
     },
@@ -1035,6 +1062,7 @@ const zh = {
       tabs: {
         soul: "SOUL.md",
         model: "模型",
+        gateway: "Gateway",
         mcp: "MCP",
         skills: "技能",
         cron: "定时任务",
@@ -1060,6 +1088,16 @@ const zh = {
         keyValue: "例如 sk-...",
         noKeys: "尚未设置 API 密钥。",
         set: "已设置",
+      },
+      gateway: {
+        title: "Gateway 消息渠道",
+        hint: "Gateway 消息渠道及 cron 定时任务的默认工作目录，本地 CLI 对话不用。",
+        workdirLabel: "Gateway 工作目录",
+        workdirPlaceholder: "已有目录的绝对路径",
+        pickWorkdir: "选择目录",
+        pickingWorkdir: "选择中…",
+        save: "保存并重启 Gateway",
+        saving: "保存中…",
       },
       mcp: {
         hint: "按 Hermes 官方流程，MCP 配置会写入该 profile 的 mcp_servers 配置块；HTTP/SSE 服务请使用 URL 方式。",

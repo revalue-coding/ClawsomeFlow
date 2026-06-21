@@ -38,6 +38,14 @@
 #      releases still run `vite build` immediately before the wheel step so
 #      `frontend/dist` is never stale inside the artifact.
 #   scripts/release.sh --dry-run patch       # rehearsal mode: no push/upload and no persisted file edits
+#
+# Reversibility:
+#   Steps 0–2 (venv bootstrap, pre-flight, full test matrix) never touch
+#   release-mutation files. Abort there (Ctrl+C / test failure) and re-run
+#   as-is — no manual rollback.
+#   After you confirm the target version, the script snapshots those files and
+#   auto-restores them (plus any local-only release commit/tag) on abort unless
+#   the release finishes successfully or the commit has already been pushed.
 
 set -euo pipefail
 
@@ -46,7 +54,12 @@ cd "$REPO"
 RELEASE_VENV_DIR="${CSFLOW_RELEASE_VENV_DIR:-$REPO/.venv311}"
 RELEASE_PYTHON_BIN="${CSFLOW_RELEASE_PYTHON_BIN:-python3.11}"
 VENV_ACTIVATED=0
-DRY_RUN_SNAPSHOT_DIR=""
+RELEASE_SNAPSHOT_DIR=""
+RELEASE_MUTATIONS_STARTED=0
+RELEASE_TESTS_GATE_PASSED=0
+RELEASE_SUCCEEDED=0
+PUSH_COMPLETED=0
+LOCAL_RELEASE_TAG=""
 RELEASE_MUTATED_FILES=(
   "CHANGELOG.md"
   "backend/app/__init__.py"
@@ -122,37 +135,78 @@ deactivate_release_env() {
   fi
 }
 
-prepare_dry_run_no_write_mode() {
-  [[ "$DRY_RUN" == "1" ]] || return 0
-  DRY_RUN_SNAPSHOT_DIR="$(mktemp -d)"
+snapshot_release_mutation_files() {
+  [[ -n "$RELEASE_SNAPSHOT_DIR" ]] && return 0
+  RELEASE_SNAPSHOT_DIR="$(mktemp -d)"
   for rel in "${RELEASE_MUTATED_FILES[@]}"; do
-    mkdir -p "$DRY_RUN_SNAPSHOT_DIR/$(dirname "$rel")"
-    cp "$REPO/$rel" "$DRY_RUN_SNAPSHOT_DIR/$rel"
+    mkdir -p "$RELEASE_SNAPSHOT_DIR/$(dirname "$rel")"
+    cp "$REPO/$rel" "$RELEASE_SNAPSHOT_DIR/$rel"
   done
-  warn "  [dry-run] no-write mode enabled: tracked release files will be auto-restored on exit"
 }
 
-restore_dry_run_no_write_mode() {
-  [[ "$DRY_RUN" == "1" ]] || return 0
-  [[ -n "$DRY_RUN_SNAPSHOT_DIR" && -d "$DRY_RUN_SNAPSHOT_DIR" ]] || return 0
+begin_release_mutations() {
+  [[ "$RELEASE_TESTS_GATE_PASSED" == "1" ]] \
+    || fail "Internal error: release mutations started before the test gate passed."
+  snapshot_release_mutation_files
+  RELEASE_MUTATIONS_STARTED=1
+  if [[ "$DRY_RUN" == "1" ]]; then
+    warn "  [dry-run] release files snapshotted — auto-restored on exit"
+  fi
+}
+
+restore_release_mutation_files() {
+  [[ "$RELEASE_MUTATIONS_STARTED" == "1" ]] || return 0
+  # Real releases keep mutations once pushed; dry-run always rolls back.
+  if [[ "$RELEASE_SUCCEEDED" == "1" && "$DRY_RUN" != "1" ]]; then
+    return 0
+  fi
+  if [[ "$PUSH_COMPLETED" == "1" ]]; then
+    return 0
+  fi
+  [[ -n "$RELEASE_SNAPSHOT_DIR" && -d "$RELEASE_SNAPSHOT_DIR" ]] || return 0
   for rel in "${RELEASE_MUTATED_FILES[@]}"; do
-    if [[ -f "$DRY_RUN_SNAPSHOT_DIR/$rel" ]]; then
-      cp "$DRY_RUN_SNAPSHOT_DIR/$rel" "$REPO/$rel"
+    if [[ -f "$RELEASE_SNAPSHOT_DIR/$rel" ]]; then
+      cp "$RELEASE_SNAPSHOT_DIR/$rel" "$REPO/$rel"
     fi
   done
-  rm -rf "$DRY_RUN_SNAPSHOT_DIR"
-  DRY_RUN_SNAPSHOT_DIR=""
+  if [[ "$DRY_RUN" == "1" ]]; then
+    warn "  [dry-run] restored release-mutation files"
+  elif [[ "$RELEASE_MUTATIONS_STARTED" == "1" ]]; then
+    warn "  restored release-mutation files after abort"
+  fi
+}
+
+rollback_local_git_release() {
+  [[ "$RELEASE_SUCCEEDED" == "1" && "$DRY_RUN" != "1" ]] && return 0
+  [[ "$PUSH_COMPLETED" == "1" ]] && return 0
+  [[ -n "$LOCAL_RELEASE_TAG" ]] || return 0
+
+  local head_msg=""
+  head_msg="$(git log -1 --format=%s 2>/dev/null || true)"
+  if [[ "$head_msg" == "release: ${NEXT}" ]]; then
+    git reset --hard HEAD~1 >/dev/null 2>&1 \
+      && warn "  rolled back local release commit"
+  fi
+  if git rev-parse "$LOCAL_RELEASE_TAG" >/dev/null 2>&1; then
+    git tag -d "$LOCAL_RELEASE_TAG" >/dev/null 2>&1 \
+      && warn "  removed local tag ${LOCAL_RELEASE_TAG}"
+  fi
 }
 
 cleanup_on_exit() {
   local exit_code=$?
   set +e
-  restore_dry_run_no_write_mode
+  restore_release_mutation_files
+  rollback_local_git_release
+  if [[ -n "$RELEASE_SNAPSHOT_DIR" && -d "$RELEASE_SNAPSHOT_DIR" ]]; then
+    rm -rf "$RELEASE_SNAPSHOT_DIR"
+    RELEASE_SNAPSHOT_DIR=""
+  fi
   deactivate_release_env
   return "$exit_code"
 }
 
-trap cleanup_on_exit EXIT
+trap cleanup_on_exit EXIT INT TERM
 
 # ── arg parsing ────────────────────────────────────────────────────
 YES=0
@@ -243,6 +297,7 @@ if [[ "$SKIP_TESTS" == "0" ]]; then
     warn "  Run 'cd frontend && npm install' to enable."
   fi
   ok "  tests + builds green"
+  RELEASE_TESTS_GATE_PASSED=1
   echo
 else
   if [[ "$CHANNEL" == "beta" ]]; then
@@ -250,6 +305,7 @@ else
   else
     warn "[2/9] Skipping test matrix (--skip-tests; vite build runs before wheel)"
   fi
+  RELEASE_TESTS_GATE_PASSED=1
   echo
 fi
 
@@ -261,7 +317,7 @@ NEXT="$(python scripts/_bump_version.py next "$BUMP_PART" --channel "$CHANNEL")"
 TAG="v$NEXT"
 say "  $CURRENT  →  $NEXT   (tag: $TAG)"
 confirm "Proceed?" || fail "Aborted."
-prepare_dry_run_no_write_mode
+begin_release_mutations
 echo
 
 # ── 4. Cut CHANGELOG ───────────────────────────────────────────────
@@ -315,10 +371,12 @@ else
   # public repo. Only the version-literal files are committed here.
   git add backend/app/__init__.py backend/pyproject.toml frontend/package.json
   git commit -m "release: $NEXT"
+  LOCAL_RELEASE_TAG="$TAG"
   git tag -a "$TAG" -m "ClawsomeFlow $NEXT"
   if [[ "$SKIP_PUSH" == "0" ]]; then
     git push origin main
     git push origin "$TAG"
+    PUSH_COMPLETED=1
     ok "  pushed commit + tag to origin"
   else
     warn "  --skip-push: not pushing to origin (commit + tag are local)."
@@ -381,6 +439,7 @@ fi
 echo
 
 # ── Done ──────────────────────────────────────────────────────────
+RELEASE_SUCCEEDED=1
 ok "✅ Released $NEXT"
 case "$CHANNEL" in
   release)

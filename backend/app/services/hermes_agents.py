@@ -1024,6 +1024,12 @@ def start_gateway(agent_id: str) -> str:
     return message or "gateway started"
 
 
+def restart_gateway(agent_id: str) -> None:
+    """Best-effort ``hermes -p <id> gateway restart`` (errors are ignored)."""
+    aid = _validate_agent_id(agent_id)
+    _hermes_profile(aid, ["gateway", "restart"])
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Settings — SOUL.md (identity)
 # ──────────────────────────────────────────────────────────────────────
@@ -1084,6 +1090,36 @@ def read_model(agent_id: str) -> dict[str, str]:
         "provider": str(model.get("provider") or ""),
         "base_url": str(model.get("base_url") or ""),
     }
+
+
+def read_gateway_cwd(agent_id: str) -> dict[str, str]:
+    """Read ``terminal.cwd`` from the profile's config.yaml."""
+    aid = _validate_agent_id(agent_id)
+    cfg_path = _config_path(aid)
+    cwd = ""
+    if cfg_path.exists():
+        try:
+            data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            terminal = data.get("terminal") or {}
+            if isinstance(terminal, dict):
+                cwd = str(terminal.get("cwd") or "")
+        except yaml.YAMLError:
+            cwd = ""
+    return {"cwd": cwd}
+
+
+def write_gateway_cwd(agent_id: str, *, cwd: str) -> dict[str, str]:
+    """Set ``terminal.cwd`` via the Hermes CLI, then restart the gateway."""
+    aid = _validate_agent_id(agent_id)
+    abs_path = str(_existing_directory(cwd, field_name="cwd"))
+    rc, out, err = _hermes_profile(aid, ["config", "set", "terminal.cwd", abs_path])
+    if rc != 0:
+        raise ProfileOpFailed(
+            f"`hermes config set terminal.cwd` failed: "
+            f"{(_strip_ansi(err) or _strip_ansi(out)).strip()}"
+        )
+    restart_gateway(aid)
+    return read_gateway_cwd(aid)
 
 
 def write_model(
@@ -1862,6 +1898,9 @@ __all__ = [
     "delete_agent",
     "is_managed",
     "start_gateway",
+    "restart_gateway",
+    "read_gateway_cwd",
+    "write_gateway_cwd",
     "read_soul",
     "write_soul",
     "read_model",

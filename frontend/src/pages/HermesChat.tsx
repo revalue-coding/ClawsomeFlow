@@ -48,6 +48,7 @@ import {
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
+import { alertIfNativeDirectoryBlocked, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
 import { cn } from "@/lib/cn";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useStickyScroll } from "@/lib/useStickyScroll";
@@ -133,12 +134,6 @@ function createFieldError(opts: {
   }
   if (opts.existingIds.includes(id)) return "hermes.create.errors.idDuplicate";
   return null;
-}
-
-function isRemoteBrowser(): boolean {
-  if (typeof window === "undefined") return false;
-  const h = window.location.hostname;
-  return h !== "localhost" && h !== "127.0.0.1" && h !== "::1" && h !== "";
 }
 
 function agentCardShowsIdLine(agent: { id: string; name: string }): boolean {
@@ -1234,17 +1229,24 @@ function ChatRoom({ agentId }: { agentId: string }) {
     event.preventDefault();
     setDraggingFiles(false);
     if (sending || resetting || uploadingAttachments) return;
-    const folder = resolveDroppedFolderPath(event.dataTransfer);
-    if (folder?.hasFolder) {
-      if (folder.absolutePath) {
-        appendFolderPathToInput(folder.absolutePath);
-        setError("");
-      } else {
-        setError(t("chat.attachments.folderAbsolutePathUnavailable"));
+    void (async () => {
+      const blocked = await getNativeDirectoryBlockedMessage(t, "pick");
+      if (blocked) {
+        setError(blocked);
+        return;
       }
-      return;
-    }
-    addPendingFiles(Array.from(event.dataTransfer.files ?? []));
+      const folder = resolveDroppedFolderPath(event.dataTransfer);
+      if (folder?.hasFolder) {
+        if (folder.absolutePath) {
+          appendFolderPathToInput(folder.absolutePath);
+          setError("");
+        } else {
+          setError(t("chat.attachments.folderAbsolutePathUnavailable"));
+        }
+        return;
+      }
+      addPendingFiles(Array.from(event.dataTransfer.files ?? []));
+    })();
   }, [
     addPendingFiles,
     appendFolderPathToInput,
@@ -1473,10 +1475,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
   }, [recovering, agentId, chatScope]);
 
   const pickWorkdir = async () => {
-    if (isRemoteBrowser()) {
-      void alert(t("hermes.remoteUnavailable"));
-      return;
-    }
+    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     try {
       const out = await api.pickDirectory({ title: t("hermes.workdir"), initialPath: workdir || undefined });
       if (out.path) updateWorkdir(out.path);
@@ -1486,10 +1485,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
   };
 
   const openProfile = async () => {
-    if (isRemoteBrowser()) {
-      void alert(t("hermes.remoteUnavailable"));
-      return;
-    }
+    if (await alertIfNativeDirectoryBlocked(t, "open")) return;
     setOpening(true);
     try {
       await api.openDirectory({ path: profileRoot });
@@ -2113,7 +2109,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
 // Settings modal
 // ──────────────────────────────────────────────────────────────────────
 
-type SettingsTab = "soul" | "model" | "mcp" | "skills" | "cron";
+type SettingsTab = "soul" | "model" | "gateway" | "mcp" | "skills" | "cron";
 
 function SettingsModal({ agentId, onClose }: { agentId: string; onClose: () => void }) {
   const { t } = useTranslation();
@@ -2125,8 +2121,8 @@ function SettingsModal({ agentId, onClose }: { agentId: string; onClose: () => v
           selected tab reads in both themes (a frosted surface chip with brand
           text + ring), instead of the old white-on-near-white in dark mode. */}
       <div className="mb-4 rounded-xl border border-ink-100 bg-ink-50/60 p-1.5">
-        <div className="grid grid-cols-5 gap-1">
-          {(["soul", "model", "mcp", "skills", "cron"] as SettingsTab[]).map((k) => (
+        <div className="grid grid-cols-3 gap-1 sm:grid-cols-6">
+          {(["soul", "model", "gateway", "mcp", "skills", "cron"] as SettingsTab[]).map((k) => (
             <button
               key={k}
               type="button"
@@ -2145,6 +2141,7 @@ function SettingsModal({ agentId, onClose }: { agentId: string; onClose: () => v
       </div>
       {tab === "soul" && <SoulTab agentId={agentId} />}
       {tab === "model" && <ModelTab agentId={agentId} />}
+      {tab === "gateway" && <GatewayTab agentId={agentId} />}
       {tab === "mcp" && <McpTab agentId={agentId} />}
       {tab === "skills" && <SkillsTab agentId={agentId} />}
       {tab === "cron" && <CronTab agentId={agentId} />}
@@ -2345,12 +2342,112 @@ function ModelTab({ agentId }: { agentId: string }) {
   );
 }
 
+function GatewayTab({ agentId }: { agentId: string }) {
+  const { t } = useTranslation();
+  const { alert } = useDialog();
+  const [cwd, setCwd] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api
+      .getHermesGateway(agentId)
+      .then((r) => setCwd(r.cwd))
+      .catch((e) => setError(errText(e)))
+      .finally(() => setLoading(false));
+  }, [agentId]);
+
+  const pickWorkdir = async () => {
+    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
+    setPicking(true);
+    try {
+      const out = await api.pickDirectory({
+        title: t("hermes.settingsModal.gateway.workdirLabel"),
+        initialPath: cwd || undefined,
+      });
+      if (out.path) {
+        setCwd(out.path);
+        setSaved(false);
+      }
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setPicking(false);
+    }
+  };
+
+  const save = async () => {
+    if (!cwd.trim() || busy) return;
+    setBusy(true);
+    setSaved(false);
+    setError("");
+    try {
+      const r = await api.putHermesGateway(agentId, { cwd: cwd.trim() });
+      setCwd(r.cwd);
+      setSaved(true);
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading) return <Loading label={t("common.loading")} />;
+  return (
+    <div className="space-y-3">
+      {error && <ErrorBox>{error}</ErrorBox>}
+      <div className="text-sm font-medium text-ink-700">{t("hermes.settingsModal.gateway.title")}</div>
+      <p className="text-xs text-ink-400">{t("hermes.settingsModal.gateway.hint")}</p>
+      <label className="block text-sm">
+        <span className="text-ink-600">{t("hermes.settingsModal.gateway.workdirLabel")}</span>
+        <div className="mt-1 flex gap-2">
+          <input
+            className="input flex-1 font-mono text-xs"
+            value={cwd}
+            placeholder={t("hermes.settingsModal.gateway.workdirPlaceholder")}
+            onChange={(e) => {
+              setCwd(e.target.value);
+              setSaved(false);
+            }}
+            disabled={busy}
+          />
+          <button
+            type="button"
+            className="btn-outline whitespace-nowrap"
+            onClick={() => void pickWorkdir()}
+            disabled={busy || picking}
+          >
+            {picking
+              ? t("hermes.settingsModal.gateway.pickingWorkdir")
+              : t("hermes.settingsModal.gateway.pickWorkdir")}
+          </button>
+        </div>
+      </label>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          onClick={() => void save()}
+          disabled={busy || !cwd.trim()}
+        >
+          {busy ? t("hermes.settingsModal.gateway.saving") : t("hermes.settingsModal.gateway.save")}
+        </button>
+        {saved && <span className="text-xs text-emerald-600">{t("hermes.settingsModal.saved")}</span>}
+      </div>
+    </div>
+  );
+}
+
 function McpTab({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const [servers, setServers] = useState<HermesMcpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [removingName, setRemovingName] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [transport, setTransport] = useState<"http_sse" | "sse">("http_sse");
   const [url, setUrl] = useState("");
@@ -2413,6 +2510,8 @@ function McpTab({ agentId }: { agentId: string }) {
   };
 
   const remove = async (serverName: string) => {
+    if (saving || removingName) return;
+    setRemovingName(serverName);
     setError("");
     try {
       await api.deleteHermesMcpServer(agentId, serverName);
@@ -2420,6 +2519,8 @@ function McpTab({ agentId }: { agentId: string }) {
       setServers(await api.getHermesMcpServers(agentId));
     } catch (e) {
       setError(errText(e));
+    } finally {
+      setRemovingName(null);
     }
   };
 
@@ -2453,8 +2554,9 @@ function McpTab({ agentId }: { agentId: string }) {
               <div className="flex shrink-0 items-center gap-3">
                 <button
                   type="button"
-                  className="text-xs text-ink-500 hover:text-ink-800"
+                  className="text-xs text-ink-500 hover:text-ink-800 disabled:opacity-50"
                   onClick={() => (editingName === server.name ? resetForm() : startEdit(server))}
+                  disabled={saving || removingName !== null}
                 >
                   {editingName === server.name
                     ? t("common.cancel")
@@ -2462,8 +2564,9 @@ function McpTab({ agentId }: { agentId: string }) {
                 </button>
                 <button
                   type="button"
-                  className="text-xs text-rose-500 hover:text-rose-700"
+                  className="text-xs text-rose-500 hover:text-rose-700 disabled:opacity-50"
                   onClick={() => void remove(server.name)}
+                  disabled={saving || removingName === server.name}
                 >
                   {t("hermes.settingsModal.mcp.remove")}
                 </button>
@@ -2570,6 +2673,7 @@ function SkillsTab({ agentId }: { agentId: string }) {
   const [editDesc, setEditDesc] = useState("");
   const [editBody, setEditBody] = useState("");
   const [editSaving, setEditSaving] = useState(false);
+  const [deletingName, setDeletingName] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -2638,12 +2742,17 @@ function SkillsTab({ agentId }: { agentId: string }) {
   };
 
   const del = async (nameKey: string) => {
+    if (creating || editSaving || deletingName) return;
+    setDeletingName(nameKey);
     setError("");
     try {
       await api.deleteHermesSkill(agentId, nameKey);
+      if (editingName === nameKey) cancelEdit();
       await reload();
     } catch (e) {
       setError(errText(e));
+    } finally {
+      setDeletingName(null);
     }
   };
 
@@ -2688,8 +2797,9 @@ function SkillsTab({ agentId }: { agentId: string }) {
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    className="text-xs text-ink-500 hover:text-ink-800"
+                    className="text-xs text-ink-500 hover:text-ink-800 disabled:opacity-50"
                     onClick={() => void view(s.name)}
+                    disabled={deletingName !== null || editSaving || creating}
                   >
                     {expanded === s.name
                       ? t("hermes.settingsModal.skills.hide")
@@ -2697,8 +2807,9 @@ function SkillsTab({ agentId }: { agentId: string }) {
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-ink-500 hover:text-ink-800"
+                    className="text-xs text-ink-500 hover:text-ink-800 disabled:opacity-50"
                     onClick={() => (editingName === s.name ? cancelEdit() : void startEdit(s))}
+                    disabled={deletingName !== null || creating}
                   >
                     {editingName === s.name
                       ? t("common.cancel")
@@ -2706,8 +2817,9 @@ function SkillsTab({ agentId }: { agentId: string }) {
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-rose-500 hover:text-rose-700"
+                    className="text-xs text-rose-500 hover:text-rose-700 disabled:opacity-50"
                     onClick={() => void del(s.name)}
+                    disabled={deletingName === s.name || editSaving || creating}
                   >
                     {t("hermes.settingsModal.skills.delete")}
                   </button>
@@ -2817,6 +2929,8 @@ function CronTab({ agentId }: { agentId: string }) {
   const [editWorkdir, setEditWorkdir] = useState("");
   const [editSaving, setEditSaving] = useState(false);
   const [pickingEditWorkdir, setPickingEditWorkdir] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -2839,10 +2953,7 @@ function CronTab({ agentId }: { agentId: string }) {
   }, [reload]);
 
   const pickCronWorkdir = async () => {
-    if (isRemoteBrowser()) {
-      void alert(t("hermes.remoteUnavailable"));
-      return;
-    }
+    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     setPickingWorkdir(true);
     try {
       const out = await api.pickDirectory({
@@ -2858,7 +2969,8 @@ function CronTab({ agentId }: { agentId: string }) {
   };
 
   const add = async () => {
-    if (!schedule.trim()) return;
+    if (!schedule.trim() || adding) return;
+    setAdding(true);
     setError("");
     try {
       await api.createHermesCron(agentId, {
@@ -2876,16 +2988,22 @@ function CronTab({ agentId }: { agentId: string }) {
       await reload();
     } catch (e) {
       setError(errText(e));
+    } finally {
+      setAdding(false);
     }
   };
 
   const act = async (jobId: string, action: "pause" | "resume" | "remove") => {
+    if (actionBusyId) return;
+    setActionBusyId(jobId);
     setError("");
     try {
       await api.hermesCronAction(agentId, jobId, action);
       await reload();
     } catch (e) {
       setError(errText(e));
+    } finally {
+      setActionBusyId(null);
     }
   };
 
@@ -2905,10 +3023,7 @@ function CronTab({ agentId }: { agentId: string }) {
   };
 
   const pickEditWorkdir = async () => {
-    if (isRemoteBrowser()) {
-      void alert(t("hermes.remoteUnavailable"));
-      return;
-    }
+    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     setPickingEditWorkdir(true);
     try {
       const out = await api.pickDirectory({
@@ -2997,8 +3112,9 @@ function CronTab({ agentId }: { agentId: string }) {
                 <div className="flex shrink-0 items-center gap-2">
                   <button
                     type="button"
-                    className="text-xs text-ink-500 hover:text-ink-800"
+                    className="text-xs text-ink-500 hover:text-ink-800 disabled:opacity-50"
                     onClick={() => void act(j.id, j.enabled ? "pause" : "resume")}
+                    disabled={actionBusyId === j.id || editSaving || adding}
                   >
                     {j.enabled
                       ? t("hermes.settingsModal.cron.pause")
@@ -3006,8 +3122,9 @@ function CronTab({ agentId }: { agentId: string }) {
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-ink-500 hover:text-ink-800"
+                    className="text-xs text-ink-500 hover:text-ink-800 disabled:opacity-50"
                     onClick={() => (editingId === j.id ? cancelEdit() : startEdit(j))}
+                    disabled={actionBusyId === j.id || editSaving || adding}
                   >
                     {editingId === j.id
                       ? t("common.cancel")
@@ -3015,8 +3132,9 @@ function CronTab({ agentId }: { agentId: string }) {
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-rose-500 hover:text-rose-700"
+                    className="text-xs text-rose-500 hover:text-rose-700 disabled:opacity-50"
                     onClick={() => void act(j.id, "remove")}
+                    disabled={actionBusyId === j.id || editSaving || adding}
                   >
                     {t("hermes.settingsModal.cron.remove")}
                   </button>
@@ -3156,9 +3274,9 @@ function CronTab({ agentId }: { agentId: string }) {
           type="button"
           className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
           onClick={() => void add()}
-          disabled={!schedule.trim()}
+          disabled={!schedule.trim() || adding || editSaving || actionBusyId !== null}
         >
-          {t("hermes.settingsModal.cron.add")}
+          {adding ? t("common.saving") : t("hermes.settingsModal.cron.add")}
         </button>
       </div>
     </div>

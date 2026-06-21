@@ -689,6 +689,12 @@ export interface WorkspaceDirectoryList {
   items: string[];
 }
 
+export interface UiCapabilities {
+  deploymentMode: "local" | "server";
+  allowNativeDirectoryPicker: boolean;
+  nativeDirectoryUiAvailable: boolean;
+}
+
 export interface EnsureGitRepoResult {
   path: string;
   pathExists: boolean;
@@ -752,6 +758,10 @@ export interface HermesModelSetting {
   default: string;
   provider: string;
   baseUrl: string;
+}
+
+export interface HermesGatewaySetting {
+  cwd: string;
 }
 
 export interface HermesSecretSetting {
@@ -1269,6 +1279,10 @@ export const api = {
     request<HermesModelSetting>("PUT", `/api/hermes/agents/${id}/settings/model`, payload),
   importHermesModel: (id: string, payload: { inheritFrom: string }) =>
     request<HermesModelSetting>("POST", `/api/hermes/agents/${id}/settings/model/import`, payload),
+  getHermesGateway: (id: string) =>
+    request<HermesGatewaySetting>("GET", `/api/hermes/agents/${id}/settings/gateway`),
+  putHermesGateway: (id: string, payload: HermesGatewaySetting) =>
+    request<HermesGatewaySetting>("PUT", `/api/hermes/agents/${id}/settings/gateway`, payload),
   getHermesMcpServers: (id: string) =>
     request<HermesMcpServer[]>("GET", `/api/hermes/agents/${id}/settings/mcp`),
   putHermesMcpServer: (
@@ -1498,6 +1512,8 @@ export const api = {
       "GET",
       `/api/system/workspace-directories${allUsers ? "?allUsers=true" : ""}`,
     ),
+  getUiCapabilities: () =>
+    request<UiCapabilities>("GET", "/api/system/ui-capabilities"),
 
   // Profiles
   listProfiles: () =>

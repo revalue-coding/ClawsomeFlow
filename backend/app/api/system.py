@@ -61,6 +61,12 @@ class WorkspaceDirectoryListResponse(_CamelModel):
     items: list[str] = Field(default_factory=list)
 
 
+class UiCapabilitiesResponse(_CamelModel):
+    deployment_mode: Literal["local", "server"]
+    allow_native_directory_picker: bool
+    native_directory_ui_available: bool
+
+
 class EnsureGitRepoPayload(_CamelModel):
     path: str
     create_dir_if_missing: bool = True
@@ -362,10 +368,7 @@ def _pick_directory_native(*, title: str, initial_path: str | None) -> str | Non
     if sys.platform == "darwin":
         return _pick_directory_macos(title=title, initial_dir=initial_dir)
 
-    # No GUI display -> a native picker cannot be shown (Linux X11/Wayland).
-    if os.name != "nt" and not (
-        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    ):
+    if not native_directory_ui_available():
         raise RuntimeError("No GUI display found for native directory picker.")
 
     try:
@@ -406,9 +409,7 @@ def _open_directory_native(*, path: Path) -> None:
         except OSError as exc:
             raise RuntimeError(f"failed to open directory: {exc}") from exc
 
-    if sys.platform != "darwin" and not (
-        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    ):
+    if not native_directory_ui_available():
         raise RuntimeError("No GUI display found for opening directories.")
 
     commands: list[list[str]] = [["open", target], ["xdg-open", target], ["gio", "open", target]]
@@ -512,6 +513,27 @@ def _git_local_branches(path: Path) -> list[str]:
 
 def _git_current_branch(path: Path) -> str | None:
     return git_repo_util.current_branch(path)
+
+
+def native_directory_ui_available() -> bool:
+    """Whether this host can show a native directory picker or open a folder in a file manager."""
+    if os.name == "nt":
+        return True
+    if sys.platform == "darwin":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+@router.get("/ui-capabilities", response_model=UiCapabilitiesResponse)
+def ui_capabilities(_user: UserDep = "") -> UiCapabilitiesResponse:
+    """Expose deployment + native UI availability for frontend remote-client detection."""
+    cfg = load_config()
+    caps = get_deployment_capabilities(cfg)
+    return UiCapabilitiesResponse(
+        deployment_mode=cfg.deployment_mode,
+        allow_native_directory_picker=caps.allow_native_directory_picker,
+        native_directory_ui_available=native_directory_ui_available(),
+    )
 
 
 @router.get("/workspace-directories", response_model=WorkspaceDirectoryListResponse)

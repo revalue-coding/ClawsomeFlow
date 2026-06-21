@@ -177,6 +177,10 @@ class ModelView(_CamelModel):
     base_url: str = ""
 
 
+class GatewayView(_CamelModel):
+    cwd: str = ""
+
+
 class ModelImportPayload(_CamelModel):
     inherit_from: str = "default"
 
@@ -736,6 +740,30 @@ def put_model(
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
     return ModelView(default=m["default"], provider=m["provider"], base_url=m["base_url"])
+
+
+@router.get("/{agent_id}/settings/gateway", response_model=GatewayView)
+def get_gateway_settings(
+    agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep
+) -> GatewayView:
+    _get_owned(agent_id, user, storage)
+    g = svc.read_gateway_cwd(agent_id)
+    return GatewayView(cwd=g["cwd"])
+
+
+@router.put("/{agent_id}/settings/gateway", response_model=GatewayView)
+def put_gateway_settings(
+    agent_id: Annotated[str, Path()],
+    payload: Annotated[GatewayView, Body()],
+    user: UserDep,
+    storage: StorageDep,
+) -> GatewayView:
+    _get_owned(agent_id, user, storage)
+    try:
+        g = svc.write_gateway_cwd(agent_id, cwd=payload.cwd)
+    except svc.HermesAgentError as exc:
+        raise _map_service_error(exc) from exc
+    return GatewayView(cwd=g["cwd"])
 
 
 @router.post("/{agent_id}/settings/model/import", response_model=ModelView)

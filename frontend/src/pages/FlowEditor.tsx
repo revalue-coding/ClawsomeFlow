@@ -50,6 +50,7 @@ import {
   setDevMode,
 } from "@/lib/flowRuntime";
 import { branchAfterRepoCheck, ensureRepoAndListBranches } from "@/lib/flowRepoBranch";
+import { alertIfNativeDirectoryBlocked } from "@/lib/remoteClient";
 import {
   clearSessionBackedKeys,
   useSessionBackedModalFlag,
@@ -233,15 +234,6 @@ const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = [
   "codebuddy",
   "hermes",
 ];
-
-/** Detect whether the SPA is served to a non-loopback host. The native
- *  directory picker only works when backend and browser run on the same
- *  machine, so we surface a friendlier hint for remote access. */
-function isRemoteBrowser(): boolean {
-  if (typeof window === "undefined") return false;
-  const h = window.location.hostname;
-  return h !== "localhost" && h !== "127.0.0.1" && h !== "::1" && h !== "";
-}
 
 function isOpenclawKind(kind: OwnerKind): kind is "openclaw" {
   return kind === "openclaw";
@@ -773,7 +765,6 @@ export function FlowEditor() {
     | { mode: "edit" | "view"; rowKey: string }
     | null
   >("flow-editor:editing", null, { isClosed: (value) => value === null });
-  const remoteBrowser = isRemoteBrowser();
 
   function showAutoMergeSyncNotice() {
     setAutoMergeSyncNoticeOpen(true);
@@ -1603,10 +1594,7 @@ export function FlowEditor() {
   }
 
   async function onPickLeaderRepo() {
-    if (remoteBrowser) {
-      void alert(t("flowEditor.pickDirRemoteHint"));
-      return;
-    }
+    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     setLeaderPickingRepo(true);
     try {
       const out = await api.pickDirectory({
@@ -2934,8 +2922,6 @@ function TaskFormBody({
     onRepoPathCommit(repo.trim());
   }
 
-  const remoteBrowser = isRemoteBrowser();
-
   // Dependable list = every other non-summary task. Keeping summary tasks
   // out avoids summary↔summary/self dependency cycles.
   const dependableTasks = tasks
@@ -2943,13 +2929,7 @@ function TaskFormBody({
     .map((r) => r.id);
 
   async function onPickRepo() {
-    // Remote access has no usable native dialog — surface the reason in a
-    // popup before we even hit the backend. Users still have the input
-    // field to paste an absolute path into.
-    if (remoteBrowser) {
-      void alert(t("flowEditor.pickDirRemoteHint"));
-      return;
-    }
+    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     setPickingRepo(true);
     try {
       const out = await api.pickDirectory({

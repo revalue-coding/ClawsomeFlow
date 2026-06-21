@@ -61,6 +61,32 @@ const en = {
     nextPage: "Next",
     pageInfo: "Page {{page}} / {{total}}",
   },
+  remoteClient: {
+    nativeDirectory: {
+      pick: {
+        remoteHostname:
+          "You are not viewing the console from this machine's local browser (the address is not localhost). " +
+          "The folder picker only works when the browser and ClawsomeFlow share the same desktop. " +
+          "Paste the absolute path on the server manually (e.g. /home/you/project).",
+        serverNoGui:
+          "ClawsomeFlow is running on a host without a graphical desktop (typical headless server, or SSH without a display on the server). " +
+          "No folder picker can be shown here. Paste the absolute path on that server manually (e.g. /home/you/project).",
+        serverMode:
+          "The native folder picker is disabled in server deployment mode. Paste the path manually.",
+      },
+      open: {
+        remoteHostname:
+          "You are not viewing the console from this machine's local browser. " +
+          "Opening a folder in the system file manager only works on the same desktop as ClawsomeFlow. " +
+          "Use SSH on the server, or paste paths in the form instead.",
+        serverNoGui:
+          "ClawsomeFlow is running on a host without a graphical desktop. " +
+          "The file manager cannot be opened from this browser session—use SSH on the server, or paste paths manually.",
+        serverMode:
+          "Opening folders in the file manager is disabled in server deployment mode.",
+      },
+    },
+  },
   nav: {
     groupOrchestration: "Workflows",
     groupAgents: "My Team",
@@ -754,6 +780,8 @@ const en = {
     toOpenclaw: "to OpenClaw",
     toOpenclawRemoteUnavailable:
       "The OpenClaw runtime runs on the server's local machine and is not reachable from a remote/SSH browser session. Open it on the host machine, or use SSH local port forwarding to reach it.",
+    toOpenclawGatewayUnavailable:
+      "OpenClaw gateway URL is unavailable; start the OpenClaw service and try again.",
     runtimeUnavailableMessage:
       "No running Openclaw service was detected on your system. Start the service and try again.",
     runtimeRetry: "Retry",
@@ -792,6 +820,8 @@ const en = {
       emptyFile: "{{name}} is empty and cannot be uploaded.",
       folderAbsolutePathUnavailable:
         "This browser cannot read the dropped folder's absolute path. Use a local desktop session or paste the absolute path manually.",
+      folderRemoteUnavailable:
+        "Folder drag-and-drop is unavailable in remote access; paste the server absolute path manually.",
       folderPathLimited:
         "Browser security limits prevent reading the absolute folder path; a detectable folder path was pasted into the input, please adjust it if needed.",
     },
@@ -1050,6 +1080,7 @@ const en = {
       tabs: {
         soul: "SOUL.md",
         model: "Model",
+        gateway: "Gateway",
         mcp: "MCP",
         skills: "Skills",
         cron: "Cron",
@@ -1075,6 +1106,18 @@ const en = {
         keyValue: "e.g. sk-...",
         noKeys: "No API keys set.",
         set: "set",
+      },
+      gateway: {
+        title: "Gateway message channel",
+        hint:
+          "Default working directory for the Gateway message channel and cron jobs. " +
+          "Does not apply to local CLI chat.",
+        workdirLabel: "Gateway working directory",
+        workdirPlaceholder: "Absolute path to an existing directory",
+        pickWorkdir: "Browse",
+        pickingWorkdir: "Browsing…",
+        save: "Save & restart Gateway",
+        saving: "Saving…",
       },
       mcp: {
         hint:

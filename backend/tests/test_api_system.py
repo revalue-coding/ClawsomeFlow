@@ -160,6 +160,44 @@ def test_open_directory_runtime_error_mapped(monkeypatch, tmp_path: Path) -> Non
     assert r.json()["error"] == "DIRECTORY_OPEN_UNAVAILABLE"
 
 
+def test_ui_capabilities_local_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.system.load_config",
+        lambda: SimpleNamespace(deployment_mode="local"),
+    )
+    with TestClient(create_app()) as client:
+        r = client.get("/api/system/ui-capabilities")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deploymentMode"] == "local"
+    assert body["allowNativeDirectoryPicker"] is True
+
+
+def test_ui_capabilities_server_mode_disables_native_picker(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.system.load_config",
+        lambda: SimpleNamespace(deployment_mode="server"),
+    )
+    with TestClient(create_app()) as client:
+        r = client.get("/api/system/ui-capabilities")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deploymentMode"] == "server"
+    assert body["allowNativeDirectoryPicker"] is False
+
+
+def test_ui_capabilities_native_ui_false_without_display(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.system.load_config",
+        lambda: SimpleNamespace(deployment_mode="local"),
+    )
+    monkeypatch.setattr("app.api.system.native_directory_ui_available", lambda: False)
+    with TestClient(create_app()) as client:
+        r = client.get("/api/system/ui-capabilities")
+    assert r.status_code == 200, r.text
+    assert r.json()["nativeDirectoryUiAvailable"] is False
+
+
 def test_workspace_directories_local_scoped_to_current_user(monkeypatch) -> None:
     monkeypatch.setenv("CSFLOW_USER", "alice")
     monkeypatch.setattr(

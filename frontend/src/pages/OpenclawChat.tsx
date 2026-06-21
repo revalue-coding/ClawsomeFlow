@@ -66,6 +66,7 @@ import { DesktopIcon, EditIcon, PlusIcon, RefreshIcon, SettingsIcon, StoreIcon, 
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
+import { alertIfNativeDirectoryBlocked, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
 import {
   clearChatHistory,
   formatChatTime,
@@ -1788,17 +1789,24 @@ function ChatRoom({
     event.preventDefault();
     setDraggingFiles(false);
     if (streaming || resetting || uploadingAttachments) return;
-    const folder = resolveDroppedFolderPath(event.dataTransfer);
-    if (folder?.hasFolder) {
-      if (folder.absolutePath) {
-        appendFolderPathToInput(folder.absolutePath);
-        setActionError(null);
-      } else {
-        setActionError(t("chat.attachments.folderAbsolutePathUnavailable"));
+    void (async () => {
+      const blocked = await getNativeDirectoryBlockedMessage(t, "pick");
+      if (blocked) {
+        setActionError(blocked);
+        return;
       }
-      return;
-    }
-    addPendingFiles(Array.from(event.dataTransfer.files ?? []));
+      const folder = resolveDroppedFolderPath(event.dataTransfer);
+      if (folder?.hasFolder) {
+        if (folder.absolutePath) {
+          appendFolderPathToInput(folder.absolutePath);
+          setActionError(null);
+        } else {
+          setActionError(t("chat.attachments.folderAbsolutePathUnavailable"));
+        }
+        return;
+      }
+      addPendingFiles(Array.from(event.dataTransfer.files ?? []));
+    })();
   }, [
     addPendingFiles,
     appendFolderPathToInput,
@@ -2266,12 +2274,7 @@ function ChatRoom({
 
   async function onOpenMyDesktop() {
     if (!agent || openingMyDesktop) return;
-    if (isRemoteBrowser()) {
-      if (typeof window !== "undefined") {
-        void alert(t("chat.myDesktop.remoteUnavailable"));
-      }
-      return;
-    }
+    if (await alertIfNativeDirectoryBlocked(t, "open")) return;
     const targetPath = buildAgentMyDesktopPath(agent.workspacePath);
     setActionError(null);
     setOpeningMyDesktop(true);
@@ -2369,12 +2372,12 @@ function ChatRoom({
           <button
             type="button"
             onClick={() => {
-              // The OpenClaw runtime listens on the server's local machine; a
-              // remote/SSH browser session cannot reach it, so reject up front
-              // instead of opening a dead tab. Open via JS (no href) so the
-              // browser status bar never reveals the URL on hover.
               if (isRemoteBrowser()) {
                 void alert(t("chat.toOpenclawRemoteUnavailable"));
+                return;
+              }
+              if (!openclawUrl) {
+                void alert(t("chat.toOpenclawGatewayUnavailable"));
                 return;
               }
               window.open(openclawUrl, "_blank", "noopener,noreferrer");
@@ -3904,27 +3907,16 @@ function AgentSettingsModal({
   );
 }
 
-function buildOpenclawChatUrl(agentId: string, gatewayUrl?: string | null): string {
+function buildOpenclawChatUrl(agentId: string, gatewayUrl?: string | null): string | null {
   const suffix = `/?agentId=${encodeURIComponent(agentId)}`;
   const normalizedGatewayUrl = (gatewayUrl || "").trim();
-  if (normalizedGatewayUrl) {
-    try {
-      const parsed = new URL(normalizedGatewayUrl);
-      return `${parsed.origin}${suffix}`;
-    } catch {
-      // ignore invalid runtime URL and fall back to legacy default
-    }
+  if (!normalizedGatewayUrl) return null;
+  try {
+    const parsed = new URL(normalizedGatewayUrl);
+    return `${parsed.origin}${suffix}`;
+  } catch {
+    return null;
   }
-  if (typeof window === "undefined") return `http://127.0.0.1:18789${suffix}`;
-  const protocol = window.location.protocol;
-  const hostname = window.location.hostname;
-  return `${protocol}//${hostname}:18789${suffix}`;
-}
-
-function isRemoteBrowser(): boolean {
-  if (typeof window === "undefined") return false;
-  const h = window.location.hostname;
-  return h !== "localhost" && h !== "127.0.0.1" && h !== "::1" && h !== "";
 }
 
 function buildAgentMyDesktopPath(workspacePath: string): string {
