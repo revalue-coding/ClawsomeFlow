@@ -275,7 +275,35 @@ try_install_pinned_stable_quietly() {
   return 1
 }
 
+ensure_os_packages() {
+  mkdir -p "${HOME}/.local/bin"
+  if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+    return
+  fi
+  if [[ "${IS_MACOS}" == "1" ]] && command -v brew >/dev/null 2>&1; then
+    brew install git tmux
+    return
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y git tmux
+    return
+  fi
+  echo "Warning: git and tmux are required but could not be auto-installed." >&2
+}
+
+ensure_mcp_sdk_compatible() {
+  "$VENV_DIR/bin/python" - <<'PY'
+from app.integrations.mcp_compat import ensure_mcp_sdk_compatible
+import sys
+ok, detail = ensure_mcp_sdk_compatible()
+if not ok:
+    print(detail or "mcp sdk incompatible", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 probe_existing_deployment
+ensure_os_packages
 mkdir -p "$(dirname "$VENV_DIR")"
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"
@@ -284,6 +312,10 @@ fi
 
 if [[ "$USE_PRE" == "1" ]]; then
   "$VENV_DIR/bin/pip" install --upgrade --index-url "$PYPI_INDEX_URL" --pre clawsomeflow
+  ensure_mcp_sdk_compatible || {
+    echo "MCP Python SDK pin failed after --pre install (need mcp>=1,<2)." >&2
+    exit 1
+  }
 else
   stable_version="$(resolve_latest_stable_version || true)"
   if [[ -n "${stable_version}" ]]; then
@@ -334,6 +366,16 @@ fi
 
 "$VENV_DIR/bin/clawteam" runtime --help >/dev/null 2>&1 || {
   echo "clawteam installed but runtime command missing." >&2
+  exit 1
+}
+
+ensure_mcp_sdk_compatible || {
+  echo "MCP Python SDK is incompatible with clawteam-mcp." >&2
+  exit 1
+}
+
+[[ -x "$VENV_DIR/bin/clawteam-mcp" ]] || {
+  echo "clawteam-mcp missing after clawteam install (need clawteam >= 0.3)." >&2
   exit 1
 }
 

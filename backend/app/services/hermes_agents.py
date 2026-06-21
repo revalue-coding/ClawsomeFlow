@@ -205,6 +205,11 @@ def _existing_directory(path: str, *, field_name: str = "path") -> Path:
 
 PROBE_FAST = "fast"
 PROBE_FULL = "full"
+# List reconcile modes — ``fast`` scans ``~/.hermes/profiles/`` (microseconds);
+# ``full`` runs ``hermes profile list`` (authoritative but slow on Linux when
+# ``~/.local/bin`` holds large CLI binaries that Hermes' alias reverse-lookup reads).
+RECONCILE_FAST = "fast"
+RECONCILE_FULL = "full"
 # Generous timeout for the FULL probe: `hermes --version` runs a synchronous
 # update-check (git) that can take several seconds on the first (cold-cache)
 # call, so the 5s default would false-negative a perfectly usable binary. The
@@ -285,6 +290,32 @@ def list_profile_names_checked() -> tuple[bool, list[str]]:
 def list_profile_names() -> list[str]:
     """Parse ``hermes profile list`` → profile names (default excluded)."""
     return list_profile_names_checked()[1]
+
+
+def list_profile_names_from_fs() -> list[str]:
+    """Named profile ids under ``~/.hermes/profiles/`` via directory scan.
+
+    Matches the named-profile subset of ``hermes profile list`` without
+    invoking the CLI — the hot path for the WebUI's first paint.
+    """
+    profiles_root = hermes_home() / "profiles"
+    if not profiles_root.is_dir():
+        return []
+    names: list[str] = []
+    try:
+        entries = sorted(profiles_root.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if name in _RESERVED_PROFILE_NAMES:
+            continue
+        if not _AGENT_ID_RE.fullmatch(name):
+            continue
+        names.append(name)
+    return names
 
 
 def read_profile_description(agent_id: str) -> str:
@@ -804,27 +835,13 @@ def get_agent(
     return row
 
 
-def _reconcile_managed_profiles(
+def _reconcile_managed_profiles_with(
     *,
     user: str,
     storage: StorageBackend,
+    on_disk: list[str],
 ) -> None:
-    """Make the managed-agent DB rows mirror the Hermes profiles that actually
-    exist — Hermes is the source of truth:
-
-    * **adopt** any on-disk profile not yet in the DB (no manual "claim"); and
-    * **prune** any managed row whose profile is gone (deleted via the CLI, by
-      the agent itself, or externally) so the platform never shows a ghost.
-
-    The DB row only carries ClawsomeFlow-specific metadata (team, owner, display
-    name, nl_prompt) layered on top of the profile — it is not a second source
-    of truth. Best-effort and idempotent; individual failures never abort the
-    listing. Crucially, reconciliation is **skipped entirely** when Hermes can't
-    be queried, so a transient CLI failure never prunes valid rows.
-    """
-    query_ok, on_disk = list_profile_names_checked()
-    if not query_ok:
-        return  # hermes unavailable — trust the DB as-is, do not mutate
+    """Apply adopt/prune given a concrete on-disk profile-name list."""
     on_disk_set = set(on_disk)
     # Never adopt a profile whose create is still in flight: its row will be
     # committed by the create itself, and adopting here would make that create
@@ -856,18 +873,59 @@ def _reconcile_managed_profiles(
                 logger.warning("hermes_prune_failed", agent_id=aid, error=str(exc))
 
 
+def _reconcile_managed_profiles(
+    *,
+    user: str,
+    storage: StorageBackend,
+) -> None:
+    """Make the managed-agent DB rows mirror the Hermes profiles that actually
+    exist — Hermes is the source of truth:
+
+    * **adopt** any on-disk profile not yet in the DB (no manual "claim"); and
+    * **prune** any managed row whose profile is gone (deleted via the CLI, by
+      the agent itself, or externally) so the platform never shows a ghost.
+
+    The DB row only carries ClawsomeFlow-specific metadata (team, owner, display
+    name, nl_prompt) layered on top of the profile — it is not a second source
+    of truth. Best-effort and idempotent; individual failures never abort the
+    listing. Crucially, reconciliation is **skipped entirely** when Hermes can't
+    be queried, so a transient CLI failure never prunes valid rows.
+    """
+    query_ok, on_disk = list_profile_names_checked()
+    if not query_ok:
+        return  # hermes unavailable — trust the DB as-is, do not mutate
+    _reconcile_managed_profiles_with(user=user, storage=storage, on_disk=on_disk)
+
+
+def _reconcile_managed_profiles_fast(
+    *,
+    user: str,
+    storage: StorageBackend,
+) -> None:
+    """Filesystem-only reconcile for the WebUI fast list path."""
+    _reconcile_managed_profiles_with(
+        user=user,
+        storage=storage,
+        on_disk=list_profile_names_from_fs(),
+    )
+
+
 def list_agents(
     *,
     user: str | None = None,
     storage: StorageBackend | None = None,
     config: Config | None = None,
     adopt: bool = True,
+    reconcile: str = RECONCILE_FULL,
 ) -> list[HermesAgent]:
     storage = storage or get_storage(config or load_config())
     # Reconcile against live Hermes profiles so the list always reflects what
     # actually exists. Only when we have a concrete owner user.
     if adopt and user:
-        _reconcile_managed_profiles(user=user, storage=storage)
+        if reconcile == RECONCILE_FAST:
+            _reconcile_managed_profiles_fast(user=user, storage=storage)
+        elif reconcile == RECONCILE_FULL:
+            _reconcile_managed_profiles(user=user, storage=storage)
     return storage.hermes_list(owner_user=user)
 
 
@@ -1883,12 +1941,15 @@ __all__ = [
     "is_create_in_flight",
     "PROBE_FAST",
     "PROBE_FULL",
+    "RECONCILE_FAST",
+    "RECONCILE_FULL",
     "hermes_home",
     "hermes_profile_root",
     "hermes_executable",
     "probe_runtime_running",
     "list_profile_names",
     "list_profile_names_checked",
+    "list_profile_names_from_fs",
     "commit_agent",
     "claim_profile",
     "list_claimable_profiles",

@@ -792,7 +792,7 @@ export function FlowEditor() {
       .then((r) => setOpenclawOptions(r.items))
       .catch(() => {});
     api
-      .listHermesAgents()
+      .listHermesAgents("fast")
       .then((r) => setHermesOptions(r.items))
       .catch(() => {});
     api

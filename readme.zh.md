@@ -210,6 +210,8 @@ csflow upgrade    # 升级到最新版本（Flow / Run / 设置都会保留）
 # 生命周期
 csflow stop
 csflow doctor                              # 健康检查（依赖 + 配置 + 网关）
+csflow uninstall --yes                     # 停止服务并注销 OpenClaw（保留本地数据）
+csflow uninstall --purge-data              # 彻底删除数据：需输入 PURGE 确认（不可恢复）
 
 # Flow / Run
 csflow flows list

@@ -1108,7 +1108,6 @@ const en = {
         set: "set",
       },
       gateway: {
-        title: "Gateway message channel",
         hint:
           "Default working directory for the Gateway message channel and cron jobs. " +
           "Does not apply to local CLI chat.",

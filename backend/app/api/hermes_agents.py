@@ -487,8 +487,15 @@ def _attachments_for_history(
 
 
 @router.get("", response_model=HermesAgentListResponse)
-def list_agents(user: UserDep, storage: StorageDep) -> HermesAgentListResponse:
-    items = svc.list_agents(user=user, storage=storage)
+def list_agents(
+    user: UserDep,
+    storage: StorageDep,
+    mode: Annotated[str, Query()] = svc.RECONCILE_FULL,
+) -> HermesAgentListResponse:
+    # ``mode=fast`` scans ``~/.hermes/profiles/`` for instant first paint;
+    # ``full`` (default) runs ``hermes profile list`` for authoritative reconcile.
+    reconcile = svc.RECONCILE_FAST if mode == svc.RECONCILE_FAST else svc.RECONCILE_FULL
+    items = svc.list_agents(user=user, storage=storage, reconcile=reconcile)
     team_names = _team_name_map(storage=storage, user=user)
     return HermesAgentListResponse(
         items=[_to_summary(a, team_name=team_names.get(a.team_id, "")) for a in items],

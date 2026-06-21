@@ -165,6 +165,19 @@ function formatLocalFileSize(bytes: number): string {
   return `${Math.round(bytes)} B`;
 }
 
+/** Compare agent lists for the background full-reconcile refresh gate. */
+function hermesAgentListsEqual(
+  a: HermesAgentSummary[],
+  b: HermesAgentSummary[],
+): boolean {
+  if (a.length !== b.length) return false;
+  const key = (x: HermesAgentSummary) =>
+    `${x.id}\0${x.name}\0${x.teamId}\0${x.description}`;
+  const sa = [...a].sort((x, y) => x.id.localeCompare(y.id)).map(key).join("\n");
+  const sb = [...b].sort((x, y) => x.id.localeCompare(y.id)).map(key).join("\n");
+  return sa === sb;
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Top-level: runtime gate → picker | chat room
 // ──────────────────────────────────────────────────────────────────────
@@ -310,28 +323,51 @@ function Picker() {
   // before the modal closes) firing two POST /hermes/agents for the same id —
   // which on the backend would race and could clobber the winner's profile.
   const createInFlightRef = useRef(false);
+  const pickerMountedRef = useRef(true);
+
+  useEffect(() => {
+    pickerMountedRef.current = true;
+    return () => {
+      pickerMountedRef.current = false;
+    };
+  }, []);
 
   const reload = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
       const [a, tm] = await Promise.all([
-        api.listHermesAgents(),
+        api.listHermesAgents("fast"),
         api.listOpenclawTeams(),
       ]);
+      if (!pickerMountedRef.current) return;
       setAgents(a.items);
       setTeams(tm.items);
     } catch (e) {
+      if (!pickerMountedRef.current) return;
       setError(errText(e));
     } finally {
-      setLoading(false);
+      if (pickerMountedRef.current) setLoading(false);
     }
+    // Background full reconcile — authoritative but slow; refresh only on diff.
+    void api
+      .listHermesAgents("full")
+      .then((full) => {
+        if (!pickerMountedRef.current) return;
+        setAgents((prev) =>
+          hermesAgentListsEqual(prev, full.items) ? prev : full.items,
+        );
+      })
+      .catch(() => {
+        /* fast list already shown; next manual reload retries */
+      });
   }, []);
 
   // Quiet refetch (no loading spinner) used by the build-progress poll.
   const refreshAgents = useCallback(async () => {
     try {
-      const a = await api.listHermesAgents();
+      const a = await api.listHermesAgents("fast");
+      if (!pickerMountedRef.current) return;
       setAgents(a.items);
     } catch {
       /* ignore poll errors — the next tick retries */
@@ -533,7 +569,7 @@ function Picker() {
       setWorkPopupText(t("hermes.create.workPopup.cancelVerifying"));
       const deadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
       for (;;) {
-        const listed = await api.listHermesAgents();
+        const listed = await api.listHermesAgents("fast");
         if (!listed.items.some((item) => item.id === agentId)) break;
         if (Date.now() >= deadline) {
           throw new Error(t("hermes.create.workPopup.cancelAgentStillVisible"));
@@ -1230,13 +1266,13 @@ function ChatRoom({ agentId }: { agentId: string }) {
     setDraggingFiles(false);
     if (sending || resetting || uploadingAttachments) return;
     void (async () => {
-      const blocked = await getNativeDirectoryBlockedMessage(t, "pick");
-      if (blocked) {
-        setError(blocked);
-        return;
-      }
       const folder = resolveDroppedFolderPath(event.dataTransfer);
       if (folder?.hasFolder) {
+        const blocked = await getNativeDirectoryBlockedMessage(t, "pick");
+        if (blocked) {
+          setError(blocked);
+          return;
+        }
         if (folder.absolutePath) {
           appendFolderPathToInput(folder.absolutePath);
           setError("");
@@ -1938,14 +1974,17 @@ function ChatRoom({ agentId }: { agentId: string }) {
           </div>
           <div
             className={cn(
-              "rounded-lg border border-dashed px-3 py-2 transition",
+              "space-y-2 rounded-lg border border-dashed px-3 py-2 transition",
               draggingFiles ? "border-brand-400 bg-brand-50/40" : "border-ink-200 bg-ink-50/40",
             )}
             onDragOver={(event: DragEvent<HTMLDivElement>) => {
               event.preventDefault();
               if (!draggingFiles) setDraggingFiles(true);
             }}
-            onDragLeave={() => setDraggingFiles(false)}
+            onDragLeave={(event: DragEvent<HTMLDivElement>) => {
+              if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+              setDraggingFiles(false);
+            }}
             onDrop={onDropAttachmentArea}
           >
             <input
@@ -1970,7 +2009,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
               )}
             </div>
             {pendingFiles.length > 0 && (
-              <div className="mt-2 space-y-1">
+              <div className="space-y-1">
                 {pendingFiles.map((file, idx) => (
                   <div
                     key={`${file.name}-${file.size}-${file.lastModified}-${idx}`}
@@ -1992,48 +2031,48 @@ function ChatRoom({ agentId }: { agentId: string }) {
                 ))}
               </div>
             )}
-          </div>
-          <div className="flex items-end gap-2">
-            <textarea
-              ref={inputRef}
-              className="textarea h-20 flex-1 resize-none"
-              placeholder={t("chat.inputPlaceholder")}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                handleChatTextareaEnterKey(e, () => {
-                  if (!sending && !resetting && !uploadingAttachments) {
-                    (e.currentTarget.form as HTMLFormElement).requestSubmit();
-                  }
-                });
-              }}
-              disabled={sending || resetting || uploadingAttachments}
-            />
-            <button
-              type="button"
-              className="btn-outline"
-              disabled={sending || resetting || uploadingAttachments}
-              onClick={() => void reset()}
-            >
-              {resetting ? t("chat.resetting") : t("chat.reset")}
-            </button>
-            {sending ? (
+            <div className="flex items-end gap-2">
+              <textarea
+                ref={inputRef}
+                className="textarea h-20 flex-1 resize-none"
+                placeholder={t("chat.inputPlaceholder")}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  handleChatTextareaEnterKey(e, () => {
+                    if (!sending && !resetting && !uploadingAttachments) {
+                      (e.currentTarget.form as HTMLFormElement).requestSubmit();
+                    }
+                  });
+                }}
+                disabled={sending || resetting || uploadingAttachments}
+              />
               <button
                 type="button"
-                className="btn-outline border-rose-300 text-rose-600 hover:bg-rose-50"
-                onClick={() => void stop()}
+                className="btn-outline"
+                disabled={sending || resetting || uploadingAttachments}
+                onClick={() => void reset()}
               >
-                {t("chat.stop")}
+                {resetting ? t("chat.resetting") : t("chat.reset")}
               </button>
-            ) : (
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={resetting || uploadingAttachments || (!input.trim() && pendingFiles.length === 0)}
-              >
-                {t("chat.send")}
-              </button>
-            )}
+              {sending ? (
+                <button
+                  type="button"
+                  className="btn-outline border-rose-300 text-rose-600 hover:bg-rose-50"
+                  onClick={() => void stop()}
+                >
+                  {t("chat.stop")}
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={resetting || uploadingAttachments || (!input.trim() && pendingFiles.length === 0)}
+                >
+                  {t("chat.send")}
+                </button>
+              )}
+            </div>
           </div>
         </form>
       </Card>
@@ -2399,11 +2438,10 @@ function GatewayTab({ agentId }: { agentId: string }) {
   return (
     <div className="space-y-3">
       {error && <ErrorBox>{error}</ErrorBox>}
-      <div className="text-sm font-medium text-ink-700">{t("hermes.settingsModal.gateway.title")}</div>
-      <p className="text-xs text-ink-400">{t("hermes.settingsModal.gateway.hint")}</p>
       <label className="block text-sm">
-        <span className="text-ink-600">{t("hermes.settingsModal.gateway.workdirLabel")}</span>
-        <div className="mt-1 flex gap-2">
+        <span className="font-medium text-ink-700">{t("hermes.settingsModal.gateway.workdirLabel")}</span>
+        <p className="mt-1 text-xs text-ink-400">{t("hermes.settingsModal.gateway.hint")}</p>
+        <div className="mt-2 flex gap-2">
           <input
             className="input flex-1 font-mono text-xs"
             value={cwd}

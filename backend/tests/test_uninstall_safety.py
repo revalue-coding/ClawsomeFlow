@@ -1,4 +1,4 @@
-"""Tests for uninstall safety / full-uninstall flow and purge-data command.
+"""Tests for uninstall safety / full-uninstall flow with --purge-data.
 
 These are safety-critical: a regression here means a user could lose
 their entire workspace by typing the wrong command at 2am.
@@ -37,22 +37,29 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-# ── csflow uninstall (with optional full wipe) ───────────────────────
+# ── csflow uninstall (default: keep data) ─────────────────────────────
 
 
-def test_uninstall_no_purge_flag_in_help(runner: CliRunner, tmp_home: Path) -> None:
-    """Sanity: uninstall must not expose destructive flags."""
+def test_uninstall_exposes_purge_flag_in_help(runner: CliRunner, tmp_home: Path) -> None:
     result = runner.invoke(app, ["uninstall", "--help"])
     assert result.exit_code == 0
-    assert "--purge" not in result.output
+    assert "--purge-data" in result.output
     assert "--thorough" not in result.output
+
+
+def test_root_help_lists_grouped_commands(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0, result.output
+    assert "Lifecycle:" in result.output
+    assert "Operations:" in result.output
+    assert "Utilities:" in result.output
+    assert "uninstall --purge-data" in result.output
 
 
 def test_uninstall_preserves_data_with_yes(
     runner: CliRunner, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Even with ``--yes``, uninstall must leave ~/.clawsomeflow/ alone."""
-    # Stub out the OpenClaw side-effect — we're not testing that here.
     from app.integrations import openclaw_install
 
     async def _noop(**_kw):
@@ -97,15 +104,14 @@ def test_uninstall_always_keeps_data_even_when_service_teardown_runs(
     assert (tmp_home / ".flows" / "demo.json").exists()
 
 
-# ── csflow purge-data ─────────────────────────────────────────────────
+# ── csflow uninstall --purge-data ─────────────────────────────────────
 
 
 def test_purge_requires_literal_PURGE(
     runner: CliRunner, tmp_home: Path,
 ) -> None:
-    """Without the magic word, purge-data must abort and leave files intact."""
-    # Provide an answer that's NOT the magic word.
-    result = runner.invoke(app, ["purge-data"], input="yes\n")
+    """Without the magic word, --purge-data must abort and leave files intact."""
+    result = runner.invoke(app, ["uninstall", "--purge-data"], input="yes\n")
     assert result.exit_code == 1, result.output
     assert "didn't type PURGE" in result.output
     assert (tmp_home / ".flows" / "demo.json").exists()
@@ -121,7 +127,7 @@ def test_purge_proceeds_with_literal_PURGE(
         return openclaw_install.UninstallResult([], [], False)
 
     monkeypatch.setattr(openclaw_install, "uninstall_from_openclaw", _noop)
-    result = runner.invoke(app, ["purge-data"], input="PURGE\n")
+    result = runner.invoke(app, ["uninstall", "--purge-data"], input="PURGE\n")
     assert result.exit_code == 0, result.output
     assert not tmp_home.exists()
 
@@ -137,7 +143,9 @@ def test_purge_proceeds_with_explicit_flag(
 
     monkeypatch.setattr(openclaw_install, "uninstall_from_openclaw", _noop)
     result = runner.invoke(app, [
-        "purge-data", "--i-understand-this-deletes-everything",
+        "uninstall",
+        "--purge-data",
+        "--i-understand-this-deletes-everything",
     ])
     assert result.exit_code == 0, result.output
     assert not tmp_home.exists()
@@ -150,27 +158,57 @@ def test_purge_refuses_when_backend_running(
     from app.cli import _runtime
     monkeypatch.setattr(_runtime, "read_pid", lambda: 12345)
     monkeypatch.setattr(_runtime, "is_alive", lambda pid: True)
-    # Also patch the names re-exported by app.cli.purge.
-    from app.cli import purge as purge_mod
-    monkeypatch.setattr(purge_mod, "read_pid", lambda: 12345)
-    monkeypatch.setattr(purge_mod, "is_alive", lambda pid: True)
+    from app.cli import uninstall as uninstall_mod
+    monkeypatch.setattr(uninstall_mod, "read_pid", lambda: 12345)
+    monkeypatch.setattr(uninstall_mod, "is_alive", lambda pid: True)
 
     result = runner.invoke(app, [
-        "purge-data", "--i-understand-this-deletes-everything",
+        "uninstall",
+        "--purge-data",
+        "--i-understand-this-deletes-everything",
     ])
     assert result.exit_code == 1, result.output
     assert "backend is running" in result.output
     assert (tmp_home / ".flows" / "demo.json").exists()
 
 
-def test_purge_yes_short_flag_does_not_exist(runner: CliRunner) -> None:
-    """``-y`` MUST NOT exist on purge-data — that was an explicit design call.
+def test_purge_yes_short_flag_does_not_skip_purge_prompt(
+    runner: CliRunner, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``-y`` alone must not wipe data — muscle memory from other commands."""
+    from app.integrations import openclaw_install
 
-    Defends against muscle memory from other commands that DO accept ``-y``.
-    """
-    result = runner.invoke(app, ["purge-data", "-y"])
-    # Typer rejects unknown options with exit 2.
-    assert result.exit_code == 2, result.output
-    assert "no such option" in result.output.lower() or \
-           "unexpected" in result.output.lower() or \
-           "-y" in result.output
+    async def _noop(**_kw):
+        return openclaw_install.UninstallResult([], [], False)
+
+    monkeypatch.setattr(openclaw_install, "uninstall_from_openclaw", _noop)
+    result = runner.invoke(app, ["uninstall", "--purge-data", "-y"])
+    assert result.exit_code == 1, result.output
+    assert (tmp_home / ".flows" / "demo.json").exists()
+
+
+def test_purge_data_command_removed(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["purge-data"])
+    assert result.exit_code != 0
+
+
+def test_rmtree_robust_tolerates_enoent(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent pid cleanup during rmtree must not abort purge."""
+    import os
+    import shutil
+
+    from app.cli.uninstall import _rmtree_robust
+
+    real_rmtree = shutil.rmtree
+
+    def rmtree_with_simulated_race(path: str | os.PathLike[str], onerror=None):
+        if onerror is not None:
+            exc = FileNotFoundError(2, "No such file or directory", "csflow.pid")
+            onerror(os.unlink, "csflow.pid", (FileNotFoundError, exc, exc.__traceback__))
+        real_rmtree(path, onerror=onerror)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree_with_simulated_race)
+    _rmtree_robust(tmp_home)
+    assert not tmp_home.exists()

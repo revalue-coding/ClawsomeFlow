@@ -605,6 +605,22 @@ def run_upgrade(
         report.repair_warnings.append(f"clawteam spawn_ready_timeout: {exc}")
         logger.warning("upgrade_clawteam_spawn_ready_timeout_failed", error=str(exc))
 
+    # 0e3. MCP Python SDK pin. ``pip install --pre`` (or an unpinned ``mcp>=1``)
+    # can pull MCP 2.x alphas that break ``clawteam-mcp`` startup; repair-only
+    # users must converge with fresh deploys. Idempotent when already on 1.x.
+    try:
+        from app.integrations.mcp_compat import ensure_mcp_sdk_compatible
+
+        ok, detail = ensure_mcp_sdk_compatible()
+        if not ok:
+            report.repair_warnings.append(f"mcp sdk compatibility: {detail}")
+            logger.warning("upgrade_mcp_sdk_repair_failed", detail=detail)
+        else:
+            logger.info("upgrade_mcp_sdk_compatible")
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"mcp sdk compatibility: {exc}")
+        logger.warning("upgrade_mcp_sdk_repair_failed", error=str(exc))
+
     # 0f. Global agent tools (``.clawsomeflow-agent-tools/``). These are NOT
     # OpenClaw-specific — every agent kind references them by absolute path (e.g.
     # the locked self-merge tool ``csflow-locked-merge.py``). Deploy here,

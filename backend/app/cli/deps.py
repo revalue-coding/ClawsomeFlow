@@ -37,6 +37,12 @@ from typing import Callable
 from rich.console import Console
 from rich.table import Table
 
+from app.integrations.mcp_compat import (
+    MCP_SDK_SPEC,
+    incompatible_mcp_detail,
+    mcp_sdk_compatible,
+    pip_install_mcp_sdk,
+)
 from app.integrations.openclaw_cli import resolve_openclaw_executable
 from app.runtime_bins import resolve_binary
 
@@ -360,6 +366,33 @@ def check_node() -> Status:
     )
 
 
+def _pip_cmd_for_current_python(*, user: bool = False) -> list[str]:
+    cmd = [sys.executable, "-m", "pip", "install"]
+    if user and not _running_inside_virtualenv():
+        cmd.append("--user")
+    return cmd
+
+
+def _pin_mcp_sdk_after_clawteam_install(pip_cmd: list[str]) -> InstallResult | None:
+    """Best-effort MCP 1.x pin; returns failure only when repair was needed and failed."""
+    if mcp_sdk_compatible():
+        return None
+    ok, detail = pip_install_mcp_sdk(pip_cmd=[*pip_cmd, "--upgrade"])
+    if not ok:
+        return InstallResult(
+            name="clawteam",
+            ok=False,
+            detail=f"clawteam installed but MCP SDK pin failed: {detail}",
+        )
+    if not mcp_sdk_compatible():
+        return InstallResult(
+            name="clawteam",
+            ok=False,
+            detail=incompatible_mcp_detail() or "MCP SDK still incompatible after pin",
+        )
+    return None
+
+
 def check_clawteam() -> Status:
     clawteam_bin = resolve_binary("clawteam")
     if clawteam_bin is None:
@@ -376,14 +409,38 @@ def check_clawteam() -> Status:
             install_hint=_hint_for("clawteam"),
         )
     runtime_help = _run([clawteam_bin, "runtime", "--help"])
-    ok = runtime_help is not None
+    if runtime_help is None:
+        return Status(
+            name="clawteam", ok=False, found_version=out,
+            detail=(
+                "Installed clawteam lacks `runtime` subcommand "
+                f"(resolved binary: {clawteam_bin})."
+            ),
+            install_hint=_hint_for("clawteam"),
+        )
+    if not mcp_sdk_compatible():
+        return Status(
+            name="clawteam",
+            ok=False,
+            found_version=out,
+            detail=incompatible_mcp_detail(),
+            install_hint=f"pip install '{MCP_SDK_SPEC}'",
+        )
+    mcp_bin = resolve_binary("clawteam-mcp")
+    if mcp_bin is None:
+        return Status(
+            name="clawteam",
+            ok=False,
+            found_version=out,
+            detail=(
+                "`clawteam-mcp` binary not found (need clawteam ≥ 0.3). "
+                "Reinstall clawteam into the same venv as csflow."
+            ),
+            install_hint=_hint_for("clawteam"),
+        )
     return Status(
-        name="clawteam", ok=ok, found_version=out,
-        detail="" if ok else (
-            "Installed clawteam lacks `runtime` subcommand "
-            f"(resolved binary: {clawteam_bin})."
-        ),
-        install_hint=_hint_for("clawteam"),
+        name="clawteam", ok=True, found_version=out,
+        detail="", install_hint=_hint_for("clawteam"),
     )
 
 
@@ -665,16 +722,20 @@ def install_tool(name: str, *, non_interactive: bool = False) -> InstallResult:
         return InstallResult(name=name, ok=check.ok, detail="" if check.ok else check.detail)
 
     if name == "clawteam":
-        pip_cmd = [sys.executable, "-m", "pip", "install"]
-        if not _running_inside_virtualenv():
-            # System Python installs should avoid global-site mutation.
-            pip_cmd.append("--user")
+        pip_cmd = _pip_cmd_for_current_python(
+            user=not _running_inside_virtualenv(),
+        )
         failures: list[str] = []
         for origin, spec in _clawteam_install_specs():
             cmd = [*pip_cmd, "--upgrade", spec]
             ok, out = _exec(cmd, timeout=1800.0)
             if not ok:
                 failures.append(f"{origin}: {out or 'pip install clawteam failed'}")
+                continue
+
+            pin_failure = _pin_mcp_sdk_after_clawteam_install(pip_cmd)
+            if pin_failure is not None:
+                failures.append(f"{origin}: {pin_failure.detail}")
                 continue
 
             check = check_clawteam()
@@ -686,13 +747,17 @@ def install_tool(name: str, *, non_interactive: bool = False) -> InstallResult:
 
         clone_ok, clone_detail = _install_clawteam_from_upstream_clone(pip_cmd)
         if clone_ok:
-            check = check_clawteam()
-            if check.ok:
-                return InstallResult(name=name, ok=True, detail="")
-            failures.append(
-                "upstream-clone: "
-                f"{check.detail or 'clawteam runtime command still unavailable'}"
-            )
+            pin_failure = _pin_mcp_sdk_after_clawteam_install(pip_cmd)
+            if pin_failure is not None:
+                failures.append(f"upstream-clone: {pin_failure.detail}")
+            else:
+                check = check_clawteam()
+                if check.ok:
+                    return InstallResult(name=name, ok=True, detail="")
+                failures.append(
+                    "upstream-clone: "
+                    f"{check.detail or 'clawteam runtime command still unavailable'}"
+                )
         else:
             failures.append(f"upstream-clone: {clone_detail}")
         detail = " ; ".join(failures) if failures else "pip install clawteam failed"

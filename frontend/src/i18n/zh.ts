@@ -1090,7 +1090,6 @@ const zh = {
         set: "已设置",
       },
       gateway: {
-        title: "Gateway 消息渠道",
         hint: "Gateway 消息渠道及 cron 定时任务的默认工作目录，本地 CLI 对话不用。",
         workdirLabel: "Gateway 工作目录",
         workdirPlaceholder: "已有目录的绝对路径",

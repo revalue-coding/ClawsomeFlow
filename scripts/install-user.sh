@@ -50,7 +50,8 @@ Options:
 Result:
   - Installs Python 3.11 runtime.
   - Installs latest stable clawsomeflow release into ~/.clawsomeflow/.venv (or prerelease with --pre).
-  - Installs latest clawteam from PyPI (no version pin) and verifies runtime subcommand.
+  - Installs git + tmux when a supported package manager is available.
+  - Installs latest clawteam from PyPI (no version pin) and verifies runtime + clawteam-mcp + MCP 1.x SDK.
   - OpenClaw / Claude / Codex / Cursor / Hermes are optional runtimes (not auto-installed by this script).
   - Writes launcher shims into ~/.local/bin (csflow / clawsomeflow / clawteam).
   - First-time install initializes ~/.clawsomeflow; rerun performs in-place upgrade.
@@ -145,13 +146,13 @@ PY
 ensure_python311() {
   resolve_python_runtime_bin
   if [[ -n "${PYTHON_RUNTIME_BIN}" ]]; then
-    say "[1/9] Python 3.11 already present"
+    say "[1/10] Python 3.11 already present"
     return
   fi
   if [[ "${IS_MACOS}" == "1" ]]; then
     command -v brew >/dev/null 2>&1 \
       || fail "Python 3.11 is required on macOS. Please install Homebrew first: https://brew.sh"
-    say "[1/9] Installing Python 3.11 (Homebrew)"
+    say "[1/10] Installing Python 3.11 (Homebrew)"
     brew install python@3.11 || fail "Failed to install python@3.11 via Homebrew."
     resolve_python_runtime_bin
     [[ -n "${PYTHON_RUNTIME_BIN}" ]] || fail "python@3.11 installed but python3.11 still unavailable in PATH."
@@ -160,15 +161,33 @@ ensure_python311() {
   if ! command -v apt-get >/dev/null; then
     fail "Python 3.11 is required. This host is not apt-based; install Python 3.11 manually."
   fi
-  say "[1/9] Installing Python 3.11"
+  say "[1/10] Installing Python 3.11"
   sudo apt-get update
   sudo apt-get install -y python3.11 python3.11-venv
   resolve_python_runtime_bin
   [[ -n "${PYTHON_RUNTIME_BIN}" ]] || fail "Python 3.11 installation finished but executable still unavailable."
 }
 
+ensure_os_packages() {
+  say "[2/10] Ensuring system packages (git, tmux)"
+  if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+    say "  ✓ git and tmux already present"
+    return
+  fi
+  if [[ "${IS_MACOS}" == "1" ]]; then
+    command -v brew >/dev/null 2>&1 || fail "Homebrew is required to install git/tmux on macOS."
+    brew install git tmux || fail "Failed to install git/tmux via Homebrew."
+    return
+  fi
+  if command -v apt-get >/dev/null; then
+    sudo apt-get install -y git tmux || fail "Failed to install git/tmux (required for ClawTeam worktrees and spawn)."
+    return
+  fi
+  fail "git and tmux are required but no supported package manager was found (install manually)."
+}
+
 ensure_runtime_venv() {
-  say "[2/9] Preparing isolated runtime venv"
+  say "[3/10] Preparing isolated runtime venv"
   mkdir -p "$(dirname "${VENV_DIR}")"
   if [[ ! -x "${VENV_BIN}/python" ]]; then
     [[ -n "${PYTHON_RUNTIME_BIN}" ]] || fail "Python runtime not resolved."
@@ -179,12 +198,14 @@ ensure_runtime_venv() {
 }
 
 install_clawsomeflow() {
-  say "[3/9] Installing clawsomeflow into runtime venv"
+  say "[4/10] Installing clawsomeflow into runtime venv"
   local channel_label="stable"
   if [[ "${USE_PRE}" == "1" ]]; then
     channel_label="pre-release"
     "${VENV_BIN}/pip" install --upgrade --index-url "${PYPI_INDEX_URL}" --pre clawsomeflow || \
       fail "Failed to install clawsomeflow from PyPI (--pre)."
+    # --pre applies to the whole dependency tree; re-pin MCP 1.x explicitly.
+    ensure_mcp_sdk_compatible || true
   else
     install_latest_stable_clawsomeflow || \
       fail "Failed to install clawsomeflow from PyPI."
@@ -279,64 +300,68 @@ _try_install_pinned_stable_quietly() {
   return 1
 }
 
+ensure_mcp_sdk_compatible() {
+  say "  -> pinning MCP Python SDK to 1.x (clawteam-mcp compatibility)"
+  if ! "${VENV_BIN}/python" - <<'PY'
+from app.integrations.mcp_compat import ensure_mcp_sdk_compatible
+import sys
+ok, detail = ensure_mcp_sdk_compatible()
+if not ok:
+    print(detail or "mcp sdk incompatible", file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    fail "MCP Python SDK is incompatible with clawteam-mcp (need mcp>=1,<2)."
+  fi
+}
+
 ensure_clawteam_runtime() {
-  say "[4/9] Ensuring clawteam runtime capability"
+  say "[5/10] Ensuring clawteam runtime capability"
   if [[ -x "${VENV_BIN}/clawteam" ]] && "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1; then
-    say "  ✓ clawteam runtime available"
-    return
-  fi
+    :
+  else
+    local source_override="${CSFLOW_CLAWTEAM_SOURCE:-}"
+    if [[ -n "${source_override}" ]]; then
+      say "  -> trying configured clawteam source: ${source_override}"
+      "${VENV_BIN}/pip" install --upgrade "${source_override}" \
+        || fail "clawteam install from CSFLOW_CLAWTEAM_SOURCE failed"
+    elif [[ -f "${LOCAL_CLAWTEAM_SOURCE}/pyproject.toml" ]]; then
+      say "  -> trying local clawteam source: ${LOCAL_CLAWTEAM_SOURCE}"
+      "${VENV_BIN}/pip" install --upgrade "${LOCAL_CLAWTEAM_SOURCE}" \
+        || fail "clawteam install from local source failed"
+    else
+      say "  -> trying PyPI clawteam"
+      if ! "${VENV_BIN}/pip" install --upgrade --index-url "${PYPI_INDEX_URL}" clawteam; then
+        warn "PyPI clawteam install failed, will fallback to git clone source install."
+      fi
+    fi
 
-  local source_override="${CSFLOW_CLAWTEAM_SOURCE:-}"
-  if [[ -n "${source_override}" ]]; then
-    say "  -> trying configured clawteam source: ${source_override}"
-    "${VENV_BIN}/pip" install --upgrade "${source_override}" \
-      || fail "clawteam install from CSFLOW_CLAWTEAM_SOURCE failed"
-    if [[ -x "${VENV_BIN}/clawteam" ]] && "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1; then
-      say "  ✓ clawteam runtime available"
-      return
+    if ! [[ -x "${VENV_BIN}/clawteam" ]] || ! "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1; then
+      say "  -> PyPI/local clawteam lacks runtime, cloning upstream source"
+      local tmp_dir
+      tmp_dir="$(mktemp -d)"
+      if ! git clone --depth 1 https://github.com/HKUDS/ClawTeam.git "${tmp_dir}/ClawTeam"; then
+        rm -rf "${tmp_dir}"
+        fail "clawteam git clone failed"
+      fi
+      if ! "${VENV_BIN}/pip" install --upgrade "${tmp_dir}/ClawTeam"; then
+        rm -rf "${tmp_dir}"
+        fail "clawteam install from cloned source failed"
+      fi
+      rm -rf "${tmp_dir}"
     fi
   fi
-
-  if [[ -f "${LOCAL_CLAWTEAM_SOURCE}/pyproject.toml" ]]; then
-    say "  -> trying local clawteam source: ${LOCAL_CLAWTEAM_SOURCE}"
-    "${VENV_BIN}/pip" install --upgrade "${LOCAL_CLAWTEAM_SOURCE}" \
-      || fail "clawteam install from local source failed"
-    if [[ -x "${VENV_BIN}/clawteam" ]] && "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1; then
-      say "  ✓ clawteam runtime available"
-      return
-    fi
-  fi
-
-  say "  -> trying PyPI clawteam"
-  if ! "${VENV_BIN}/pip" install --upgrade --index-url "${PYPI_INDEX_URL}" clawteam; then
-    warn "PyPI clawteam install failed, will fallback to git clone source install."
-  fi
-  if [[ -x "${VENV_BIN}/clawteam" ]] && "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1; then
-    say "  ✓ clawteam runtime available"
-    return
-  fi
-
-  say "  -> PyPI clawteam lacks runtime, cloning upstream source"
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  if ! git clone --depth 1 https://github.com/HKUDS/ClawTeam.git "${tmp_dir}/ClawTeam"; then
-    rm -rf "${tmp_dir}"
-    fail "clawteam git clone failed"
-  fi
-  if ! "${VENV_BIN}/pip" install --upgrade "${tmp_dir}/ClawTeam"; then
-    rm -rf "${tmp_dir}"
-    fail "clawteam install from cloned source failed"
-  fi
-  rm -rf "${tmp_dir}"
 
   [[ -x "${VENV_BIN}/clawteam" ]] || fail "clawteam install failed (binary missing)"
   "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1 \
     || fail "clawteam installed but runtime command missing"
-  say "  ✓ clawteam runtime available"
+  ensure_mcp_sdk_compatible
+  [[ -x "${VENV_BIN}/clawteam-mcp" ]] || fail "clawteam-mcp missing after clawteam install (need clawteam ≥ 0.3)"
+  say "  ✓ clawteam runtime + clawteam-mcp available"
 }
 
 install_launchers() {
-  say "[5/9] Installing launcher shims into ~/.local/bin"
+  say "[6/10] Installing launcher shims into ~/.local/bin"
   ensure_local_bin_in_path
   ln -sf "${VENV_BIN}/csflow" "${HOME}/.local/bin/csflow"
   ln -sf "${VENV_BIN}/clawsomeflow" "${HOME}/.local/bin/clawsomeflow"
@@ -364,7 +389,7 @@ snapshot_existing_metadata() {
 }
 
 reconcile_installation() {
-  say "[6/9] Reconciling ClawsomeFlow data"
+  say "[7/10] Reconciling ClawsomeFlow data"
   if [[ "${EXISTING_DEPLOYMENT}" == "1" ]]; then
     say "  -> Existing deployment detected: in-place upgrade (no uninstall)"
     snapshot_existing_metadata
@@ -381,7 +406,7 @@ reconcile_installation() {
 }
 
 write_user_service() {
-  say "[7/9] Configuring managed service"
+  say "[8/10] Configuring managed service"
   if [[ "${IS_MACOS}" == "1" ]]; then
     say "  -> macOS detected; launchd service file is managed by csflow CLI."
     return
@@ -417,7 +442,7 @@ EOF
 
 enable_linger_if_possible() {
   if [[ "${IS_MACOS}" == "1" ]]; then
-    say "[8/9] Skipping linger setup on macOS"
+    say "[9/10] Skipping linger setup on macOS"
     return
   fi
   if [[ "${SKIP_LINGER}" == "1" ]]; then
@@ -434,7 +459,7 @@ enable_linger_if_possible() {
     return
   fi
   if sudo true >/dev/null 2>&1; then
-    say "[8/9] Enabling user linger for boot auto-start"
+    say "[9/10] Enabling user linger for boot auto-start"
     sudo loginctl enable-linger "${USER}" || warn "enable-linger failed; continuing"
   else
     warn "sudo loginctl unavailable; skip linger setup."
@@ -442,11 +467,27 @@ enable_linger_if_possible() {
   fi
 }
 
+verify_runtime_stack() {
+  say "[9/10] Preflight: verifying required runtime stack"
+  if ! "${VENV_BIN}/python" - <<'PY'
+from app.cli.deps import fatal_missing, run_all
+import sys
+missing = fatal_missing(run_all())
+if missing:
+    print("Missing required dependencies:", ", ".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    fail "Runtime preflight failed. Run: ${VENV_BIN}/csflow doctor"
+  fi
+  say "  ✓ python, git, tmux, clawteam (+ MCP 1.x / clawteam-mcp)"
+}
+
 start_user_service() {
   if [[ "${IS_MACOS}" == "1" ]]; then
-    say "[9/9] Starting and enabling csflow service (launchd)"
+    say "[10/10] Starting and enabling csflow service (launchd)"
     ensure_port_reusable
-    local start_args=("start" "--skip-deps")
+    local start_args=("start")
     if [[ "${YES}" == "1" ]]; then
       start_args+=("--yes")
     fi
@@ -454,7 +495,7 @@ start_user_service() {
     return
   fi
 
-  say "[9/9] Starting and enabling csflow service (systemd)"
+  say "[10/10] Starting and enabling csflow service (systemd)"
   ensure_port_reusable
   systemctl --user daemon-reload
   systemctl --user enable --now csflow
@@ -462,7 +503,7 @@ start_user_service() {
 }
 
 health_check() {
-  local url="http://127.0.0.1:${CSFLOW_PORT}/"
+  local url="http://127.0.0.1:${CSFLOW_PORT}/health"
   # First boot after an upgrade runs init/migration before uvicorn starts
   # listening, which can take well over a few seconds on a busy host. Give it
   # a generous window so a slow-but-successful start is not reported as a
@@ -478,7 +519,13 @@ health_check() {
     fi
     sleep 1
   done
-  fail "Service started but health check failed after ${attempts}s: ${url}"
+  warn "Recent service logs (if systemd user unit is active):"
+  if [[ "${IS_MACOS}" != "1" ]] && command -v journalctl >/dev/null; then
+    journalctl --user -u csflow -n 30 --no-pager 2>/dev/null || true
+  fi
+  fail "Service started but health check failed after ${attempts}s: ${url}
+Hint: run '${VENV_BIN}/csflow doctor' and inspect logs with:
+  journalctl --user -u csflow -n 50 --no-pager"
 }
 
 print_deployed_version() {
@@ -492,6 +539,7 @@ say "🦞 ClawsomeFlow end-user installer"
 probe_existing_deployment
 ensure_local_bin_in_path
 ensure_python311
+ensure_os_packages
 ensure_runtime_venv
 install_clawsomeflow
 ensure_clawteam_runtime
@@ -499,6 +547,7 @@ install_launchers
 reconcile_installation
 write_user_service
 enable_linger_if_possible
+verify_runtime_stack
 start_user_service
 health_check
 print_deployed_version

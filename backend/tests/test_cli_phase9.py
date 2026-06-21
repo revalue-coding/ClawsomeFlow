@@ -78,9 +78,16 @@ def test_deps_check_clawteam_uses_resolved_binary(
     monkeypatch.setattr(
         deps_mod,
         "resolve_binary",
-        lambda name: "/opt/runtime/bin/clawteam" if name == "clawteam" else None,
+        lambda name: (
+            "/opt/runtime/bin/clawteam"
+            if name == "clawteam"
+            else "/opt/runtime/bin/clawteam-mcp"
+            if name == "clawteam-mcp"
+            else None
+        ),
     )
     monkeypatch.setattr(deps_mod, "_run", _fake_run)
+    monkeypatch.setattr(deps_mod, "mcp_sdk_compatible", lambda: True)
 
     status = deps_mod.check_clawteam()
     assert status.ok is True
@@ -88,6 +95,67 @@ def test_deps_check_clawteam_uses_resolved_binary(
         ["/opt/runtime/bin/clawteam", "--version"],
         ["/opt/runtime/bin/clawteam", "runtime", "--help"],
     ]
+
+
+def test_deps_check_clawteam_fails_on_mcp2_alpha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.cli import deps as deps_mod
+
+    monkeypatch.setattr(
+        deps_mod,
+        "resolve_binary",
+        lambda name: "/opt/runtime/bin/clawteam" if name == "clawteam" else None,
+    )
+    monkeypatch.setattr(
+        deps_mod,
+        "_run",
+        lambda cmd, timeout=5.0: (
+            "clawteam 0.3.0"
+            if cmd == ["/opt/runtime/bin/clawteam", "--version"]
+            else "usage"
+            if cmd == ["/opt/runtime/bin/clawteam", "runtime", "--help"]
+            else None
+        ),
+    )
+    monkeypatch.setattr(deps_mod, "mcp_sdk_compatible", lambda: False)
+    monkeypatch.setattr(
+        deps_mod,
+        "incompatible_mcp_detail",
+        lambda: "Incompatible mcp 2.0.0a2 installed",
+    )
+
+    status = deps_mod.check_clawteam()
+    assert status.ok is False
+    assert "Incompatible mcp" in status.detail
+
+
+def test_deps_check_clawteam_fails_when_clawteam_mcp_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.cli import deps as deps_mod
+
+    monkeypatch.setattr(
+        deps_mod,
+        "resolve_binary",
+        lambda name: "/opt/runtime/bin/clawteam" if name == "clawteam" else None,
+    )
+    monkeypatch.setattr(
+        deps_mod,
+        "_run",
+        lambda cmd, timeout=5.0: (
+            "clawteam 0.3.0"
+            if cmd == ["/opt/runtime/bin/clawteam", "--version"]
+            else "usage"
+            if cmd == ["/opt/runtime/bin/clawteam", "runtime", "--help"]
+            else None
+        ),
+    )
+    monkeypatch.setattr(deps_mod, "mcp_sdk_compatible", lambda: True)
+
+    status = deps_mod.check_clawteam()
+    assert status.ok is False
+    assert "clawteam-mcp" in status.detail
 
 
 def test_check_cursor_requires_successful_probe(

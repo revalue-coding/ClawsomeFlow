@@ -889,3 +889,53 @@ def test_run_upgrade_creates_ai_decompose_workdir(
         include_user_agent_skill_refresh=False,
     )
     assert (wd / ".git").is_dir()
+
+
+def test_run_upgrade_repairs_incompatible_mcp_sdk(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+    called = {"n": 0}
+
+    def _ensure(*, pip_cmd=None):
+        called["n"] += 1
+        return True, ""
+
+    monkeypatch.setattr(
+        "app.integrations.mcp_compat.ensure_mcp_sdk_compatible",
+        _ensure,
+    )
+
+    report = upgrade.run_upgrade(
+        config=fake_config,
+        target_version="1.0.0",
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+    assert report.ok is True
+    assert called["n"] == 1
+
+
+def test_run_upgrade_warns_when_mcp_sdk_repair_fails(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+    monkeypatch.setattr(
+        "app.integrations.mcp_compat.ensure_mcp_sdk_compatible",
+        lambda **_: (False, "still on mcp 2.0.0a2"),
+    )
+
+    report = upgrade.run_upgrade(
+        config=fake_config,
+        target_version="1.0.0",
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+    assert report.ok is True
+    assert any("mcp sdk compatibility" in w for w in report.repair_warnings)

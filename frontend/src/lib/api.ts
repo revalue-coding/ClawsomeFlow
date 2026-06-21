@@ -1214,8 +1214,11 @@ export const api = {
     request<void>("POST", `/api/openclaw/agents/${id}/chat/stop`),
 
   // ── Hermes agents ────────────────────────────────────────────────
-  listHermesAgents: () =>
-    request<{ items: HermesAgentSummary[] }>("GET", "/api/hermes/agents"),
+  listHermesAgents: (mode: "fast" | "full" = "full") =>
+    request<{ items: HermesAgentSummary[] }>(
+      "GET",
+      `/api/hermes/agents?mode=${mode}`,
+    ),
   getHermesAgent: (id: string) =>
     request<HermesAgentDetail>("GET", `/api/hermes/agents/${id}`),
   getHermesRuntimeStatus: (mode: "fast" | "full" = "full") =>

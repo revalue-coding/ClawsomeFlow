@@ -212,6 +212,8 @@ A few more for day-to-day use:
 # Lifecycle
 csflow stop
 csflow doctor                              # health check (deps + config + gateway)
+csflow uninstall --yes                     # stop service + unregister OpenClaw (keep data)
+csflow uninstall --purge-data              # full wipe: type PURGE to confirm (irreversible)
 
 # Flow / Run
 csflow flows list

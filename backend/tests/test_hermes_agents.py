@@ -864,6 +864,51 @@ def test_upsert_mcp_server_preserves_env_when_none(hermes_home: Path) -> None:
     assert svc.list_mcp_servers("mcpagent")[0]["env_keys"] == []
 
 
+def test_list_profile_names_from_fs(hermes_home: Path) -> None:
+    profiles = hermes_home / "profiles"
+    (profiles / "alpha").mkdir(parents=True)
+    (profiles / "beta").mkdir(parents=True)
+    (profiles / "default").mkdir(parents=True)  # reserved — excluded
+    (profiles / "Bad-Name").mkdir(parents=True)  # invalid id — excluded
+    (profiles / "notes.txt").write_text("not a profile")
+    assert svc.list_profile_names_from_fs() == ["alpha", "beta"]
+
+
+def test_list_agents_fast_reconcile_uses_fs_not_cli(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profiles = hermes_home / "profiles"
+    (profiles / "fsagent").mkdir(parents=True)
+    cli_called: list[bool] = []
+
+    def _cli_checked() -> tuple[bool, list[str]]:
+        cli_called.append(True)
+        return True, []
+
+    monkeypatch.setattr(svc, "list_profile_names_checked", _cli_checked)
+    storage = get_storage()
+    rows = svc.list_agents(user="alice", storage=storage, reconcile=svc.RECONCILE_FAST)
+    assert [r.id for r in rows] == ["fsagent"]
+    assert cli_called == []
+
+
+def test_api_list_mode_fast(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (hermes_home / "profiles" / "quick").mkdir(parents=True)
+    cli_called: list[bool] = []
+
+    def _cli_checked() -> tuple[bool, list[str]]:
+        cli_called.append(True)
+        return True, []
+
+    monkeypatch.setattr(svc, "list_profile_names_checked", _cli_checked)
+    r = client.get("/api/hermes/agents?mode=fast")
+    assert r.status_code == 200
+    assert [a["id"] for a in r.json()["items"]] == ["quick"]
+    assert cli_called == []
+
+
 def test_api_list_empty(
     client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -11,8 +11,7 @@ Lifecycle:
 * ``csflow serve``      — boot uvicorn (skip init / dep-check)
 * ``csflow doctor``     — dependency + configuration audit
 * ``csflow upgrade``    — user-facing stable package upgrade + reconcile
-* ``csflow uninstall``  — remove OpenClaw integration (keep local data)
-* ``csflow purge-data`` — delete ``~/.clawsomeflow/`` (strong confirmation)
+* ``csflow uninstall``  — remove OpenClaw integration (``--purge-data`` wipes local data)
 * ``csflow version``    — print the package version
 
 Ops:
@@ -29,12 +28,14 @@ import sys
 import typer
 
 from app import __version__, logging_setup
+from app.cli._help import CsflowHelpGroup
 
 app = typer.Typer(
     name="csflow",
     help="ClawsomeFlow — vertical agent workflow orchestration platform.",
     no_args_is_help=True,
     add_completion=False,
+    cls=CsflowHelpGroup,
 )
 
 
@@ -90,7 +91,6 @@ from app.cli import (  # noqa: E402,F401  (side-effect imports)
     doctor as _doctor_mod,
     upgrade as _upgrade_mod,
     uninstall as _uninstall_mod,
-    purge as _purge_mod,
     logs as _logs_mod,
 )
 
