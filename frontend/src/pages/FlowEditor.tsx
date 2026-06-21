@@ -695,6 +695,16 @@ export function FlowEditor() {
   /** Repo path last committed for validation (blur / pick / select), not every keystroke. */
   const [leaderRepoToCheck, setLeaderRepoToCheck] = useState("");
   const leaderRepoCheckSeededRef = useRef(false);
+
+  function resetLeaderRepoCheck() {
+    setLeaderRepoToCheck("");
+    leaderRepoCheckSeededRef.current = false;
+  }
+
+  function commitLeaderRepoCheck(repo: string) {
+    setLeaderRepoToCheck(repo.trim());
+    leaderRepoCheckSeededRef.current = true;
+  }
   const [leaderPickingRepo, setLeaderPickingRepo] = useState(false);
   const [runInputFields, setRunInputFieldsState] = useSessionBackedState<string[]>(
     draftKey("runInputFields"),
@@ -826,7 +836,7 @@ export function FlowEditor() {
           setLeaderIsTemporary(summary.ownerKind !== "openclaw" && summary.ownerIsTemporary);
           setLeaderRepo(summary.ownerRepo);
           setLeaderTargetBranch(summary.ownerTargetBranch.trim());
-          setLeaderRepoToCheck(summary.ownerRepo.trim());
+          commitLeaderRepoCheck(summary.ownerRepo);
         }
         setHydrated(true);
       })
@@ -943,15 +953,15 @@ export function FlowEditor() {
     };
   }, [confirm, leaderId, leaderKind, leaderRepoToCheck, t]);
 
-  // Seed branch validation once when restoring a draft or loaded flow repo path.
+  // Seed repo validation once when restoring a saved Flow or session draft — not
+  // while the user is still typing into the repo text field (that commits on blur).
   useEffect(() => {
     if (leaderRepoCheckSeededRef.current) return;
     if (leaderKind === "openclaw") return;
     const repo = leaderRepo.trim();
     if (!repo) return;
-    leaderRepoCheckSeededRef.current = true;
-    setLeaderRepoToCheck(repo);
-  }, [leaderKind, leaderRepo]);
+    commitLeaderRepoCheck(repo);
+  }, [leaderKind, hydrated]);
 
   // ── derived state -------------------------------------------------
 
@@ -1526,7 +1536,7 @@ export function FlowEditor() {
       setError(t("flowEditor.decompose.leaderRepoRequired"));
       return false;
     }
-    setLeaderRepoToCheck(repo);
+    commitLeaderRepoCheck(repo);
     const branchBeforeCheck = leaderTargetBranch;
     const out = await ensureRepoAndListBranches({
       repo,
@@ -1605,10 +1615,9 @@ export function FlowEditor() {
       });
       if (out.path) {
         setLeaderRepo(out.path);
-        setLeaderTargetBranch("");
         setLeaderBranchOptions([]);
         setLeaderBranchEditable(false);
-        setLeaderRepoToCheck(out.path);
+        commitLeaderRepoCheck(out.path);
       }
     } catch (e) {
       const msg =
@@ -1804,6 +1813,9 @@ export function FlowEditor() {
                     if (nextMode === "new") {
                       setLeaderIsTemporary(true);
                       if (leaderKind === "openclaw") setLeaderKind("claude");
+                      setLeaderRepo("");
+                      setLeaderTargetBranch("");
+                      resetLeaderRepoCheck();
                     } else {
                       setLeaderIsTemporary(false);
                       // Persistent leader only supports the persistent
@@ -1813,6 +1825,7 @@ export function FlowEditor() {
                         setLeaderKind("openclaw");
                         setLeaderRepo("");
                         setLeaderTargetBranch("");
+                        resetLeaderRepoCheck();
                       }
                     }
                   }}
@@ -1833,6 +1846,7 @@ export function FlowEditor() {
                     if (nextKind === "openclaw") {
                       setLeaderRepo("");
                       setLeaderTargetBranch("");
+                      resetLeaderRepoCheck();
                     }
                   }}
                 >
@@ -1904,10 +1918,9 @@ export function FlowEditor() {
                         onChange={(e) => {
                           const next = e.target.value;
                           setLeaderRepo(next);
-                          setLeaderTargetBranch("");
                           setLeaderBranchOptions([]);
                           setLeaderBranchEditable(false);
-                          setLeaderRepoToCheck(next);
+                          commitLeaderRepoCheck(next);
                         }}
                       >
                         <option value="">
@@ -1937,11 +1950,10 @@ export function FlowEditor() {
                         placeholder={t("flowEditor.taskFields.claudeRepoPlaceholder")}
                         onChange={(e) => {
                           setLeaderRepo(e.target.value);
-                          setLeaderTargetBranch("");
                           setLeaderBranchOptions([]);
                           setLeaderBranchEditable(false);
                         }}
-                        onBlur={(e) => setLeaderRepoToCheck(e.target.value.trim())}
+                        onBlur={(e) => commitLeaderRepoCheck(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
                             e.preventDefault();
@@ -2619,9 +2631,6 @@ function TaskEditModal({
     if (Object.prototype.hasOwnProperty.call(p, "ownerRepo")) {
       setBranchOptions([]);
       setBranchEditable(false);
-      if (!(p.ownerRepo ?? "").trim()) {
-        setRepoToCheck("");
-      }
     }
     setDraft((d) => ({ ...d, ...p }));
   }
@@ -2918,7 +2927,7 @@ function TaskFormBody({
     : "";
 
   function patchOwnerRepo(repo: string) {
-    onChange({ ownerRepo: repo, ownerTargetBranch: "" });
+    onChange({ ownerRepo: repo });
   }
 
   function commitRepoPath(repo: string) {
