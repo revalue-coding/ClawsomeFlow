@@ -1801,7 +1801,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
               title={t("hermes.myProfile")}
             >
               <DesktopIcon className="h-3.5 w-3.5" />
-              {opening ? t("hermes.opening") : t("hermes.myProfile")}
+              {t("hermes.myProfile")}
             </button>
           </h1>
           <div className="mt-2 inline-flex items-center gap-2 text-xs text-ink-600">
@@ -2458,9 +2458,7 @@ function GatewayTab({ agentId }: { agentId: string }) {
             onClick={() => void pickWorkdir()}
             disabled={busy || picking}
           >
-            {picking
-              ? t("hermes.settingsModal.gateway.pickingWorkdir")
-              : t("hermes.settingsModal.gateway.pickWorkdir")}
+            {t("hermes.settingsModal.gateway.pickWorkdir")}
           </button>
         </div>
       </label>
@@ -3226,9 +3224,7 @@ function CronTab({ agentId }: { agentId: string }) {
                       onClick={() => void pickEditWorkdir()}
                       disabled={pickingEditWorkdir}
                     >
-                      {pickingEditWorkdir
-                        ? t("hermes.settingsModal.cron.pickingWorkdir")
-                        : t("hermes.settingsModal.cron.pickWorkdir")}
+                      {t("hermes.settingsModal.cron.pickWorkdir")}
                     </button>
                   </div>
                   <div className="flex items-center gap-2">
@@ -3303,9 +3299,7 @@ function CronTab({ agentId }: { agentId: string }) {
             onClick={() => void pickCronWorkdir()}
             disabled={pickingWorkdir}
           >
-            {pickingWorkdir
-              ? t("hermes.settingsModal.cron.pickingWorkdir")
-              : t("hermes.settingsModal.cron.pickWorkdir")}
+            {t("hermes.settingsModal.cron.pickWorkdir")}
           </button>
         </div>
         <button

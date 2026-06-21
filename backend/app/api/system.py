@@ -5,24 +5,25 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+from app import paths
 from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.config import load_config
 from app.deployment import get_deployment_capabilities
-from app import paths
+from app.integrations import git_repo as git_repo_util
 from app.logging_setup import get_logger
 from app.models import DEFAULT_TARGET_BRANCH
-from app.integrations import git_repo as git_repo_util
 from app.services import update_check
 from app.storage import get_storage
 
@@ -65,6 +66,7 @@ class UiCapabilitiesResponse(_CamelModel):
     deployment_mode: Literal["local", "server"]
     allow_native_directory_picker: bool
     native_directory_ui_available: bool
+    native_directory_client_colocated: bool
 
 
 class EnsureGitRepoPayload(_CamelModel):
@@ -101,6 +103,7 @@ class RepoBranchesResponse(_CamelModel):
 
 @router.post("/pick-directory", response_model=PickDirectoryResponse)
 async def pick_directory(
+    request: Request,
     payload: Annotated[PickDirectoryPayload, Body()] = PickDirectoryPayload(),
     _user: UserDep = "",
 ) -> PickDirectoryResponse:
@@ -117,6 +120,7 @@ async def pick_directory(
             "Directory picker is available only in local mode.",
             status_code=409,
         )
+    _ensure_native_directory_client_colocated(request, action="pick")
     try:
         selected = await asyncio.to_thread(
             _pick_directory_native,
@@ -134,6 +138,7 @@ async def pick_directory(
 
 @router.post("/open-directory", response_model=OpenDirectoryResponse)
 async def open_directory(
+    request: Request,
     payload: Annotated[OpenDirectoryPayload, Body()],
     _user: UserDep = "",
 ) -> OpenDirectoryResponse:
@@ -169,6 +174,7 @@ async def open_directory(
             status_code=400,
             details={"path": str(resolved)},
         )
+    _ensure_native_directory_client_colocated(request, action="open")
     try:
         await asyncio.to_thread(_open_directory_native, path=resolved)
     except RuntimeError as exc:
@@ -524,15 +530,184 @@ def native_directory_ui_available() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+def _is_loopback_client_host(host: str) -> bool:
+    return host in ("127.0.0.1", "::1", "localhost", "testclient")
+
+
+def _is_ssh_process_name(name: str) -> bool:
+    lowered = name.lower()
+    return lowered == "sshd" or lowered.startswith("ssh") or lowered.startswith("autossh")
+
+
+def _proc_tcp_port_hex(port: int) -> str:
+    return f"{port & 0xFF:02X}{(port >> 8) & 0xFF:02X}"
+
+
+def _linux_socket_inodes_for_loopback_port(port: int) -> list[str]:
+    port_hex = _proc_tcp_port_hex(port)
+    inodes: list[str] = []
+    loopback_v4 = f"0100007F:{port_hex}"
+    loopback_v6 = f"00000000000000000000000001000000:{port_hex}"
+
+    for proc_path in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+        try:
+            lines = proc_path.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) < 10 or parts[3] != "01":
+                continue
+            local_addr, rem_addr, inode = parts[1], parts[2], parts[9]
+            if any(
+                addr.upper() == marker
+                for addr in (local_addr, rem_addr)
+                for marker in (loopback_v4.upper(), loopback_v6.upper())
+            ):
+                inodes.append(inode)
+    return inodes
+
+
+def _linux_pids_holding_socket_inode(inode: str) -> list[int]:
+    pids: list[int] = []
+    needle = f"socket:[{inode}]"
+    proc_root = Path("/proc")
+    try:
+        proc_entries = list(proc_root.iterdir())
+    except OSError:
+        return pids
+
+    for proc_dir in proc_entries:
+        if not proc_dir.name.isdigit():
+            continue
+        fd_dir = proc_dir / "fd"
+        try:
+            fd_names = list(fd_dir.iterdir())
+        except OSError:
+            continue
+        for fd in fd_names:
+            try:
+                if os.readlink(fd) == needle:
+                    pids.append(int(proc_dir.name))
+                    break
+            except OSError:
+                continue
+    return pids
+
+
+def _linux_comm_for_pid(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip().lower()
+    except OSError:
+        return None
+
+
+def _linux_ssh_processes_for_loopback_port(port: int) -> set[str]:
+    names: set[str] = set()
+    for inode in _linux_socket_inodes_for_loopback_port(port):
+        for pid in _linux_pids_holding_socket_inode(inode):
+            comm = _linux_comm_for_pid(pid)
+            if comm and _is_ssh_process_name(comm):
+                names.add(comm)
+    return names
+
+
+def _ss_line_indicates_ssh_forward(line: str, client_port: int) -> bool:
+    parts = line.split()
+    if len(parts) < 4:
+        return False
+    local_addr, peer_addr = parts[2], parts[3]
+    peer_v4 = f"127.0.0.1:{client_port}"
+    peer_v6 = f"[::1]:{client_port}"
+    if local_addr not in (peer_v4, peer_v6) and peer_addr not in (peer_v4, peer_v6):
+        return False
+    process_blob = line.split("users:", 1)[-1] if "users:" in line else ""
+    return any(_is_ssh_process_name(name) for name in re.findall(r'"([^"]+)"', process_blob))
+
+
+def _lsof_line_indicates_ssh_forward(line: str, client_port: int) -> bool:
+    parts = line.split()
+    if not parts:
+        return False
+    if not _is_ssh_process_name(parts[0]):
+        return False
+    port_token = f":{client_port}"
+    return port_token in line and ("->127.0.0.1" in line or "->[::1]" in line or port_token in line)
+
+
+def _loopback_client_is_ssh_forward(client_host: str, client_port: int) -> bool:
+    """True when loopback HTTP peer port belongs to ssh/sshd (any OS, any SSH -L forward)."""
+    if client_host in ("testclient",) or client_port <= 0:
+        return False
+    if not _is_loopback_client_host(client_host):
+        return False
+
+    try:
+        if sys.platform == "linux" and _linux_ssh_processes_for_loopback_port(client_port):
+            return True
+
+        if shutil.which("ss"):
+            result = subprocess.run(
+                ["ss", "-H", "-tnp"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            for line in result.stdout.splitlines():
+                if _ss_line_indicates_ssh_forward(line, client_port):
+                    return True
+
+        if shutil.which("lsof"):
+            result = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{client_port}", "-sTCP:ESTABLISHED"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            for line in result.stdout.splitlines()[1:]:
+                if _lsof_line_indicates_ssh_forward(line, client_port):
+                    return True
+    except Exception:
+        logger.debug("ssh forward detection failed", exc_info=True)
+
+    return False
+
+
+def native_directory_client_colocated(request: Request) -> bool:
+    """Whether this HTTP client shares the server desktop (not SSH port-forwarded)."""
+    client = request.client
+    if client is None or not _is_loopback_client_host(client.host):
+        return False
+    if _loopback_client_is_ssh_forward(client.host, client.port or 0):
+        return False
+    return True
+
+
+def _ensure_native_directory_client_colocated(request: Request, *, action: Literal["pick", "open"]) -> None:
+    if native_directory_client_colocated(request):
+        return
+    code = "DIRECTORY_PICKER_UNAVAILABLE" if action == "pick" else "DIRECTORY_OPEN_UNAVAILABLE"
+    raise ApiError(
+        code,
+        "Native directory UI is unavailable from this browser session "
+        "(remote SSH port-forward). Paste the absolute path manually.",
+        status_code=409,
+    )
+
+
 @router.get("/ui-capabilities", response_model=UiCapabilitiesResponse)
-def ui_capabilities(_user: UserDep = "") -> UiCapabilitiesResponse:
+def ui_capabilities(request: Request, _user: UserDep = "") -> UiCapabilitiesResponse:
     """Expose deployment + native UI availability for frontend remote-client detection."""
     cfg = load_config()
     caps = get_deployment_capabilities(cfg)
+    native_ui = native_directory_ui_available()
     return UiCapabilitiesResponse(
         deployment_mode=cfg.deployment_mode,
         allow_native_directory_picker=caps.allow_native_directory_picker,
-        native_directory_ui_available=native_directory_ui_available(),
+        native_directory_ui_available=native_ui,
+        native_directory_client_colocated=native_directory_client_colocated(request),
     )
 
 

@@ -2327,7 +2327,7 @@ function ChatRoom({
               title={t("chat.myDesktop.action")}
             >
               <DesktopIcon className="h-3.5 w-3.5" />
-              {openingMyDesktop ? t("chat.myDesktop.opening") : t("chat.myDesktop.action")}
+              {t("chat.myDesktop.action")}
             </button>
           </h1>
           <div className="mt-2 inline-flex items-center gap-2 text-xs text-ink-600">

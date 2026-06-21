@@ -14,7 +14,8 @@ export function getUiCapabilities(): UiCapabilities | null {
 export type NativeDirectoryBlockReason =
   | "remoteHostname"
   | "serverNoGui"
-  | "serverMode";
+  | "serverMode"
+  | "clientNotColocated";
 
 export type NativeDirectoryAction = "pick" | "open";
 
@@ -33,6 +34,7 @@ export function getNativeDirectoryBlockReason(
   if (!resolved) return null;
   if (!resolved.allowNativeDirectoryPicker) return "serverMode";
   if (!resolved.nativeDirectoryUiAvailable) return "serverNoGui";
+  if (resolved.nativeDirectoryClientColocated === false) return "clientNotColocated";
   return null;
 }
 

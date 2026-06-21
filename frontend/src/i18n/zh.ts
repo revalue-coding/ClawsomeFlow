@@ -75,6 +75,9 @@ const zh = {
           "ClawsomeFlow 运行在无图形桌面的主机上（常见于无界面服务器，或通过 SSH 访问且服务器端无 DISPLAY）。" +
           "此处无法弹出目录选择框。请手动粘贴该服务器上的绝对路径（例如 /home/you/project）。",
         serverMode: "当前为 server 部署模式，原生目录选择器已禁用。请手动粘贴路径。",
+        clientNotColocated:
+          "当前通过 SSH 端口转发访问（浏览器地址为 localhost，但浏览器实际运行在另一台机器上）。" +
+          "目录选择框会弹在服务器本机桌面上，您看不到。请手动粘贴服务器上的绝对路径（例如 /home/you/project）。",
       },
       open: {
         remoteHostname:
@@ -84,6 +87,9 @@ const zh = {
           "ClawsomeFlow 运行在无图形桌面的主机上，无法从当前浏览器会话打开文件管理器。" +
           "请 SSH 登录服务器操作，或手动粘贴路径。",
         serverMode: "当前为 server 部署模式，无法在文件管理器中打开文件夹。",
+        clientNotColocated:
+          "当前通过 SSH 端口转发访问（浏览器地址为 localhost，但浏览器实际运行在另一台机器上）。" +
+          "文件管理器会在服务器本机打开，您看不到。请 SSH 登录服务器操作，或手动粘贴路径。",
       },
     },
   },
@@ -404,7 +410,6 @@ const zh = {
       claudeRepoServerEmpty: "服务端尚未录入可选的工作目录。",
       pickDirTitle: "选择 Workspace 仓库目录",
       pickDirButton: "选择目录",
-      pickingDir: "打开中…",
       dependsOn: "依赖任务（多选）",
       dependsOnHint: "本任务必须等所列任务都 completed 后才会派发",
       isLeaderSummary: "leader 总结任务",
@@ -776,7 +781,6 @@ const zh = {
     runtimeChecking: "检查中…",
     myDesktop: {
       action: "my-desktop",
-      opening: "打开中…",
       remoteUnavailable: "当前是 SSH / 远程连接，无法远程打开本机文件夹。",
       openFailed: "无法打开 my-desktop 目录：{{message}}",
     },
@@ -972,7 +976,6 @@ const zh = {
     dashboardOpenFailed: "无法打开 Hermes 控制台：{{message}}",
     dashboardRemoteUnavailable:
       "Hermes 控制台运行在服务器本机（127.0.0.1），无法从远程 / SSH 浏览器会话打开。请在服务器本机操作，或使用 SSH 本地端口转发后再访问。",
-    opening: "打开中…",
     remoteUnavailable: "当前为 SSH/远程浏览器会话，无法打开本地文件夹。",
     openFailed: "打开 profile 目录失败：{{message}}",
     back: "返回",
@@ -1094,7 +1097,6 @@ const zh = {
         workdirLabel: "Gateway 工作目录",
         workdirPlaceholder: "已有目录的绝对路径",
         pickWorkdir: "选择目录",
-        pickingWorkdir: "选择中…",
         save: "保存并重启 Gateway",
         saving: "保存中…",
       },
@@ -1140,7 +1142,6 @@ const zh = {
         deliver: "投递至（默认 local）",
         workdir: "工作目录（可选）",
         pickWorkdir: "选择目录",
-        pickingWorkdir: "选择中…",
         add: "添加任务",
         pause: "暂停",
         resume: "恢复",

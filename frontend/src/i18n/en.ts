@@ -71,8 +71,10 @@ const en = {
         serverNoGui:
           "ClawsomeFlow is running on a host without a graphical desktop (typical headless server, or SSH without a display on the server). " +
           "No folder picker can be shown here. Paste the absolute path on that server manually (e.g. /home/you/project).",
-        serverMode:
-          "The native folder picker is disabled in server deployment mode. Paste the path manually.",
+        serverMode: "The native folder picker is disabled in server deployment mode. Paste the path manually.",
+        clientNotColocated:
+          "You are viewing ClawsomeFlow through SSH port forwarding (the browser address shows localhost, but the browser runs on another machine). " +
+          "The folder picker would open on the server's desktop, not yours. Paste the absolute path on the server manually (e.g. /home/you/project).",
       },
       open: {
         remoteHostname:
@@ -84,6 +86,9 @@ const en = {
           "The file manager cannot be opened from this browser session—use SSH on the server, or paste paths manually.",
         serverMode:
           "Opening folders in the file manager is disabled in server deployment mode.",
+        clientNotColocated:
+          "You are viewing ClawsomeFlow through SSH port forwarding (the browser address shows localhost, but the browser runs on another machine). " +
+          "The file manager would open on the server's desktop, not yours. Use SSH on the server, or paste paths manually.",
       },
     },
   },
@@ -410,7 +415,6 @@ const en = {
         "No recorded workspace directories found on server yet.",
       pickDirTitle: "Choose workspace repo directory",
       pickDirButton: "Choose directory",
-      pickingDir: "Opening…",
       dependsOn: "Depends on (multi)",
       dependsOnHint: "This task only runs once every listed task is completed.",
       isLeaderSummary: "Leader summary task",
@@ -788,7 +792,6 @@ const en = {
     runtimeChecking: "Checking…",
     myDesktop: {
       action: "my-desktop",
-      opening: "Opening…",
       remoteUnavailable:
         "This is an SSH/remote connection. Cannot open a local folder remotely.",
       openFailed: "Failed to open my-desktop folder: {{message}}",
@@ -986,7 +989,6 @@ const en = {
     dashboardOpenFailed: "Could not open Hermes dashboard: {{message}}",
     dashboardRemoteUnavailable:
       "The Hermes dashboard runs on the server's local machine (127.0.0.1) and cannot be opened from a remote/SSH browser session. Open it on the host machine, or use SSH local port forwarding to reach it.",
-    opening: "Opening…",
     remoteUnavailable:
       "This is an SSH/remote browser session; opening local folders is unavailable.",
     openFailed: "Failed to open the profile folder: {{message}}",
@@ -1114,7 +1116,6 @@ const en = {
         workdirLabel: "Gateway working directory",
         workdirPlaceholder: "Absolute path to an existing directory",
         pickWorkdir: "Browse",
-        pickingWorkdir: "Browsing…",
         save: "Save & restart Gateway",
         saving: "Saving…",
       },
@@ -1161,7 +1162,6 @@ const en = {
         deliver: "Deliver to (default: local)",
         workdir: "Working dir (optional)",
         pickWorkdir: "Choose directory",
-        pickingWorkdir: "Choosing...",
         add: "Add job",
         pause: "Pause",
         resume: "Resume",

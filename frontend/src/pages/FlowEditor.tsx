@@ -1955,9 +1955,7 @@ export function FlowEditor() {
                         onClick={() => void onPickLeaderRepo()}
                         disabled={leaderPickingRepo}
                       >
-                        {leaderPickingRepo
-                          ? t("flowEditor.taskFields.pickingDir")
-                          : t("flowEditor.taskFields.pickDirButton")}
+                        {t("flowEditor.taskFields.pickDirButton")}
                       </button>
                     </div>
                   )}
@@ -3244,9 +3242,7 @@ function TaskFormBody({
                     onClick={onPickRepo}
                     disabled={pickingRepo || ownerLocked}
                   >
-                    {pickingRepo
-                      ? t("flowEditor.taskFields.pickingDir")
-                      : t("flowEditor.taskFields.pickDirButton")}
+                    {t("flowEditor.taskFields.pickDirButton")}
                   </button>
                 </div>
               )}

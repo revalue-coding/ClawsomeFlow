@@ -693,6 +693,7 @@ export interface UiCapabilities {
   deploymentMode: "local" | "server";
   allowNativeDirectoryPicker: boolean;
   nativeDirectoryUiAvailable: boolean;
+  nativeDirectoryClientColocated: boolean;
 }
 
 export interface EnsureGitRepoResult {

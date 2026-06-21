@@ -171,6 +171,96 @@ def test_ui_capabilities_local_default(monkeypatch) -> None:
     body = r.json()
     assert body["deploymentMode"] == "local"
     assert body["allowNativeDirectoryPicker"] is True
+    assert body["nativeDirectoryClientColocated"] is True
+
+
+def test_ui_capabilities_client_not_colocated_same_platform_ssh(monkeypatch) -> None:
+    """Linux browser + Linux server over SSH -L must still be treated as remote."""
+    monkeypatch.setattr(
+        "app.api.system.load_config",
+        lambda: SimpleNamespace(deployment_mode="local"),
+    )
+    monkeypatch.setattr("app.api.system.native_directory_ui_available", lambda: True)
+    monkeypatch.setattr("app.api.system._loopback_client_is_ssh_forward", lambda _h, _p: True)
+    with TestClient(create_app()) as client:
+        r = client.get(
+            "/api/system/ui-capabilities",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+            },
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["nativeDirectoryUiAvailable"] is True
+    assert body["nativeDirectoryClientColocated"] is False
+
+
+def test_ui_capabilities_same_platform_without_ssh_forward(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.system.load_config",
+        lambda: SimpleNamespace(deployment_mode="local"),
+    )
+    monkeypatch.setattr("app.api.system._loopback_client_is_ssh_forward", lambda _h, _p: False)
+    with TestClient(create_app()) as client:
+        r = client.get(
+            "/api/system/ui-capabilities",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["nativeDirectoryClientColocated"] is True
+
+
+def test_ui_capabilities_client_not_colocated_ssh_forward(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.system.load_config",
+        lambda: SimpleNamespace(deployment_mode="local"),
+    )
+    monkeypatch.setattr("app.api.system.native_directory_ui_available", lambda: True)
+    monkeypatch.setattr("app.api.system._loopback_client_is_ssh_forward", lambda _h, _p: True)
+    with TestClient(create_app()) as client:
+        r = client.get("/api/system/ui-capabilities")
+    assert r.status_code == 200, r.text
+    assert r.json()["nativeDirectoryClientColocated"] is False
+
+
+def test_pick_directory_blocked_when_client_not_colocated(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.system.load_config",
+        lambda: SimpleNamespace(deployment_mode="local"),
+    )
+    monkeypatch.setattr(
+        "app.api.system.native_directory_client_colocated",
+        lambda _request: False,
+    )
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/pick-directory", json={})
+    assert r.status_code == 409
+    assert r.json()["error"] == "DIRECTORY_PICKER_UNAVAILABLE"
+
+
+def test_open_directory_blocked_when_client_not_colocated(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.setattr(
+        "app.api.system.load_config",
+        lambda: SimpleNamespace(deployment_mode="local"),
+    )
+    monkeypatch.setattr(
+        "app.api.system.native_directory_client_colocated",
+        lambda _request: False,
+    )
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/open-directory", json={"path": str(target)})
+    assert r.status_code == 409
+    assert r.json()["error"] == "DIRECTORY_OPEN_UNAVAILABLE"
 
 
 def test_ui_capabilities_server_mode_disables_native_picker(monkeypatch) -> None:
@@ -436,4 +526,26 @@ def test_repo_branches_preserve_existing_branch_even_when_filtered(
         )
     assert r2.status_code == 200, r2.text
     assert "missing-branch" not in r2.json()["branches"]
+
+
+def test_ss_line_indicates_ssh_forward_local_port() -> None:
+    line = "ESTAB 0 0 127.0.0.1:54321 127.0.0.1:17017 users:((\"sshd\",pid=99,fd=3))"
+    assert system._ss_line_indicates_ssh_forward(line, 54321) is True
+
+
+def test_ss_line_indicates_ssh_forward_ignores_non_ssh() -> None:
+    line = "ESTAB 0 0 127.0.0.1:54321 127.0.0.1:17017 users:((\"python3\",pid=99,fd=3))"
+    assert system._ss_line_indicates_ssh_forward(line, 54321) is False
+
+
+def test_linux_ssh_process_detection_via_proc(monkeypatch) -> None:
+    monkeypatch.setattr(
+        system,
+        "_linux_socket_inodes_for_loopback_port",
+        lambda _port: ["12345"],
+    )
+    monkeypatch.setattr(system, "_linux_pids_holding_socket_inode", lambda _inode: [4242])
+    monkeypatch.setattr(system, "_linux_comm_for_pid", lambda _pid: "sshd")
+    assert system._linux_ssh_processes_for_loopback_port(54321) == {"sshd"}
+    assert system._loopback_client_is_ssh_forward("127.0.0.1", 54321) is True
 
