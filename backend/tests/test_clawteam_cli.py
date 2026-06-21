@@ -366,6 +366,62 @@ async def test_workspace_cleanup_uses_agent_flag(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+async def test_workspace_cleanup_deletes_agent_branch_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=repo,
+        env={
+            **dict(__import__("os").environ),
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
+        check=True,
+    )
+    agent_branch = "clawteam/csflow-x/alice"
+    subprocess.run(["git", "branch", agent_branch], cwd=repo, check=True)
+
+    async def _fake_run(argv: list[str], *, env: dict[str, str]):
+        del env
+        return 0, "", ""
+
+    async def _fake_workspace_list(self, *, team: str, repo: str | None = None):
+        del self, team, repo
+        return [
+            {
+                "agent_name": "alice",
+                "branch_name": agent_branch,
+                "repo_root": str(repo),
+            }
+        ]
+
+    monkeypatch.setattr(cli_mod, "_run", _fake_run)
+    monkeypatch.setattr(ClawTeamCli, "workspace_list", _fake_workspace_list)
+    ok = await ClawTeamCli().workspace_cleanup(
+        team="csflow-x",
+        agent="alice",
+        repo=str(repo),
+    )
+    assert ok is True
+    branches = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert agent_branch not in [b.strip() for b in branches]
+    assert "main" in [b.strip() for b in branches]
+
+
+@pytest.mark.asyncio
 async def test_spawn_resume_uses_replace_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, list[str]] = {}
 

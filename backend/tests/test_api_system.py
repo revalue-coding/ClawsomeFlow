@@ -332,3 +332,30 @@ def test_repo_branches_lists_local_heads(tmp_path: Path) -> None:
     assert base_branch in body["branches"]
     assert "feature/demo" in body["branches"]
 
+
+def test_repo_branches_excludes_clawteam_agent_refs(tmp_path: Path) -> None:
+    target = tmp_path / "git-branches-filter"
+    with TestClient(create_app()) as client:
+        ensured = client.post(
+            "/api/system/ensure-git-repo",
+            json={
+                "path": str(target),
+                "createDirIfMissing": True,
+                "initializeIfMissing": True,
+                "createInitialCommitIfMissing": True,
+            },
+        )
+        assert ensured.status_code == 200, ensured.text
+    subprocess.run(["git", "branch", "clawteam/run-1/agent-a"], cwd=target, check=True)
+    subprocess.run(["git", "branch", "feature/demo"], cwd=target, check=True)
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/api/system/git-branches",
+            json={"path": str(target)},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "clawteam/run-1/agent-a" not in body["branches"]
+    assert "feature/demo" in body["branches"]
+    assert "main" in body["branches"]
+

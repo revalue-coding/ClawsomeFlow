@@ -692,6 +692,9 @@ export function FlowEditor() {
   const [leaderBranchOptions, setLeaderBranchOptions] = useState<string[]>([]);
   const [leaderBranchEditable, setLeaderBranchEditable] = useState(false);
   const [leaderBranchLoading, setLeaderBranchLoading] = useState(false);
+  /** Repo path last committed for validation (blur / pick / select), not every keystroke. */
+  const [leaderRepoToCheck, setLeaderRepoToCheck] = useState("");
+  const leaderRepoCheckSeededRef = useRef(false);
   const [leaderPickingRepo, setLeaderPickingRepo] = useState(false);
   const [runInputFields, setRunInputFieldsState] = useSessionBackedState<string[]>(
     draftKey("runInputFields"),
@@ -823,6 +826,7 @@ export function FlowEditor() {
           setLeaderIsTemporary(summary.ownerKind !== "openclaw" && summary.ownerIsTemporary);
           setLeaderRepo(summary.ownerRepo);
           setLeaderTargetBranch(summary.ownerTargetBranch.trim());
+          setLeaderRepoToCheck(summary.ownerRepo.trim());
         }
         setHydrated(true);
       })
@@ -899,7 +903,7 @@ export function FlowEditor() {
       setLeaderBranchEditable(false);
       return;
     }
-    const repo = leaderRepo.trim();
+    const repo = leaderRepoToCheck.trim();
     if (!repo) {
       setLeaderBranchOptions([]);
       setLeaderBranchEditable(false);
@@ -937,7 +941,17 @@ export function FlowEditor() {
     return () => {
       cancelled = true;
     };
-  }, [confirm, leaderId, leaderKind, leaderRepo, t]);
+  }, [confirm, leaderId, leaderKind, leaderRepo, leaderRepoToCheck, t]);
+
+  // Seed branch validation once when restoring a draft or loaded flow repo path.
+  useEffect(() => {
+    if (leaderRepoCheckSeededRef.current) return;
+    if (leaderKind === "openclaw") return;
+    const repo = leaderRepo.trim();
+    if (!repo) return;
+    leaderRepoCheckSeededRef.current = true;
+    setLeaderRepoToCheck(repo);
+  }, [leaderKind, leaderRepo]);
 
   // ── derived state -------------------------------------------------
 
@@ -1036,12 +1050,16 @@ export function FlowEditor() {
     if (!leaderRepo.trim()) {
       return t("flowEditor.decompose.leaderRepoRequired");
     }
+    if (!leaderTargetBranch.trim()) {
+      return t("flowEditor.validation.claudeTargetBranchRequired");
+    }
     return null;
   }, [
     leaderId,
     leaderKind,
     leaderIsTemporary,
     leaderRepo,
+    leaderTargetBranch,
     openclawOptions,
     hermesOptions,
     t,
@@ -1501,96 +1519,39 @@ export function FlowEditor() {
 
   // ── decompose ----------------------------------------------------
 
-  async function ensureLeaderRepoReadyForDecompose(): Promise<boolean> {
+  async function validateLeaderRepoAndBranchForDecompose(): Promise<boolean> {
     if (!isNonOpenclawKind(leaderKind)) return true;
     const repo = leaderRepo.trim();
     if (!repo) {
       setError(t("flowEditor.decompose.leaderRepoRequired"));
       return false;
     }
-    const leaderLabel = leaderId.trim() || t("flowEditor.repoIssue.unknownAgent");
-    const errText = (e: unknown) =>
-      e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
-
-    let checked;
-    try {
-      checked = await api.ensureGitRepo({
-        path: repo,
-        createDirIfMissing: false,
-        initializeIfMissing: false,
-      });
-    } catch (e) {
-      setError(t("flowEditor.taskRepoCheck.checkFailed", { message: errText(e) }));
+    setLeaderRepoToCheck(repo);
+    const out = await ensureRepoAndListBranches({
+      repo,
+      agentLabel: leaderId.trim() || t("flowEditor.repoIssue.unknownAgent"),
+      confirmCreate: confirm,
+      messages: repoBranchMessages(t),
+    });
+    if (!out.ok) {
+      if (out.error) setError(out.error);
       return false;
     }
-
-    const resolvedPath = checked.path || repo;
-    if (checked.pathExists && checked.isGitRepo && checked.hasInitialCommit) {
-      if (resolvedPath !== leaderRepo) {
-        setLeaderRepo(resolvedPath);
-      }
-      return true;
+    setLeaderBranchOptions(out.result.branches);
+    setLeaderBranchEditable(out.result.editable);
+    if (out.result.path && out.result.path !== leaderRepo) {
+      setLeaderRepo(out.result.path);
     }
-
-    const reason = !checked.pathExists
-      ? t("flowEditor.repoIssue.reasonPathMissing")
-      : !checked.isGitRepo
-      ? t("flowEditor.repoIssue.reasonNotGitRepo")
-      : !checked.hasInitialCommit
-      ? t("flowEditor.repoIssue.reasonNoInitialCommit")
-      : t("flowEditor.repoIssue.reasonUnknown");
-    const shouldCreate = await confirm(
-      t("flowEditor.taskRepoCheck.confirmCreate", {
-        agentId: leaderLabel,
-        repo: resolvedPath,
-        reason,
-      }),
-    );
-    if (!shouldCreate) {
-      setError(t("flowEditor.taskRepoCheck.reselectHint"));
+    const branch = leaderTargetBranch.trim();
+    if (!branch) {
+      setError(t("flowEditor.validation.claudeTargetBranchRequired"));
       return false;
     }
-
-    try {
-      const ensured = await api.ensureGitRepo({
-        path: resolvedPath,
-        createDirIfMissing: true,
-        initializeIfMissing: true,
-        createInitialCommitIfMissing: true,
-      });
-      if (!ensured.isGitRepo || !ensured.hasInitialCommit) {
-        setError(t("flowEditor.taskRepoCheck.stillInvalid"));
-        return false;
-      }
-      const normalizedPath = ensured.path || resolvedPath;
-      let nextLeaderTargetBranch = leaderTargetBranch.trim() || DEFAULT_TARGET_BRANCH;
-      if (ensured.initializedRepo || ensured.createdInitialCommit) {
-        const fromEnsure = ensured.currentBranch?.trim();
-        if (fromEnsure) {
-          nextLeaderTargetBranch = fromEnsure;
-        } else {
-          try {
-            const meta = await api.listRepoBranches({ path: normalizedPath });
-            nextLeaderTargetBranch =
-              meta.currentBranch?.trim()
-              || meta.branches[0]
-              || DEFAULT_TARGET_BRANCH;
-          } catch {
-            nextLeaderTargetBranch = DEFAULT_TARGET_BRANCH;
-          }
-        }
-      }
-      if (normalizedPath !== leaderRepo) {
-        setLeaderRepo(normalizedPath);
-      }
-      if (nextLeaderTargetBranch !== leaderTargetBranch) {
-        setLeaderTargetBranch(nextLeaderTargetBranch);
-      }
-      return true;
-    } catch (e) {
-      setError(t("flowEditor.taskRepoCheck.createFailed", { message: errText(e) }));
+    if (!out.result.branches.includes(branch)) {
+      setError(t("flowEditor.taskBranchCheck.notFound"));
       return false;
     }
+    return true;
   }
 
   async function openDecompose() {
@@ -1622,12 +1583,8 @@ export function FlowEditor() {
         setError(t("flowEditor.validation.pickLeader"));
         return;
       }
-      const repoReady = await ensureLeaderRepoReadyForDecompose();
+      const repoReady = await validateLeaderRepoAndBranchForDecompose();
       if (!repoReady) return;
-      if (!leaderTargetBranch.trim()) {
-        setError(t("flowEditor.validation.claudeTargetBranchRequired"));
-        return;
-      }
     }
     setError(null);
     setDecomposeOpen(true);
@@ -1647,6 +1604,9 @@ export function FlowEditor() {
       if (out.path) {
         setLeaderRepo(out.path);
         setLeaderTargetBranch("");
+        setLeaderBranchOptions([]);
+        setLeaderBranchEditable(false);
+        setLeaderRepoToCheck(out.path);
       }
     } catch (e) {
       const msg =
@@ -1940,8 +1900,12 @@ export function FlowEditor() {
                         className="select"
                         value={leaderRepo}
                         onChange={(e) => {
-                          setLeaderRepo(e.target.value);
+                          const next = e.target.value;
+                          setLeaderRepo(next);
                           setLeaderTargetBranch("");
+                          setLeaderBranchOptions([]);
+                          setLeaderBranchEditable(false);
+                          setLeaderRepoToCheck(next);
                         }}
                       >
                         <option value="">
@@ -1972,10 +1936,14 @@ export function FlowEditor() {
                         onChange={(e) => {
                           setLeaderRepo(e.target.value);
                           setLeaderTargetBranch("");
+                          setLeaderBranchOptions([]);
+                          setLeaderBranchEditable(false);
                         }}
+                        onBlur={(e) => setLeaderRepoToCheck(e.target.value.trim())}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
                             e.preventDefault();
+                            (e.target as HTMLInputElement).blur();
                           }
                         }}
                       />
@@ -2285,6 +2253,7 @@ export function FlowEditor() {
           mode={editing.mode}
           initialRow={editingRow}
           tasks={tasks}
+          devMode={devMode}
           openclawOptions={openclawOptions}
           hermesOptions={hermesOptions}
           leaderKind={leaderKind}
@@ -2577,6 +2546,7 @@ function TaskEditModal({
   mode,
   initialRow,
   tasks,
+  devMode,
   openclawOptions,
   hermesOptions,
   leaderKind,
@@ -2591,6 +2561,7 @@ function TaskEditModal({
   mode: "create" | "edit" | "view";
   initialRow: TaskRow;
   tasks: TaskRow[];
+  devMode: boolean;
   openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
   leaderKind: OwnerKind;
@@ -2614,6 +2585,8 @@ function TaskEditModal({
     isNonOpenclawKind(initialRow.ownerKind),
   );
   const [branchLoading, setBranchLoading] = useState(false);
+  /** Repo path last committed for validation (blur / pick / select), not every keystroke. */
+  const [repoToCheck, setRepoToCheck] = useState("");
   const readOnly = mode === "view";
   const isSummary = draft.isLeaderSummary;
   const [ownerMode, setOwnerMode] = useState<OwnerMode>(() =>
@@ -2635,8 +2608,21 @@ function TaskEditModal({
 
   function patch(p: Partial<TaskRow>) {
     setSaveError(null);
+    if (Object.prototype.hasOwnProperty.call(p, "ownerRepo")) {
+      setBranchOptions([]);
+      setBranchEditable(false);
+      if (!(p.ownerRepo ?? "").trim()) {
+        setRepoToCheck("");
+      }
+    }
     setDraft((d) => ({ ...d, ...p }));
   }
+
+  useEffect(() => {
+    if (isOpenclawKind(initialRow.ownerKind)) return;
+    const repo = initialRow.ownerRepo.trim();
+    if (repo) setRepoToCheck(repo);
+  }, [initialRow.ownerKind, initialRow.ownerRepo]);
 
   function hasOtherTaskWithSameAgentDifferentRepoOrBranch(row: TaskRow): boolean {
     if (!isNonOpenclawKind(row.ownerKind)) return false;
@@ -2662,7 +2648,7 @@ function TaskEditModal({
       setBranchEditable(false);
       return;
     }
-    const repo = draft.ownerRepo.trim();
+    const repo = repoToCheck.trim();
     if (!repo) {
       setBranchOptions([]);
       setBranchEditable(false);
@@ -2709,7 +2695,7 @@ function TaskEditModal({
     return () => {
       cancelled = true;
     };
-  }, [confirm, draft.ownerId, draft.ownerKind, draft.ownerRepo, t]);
+  }, [confirm, draft.ownerId, draft.ownerKind, repoToCheck, t]);
 
   async function ensureNonOpenclawRepoReady(
     row: TaskRow,
@@ -2808,6 +2794,7 @@ function TaskEditModal({
         row={draft}
         readOnly={readOnly}
         isSummary={isSummary}
+        devMode={devMode}
         showCheckpointField={mode !== "edit"}
         tasks={tasks}
         ownerMode={ownerMode}
@@ -2818,6 +2805,7 @@ function TaskEditModal({
         branchOptions={branchOptions}
         branchEditable={branchEditable}
         branchLoading={branchLoading}
+        onRepoPathCommit={setRepoToCheck}
         onOwnerModeChange={(nextMode) => {
           setOwnerMode(nextMode);
           if (nextMode === "new") {
@@ -2877,6 +2865,7 @@ function TaskFormBody({
   row,
   readOnly,
   isSummary,
+  devMode,
   showCheckpointField,
   tasks,
   ownerMode,
@@ -2887,12 +2876,14 @@ function TaskFormBody({
   branchOptions,
   branchEditable,
   branchLoading,
+  onRepoPathCommit,
   onOwnerModeChange,
   onChange,
 }: {
   row: TaskRow;
   readOnly: boolean;
   isSummary: boolean;
+  devMode: boolean;
   showCheckpointField: boolean;
   tasks: TaskRow[];
   ownerMode: OwnerMode;
@@ -2903,6 +2894,7 @@ function TaskFormBody({
   branchOptions: string[];
   branchEditable: boolean;
   branchLoading: boolean;
+  onRepoPathCommit: (repo: string) => void;
   onOwnerModeChange: (mode: OwnerMode) => void;
   onChange: (patch: Partial<TaskRow>) => void;
 }) {
@@ -2919,6 +2911,10 @@ function TaskFormBody({
 
   function patchOwnerRepo(repo: string) {
     onChange({ ownerRepo: repo, ownerTargetBranch: "" });
+  }
+
+  function commitRepoPath(repo: string) {
+    onRepoPathCommit(repo.trim());
   }
 
   const remoteBrowser = isRemoteBrowser();
@@ -2943,7 +2939,10 @@ function TaskFormBody({
         title: t("flowEditor.taskFields.pickDirTitle"),
         initialPath: row.ownerRepo || undefined,
       });
-      if (out.path) patchOwnerRepo(out.path);
+      if (out.path) {
+        patchOwnerRepo(out.path);
+        commitRepoPath(out.path);
+      }
     } catch (e) {
       // Backend without a GUI display (the typical headless server case)
       // returns DIRECTORY_PICKER_UNAVAILABLE with a human-readable detail.
@@ -2982,7 +2981,7 @@ function TaskFormBody({
       </div>
       <div className="md:col-span-2">
         <label className="label">{t("flowEditor.taskFields.description")}</label>
-        {!isSummary && (
+        {!isSummary && devMode && (
           <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2 mb-2">
             {t("flowEditor.taskFields.descriptionCollabHint")}
           </div>
@@ -3104,7 +3103,7 @@ function TaskFormBody({
                 disabled={ownerLocked}
                 placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
                 onType={(text) => onChange({ ownerId: text })}
-                onPick={(sel) =>
+                onPick={(sel) => {
                   onChange({
                     ownerId: sel.id,
                     ownerRepo: sel.repo,
@@ -3113,8 +3112,9 @@ function TaskFormBody({
                     // true (a false flag would trigger a managed-existence
                     // check it can't satisfy).
                     ownerIsTemporary: true,
-                  })
-                }
+                  });
+                  commitRepoPath(sel.repo);
+                }}
               />
             );
           })()
@@ -3163,6 +3163,9 @@ function TaskFormBody({
                       }
                     : {}),
                 });
+                if (existing?.repo) {
+                  commitRepoPath(existing.repo);
+                }
               }}
             >
               <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
@@ -3198,7 +3201,10 @@ function TaskFormBody({
                     className="select"
                     value={row.ownerRepo}
                     disabled={ownerLocked}
-                    onChange={(e) => patchOwnerRepo(e.target.value)}
+                    onChange={(e) => {
+                      patchOwnerRepo(e.target.value);
+                      commitRepoPath(e.target.value);
+                    }}
                   >
                     <option value="">
                       {t("flowEditor.taskFields.claudeRepoServerPlaceholder")}
@@ -3227,9 +3233,11 @@ function TaskFormBody({
                     value={row.ownerRepo}
                     readOnly={ownerLocked}
                     onChange={(e) => patchOwnerRepo(e.target.value)}
+                    onBlur={(e) => commitRepoPath(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         e.preventDefault();
+                        (e.target as HTMLInputElement).blur();
                       }
                     }}
                   />

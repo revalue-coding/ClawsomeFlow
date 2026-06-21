@@ -478,7 +478,7 @@ async def test_manual_review_cleanup_non_openclaw_emits_cleaned_event() -> None:
         cli=cli,
     )
     assert ok is True
-    assert cli.cleanup_calls == [{"team": run.team_name, "agent": "alice"}]
+    assert cli.cleanup_calls == [{"team": run.team_name, "agent": "alice", "repo": "/r"}]
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
     assert any(e.type == "manual_review_worktree_cleaned" for e in events)
 

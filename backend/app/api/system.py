@@ -290,7 +290,7 @@ def repo_branches(
             current_branch=DEFAULT_TARGET_BRANCH,
             branches=[DEFAULT_TARGET_BRANCH],
         )
-    branches = _git_local_branches(target)
+    branches = git_repo_util.list_flow_target_branches(target)
     current = _git_current_branch(target) or DEFAULT_TARGET_BRANCH
     if current and current not in branches:
         branches = [current, *branches]

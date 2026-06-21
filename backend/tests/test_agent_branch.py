@@ -9,7 +9,14 @@ import pytest
 
 from app.integrations.git_repo import (
     branch_exists_in_repo,
+    clawteam_agent_branch_name,
     conventional_branch,
+    delete_clawteam_agent_branch,
+    delete_clawteam_team_branches,
+    delete_local_branch,
+    is_clawteam_agent_branch,
+    list_flow_target_branches,
+    list_local_branches,
     resolve_target_branch,
     resolve_workspace_base_branch,
 )
@@ -132,3 +139,43 @@ def test_normalize_flow_spec_branches(tmp_path: Path) -> None:
     )
     normalize_flow_spec_branches(spec)
     assert spec.agents[0].target_branch == "main"
+
+
+def test_is_clawteam_agent_branch() -> None:
+    assert is_clawteam_agent_branch("clawteam/csflow-x/alice")
+    assert not is_clawteam_agent_branch("main")
+    assert not is_clawteam_agent_branch("feature/demo")
+
+
+@pytest.mark.skipif(not _has_git(), reason="git not available")
+def test_list_flow_target_branches_excludes_clawteam_refs(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _init_repo(repo, branch="main")
+    subprocess.run(["git", "branch", "clawteam/run-1/agent-a"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "feature/demo"], cwd=repo, check=True)
+    all_branches = list_local_branches(repo)
+    assert "clawteam/run-1/agent-a" in all_branches
+    selectable = list_flow_target_branches(repo)
+    assert "clawteam/run-1/agent-a" not in selectable
+    assert "main" in selectable
+    assert "feature/demo" in selectable
+
+
+@pytest.mark.skipif(not _has_git(), reason="git not available")
+def test_delete_local_branch_and_clawteam_helpers(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _init_repo(repo, branch="main")
+    agent_branch = clawteam_agent_branch_name("run-1", "agent-a")
+    subprocess.run(["git", "branch", agent_branch], cwd=repo, check=True)
+    assert agent_branch in list_local_branches(repo)
+    assert delete_clawteam_agent_branch(repo, team="run-1", agent="agent-a")
+    assert agent_branch not in list_local_branches(repo)
+    subprocess.run(["git", "branch", "clawteam/run-1/agent-b"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "clawteam/run-1/agent-c"], cwd=repo, check=True)
+    deleted = delete_clawteam_team_branches(repo, "run-1")
+    assert "clawteam/run-1/agent-b" in deleted
+    assert "clawteam/run-1/agent-c" in deleted
+    assert "main" in list_local_branches(repo)
+    assert delete_local_branch(repo, "does-not-exist")

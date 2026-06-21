@@ -30,6 +30,7 @@ from typing import Sequence
 from app import logging_setup
 from app.concurrency import LockManager, get_lock_manager
 from app.config import Config, load_config
+from app.integrations.git_repo import delete_clawteam_agent_branch
 from app.repo_merge_lock import async_main_repo_file_lock
 from app.user_context import get_request_user
 
@@ -698,12 +699,36 @@ class ClawTeamCli:
     async def workspace_cleanup_with_diagnostics(
         self, *, team: str, agent: str, repo: str | None = None,
     ) -> WorkspaceCleanupResult:
+        branch_name: str | None = None
+        repo_root = (repo or "").strip()
+        try:
+            rows = await self.workspace_list(team=team, repo=repo_root or None)
+            row = next(
+                (
+                    item
+                    for item in rows
+                    if str(item.get("agent_name") or item.get("agent_id") or "").strip() == agent
+                ),
+                None,
+            )
+            if row:
+                branch_name = str(row.get("branch_name") or "").strip() or None
+                if not repo_root:
+                    repo_root = str(row.get("repo_root") or "").strip()
+        except Exception as exc:
+            self._log.debug(
+                "workspace_cleanup_prefetch_failed",
+                team=team,
+                agent=agent,
+                error=str(exc),
+            )
+
         # ClawTeam >= 0.2 switched to `workspace cleanup <team> --agent <name>`.
         # Keep a positional fallback for older installations.
         attempts: list[WorkspaceCleanupAttempt] = []
         argv = ["clawteam", "workspace", "cleanup", team, "--agent", agent]
-        if repo:
-            argv += ["--repo", repo]
+        if repo_root:
+            argv += ["--repo", repo_root]
         exit_code, stdout, stderr = await _run(argv, env=self._env())
         attempts.append(WorkspaceCleanupAttempt(
             argv=argv,
@@ -712,11 +737,11 @@ class ClawTeamCli:
             stderr=stderr[:2000],
         ))
         if exit_code == 0:
-            return WorkspaceCleanupResult(success=True, attempts=attempts)
-        if "--agent" in stderr and "No such option" in stderr:
+            result = WorkspaceCleanupResult(success=True, attempts=attempts)
+        elif "--agent" in stderr and "No such option" in stderr:
             legacy_argv = ["clawteam", "workspace", "cleanup", team, agent]
-            if repo:
-                legacy_argv += ["--repo", repo]
+            if repo_root:
+                legacy_argv += ["--repo", repo_root]
             legacy_exit, legacy_stdout, legacy_stderr = await _run(
                 legacy_argv, env=self._env(),
             )
@@ -726,11 +751,30 @@ class ClawTeamCli:
                 stdout=legacy_stdout[:2000],
                 stderr=legacy_stderr[:2000],
             ))
-            return WorkspaceCleanupResult(
+            result = WorkspaceCleanupResult(
                 success=(legacy_exit == 0),
                 attempts=attempts,
             )
-        return WorkspaceCleanupResult(success=False, attempts=attempts)
+        else:
+            result = WorkspaceCleanupResult(success=False, attempts=attempts)
+
+        if result.success and repo_root:
+            deleted = await asyncio.to_thread(
+                delete_clawteam_agent_branch,
+                repo_root,
+                team=team,
+                agent=agent,
+                branch_name=branch_name,
+            )
+            if not deleted:
+                self._log.warning(
+                    "workspace_cleanup_branch_delete_failed",
+                    team=team,
+                    agent=agent,
+                    repo=repo_root,
+                    branch=branch_name,
+                )
+        return result
 
     # ──────────────────────────────────────────────────────────────────
     # Profile (read-only wrappers — MVP API.md §Profiles)

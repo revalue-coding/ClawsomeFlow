@@ -24,6 +24,9 @@ Cleanup policy:
   and skip all merge decision branches.
 * After team cleanup, ClawsomeFlow runs a direct `rm -rf` fallback on
   `~/.clawteam/workspaces/{team}` to prevent stale workspace directories.
+* Whenever a worktree is cleaned up, ClawsomeFlow also deletes the matching
+  local ``clawteam/{team}/{agent}`` branch ref (and sweeps all
+  ``clawteam/{team}/…`` refs on team-level cleanup).
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from app.integrations.clawteam_cli import (
     ClawTeamCli,
     get_clawteam_cli,
 )
+from app.integrations.git_repo import delete_clawteam_team_branches
 from app.integrations.clawteam_mcp import (
     ClawTeamMcpClient,
     get_mcp_client,
@@ -601,7 +605,16 @@ async def cleanup_non_openclaw_workspace_after_review_decision(
             )
             return False
         try:
-            ok = await cli.workspace_cleanup(team=run.team_name, agent=agent_id)
+            repo = _resolve_agent_repo_for_run(
+                run=run,
+                agent_id=agent_id,
+                storage=storage,
+            )
+            ok = await cli.workspace_cleanup(
+                team=run.team_name,
+                agent=agent_id,
+                repo=repo,
+            )
         except Exception as exc:
             logger.warning(
                 "manual_review_cleanup_exception",
@@ -934,6 +947,11 @@ async def _maybe_cleanup_team_after_terminal(
             },
         )
         return False
+    cleanup_repos = await _collect_team_cleanup_repos(
+        run=run,
+        flow=flow,
+        cli=cli,
+    )
     cleanup_error: str | None = None
     try:
         await cli.team_cleanup(team=run.team_name, force=True)
@@ -956,6 +974,12 @@ async def _maybe_cleanup_team_after_terminal(
         run=run,
         storage=storage,
     )
+    if cleanup_error is None or fallback_removed:
+        await _cleanup_clawteam_branch_refs_for_team(
+            run=run,
+            repos=cleanup_repos,
+            storage=storage,
+        )
     if cleanup_error is None:
         _emit(
             storage,
@@ -1026,6 +1050,71 @@ async def _cleanup_non_openclaw_worktrees_except_preserved(
             agent_id=agent_id,
             storage=storage,
             cli=cli,
+        )
+
+
+async def _collect_team_cleanup_repos(
+    *,
+    run: FlowRun,
+    flow: Flow,
+    cli: ClawTeamCli,
+) -> set[str]:
+    repos: set[str] = set()
+    try:
+        spec = FlowSpec.model_validate(flow.spec)
+    except Exception:
+        spec = None
+    if spec is not None:
+        for agent in spec.agents:
+            repo = str(agent.repo or "").strip()
+            if repo:
+                repos.add(repo)
+    try:
+        rows = await cli.workspace_list(team=run.team_name)
+    except Exception as exc:
+        logger.debug(
+            "team_branch_cleanup_workspace_list_failed",
+            run_id=run.id,
+            team=run.team_name,
+            error=str(exc),
+        )
+    else:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            repo_root = str(row.get("repo_root") or row.get("repo") or "").strip()
+            if repo_root:
+                repos.add(repo_root)
+    return repos
+
+
+async def _cleanup_clawteam_branch_refs_for_team(
+    *,
+    run: FlowRun,
+    repos: set[str],
+    storage: StorageBackend,
+) -> None:
+    if not repos:
+        return
+    deleted_by_repo: dict[str, list[str]] = {}
+    for repo_raw in sorted(repos):
+        repo_path = Path(repo_raw).expanduser()
+        deleted = await asyncio.to_thread(
+            delete_clawteam_team_branches,
+            repo_path,
+            run.team_name,
+        )
+        if deleted:
+            deleted_by_repo[str(repo_path)] = deleted
+    if deleted_by_repo:
+        _emit(
+            storage,
+            run.id,
+            "team_clawteam_branches_deleted",
+            payload={
+                "team": run.team_name,
+                "repos": deleted_by_repo,
+            },
         )
 
 
