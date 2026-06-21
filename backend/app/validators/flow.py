@@ -272,8 +272,10 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
        in the Flow editor) AND still requires a working-directory ``repo``.
     """
     validate_flow_spec(spec)
+    # Pure (no-fs) check: a non-OpenClaw agent must name *some* target branch.
+    # Kept ahead of the repo loop so an explicitly-empty branch is reported as
+    # INVALID_TARGET_BRANCH regardless of repo state.
     _validate_non_openclaw_target_branches_nonempty(spec)
-    _validate_leader_target_branch_exists(spec)
     # Keep DB index in sync with managed openclaw.json entries before checking refs.
     from app.services.openclaw_agents import reindex_registered_agents
     reindex_registered_agents(storage=storage)
@@ -368,6 +370,12 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
                         "has_initial_commit": False,
                     },
                 )
+
+    # Only after every agent's repo is confirmed valid does "does the leader's
+    # target branch exist in that repo" become a meaningful question. Running it
+    # earlier would misreport a missing/invalid repo as INVALID_TARGET_BRANCH
+    # (the branch lookup returns False for a repo that doesn't exist).
+    _validate_leader_target_branch_exists(spec)
 
 
 def _validate_non_openclaw_target_branches_nonempty(spec: FlowSpec) -> None:

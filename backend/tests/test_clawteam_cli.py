@@ -359,7 +359,12 @@ async def test_workspace_cleanup_uses_agent_flag(monkeypatch: pytest.MonkeyPatch
         seen.append(argv)
         return 0, "", ""
 
+    async def _fake_workspace_list(self, *, team: str, repo: str | None = None):
+        del self, team, repo
+        return []
+
     monkeypatch.setattr(cli_mod, "_run", _fake_run)
+    monkeypatch.setattr(ClawTeamCli, "workspace_list", _fake_workspace_list)
     ok = await ClawTeamCli().workspace_cleanup(team="csflow-x", agent="alice")
     assert ok is True
     assert seen == [["clawteam", "workspace", "cleanup", "csflow-x", "--agent", "alice"]]
@@ -752,7 +757,12 @@ async def test_workspace_cleanup_falls_back_when_agent_flag_unsupported(
             return 2, "", "No such option: --agent"
         return 0, "", ""
 
+    async def _fake_workspace_list(self, *, team: str, repo: str | None = None):
+        del self, team, repo
+        return []
+
     monkeypatch.setattr(cli_mod, "_run", _fake_run)
+    monkeypatch.setattr(ClawTeamCli, "workspace_list", _fake_workspace_list)
     ok = await ClawTeamCli().workspace_cleanup(team="csflow-x", agent="alice")
     assert ok is True
     assert seen == [
