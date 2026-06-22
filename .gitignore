@@ -53,6 +53,9 @@ readme-copy.md
 .docs-vcs.git/
 .Harness Engineering/
 
+# Local remote-sync workspace (copies of external projects for dev reference; not part of this repo)
+.remote-sync/
+
 # Developer/maintainer-only scripts (not shipped in the public repo)
 /deploy.sh
 /deploy-server.sh
