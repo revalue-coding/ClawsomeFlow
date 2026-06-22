@@ -139,11 +139,9 @@ ClawsomeFlow's approach is direct: **migrate coordination from natural language 
 
 | Dimension | Other Multi-Agent Orchestration Platforms | ✅ ClawsomeFlow |
 |---|---|---|
-| **Task orchestration fit** | Mostly framework-specific, bound to a single ecosystem | Task orchestration is **deeply adapted to OpenClaw Agents**, while also being compatible with any CLI Agent (Claude / Codex / Cursor, etc.) collaborating in the same graph |
-| **Concurrency & isolation** | Easy contention in parallel, workspace conflicts, context cross-talk | Solves OpenClaw collaboration instability: **workspace isolation and rollback under multi-task parallelism, and thoroughly resolves session conflicts**; a **built-in cross-process repo lock makes parallel multi-branch development and merging absolutely reliable** |
-| **Control approach** | Pure Prompt self-scheduling (black box) or pure code (heavy) | **AI combined with precise orchestration**: get everything done in natural language while the scheduler precisely controls behavior (dispatch / retry / timeout / abort) |
+| **Task orchestration fit** | Mostly framework-specific, bound to a single ecosystem | Task orchestration is **deeply adapted to OpenClaw/Hermes Agents**, while also being compatible with any CLI Agent (Claude / Codex / Cursor, etc.) collaborating in the same graph |
+| **Concurrency & isolation** | Easy contention in parallel, workspace conflicts, context cross-talk | **Workspace isolation and rollback under multi-task parallelism, and thoroughly resolves session conflicts**; **built-in cross-process repo lock makes parallel multi-branch development and merging absolutely reliable** |
 | **Engineering harness** | Generally missing; failures rely on Agent improvisation | **Harness engineering**: human checkpoints, rollbackable results, complaint-loop mechanism, periodic entropy management |
-| **Failure recovery** | Relies on Agent self-healing, uncertain outcome | Clear retry / skip / abort strategies, recovery paths folded into a standard state machine |
 | **Observability** | Context is mostly a black box | Full-chain RunEvent — traceable, auditable, replayable |
 
 #### ✨ The Result?
@@ -162,7 +160,7 @@ ClawsomeFlow is built on top of **ClawTeam**.
 |---|---|---|
 | **Positioning** | Swarm-intelligence protocol foundation (Agent self-organization) | Agent workflow orchestration platform |
 | **Collaboration driver** | Agents self-poll and self-schedule in the Prompt | Server-side scheduler actively dispatches, deterministic execution |
-| **Task model** | Kanban + dependency chain | DAG Flow compilation, Leader summarizes and converges |
+| **Collaboration flow** | Collaboration flow is uncontrollable; better suited to one-off tasks | Scheduler-driven deterministic workflows, suited to repeatable, convergent engineering collaboration |
 | **OpenClaw adaptation** | Supported as an optional CLI Agent | Deeply adapted, resolving session and workspace concurrency conflicts |
 | **Parallel-merge reliability** | **No repo-level merge lock** — concurrent baseline merges race and can corrupt git metadata; completely uncontrolled | **Built-in cross-process repo lock guarantees the absolute reliability of parallel multi-branch development** |
 | **Failure & guardrails** | Basic lifecycle protocol | Human checkpoints / rollback / complaint-loop / entropy management |

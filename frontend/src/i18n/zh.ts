@@ -285,7 +285,7 @@ const zh = {
       stillInvalid: "目标路径仍不是可用的 Git 仓库，请重选目录或检查权限后重试。",
       createFailed: "仓库路径处理失败：{{message}}",
       confirmExistingAgentRepoBranchChange:
-        "Agent「{{agentId}}」的工作目录即将被改变，同一 Flow 下每个 Agent 的子任务都会基于同一 git 仓下的同一分支进行，如需同时在其他 git 仓或基于其他分支工作，请另建 Agent！\n\n是否继续并将该修改应用到 Agent「{{agentId}}」的其他子任务？",
+        "Agent「{{agentId}}」的绑定信息（平台 / 仓库 / 基线分支）即将变更。同一 Flow 内同名 Agent 共享同一套绑定。\n\n是否继续并将此变更同步到 Agent「{{agentId}}」关联的所有子任务？",
     },
     taskBranchCheck: {
       loading: "正在读取仓库分支…",
@@ -354,6 +354,9 @@ const zh = {
       cycleDetected: "任务依赖不能包含环路：{{cyclePath}}",
       descriptionRequired: "「{{subject}}」的详细说明不能为空。",
       openclawAgentMissing: "「{{subject}}」选择的 OpenClaw 智能体「{{agentId}}」不存在，请重新选择。",
+      hermesAgentMissing: "「{{subject}}」选择的 Hermes 智能体「{{agentId}}」不存在，请重新选择。",
+      agentRepoInvalid: "Agent「{{agentId}}」的仓库「{{repo}}」不是可用的 Git 仓库。",
+      agentBranchMissing: "Agent「{{agentId}}」的目标分支「{{branch}}」在其仓库中不存在。",
       saveBlockedTitle: "Flow 还有以下问题需要先修复：",
     },
     taskFields: {

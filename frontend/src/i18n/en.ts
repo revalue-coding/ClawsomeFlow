@@ -288,7 +288,7 @@ const en = {
         "The target path is still not a usable git repository. Please reselect or check permissions.",
       createFailed: "Failed to process repository path: {{message}}",
       confirmExistingAgentRepoBranchChange:
-        "Agent \"{{agentId}}\" workspace is about to change. Within one Flow, all tasks under the same Agent must share one git repository and one target branch.\n\nIf you need to work on another repository or branch at the same time, create another Agent.\n\nContinue and apply this change to the other tasks owned by \"{{agentId}}\"?",
+        "Agent \"{{agentId}}\" binding (platform / repository / base branch) is about to change. Inside one Flow, tasks sharing the same agent name must share one binding.\n\nContinue and sync this change to all subtasks owned by \"{{agentId}}\"?",
     },
     taskBranchCheck: {
       loading: "Loading repository branches…",
@@ -357,6 +357,9 @@ const en = {
       cycleDetected: "Task dependencies cannot contain cycles: {{cyclePath}}",
       descriptionRequired: "Description for \"{{subject}}\" cannot be empty.",
       openclawAgentMissing: "\"{{subject}}\" references OpenClaw agent \"{{agentId}}\" which no longer exists — pick another.",
+      hermesAgentMissing: "\"{{subject}}\" references Hermes agent \"{{agentId}}\" which no longer exists — pick another.",
+      agentRepoInvalid: "Agent \"{{agentId}}\" repository \"{{repo}}\" is not a usable git repository.",
+      agentBranchMissing: "Agent \"{{agentId}}\" target branch \"{{branch}}\" does not exist in its repository.",
       saveBlockedTitle: "Fix the following before saving the Flow:",
     },
     taskFields: {
