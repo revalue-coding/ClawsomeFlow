@@ -2262,11 +2262,6 @@ export function FlowEditor() {
                     });
                     setLeaderKind(nextKind);
                     setLeaderId(nextLeaderId);
-                    if (nextKind === "openclaw") {
-                      setLeaderRepo("");
-                      setLeaderTargetBranch("");
-                      resetLeaderRepoCheck();
-                    }
                   }}
                 >
                   <option value="">{t("flowEditor.taskFields.ownerKindPlaceholder")}</option>
@@ -2341,7 +2336,7 @@ export function FlowEditor() {
                 )}
               </div>
             </div>
-            {isNonOpenclawKind(leaderKind) && (
+            {!isOpenclawKind(leaderKind) && (
               <div className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
                 <div>
                   <label className="label">{t("flowEditor.leaderRepoLabel")}</label>
@@ -3438,7 +3433,7 @@ function TaskFormBody({
   const ownerLocked = readOnly || isSummary;
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
-  const ownerNeedsRepo = ownerKindSelected && isNonOpenclawKind(row.ownerKind);
+  const ownerShowsRepoFields = !ownerIsOpenclaw;
   const ownerIsNew = ownerMode === "new";
   const ownerKindEditable = !ownerLocked;
   const branchHelperText = branchEditable
@@ -3588,9 +3583,6 @@ function TaskFormBody({
               ownerKind: nextKind,
               ownerId: nextOwnerId,
               autoMerge: nextKind === "openclaw" ? true : row.autoMerge,
-              ...(nextKind === "openclaw"
-                ? { ownerRepo: "", ownerTargetBranch: "" }
-                : {}),
             });
           }}
         >
@@ -3760,7 +3752,7 @@ function TaskFormBody({
         )}
       </div>
 
-      {ownerNeedsRepo && (
+      {ownerShowsRepoFields && (
         <div className="md:col-span-2">
           <div className="grid gap-2 md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
             <div>

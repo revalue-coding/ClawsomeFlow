@@ -289,12 +289,16 @@ def test_ui_capabilities_native_ui_false_without_display(monkeypatch) -> None:
 
 
 def test_owner_kinds_fast_detects_available_binaries(monkeypatch) -> None:
-    available = {"openclaw", "hermes", "agent", "codex"}
-
-    def _fake_which(name: str) -> str | None:
-        return f"/usr/bin/{name}" if name in available else None
-
-    monkeypatch.setattr(system.shutil, "which", _fake_which)
+    monkeypatch.setattr(
+        system,
+        "detect_persistent_owner_kinds",
+        lambda: ["hermes", "openclaw"],
+    )
+    monkeypatch.setattr(
+        system,
+        "detect_temporary_owner_kinds",
+        lambda: ["codex", "cursor", "hermes"],
+    )
     with TestClient(create_app()) as client:
         r = client.get("/api/system/owner-kinds/fast")
     assert r.status_code == 200, r.text
@@ -304,7 +308,8 @@ def test_owner_kinds_fast_detects_available_binaries(monkeypatch) -> None:
 
 
 def test_owner_kinds_fast_empty_when_no_binary_found(monkeypatch) -> None:
-    monkeypatch.setattr(system.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(system, "detect_persistent_owner_kinds", lambda: [])
+    monkeypatch.setattr(system, "detect_temporary_owner_kinds", lambda: [])
     with TestClient(create_app()) as client:
         r = client.get("/api/system/owner-kinds/fast")
     assert r.status_code == 200, r.text

@@ -22,6 +22,10 @@ from app.api.errors import ApiError
 from app.config import load_config
 from app.deployment import get_deployment_capabilities
 from app.integrations import git_repo as git_repo_util
+from app.integrations.owner_kind_probe import (
+    detect_persistent_owner_kinds,
+    detect_temporary_owner_kinds,
+)
 from app.logging_setup import get_logger
 from app.models import DEFAULT_TARGET_BRANCH
 from app.services import update_check
@@ -106,34 +110,13 @@ class RepoBranchesResponse(_CamelModel):
     branches: list[str] = Field(default_factory=list)
 
 
-# Owner-kind "fast probe": ONLY `which` checks (millisecond-level), no full
-# runtime/version probing. Order defines dropdown order in the frontend.
-_FAST_PERSISTENT_OWNER_KIND_BINARIES: tuple[tuple[str, str], ...] = (
-    ("hermes", "hermes"),
-    ("openclaw", "openclaw"),
-)
-
-_FAST_TEMP_OWNER_KIND_BINARIES: tuple[tuple[str, str], ...] = (
-    ("claude", "claude"),
-    ("codex", "codex"),
-    # Cursor owner kind must probe the `agent` binary (not `cursor`).
-    ("cursor", "agent"),
-    ("gemini", "gemini"),
-    ("kimi", "kimi"),
-    ("qwen", "qwen"),
-    ("opencode", "opencode"),
-    ("qoder", "qodercli"),
-    ("codebuddy", "codebuddy"),
-    ("hermes", "hermes"),
-)
-
-
-def _detect_owner_kinds_fast(entries: tuple[tuple[str, str], ...]) -> list[str]:
-    kinds: list[str] = []
-    for kind, binary in entries:
-        if shutil.which(binary):
-            kinds.append(kind)
-    return kinds
+@router.get("/owner-kinds/fast", response_model=OwnerKindsFastResponse)
+def owner_kinds_fast(_user: UserDep = "") -> OwnerKindsFastResponse:
+    """Fast owner-kind availability probe (maximum-tolerance union of PATH hints)."""
+    return OwnerKindsFastResponse(
+        persistent_kinds=detect_persistent_owner_kinds(),
+        temporary_kinds=detect_temporary_owner_kinds(),
+    )
 
 
 @router.post("/pick-directory", response_model=PickDirectoryResponse)
@@ -743,15 +726,6 @@ def ui_capabilities(request: Request, _user: UserDep = "") -> UiCapabilitiesResp
         allow_native_directory_picker=caps.allow_native_directory_picker,
         native_directory_ui_available=native_ui,
         native_directory_client_colocated=native_directory_client_colocated(request),
-    )
-
-
-@router.get("/owner-kinds/fast", response_model=OwnerKindsFastResponse)
-def owner_kinds_fast(_user: UserDep = "") -> OwnerKindsFastResponse:
-    """Fast owner-kind availability probe via `which` only."""
-    return OwnerKindsFastResponse(
-        persistent_kinds=_detect_owner_kinds_fast(_FAST_PERSISTENT_OWNER_KIND_BINARIES),
-        temporary_kinds=_detect_owner_kinds_fast(_FAST_TEMP_OWNER_KIND_BINARIES),
     )
 
 
