@@ -283,6 +283,7 @@ const zh = {
       checkFailed: "仓库路径检查失败：{{message}}",
       reselectHint: "已取消自动创建，请重选目录后再保存该任务。",
       stillInvalid: "目标路径仍不是可用的 Git 仓库，请重选目录或检查权限后重试。",
+      pathNotAbsolute: "仓库路径必须是绝对路径（以 / 或 ~/ 开头），不支持相对路径。",
       createFailed: "仓库路径处理失败：{{message}}",
       confirmExistingAgentRepoBranchChange:
         "Agent「{{agentId}}」的绑定信息（平台 / 仓库 / 基线分支）即将变更。同一 Flow 内同名 Agent 共享同一套绑定。\n\n是否继续并将此变更同步到 Agent「{{agentId}}」关联的所有子任务？",

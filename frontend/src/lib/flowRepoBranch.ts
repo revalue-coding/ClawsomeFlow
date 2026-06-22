@@ -13,6 +13,15 @@ export function branchAfterRepoCheck(current: string, branches: string[]): strin
   return branches.includes(trimmed) ? trimmed : "";
 }
 
+/** Match backend ``ensure-git-repo``: path must be absolute (``/…`` or ``~/…``). */
+export function isAbsoluteRepoPath(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("/")) return true;
+  if (trimmed === "~" || trimmed.startsWith("~/")) return true;
+  return /^[A-Za-z]:[\\/]/.test(trimmed);
+}
+
 type RepoIssueReason =
   | "path_not_found"
   | "not_git_repo"
@@ -48,10 +57,11 @@ export async function ensureRepoAndListBranches(params: {
     checkFailed: (args: { message: string }) => string;
     fetchFailed: (args: { message: string }) => string;
     stillInvalid: string;
+    pathNotAbsolute: string;
   };
 }): Promise<
   | { ok: true; result: RepoEnsureResult }
-  | { ok: false; error: string; cancelled?: boolean }
+  | { ok: false; error: string; cancelled?: boolean; invalidPath?: boolean }
 > {
   const rawRepo = params.repo.trim();
   if (!rawRepo) {
@@ -61,6 +71,16 @@ export async function ensureRepoAndListBranches(params: {
   const errText = (e: unknown) =>
     e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
 
+  const invalidPathResult = () => ({
+    ok: false as const,
+    error: params.messages.pathNotAbsolute,
+    invalidPath: true,
+  });
+
+  if (!isAbsoluteRepoPath(rawRepo)) {
+    return invalidPathResult();
+  }
+
   let checked;
   try {
     checked = await api.ensureGitRepo({
@@ -69,6 +89,9 @@ export async function ensureRepoAndListBranches(params: {
       initializeIfMissing: false,
     });
   } catch (e) {
+    if (e instanceof ApiError && e.code === "INVALID_REPO_PATH") {
+      return invalidPathResult();
+    }
     return {
       ok: false,
       error: params.messages.checkFailed({ message: errText(e) }),
@@ -91,6 +114,9 @@ export async function ensureRepoAndListBranches(params: {
         },
       };
     } catch (e) {
+      if (e instanceof ApiError && e.code === "INVALID_REPO_PATH") {
+        return invalidPathResult();
+      }
       return {
         ok: false,
         error: params.messages.fetchFailed({ message: errText(e) }),
@@ -143,6 +169,9 @@ export async function ensureRepoAndListBranches(params: {
       },
     };
   } catch (e) {
+    if (e instanceof ApiError && e.code === "INVALID_REPO_PATH") {
+      return invalidPathResult();
+    }
     return {
       ok: false,
       error: params.messages.checkFailed({ message: errText(e) }),

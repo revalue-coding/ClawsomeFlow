@@ -286,6 +286,8 @@ const en = {
       reselectHint: "Auto-create was canceled. Please reselect a directory before saving this task.",
       stillInvalid:
         "The target path is still not a usable git repository. Please reselect or check permissions.",
+      pathNotAbsolute:
+        "Repository path must be an absolute path (start with / or ~/). Relative paths are not supported.",
       createFailed: "Failed to process repository path: {{message}}",
       confirmExistingAgentRepoBranchChange:
         "Agent \"{{agentId}}\" binding (platform / repository / base branch) is about to change. Inside one Flow, tasks sharing the same agent name must share one binding.\n\nContinue and sync this change to all subtasks owned by \"{{agentId}}\"?",

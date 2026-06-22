@@ -187,6 +187,7 @@ function repoBranchMessages(t: (key: string, opts?: Record<string, unknown>) => 
     fetchFailed: (args: { message: string }) =>
       t("flowEditor.taskBranchCheck.fetchFailed", args),
     stillInvalid: t("flowEditor.taskRepoCheck.stillInvalid"),
+    pathNotAbsolute: t("flowEditor.taskRepoCheck.pathNotAbsolute"),
   };
 }
 
@@ -797,8 +798,6 @@ export function FlowEditor() {
   const { id } = useParams();
   const { t } = useTranslation();
   const { confirm, alert } = useDialog();
-  const confirmRef = useRef(confirm);
-  confirmRef.current = confirm;
   const isNew = !id || id === "new";
   const navigate = useNavigate();
 
@@ -833,22 +832,15 @@ export function FlowEditor() {
   const [leaderBranchOptions, setLeaderBranchOptions] = useState<string[]>([]);
   const [leaderBranchEditable, setLeaderBranchEditable] = useState(false);
   const [leaderBranchLoading, setLeaderBranchLoading] = useState(false);
+  /** Repo path last committed for validation (blur / pick / select), not every keystroke. */
+  const [leaderRepoToCheck, setLeaderRepoToCheck] = useState("");
   const leaderRepoCheckSeededRef = useRef(false);
-  /** Monotonic id so stale async repo checks are ignored after a newer commit. */
-  const leaderRepoCheckGenRef = useRef(0);
-  /** Repo + branch before the current edit (focus / select / pick); restored on create cancel. */
+  /** Repo + branch before the current edit (focus / select / pick); restored on check failure. */
   const leaderRepoBeforeEditRef = useRef({ repo: "", branch: "" });
-  const leaderKindRef = useRef(leaderKind);
-  leaderKindRef.current = leaderKind;
-  const leaderIdRef = useRef(leaderId);
-  leaderIdRef.current = leaderId;
-  const leaderTargetBranchRef = useRef(leaderTargetBranch);
-  leaderTargetBranchRef.current = leaderTargetBranch;
-  const deploymentModeReadyRef = useRef(false);
 
   function resetLeaderRepoCheck() {
+    setLeaderRepoToCheck("");
     leaderRepoCheckSeededRef.current = false;
-    leaderRepoCheckGenRef.current += 1;
   }
 
   function snapshotLeaderRepoBeforeEdit() {
@@ -858,59 +850,16 @@ export function FlowEditor() {
     };
   }
 
-  async function runLeaderRepoValidation(repo: string, branchBeforeCheck: string) {
-    const generation = ++leaderRepoCheckGenRef.current;
-    if (leaderKindRef.current === "openclaw") return;
-    const trimmed = repo.trim();
-    if (!trimmed) {
-      setLeaderBranchOptions([]);
-      setLeaderBranchEditable(false);
-      setLeaderTargetBranch((prev) => (prev ? "" : prev));
-      return;
-    }
-    setLeaderBranchLoading(true);
-    try {
-      const out = await ensureRepoAndListBranches({
-        repo: trimmed,
-        preserveBranch: branchBeforeCheck,
-        agentLabel: leaderIdRef.current.trim() || t("flowEditor.repoIssue.unknownAgent"),
-        confirmCreate: confirmRef.current,
-        messages: repoBranchMessages(t),
-      });
-      if (generation !== leaderRepoCheckGenRef.current) return;
-      if (!out.ok) {
-        setLeaderBranchOptions([]);
-        setLeaderBranchEditable(false);
-        if (out.cancelled) {
-          revertLeaderRepoAfterCancelledCheck();
-        }
-        return;
-      }
-      setLeaderBranchOptions(out.result.branches);
-      setLeaderBranchEditable(out.result.editable);
-      if (out.result.path && out.result.path !== leaderRepo) {
-        setLeaderRepo(out.result.path);
-      }
-      setLeaderTargetBranch(
-        branchAfterRepoCheck(branchBeforeCheck, out.result.branches),
-      );
-    } finally {
-      if (generation === leaderRepoCheckGenRef.current) {
-        setLeaderBranchLoading(false);
-      }
-    }
-  }
-
-  function commitLeaderRepoCheck(repo: string) {
-    leaderRepoCheckSeededRef.current = true;
-    void runLeaderRepoValidation(repo, leaderTargetBranchRef.current);
-  }
-
-  function revertLeaderRepoAfterCancelledCheck() {
+  function revertLeaderRepoAfterEdit() {
     const snap = leaderRepoBeforeEditRef.current;
     setLeaderRepo(snap.repo);
     setLeaderTargetBranch(snap.branch);
-    void runLeaderRepoValidation(snap.repo, snap.branch);
+    setLeaderRepoToCheck(snap.repo.trim());
+  }
+
+  function commitLeaderRepoCheck(repo: string) {
+    setLeaderRepoToCheck(repo.trim());
+    leaderRepoCheckSeededRef.current = true;
   }
   const [leaderPickingRepo, setLeaderPickingRepo] = useState(false);
   const [runInputFields, setRunInputFieldsState] = useSessionBackedState<string[]>(
@@ -1114,21 +1063,59 @@ export function FlowEditor() {
     });
   }, [leaderId, leaderKind, leaderIsTemporary, leaderRepo, leaderTargetBranch, t]);
 
-  // listWorkspaceDirectories resolves asynchronously: the repo field starts as a
-  // local text input (blur-to-commit) and may switch to a server Select before
-  // blur fires — unmounting the input without commitLeaderRepoCheck. Re-validate
-  // the current path whenever deploymentMode settles or changes.
   useEffect(() => {
-    if (!deploymentModeReadyRef.current) {
-      deploymentModeReadyRef.current = true;
+    if (leaderKind === "openclaw") {
+      setLeaderBranchOptions([]);
+      setLeaderBranchEditable(false);
       return;
     }
-    if (leaderKind === "openclaw") return;
-    const repo = leaderRepo.trim();
-    if (!repo) return;
-    commitLeaderRepoCheck(repo);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- commit on mode flip only
-  }, [deploymentMode]);
+    const repo = leaderRepoToCheck.trim();
+    if (!repo) {
+      setLeaderBranchOptions([]);
+      setLeaderBranchEditable(false);
+      setLeaderTargetBranch((prev) => (prev ? "" : prev));
+      return;
+    }
+    let cancelled = false;
+    setLeaderBranchLoading(true);
+    const branchBeforeCheck = leaderTargetBranch;
+    void (async () => {
+      const out = await ensureRepoAndListBranches({
+        repo,
+        preserveBranch: branchBeforeCheck,
+        agentLabel: leaderId.trim() || t("flowEditor.repoIssue.unknownAgent"),
+        confirmCreate: confirm,
+        messages: repoBranchMessages(t),
+      });
+      if (cancelled) return;
+      if (!out.ok) {
+        setLeaderBranchOptions([]);
+        setLeaderBranchEditable(false);
+        setLeaderBranchLoading(false);
+        if (out.cancelled || out.invalidPath) {
+          revertLeaderRepoAfterEdit();
+          if (out.invalidPath) {
+            void alert(out.error);
+          }
+        }
+        return;
+      }
+      setLeaderBranchOptions(out.result.branches);
+      setLeaderBranchEditable(out.result.editable);
+      if (out.result.path && out.result.path !== leaderRepo) {
+        setLeaderRepo(out.result.path);
+      }
+      setLeaderTargetBranch(
+        branchAfterRepoCheck(branchBeforeCheck, out.result.branches),
+      );
+      setLeaderBranchLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // P2: keyed off repo + kind only; editing the leader NAME (used only as a
+    // confirm-dialog label) must not re-trigger the repo/branch check.
+  }, [alert, confirm, leaderKind, leaderRepoToCheck, t]);
 
   // Seed repo validation once when restoring a saved Flow or session draft — not
   // while the user is still typing into the repo text field (that commits on blur).
@@ -1138,7 +1125,7 @@ export function FlowEditor() {
     const repo = leaderRepo.trim();
     if (!repo) return;
     commitLeaderRepoCheck(repo);
-  }, [leaderKind, hydrated, leaderRepo]);
+  }, [leaderKind, hydrated]);
 
   // ── derived state -------------------------------------------------
 
@@ -1748,7 +1735,11 @@ export function FlowEditor() {
       messages: repoBranchMessages(t),
     });
     if (!out.ok) {
-      if (out.error) setError(out.error);
+      if (out.invalidPath) {
+        void alert(out.error);
+      } else if (out.error) {
+        setError(out.error);
+      }
       return false;
     }
     setLeaderBranchOptions(out.result.branches);
@@ -2816,9 +2807,7 @@ function TaskEditModal({
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
-  const { confirm } = useDialog();
-  const confirmRef = useRef(confirm);
-  confirmRef.current = confirm;
+  const { confirm, alert } = useDialog();
   const [draft, setDraft] = useState<TaskRow>(initialRow);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [repoChecking, setRepoChecking] = useState(false);
@@ -2827,15 +2816,12 @@ function TaskEditModal({
     isNonOpenclawKind(initialRow.ownerKind),
   );
   const [branchLoading, setBranchLoading] = useState(false);
-  const repoCheckGenRef = useRef(0);
+  /** Repo path last committed for validation (blur / pick / select), not every keystroke. */
+  const [repoToCheck, setRepoToCheck] = useState(() =>
+    isOpenclawKind(initialRow.ownerKind) ? "" : initialRow.ownerRepo.trim(),
+  );
+  /** Repo + branch before the current edit; restored on check failure. */
   const repoBeforeEditRef = useRef({ repo: "", branch: "" });
-  const draftOwnerKindRef = useRef(initialRow.ownerKind);
-  draftOwnerKindRef.current = draft.ownerKind;
-  const draftOwnerIdRef = useRef(initialRow.ownerId);
-  draftOwnerIdRef.current = draft.ownerId;
-  const draftTargetBranchRef = useRef(initialRow.ownerTargetBranch);
-  draftTargetBranchRef.current = draft.ownerTargetBranch;
-  const deploymentModeReadyRef = useRef(false);
   const readOnly = mode === "view";
   const isSummary = draft.isLeaderSummary;
   const [ownerMode, setOwnerMode] = useState<OwnerMode>(() =>
@@ -2864,16 +2850,6 @@ function TaskEditModal({
     setDraft((d) => ({ ...d, ...p }));
   }
 
-  function commitRepoCheck(repo: string) {
-    void runTaskRepoValidation(repo, draftTargetBranchRef.current);
-  }
-
-  function revertRepoAfterCancelledCheck() {
-    const snap = repoBeforeEditRef.current;
-    patch({ ownerRepo: snap.repo, ownerTargetBranch: snap.branch });
-    void runTaskRepoValidation(snap.repo, snap.branch);
-  }
-
   function snapshotRepoBeforeEdit(row: Pick<TaskRow, "ownerRepo" | "ownerTargetBranch">) {
     repoBeforeEditRef.current = {
       repo: row.ownerRepo,
@@ -2881,11 +2857,24 @@ function TaskEditModal({
     };
   }
 
-  async function runTaskRepoValidation(repo: string, branchBeforeCheck: string) {
-    const generation = ++repoCheckGenRef.current;
-    if (isOpenclawKind(draftOwnerKindRef.current)) return;
-    const trimmed = repo.trim();
-    if (!trimmed) {
+  function revertRepoAfterEdit() {
+    const snap = repoBeforeEditRef.current;
+    patch({ ownerRepo: snap.repo, ownerTargetBranch: snap.branch });
+    setRepoToCheck(snap.repo.trim());
+  }
+
+  function commitRepoCheck(repo: string) {
+    setRepoToCheck(repo.trim());
+  }
+
+  useEffect(() => {
+    if (isOpenclawKind(draft.ownerKind)) {
+      setBranchOptions([]);
+      setBranchEditable(false);
+      return;
+    }
+    const repo = repoToCheck.trim();
+    if (!repo) {
       setBranchOptions([]);
       setBranchEditable(false);
       setDraft((prev) =>
@@ -2895,21 +2884,27 @@ function TaskEditModal({
       );
       return;
     }
+    let cancelled = false;
     setBranchLoading(true);
-    try {
+    const branchBeforeCheck = draft.ownerTargetBranch;
+    void (async () => {
       const out = await ensureRepoAndListBranches({
-        repo: trimmed,
+        repo,
         preserveBranch: branchBeforeCheck,
-        agentLabel: draftOwnerIdRef.current.trim() || t("flowEditor.repoIssue.unknownAgent"),
-        confirmCreate: confirmRef.current,
+        agentLabel: draft.ownerId.trim() || t("flowEditor.repoIssue.unknownAgent"),
+        confirmCreate: confirm,
         messages: repoBranchMessages(t),
       });
-      if (generation !== repoCheckGenRef.current) return;
+      if (cancelled) return;
       if (!out.ok) {
         setBranchOptions([]);
         setBranchEditable(false);
-        if (out.cancelled) {
-          revertRepoAfterCancelledCheck();
+        setBranchLoading(false);
+        if (out.cancelled || out.invalidPath) {
+          revertRepoAfterEdit();
+          if (out.invalidPath) {
+            void alert(out.error);
+          }
         } else if (out.error) {
           setSaveError(out.error);
         }
@@ -2918,7 +2913,7 @@ function TaskEditModal({
       setBranchOptions(out.result.branches);
       setBranchEditable(out.result.editable);
       setDraft((prev) => {
-        const nextRepo = out.result.path || trimmed;
+        const nextRepo = out.result.path || repo;
         const keepBranch = branchAfterRepoCheck(
           branchBeforeCheck,
           out.result.branches,
@@ -2928,31 +2923,15 @@ function TaskEditModal({
         }
         return { ...prev, ownerRepo: nextRepo, ownerTargetBranch: keepBranch };
       });
-    } finally {
-      if (generation === repoCheckGenRef.current) {
-        setBranchLoading(false);
-      }
-    }
-  }
-
-  useEffect(() => {
-    if (isOpenclawKind(initialRow.ownerKind)) return;
-    const repo = initialRow.ownerRepo.trim();
-    if (repo) void runTaskRepoValidation(repo, initialRow.ownerTargetBranch);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed once on modal open
-  }, []);
-
-  useEffect(() => {
-    if (!deploymentModeReadyRef.current) {
-      deploymentModeReadyRef.current = true;
-      return;
-    }
-    if (isOpenclawKind(draft.ownerKind)) return;
-    const repo = draft.ownerRepo.trim();
-    if (!repo) return;
-    commitRepoCheck(repo);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- commit on mode flip only
-  }, [deploymentMode]);
+      setBranchLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // P2: the repo/branch check keys off the repo + kind only. Editing the agent
+    // NAME (draft.ownerId, used solely as a confirm-dialog label) must NOT
+    // re-run this check — the three owner blocks are independent.
+  }, [alert, confirm, draft.ownerKind, repoToCheck, t]);
 
   function hasOtherSubtaskWithSameAgentDifferentBinding(row: TaskRow): boolean {
     const ownerId = row.ownerId.trim();
@@ -2985,7 +2964,11 @@ function TaskEditModal({
       messages: repoBranchMessages(t),
     });
     if (!out.ok) {
-      if (out.error) setSaveError(out.error);
+      if (out.invalidPath) {
+        void alert(out.error);
+      } else if (out.error) {
+        setSaveError(out.error);
+      }
       return null;
     }
     if (!out.result.branches.includes(branch)) {
