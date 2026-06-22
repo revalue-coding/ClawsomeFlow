@@ -288,6 +288,31 @@ def test_ui_capabilities_native_ui_false_without_display(monkeypatch) -> None:
     assert r.json()["nativeDirectoryUiAvailable"] is False
 
 
+def test_owner_kinds_fast_detects_available_binaries(monkeypatch) -> None:
+    available = {"openclaw", "hermes", "agent", "codex"}
+
+    def _fake_which(name: str) -> str | None:
+        return f"/usr/bin/{name}" if name in available else None
+
+    monkeypatch.setattr(system.shutil, "which", _fake_which)
+    with TestClient(create_app()) as client:
+        r = client.get("/api/system/owner-kinds/fast")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["persistentKinds"] == ["hermes", "openclaw"]
+    assert body["temporaryKinds"] == ["codex", "cursor", "hermes"]
+
+
+def test_owner_kinds_fast_empty_when_no_binary_found(monkeypatch) -> None:
+    monkeypatch.setattr(system.shutil, "which", lambda _name: None)
+    with TestClient(create_app()) as client:
+        r = client.get("/api/system/owner-kinds/fast")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["persistentKinds"] == []
+    assert body["temporaryKinds"] == []
+
+
 def test_workspace_directories_local_scoped_to_current_user(monkeypatch) -> None:
     monkeypatch.setenv("CSFLOW_USER", "alice")
     monkeypatch.setattr(

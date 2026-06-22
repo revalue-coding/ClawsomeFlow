@@ -30,12 +30,13 @@ is how the poller identifies the session id.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from app.logging_setup import get_logger
 from app.services import hermes_agents as ha
@@ -55,6 +56,15 @@ _CHAT_TIMEOUT_SEC = 1800.0
 _POLL_INTERVAL_SEC = 1.5
 # Bound the retained step list so a pathological turn can't grow it unbounded.
 _MAX_STEPS = 400
+
+FinalSource = Literal["stdout", "session_export", "none", "none_after_tools", ""]
+
+
+class TurnOutcome(TypedDict):
+    status: str
+    final_text: str
+    final_source: FinalSource
+    error: str
 
 
 class StepEvent(TypedDict, total=False):
@@ -150,7 +160,13 @@ def kill_chat(session_key: str) -> bool:
                 if not job.error:
                     job.error = "cancelled"
     if signalled:
-        logger.info("hermes_chat_killed", session_key=session_key, agent_id=job.agent_id)
+        logger.info(
+            "hermes_chat_killed",
+            session_key=session_key,
+            agent_id=job.agent_id,
+            prior_status=job.status,
+            hermes_session_id=job.hermes_session_id,
+        )
     return signalled
 
 
@@ -219,7 +235,14 @@ def start_chat(
         name="hermes-chat-poll",
         daemon=True,
     ).start()
-    logger.info("hermes_chat_started", session_key=session_key, agent_id=aid, resume=resume)
+    logger.info(
+        "hermes_chat_started",
+        session_key=session_key,
+        agent_id=aid,
+        resume=resume,
+        workdir=str(wd),
+        message_chars=len(message),
+    )
     return job
 
 
@@ -231,10 +254,17 @@ def _run_poller(
 ) -> None:
     seen_tools = 0  # number of tool calls already surfaced as steps
     locked_sid = False
+    last_export: dict[str, Any] | None = None
     while not io_done.wait(timeout=_POLL_INTERVAL_SEC):
         # Watchdog: kill a turn that overruns the hard ceiling.
         if time.monotonic() - job.started_at > _CHAT_TIMEOUT_SEC:
-            logger.warning("hermes_chat_timeout", session_key=job.session_key)
+            logger.warning(
+                "hermes_chat_timeout",
+                session_key=job.session_key,
+                agent_id=job.agent_id,
+                hermes_session_id=job.hermes_session_id,
+                elapsed_sec=round(time.monotonic() - job.started_at, 1),
+            )
             kill_chat(job.session_key)
             io_done.wait(timeout=5.0)
             break
@@ -242,14 +272,27 @@ def _run_poller(
             sid = _discover_session_id(job.agent_id)
             if sid:
                 job.hermes_session_id = sid
+                logger.info(
+                    "hermes_chat_session_discovered",
+                    session_key=job.session_key,
+                    agent_id=job.agent_id,
+                    hermes_session_id=sid,
+                )
         if job.hermes_session_id:
             data = _export_session(job.agent_id, job.hermes_session_id)
             if data is not None:
                 locked_sid = True
+                last_export = data
                 seen_tools = _apply_progress(job, data, seen_tools)
             elif not locked_sid:
                 # The session we picked may have been wrong (a stale top row);
                 # allow re-discovery on the next tick until an export succeeds.
+                logger.warning(
+                    "hermes_chat_session_export_miss",
+                    session_key=job.session_key,
+                    agent_id=job.agent_id,
+                    hermes_session_id=job.hermes_session_id,
+                )
                 job.hermes_session_id = None
 
     # Process has exited (or was killed). Finalise.
@@ -260,24 +303,77 @@ def _run_poller(
     if job.hermes_session_id:
         data = _export_session(job.agent_id, job.hermes_session_id)
         if data is not None:
+            last_export = data
             _apply_progress(job, data, _count_tool_calls(data))
+        else:
+            logger.warning(
+                "hermes_chat_final_export_failed",
+                session_key=job.session_key,
+                agent_id=job.agent_id,
+                hermes_session_id=job.hermes_session_id,
+            )
+    elif rc == 0:
+        # Late discovery: stdout may be empty while the answer lives only in the
+        # session store (common for ``-c`` resume + tool-heavy turns).
+        sid = _discover_session_id(job.agent_id)
+        if sid:
+            job.hermes_session_id = sid
+            last_export = _export_session(job.agent_id, sid)
+            if last_export is not None:
+                logger.info(
+                    "hermes_chat_session_discovered_late",
+                    session_key=job.session_key,
+                    agent_id=job.agent_id,
+                    hermes_session_id=sid,
+                )
+            else:
+                logger.warning(
+                    "hermes_chat_late_export_failed",
+                    session_key=job.session_key,
+                    agent_id=job.agent_id,
+                    hermes_session_id=sid,
+                )
+
     _subproc_registry.unregister(job.proc)
 
-    with job._lock:
-        if job.status == "running":
-            if rc == 0 and (out or "").strip():
-                job.status = "done"
-                job.final_text = out.strip()
-            else:
-                job.status = "error"
-                detail = (ha._strip_ansi(err) or ha._strip_ansi(out)).strip()
-                job.error = detail[:1000] or f"hermes exited with code {rc}"
-    logger.info(
-        "hermes_chat_finished",
-        session_key=job.session_key,
-        status=job.status,
+    outcome = _resolve_turn_outcome(
+        rc=rc,
+        stdout=out or "",
+        stderr=err or "",
+        export_data=last_export,
         tool_calls=job.progress.tool_calls,
     )
+    with job._lock:
+        if job.status == "running":
+            job.status = outcome["status"]
+            job.final_text = outcome["final_text"]
+            job.error = outcome["error"]
+
+    log_fn = logger.info if job.status == "done" else logger.warning
+    log_fn(
+        "hermes_chat_finished",
+        session_key=job.session_key,
+        agent_id=job.agent_id,
+        status=job.status,
+        final_source=outcome["final_source"],
+        stdout_len=len((out or "").strip()),
+        stderr_preview=_preview_text(err or "", limit=240),
+        final_len=len(job.final_text),
+        hermes_session_id=job.hermes_session_id,
+        tool_calls=job.progress.tool_calls,
+        api_calls=job.progress.api_calls,
+        rc=rc,
+        error=job.error or None,
+    )
+    if job.status == "done" and not job.final_text and job.progress.tool_calls > 0:
+        logger.warning(
+            "hermes_chat_no_visible_reply",
+            session_key=job.session_key,
+            agent_id=job.agent_id,
+            hermes_session_id=job.hermes_session_id,
+            tool_calls=job.progress.tool_calls,
+            final_source=outcome["final_source"],
+        )
 
 
 def _discover_session_id(agent_id: str) -> str | None:
@@ -287,12 +383,23 @@ def _discover_session_id(agent_id: str) -> str | None:
     is single-user, so only our process writes ``cli`` sessions right now.
     """
     try:
-        rc, out, _err = ha._run_hermes(
+        rc, out, err = ha._run_hermes(
             ["-p", agent_id, "sessions", "list", "--source", "cli", "--limit", "5"]
         )
-    except ha.HermesAgentError:
+    except ha.HermesAgentError as exc:
+        logger.warning(
+            "hermes_chat_session_list_failed",
+            agent_id=agent_id,
+            error=str(exc)[:240],
+        )
         return None
     if rc != 0:
+        logger.warning(
+            "hermes_chat_session_list_nonzero",
+            agent_id=agent_id,
+            rc=rc,
+            stderr_preview=_preview_text(err or out, limit=240),
+        )
         return None
     for raw in ha._strip_ansi(out).splitlines():
         line = raw.strip()
@@ -304,23 +411,41 @@ def _discover_session_id(agent_id: str) -> str | None:
         token = line.split()[-1]  # ID is the last column
         if "_" in token:  # e.g. 20260617_185542_a98875
             return token
+    logger.info("hermes_chat_session_list_empty", agent_id=agent_id)
     return None
 
 
 def _export_session(agent_id: str, session_id: str) -> dict[str, Any] | None:
     try:
-        rc, out, _err = ha._run_hermes(
+        rc, out, err = ha._run_hermes(
             ["-p", agent_id, "sessions", "export", "--session-id", session_id, "-"]
         )
-    except ha.HermesAgentError:
+    except ha.HermesAgentError as exc:
+        logger.warning(
+            "hermes_chat_session_export_error",
+            agent_id=agent_id,
+            hermes_session_id=session_id,
+            error=str(exc)[:240],
+        )
         return None
     if rc != 0 or not out.strip():
+        logger.warning(
+            "hermes_chat_session_export_nonzero",
+            agent_id=agent_id,
+            hermes_session_id=session_id,
+            rc=rc,
+            stderr_preview=_preview_text(err or out, limit=240),
+        )
         return None
-    import json
-
     try:
         obj = json.loads(out.strip())
     except json.JSONDecodeError:
+        logger.warning(
+            "hermes_chat_session_export_invalid_json",
+            agent_id=agent_id,
+            hermes_session_id=session_id,
+            payload_preview=_preview_text(out, limit=240),
+        )
         return None
     return obj if isinstance(obj, dict) else None
 
@@ -368,4 +493,96 @@ def _apply_progress(job: ChatJob, data: dict[str, Any], seen_tools: int) -> int:
     return max(seen_tools, len(names))
 
 
-__all__ = ["ChatJob", "StepEvent", "start_chat", "kill_chat", "get_job"]
+_NO_TEXT_REPLY_MARKER = "[[NO_TEXT_REPLY]]"
+
+
+def _preview_text(text: str, *, limit: int = 240) -> str:
+    t = ha._strip_ansi(text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[:limit] + "…"
+
+
+def _extract_assistant_text(export_data: dict[str, Any] | None) -> str:
+    """Last non-empty assistant text from a ``sessions export`` payload."""
+    if not export_data:
+        return ""
+    messages = export_data.get("messages") or []
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if (msg.get("role") or "").lower() != "assistant":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                t = block.get("text") or block.get("content")
+                if isinstance(t, str) and t.strip():
+                    parts.append(t.strip())
+            if parts:
+                return "\n".join(parts)
+    return ""
+
+
+def _resolve_turn_outcome(
+    *,
+    rc: int,
+    stdout: str,
+    stderr: str,
+    export_data: dict[str, Any] | None,
+    tool_calls: int,
+) -> TurnOutcome:
+    """Decide terminal job state after the hermes process exits."""
+    stdout_text = (stdout or "").strip()
+    if rc != 0:
+        detail = (_preview_text(stderr) or _preview_text(stdout)).strip()
+        return {
+            "status": "error",
+            "final_text": "",
+            "final_source": "",
+            "error": detail[:1000] or f"hermes exited with code {rc}",
+        }
+    if stdout_text:
+        return {
+            "status": "done",
+            "final_text": stdout_text,
+            "final_source": "stdout",
+            "error": "",
+        }
+    export_text = _extract_assistant_text(export_data)
+    if export_text:
+        return {
+            "status": "done",
+            "final_text": export_text,
+            "final_source": "session_export",
+            "error": "",
+        }
+    if tool_calls > 0:
+        return {
+            "status": "done",
+            "final_text": _NO_TEXT_REPLY_MARKER,
+            "final_source": "none_after_tools",
+            "error": "",
+        }
+    detail = (_preview_text(stderr) or _preview_text(stdout)).strip()
+    return {
+        "status": "error",
+        "final_text": "",
+        "final_source": "none",
+        "error": detail[:1000] or "hermes produced no reply",
+    }
+
+
+__all__ = [
+    "ChatJob",
+    "StepEvent",
+    "start_chat",
+    "kill_chat",
+    "get_job",
+    "_NO_TEXT_REPLY_MARKER",
+]

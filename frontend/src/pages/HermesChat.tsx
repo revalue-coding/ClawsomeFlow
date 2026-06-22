@@ -41,6 +41,7 @@ import {
   clearChatHistory,
   loadChatHistory,
   loadLastSeenCount,
+  normalizeAssistantContent,
   reconcileTranscript,
   saveChatHistory,
   saveLastSeenCount,
@@ -1369,7 +1370,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
         // stale empty assistant bubble while the real answer sits on the server.
         const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
           role: m.role,
-          content: m.content,
+          content:
+            m.role === "assistant"
+              ? normalizeAssistantContent(m.content)
+              : m.content,
           attachments: m.attachments ?? [],
         }));
         // Server history has no timestamps; backfill from the local cache (which
@@ -1386,10 +1390,36 @@ function ChatRoom({ agentId }: { agentId: string }) {
         // user was away (settled count grew beyond what they'd last seen).
         const shown = settledCount(merged);
         setNewDividerAt(seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1);
-        // A trailing user turn means a reply is still being produced server-side
-        // (its stream was detached); poll for it instead of showing "no reply".
-        const last = merged[merged.length - 1];
-        if (last && last.role === "user") setRecovering(true);
+        try {
+          const st = await api.getHermesChatStatus(agentId);
+          if (st.status === "running") {
+            setRecovering(true);
+            setSteps(st.steps ?? []);
+            setProgress(st.progress ?? null);
+          } else {
+            const last = merged[merged.length - 1];
+            const needsFinal =
+              st.status === "done" &&
+              st.final.trim() &&
+              (!last || last.role !== "assistant" || !last.content.trim());
+            if (needsFinal) {
+              const text = normalizeAssistantContent(st.final);
+              const next =
+                last && last.role === "assistant"
+                  ? merged.map((m, i) =>
+                      i === merged.length - 1 ? { ...m, content: text, ts: Date.now() } : m,
+                    )
+                  : [...merged, { role: "assistant" as const, content: text, ts: Date.now() }];
+              setMessages(next);
+              saveChatHistory(chatScope, next);
+            } else if (last && last.role === "user") {
+              setRecovering(true);
+            }
+          }
+        } catch {
+          const last = merged[merged.length - 1];
+          if (last && last.role === "user") setRecovering(true);
+        }
       } catch (e) {
         setError(errText(e));
       }
@@ -1450,7 +1480,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
         if (cancelled) return;
         const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
           role: m.role,
-          content: m.content,
+          content:
+            m.role === "assistant"
+              ? normalizeAssistantContent(m.content)
+              : m.content,
           attachments: m.attachments ?? [],
         }));
         const last = server[server.length - 1];
@@ -1463,13 +1496,14 @@ function ChatRoom({ agentId }: { agentId: string }) {
       }
     };
     const adoptFinal = (text: string) => {
+      const normalized = normalizeAssistantContent(text);
       setMessages((prev) => {
         const next = [...prev];
         const ts = Date.now();
         if (next.length > 0 && next[next.length - 1].role === "assistant") {
-          next[next.length - 1] = { role: "assistant", content: text, ts };
+          next[next.length - 1] = { role: "assistant", content: normalized, ts };
         } else {
-          next.push({ role: "assistant", content: text, ts });
+          next.push({ role: "assistant", content: normalized, ts });
         }
         saveChatHistory(chatScope, next);
         return next;
@@ -1680,12 +1714,34 @@ function ChatRoom({ agentId }: { agentId: string }) {
           }
           return next;
         });
+      } else {
+        try {
+          const hist = await api.getHermesAgentChatHistory(agentId);
+          const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
+            role: m.role,
+            content:
+              m.role === "assistant"
+                ? normalizeAssistantContent(m.content)
+                : m.content,
+            attachments: m.attachments ?? [],
+          }));
+          const last = server[server.length - 1];
+          if (last && last.role === "assistant") {
+            setMessages((prev) => {
+              const merged = reconcileTranscript(prev, server);
+              saveChatHistory(chatScope, merged);
+              return merged;
+            });
+          }
+        } catch {
+          /* keep streamed partial */
+        }
       }
     }
   };
 
   const send = async () => {
-    if (sending || resetting || uploadingAttachments) return;
+    if (sending || recovering || resetting || uploadingAttachments) return;
     const message = input.trim();
     if (!message && pendingFiles.length === 0) return;
     let uploadedAttachments: ChatAttachmentMeta[] = [];
@@ -1710,10 +1766,13 @@ function ChatRoom({ agentId }: { agentId: string }) {
     } catch {
       /* best-effort — the client stream is already cut */
     }
+    setRecovering(false);
+    setSteps([]);
+    setProgress(null);
   };
 
   const regenerate = async () => {
-    if (sending || resetting || uploadingAttachments) return;
+    if (sending || recovering || resetting || uploadingAttachments) return;
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
     // Drop the trailing assistant reply; runTurn appends a fresh one.
@@ -2040,22 +2099,22 @@ function ChatRoom({ agentId }: { agentId: string }) {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
                   handleChatTextareaEnterKey(e, () => {
-                    if (!sending && !resetting && !uploadingAttachments) {
+                    if (!sending && !recovering && !resetting && !uploadingAttachments) {
                       (e.currentTarget.form as HTMLFormElement).requestSubmit();
                     }
                   });
                 }}
-                disabled={sending || resetting || uploadingAttachments}
+                disabled={sending || recovering || resetting || uploadingAttachments}
               />
               <button
                 type="button"
                 className="btn-outline"
-                disabled={sending || resetting || uploadingAttachments}
+                disabled={sending || recovering || resetting || uploadingAttachments}
                 onClick={() => void reset()}
               >
                 {resetting ? t("chat.resetting") : t("chat.reset")}
               </button>
-              {sending ? (
+              {sending || recovering ? (
                 <button
                   type="button"
                   className="btn-outline border-rose-300 text-rose-600 hover:bg-rose-50"

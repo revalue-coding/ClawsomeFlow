@@ -1069,6 +1069,22 @@ async def _finalize_chat_history(job: chat_svc.ChatJob, session_key: str) -> Non
     snap = job.snapshot()
     if snap["status"] == "done" and snap["final"]:
         await chat_history.append_message(session_key, role="assistant", content=snap["final"])
+        logger.info(
+            "hermes_chat_history_appended",
+            session_key=session_key,
+            agent_id=job.agent_id,
+            final_len=len(snap["final"]),
+            tool_only=snap["final"] == chat_svc._NO_TEXT_REPLY_MARKER,
+        )
+    else:
+        logger.info(
+            "hermes_chat_history_skipped",
+            session_key=session_key,
+            agent_id=job.agent_id,
+            status=snap["status"],
+            final_len=len(snap.get("final") or ""),
+            error_preview=(snap.get("error") or "")[:240] or None,
+        )
 
 
 @router.post("/{agent_id}/chat")
@@ -1146,8 +1162,9 @@ async def chat_with_agent(
             yield f"data: {json.dumps({'progress': snap['progress']})}\n\n"
             if snap["status"] != "running":
                 if snap["status"] == "done":
-                    if snap["final"]:
-                        yield f"data: {json.dumps({'delta': snap['final']})}\n\n"
+                    final = snap["final"]
+                    if final and final != chat_svc._NO_TEXT_REPLY_MARKER:
+                        yield f"data: {json.dumps({'delta': final})}\n\n"
                 else:
                     yield f"data: {json.dumps({'error': snap['error'] or 'chat failed'})}\n\n"
                 yield "data: [DONE]\n\n"

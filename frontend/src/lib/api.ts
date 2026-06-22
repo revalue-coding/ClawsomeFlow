@@ -696,6 +696,11 @@ export interface UiCapabilities {
   nativeDirectoryClientColocated: boolean;
 }
 
+export interface OwnerKindsFast {
+  persistentKinds: string[];
+  temporaryKinds: string[];
+}
+
 export interface EnsureGitRepoResult {
   path: string;
   pathExists: boolean;
@@ -1528,6 +1533,8 @@ export const api = {
       "GET",
       `/api/system/workspace-directories${allUsers ? "?allUsers=true" : ""}`,
     ),
+  getOwnerKindsFast: () =>
+    request<OwnerKindsFast>("GET", "/api/system/owner-kinds/fast"),
   getUiCapabilities: () =>
     request<UiCapabilities>("GET", "/api/system/ui-capabilities"),
 

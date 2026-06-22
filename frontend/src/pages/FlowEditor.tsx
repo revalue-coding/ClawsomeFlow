@@ -72,6 +72,7 @@ type NonOpenclawOwnerKind =
   | "codebuddy"
   | "hermes";
 type OwnerKind = "openclaw" | NonOpenclawOwnerKind;
+type OwnerKindDraft = OwnerKind | "";
 type OwnerMode = "existing" | "new";
 type DeploymentMode = "local" | "server";
 
@@ -94,7 +95,7 @@ interface TaskRow {
   /** Developer-mode per-task auto-merge switch. Default true. Ignored unless
    *  the Flow is in developer mode; OpenClaw owners are forced to auto-merge. */
   autoMerge: boolean;
-  ownerKind: OwnerKind;
+  ownerKind: OwnerKindDraft;
   ownerId: string;
   ownerRepo: string;
   ownerTargetBranch: string;
@@ -108,12 +109,16 @@ interface TaskRow {
 }
 
 interface ValidationMessages {
+  leaderKindRequired: string;
+  leaderKindUnavailable: (kindLabel: string) => string;
   pickOneSummary: string;
   onlyOneSummary: string;
   taskIdRequired: string;
   taskIdPattern: string;
   duplicateTaskId: (taskId: string) => string;
   subjectRequired: string;
+  ownerKindRequired: string;
+  ownerKindUnavailable: (args: { subject: string; kindLabel: string }) => string;
   pickOpenclawAgent: string;
   ownerAgentNameRequired: string;
   ownerAgentIdPattern: string;
@@ -200,7 +205,7 @@ function blankRow(): TaskRow {
     outputSummaryRequirement: "",
     requiresHumanCheckpoint: false,
     autoMerge: true,
-    ownerKind: "claude",
+    ownerKind: "",
     ownerId: "",
     ownerRepo: "",
     ownerTargetBranch: "",
@@ -241,12 +246,32 @@ const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = [
   "hermes",
 ];
 
-function isOpenclawKind(kind: OwnerKind): kind is "openclaw" {
+function isOwnerKind(kind: OwnerKindDraft): kind is OwnerKind {
+  return kind !== "";
+}
+
+function isOpenclawKind(kind: OwnerKindDraft): kind is "openclaw" {
   return kind === "openclaw";
 }
 
-function isNonOpenclawKind(kind: OwnerKind): kind is NonOpenclawOwnerKind {
-  return kind !== "openclaw";
+function isNonOpenclawKind(kind: OwnerKindDraft): kind is NonOpenclawOwnerKind {
+  return kind !== "" && kind !== "openclaw";
+}
+
+function isPersistentOwnerKind(kind: OwnerKindDraft): kind is OwnerKind {
+  return kind === "openclaw" || kind === "hermes";
+}
+
+function toPersistentOwnerKind(raw: string): OwnerKind | null {
+  return (PERSISTENT_OWNER_KINDS as readonly string[]).includes(raw)
+    ? (raw as OwnerKind)
+    : null;
+}
+
+function toTempOwnerKind(raw: string): NonOpenclawOwnerKind | null {
+  return (NEW_OWNER_KINDS as readonly string[]).includes(raw)
+    ? (raw as NonOpenclawOwnerKind)
+    : null;
 }
 
 // Kinds whose agent id must be picked from a managed-agent dropdown (not free
@@ -371,11 +396,12 @@ function ownerKey(
   row: Pick<TaskRow, "ownerKind" | "ownerId" | "ownerRepo" | "ownerTargetBranch">,
 ) {
   if (isOpenclawKind(row.ownerKind)) return `openclaw:${row.ownerId.trim()}`;
+  if (!isOwnerKind(row.ownerKind)) return `unset:${row.ownerId.trim()}`;
   return `${row.ownerKind}:${normalizeRepoPathForCompare(row.ownerRepo)}:${row.ownerTargetBranch.trim()}:${row.ownerId.trim()}`;
 }
 
 interface OwnerBinding {
-  ownerKind: OwnerKind;
+  ownerKind: OwnerKindDraft;
   ownerRepo: string;
   ownerTargetBranch: string;
   ownerIsTemporary: boolean;
@@ -492,19 +518,21 @@ function ownerIdAfterPlatformChange({
   hermesOptions,
 }: {
   sourceMode: OwnerMode;
-  previousKind: OwnerKind;
-  nextKind: OwnerKind;
+  previousKind: OwnerKindDraft;
+  nextKind: OwnerKindDraft;
   ownerId: string;
   openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
 }): string {
   const normalizedOwnerId = ownerId.trim();
   if (!normalizedOwnerId) return "";
+  if (!isOwnerKind(nextKind)) return "";
+  if (!isOwnerKind(previousKind)) return normalizedOwnerId;
   if (sourceMode !== "existing") return normalizedOwnerId;
   if (previousKind === nextKind) return normalizedOwnerId;
   if (
-    !PERSISTENT_OWNER_KINDS.includes(previousKind)
-    || !PERSISTENT_OWNER_KINDS.includes(nextKind)
+    !isPersistentOwnerKind(previousKind)
+    || !isPersistentOwnerKind(nextKind)
   ) {
     return normalizedOwnerId;
   }
@@ -514,9 +542,10 @@ function ownerIdAfterPlatformChange({
 }
 
 function ownerKindLabel(
-  kind: OwnerKind,
+  kind: OwnerKindDraft,
   t: (key: string) => string,
 ): string {
+  if (!kind) return t("flowEditor.taskFields.ownerKindPlaceholder");
   if (kind === "openclaw") return t("flowEditor.taskFields.ownerKindOpenclaw");
   if (kind === "codex") return t("flowEditor.taskFields.ownerKindCodex");
   if (kind === "cursor") return t("flowEditor.taskFields.ownerKindCursor");
@@ -542,6 +571,80 @@ function toOwnerKind(raw: unknown): OwnerKind {
   return (ALL_OWNER_KINDS as readonly string[]).includes(k)
     ? (k as OwnerKind)
     : "claude";
+}
+
+interface OwnerKindsAvailability {
+  persistentKinds: OwnerKind[];
+  temporaryKinds: NonOpenclawOwnerKind[];
+}
+
+const EMPTY_OWNER_KINDS: OwnerKindsAvailability = {
+  persistentKinds: [],
+  temporaryKinds: [],
+};
+
+function dedupeKindsInKnownOrder<T extends string>(
+  knownOrder: readonly T[],
+  values: Iterable<string>,
+): T[] {
+  const picked = new Set<T>();
+  for (const raw of values) {
+    const normalized = raw.trim();
+    if (!normalized) continue;
+    if ((knownOrder as readonly string[]).includes(normalized)) {
+      picked.add(normalized as T);
+    }
+  }
+  return knownOrder.filter((kind) => picked.has(kind));
+}
+
+function usedOwnerKinds(
+  rows: TaskRow[],
+  leaderKind: OwnerKindDraft,
+): OwnerKindsAvailability {
+  const persistent = new Set<string>();
+  const temporary = new Set<string>();
+  for (const row of rows) {
+    if (!isOwnerKind(row.ownerKind)) continue;
+    if (isPersistentOwnerKind(row.ownerKind)) persistent.add(row.ownerKind);
+    if (isNonOpenclawKind(row.ownerKind)) temporary.add(row.ownerKind);
+  }
+  if (isOwnerKind(leaderKind)) {
+    if (isPersistentOwnerKind(leaderKind)) persistent.add(leaderKind);
+    if (isNonOpenclawKind(leaderKind)) temporary.add(leaderKind);
+  }
+  return {
+    persistentKinds: dedupeKindsInKnownOrder(PERSISTENT_OWNER_KINDS, persistent),
+    temporaryKinds: dedupeKindsInKnownOrder(NEW_OWNER_KINDS, temporary),
+  };
+}
+
+function mergeOwnerKindAvailability(
+  detected: OwnerKindsAvailability,
+  used: OwnerKindsAvailability,
+): OwnerKindsAvailability {
+  return {
+    persistentKinds: dedupeKindsInKnownOrder(
+      PERSISTENT_OWNER_KINDS,
+      [...detected.persistentKinds, ...used.persistentKinds],
+    ),
+    temporaryKinds: dedupeKindsInKnownOrder(
+      NEW_OWNER_KINDS,
+      [...detected.temporaryKinds, ...used.temporaryKinds],
+    ),
+  };
+}
+
+function ownerKindAvailableForSource(
+  kind: OwnerKindDraft,
+  isTemporary: boolean,
+  availability: OwnerKindsAvailability,
+): boolean {
+  if (!isOwnerKind(kind)) return false;
+  if (isTemporary) {
+    return isNonOpenclawKind(kind) && availability.temporaryKinds.includes(kind);
+  }
+  return isPersistentOwnerKind(kind) && availability.persistentKinds.includes(kind);
 }
 
 /** Editable combobox for the temporary-agent NAME field. A single input that
@@ -700,7 +803,7 @@ function buildExistingOwnerOptions(
   openclawOptions: OpenclawAgentSummary[],
   opts: {
     leaderId: string;
-    leaderKind: OwnerKind;
+    leaderKind: OwnerKindDraft;
     leaderRepo: string;
     leaderTargetBranch: string;
     isSummary: boolean;
@@ -718,7 +821,7 @@ function buildExistingOwnerOptions(
   const normalizedLeaderId = leaderId.trim();
   const normalizedLeaderRepo = normalizeRepoPathForCompare(leaderRepo);
   const normalizedLeaderTargetBranch = leaderTargetBranch.trim();
-  const leaderKey = normalizedLeaderId
+  const leaderKey = normalizedLeaderId && isOwnerKind(leaderKind)
     ? (leaderKind === "openclaw"
         ? `openclaw:${normalizedLeaderId}`
         : `${leaderKind}:${normalizedLeaderId}:${normalizedLeaderRepo}:${normalizedLeaderTargetBranch}`)
@@ -748,6 +851,7 @@ function buildExistingOwnerOptions(
     const id = r.ownerId.trim();
     if (!id) continue;
     const kind = r.ownerKind;
+    if (!isOwnerKind(kind)) continue;
     const repoRaw = isNonOpenclawKind(kind) ? r.ownerRepo.trim() : "";
     const repo = isNonOpenclawKind(kind) ? normalizeRepoPathForCompare(repoRaw) : "";
     const targetBranch = isNonOpenclawKind(kind) ? r.ownerTargetBranch.trim() : "";
@@ -813,10 +917,10 @@ export function FlowEditor() {
   const [name, setName] = useSessionBackedState(draftKey("name"), "");
   const [description, setDescription] = useSessionBackedState(draftKey("description"), "");
   const [leaderId, setLeaderId] = useSessionBackedState(draftKey("leaderId"), "");
-  // P3: a persistent leader defaults to Hermes (was OpenClaw).
-  const [leaderKind, setLeaderKind] = useSessionBackedState<OwnerKind>(
+  // Leader kind starts empty; user must pick explicitly.
+  const [leaderKind, setLeaderKind] = useSessionBackedState<OwnerKindDraft>(
     draftKey("leaderKind"),
-    "hermes",
+    "",
   );
   // Leader source: false = existing/persistent agent, true = temporary ad-hoc.
   // OpenClaw default → existing.
@@ -893,8 +997,13 @@ export function FlowEditor() {
   );
   const [openclawOptions, setOpenclawOptions] = useState<OpenclawAgentSummary[]>([]);
   const [hermesOptions, setHermesOptions] = useState<HermesAgentSummary[]>([]);
+  const [detectedOwnerKinds, setDetectedOwnerKinds] = useState<OwnerKindsAvailability>(
+    EMPTY_OWNER_KINDS,
+  );
   const [deploymentMode, setDeploymentMode] = useState<DeploymentMode>("local");
   const [workspaceDirOptions, setWorkspaceDirOptions] = useState<string[]>([]);
+  const ownerKindsFetchRef = useRef<Promise<OwnerKindsAvailability> | null>(null);
+  const detectedOwnerKindsRef = useRef<OwnerKindsAvailability>(EMPTY_OWNER_KINDS);
   const [error, setError] = useState<string | null>(null);
   /** Aggregated list of unmet validation rules surfaced when the user
    *  clicks Save. Rendered as a bulleted list above the form so the
@@ -949,6 +1058,47 @@ export function FlowEditor() {
     };
   }, []);
 
+  useEffect(() => {
+    detectedOwnerKindsRef.current = detectedOwnerKinds;
+  }, [detectedOwnerKinds]);
+
+  async function refreshOwnerKindsFast(
+    opts: { silent?: boolean } = {},
+  ): Promise<OwnerKindsAvailability> {
+    if (ownerKindsFetchRef.current) return ownerKindsFetchRef.current;
+    const job = (async () => {
+      try {
+        const out = await api.getOwnerKindsFast();
+        const next: OwnerKindsAvailability = {
+          persistentKinds: dedupeKindsInKnownOrder(
+            PERSISTENT_OWNER_KINDS,
+            out.persistentKinds
+              .map((kind) => toPersistentOwnerKind(String(kind)))
+              .filter((kind): kind is OwnerKind => kind !== null),
+          ),
+          temporaryKinds: dedupeKindsInKnownOrder(
+            NEW_OWNER_KINDS,
+            out.temporaryKinds
+              .map((kind) => toTempOwnerKind(String(kind)))
+              .filter((kind): kind is NonOpenclawOwnerKind => kind !== null),
+          ),
+        };
+        setDetectedOwnerKinds(next);
+        return next;
+      } catch (e) {
+        if (!opts.silent) {
+          const msg = e instanceof ApiError ? e.message : String(e);
+          setError(msg);
+        }
+        return detectedOwnerKindsRef.current;
+      } finally {
+        ownerKindsFetchRef.current = null;
+      }
+    })();
+    ownerKindsFetchRef.current = job;
+    return job;
+  }
+
   // Load option lists.
   useEffect(() => {
     api
@@ -966,6 +1116,7 @@ export function FlowEditor() {
         setWorkspaceDirOptions(r.items);
       })
       .catch(() => {});
+    void refreshOwnerKindsFast({ silent: true });
   }, []);
 
   // Load existing flow when editing — but only once per flow. If a draft has
@@ -1064,7 +1215,7 @@ export function FlowEditor() {
   }, [leaderId, leaderKind, leaderIsTemporary, leaderRepo, leaderTargetBranch, t]);
 
   useEffect(() => {
-    if (leaderKind === "openclaw") {
+    if (!isNonOpenclawKind(leaderKind)) {
       setLeaderBranchOptions([]);
       setLeaderBranchEditable(false);
       return;
@@ -1121,7 +1272,7 @@ export function FlowEditor() {
   // while the user is still typing into the repo text field (that commits on blur).
   useEffect(() => {
     if (leaderRepoCheckSeededRef.current) return;
-    if (leaderKind === "openclaw") return;
+    if (!isNonOpenclawKind(leaderKind)) return;
     const repo = leaderRepo.trim();
     if (!repo) return;
     commitLeaderRepoCheck(repo);
@@ -1131,9 +1282,50 @@ export function FlowEditor() {
 
   const summaryTask = tasks.find((r) => r.isLeaderSummary);
   const leaderKey = summaryTask ? ownerKey(summaryTask) : null;
+  const mergedOwnerKinds = useMemo(
+    () => mergeOwnerKindAvailability(detectedOwnerKinds, usedOwnerKinds(tasks, leaderKind)),
+    [detectedOwnerKinds, tasks, leaderKind],
+  );
+
+  function ownerKindLabelText(kind: OwnerKindDraft): string {
+    return ownerKindLabel(kind, (key) => t(key));
+  }
+
+  function leaderKindIssueText(
+    kind: OwnerKindDraft,
+    temporary: boolean,
+    availability: OwnerKindsAvailability,
+  ): string | null {
+    if (!isOwnerKind(kind)) return t("flowEditor.validation.leaderKindRequired");
+    if (!ownerKindAvailableForSource(kind, temporary, availability)) {
+      return t("flowEditor.validation.leaderKindUnavailable", {
+        kindLabel: ownerKindLabelText(kind),
+      });
+    }
+    return null;
+  }
+
+  function taskOwnerKindIssueText(
+    row: TaskRow,
+    availability: OwnerKindsAvailability,
+  ): string | null {
+    if (!isOwnerKind(row.ownerKind)) {
+      return t("flowEditor.validation.ownerKindRequired");
+    }
+    if (!ownerKindAvailableForSource(row.ownerKind, row.ownerIsTemporary, availability)) {
+      return t("flowEditor.validation.ownerKindUnavailable", {
+        subject: row.subject.trim() || row.id || t("flowEditor.rowUntitled"),
+        kindLabel: ownerKindLabelText(row.ownerKind),
+      });
+    }
+    return null;
+  }
 
   const validationMessages = useMemo<ValidationMessages>(
     () => ({
+      leaderKindRequired: t("flowEditor.validation.leaderKindRequired"),
+      leaderKindUnavailable: (kindLabel: string) =>
+        t("flowEditor.validation.leaderKindUnavailable", { kindLabel }),
       pickOneSummary: t("flowEditor.validation.pickOneSummary"),
       onlyOneSummary: t("flowEditor.validation.onlyOneSummary"),
       taskIdRequired: t("flowEditor.validation.taskIdRequired"),
@@ -1141,6 +1333,9 @@ export function FlowEditor() {
       duplicateTaskId: (taskId: string) =>
         t("flowEditor.validation.duplicateTaskId", { taskId }),
       subjectRequired: t("flowEditor.validation.subjectRequired"),
+      ownerKindRequired: t("flowEditor.validation.ownerKindRequired"),
+      ownerKindUnavailable: ({ subject, kindLabel }: { subject: string; kindLabel: string }) =>
+        t("flowEditor.validation.ownerKindUnavailable", { subject, kindLabel }),
       pickOpenclawAgent: t("flowEditor.validation.pickOpenclawAgent"),
       ownerAgentNameRequired: t("flowEditor.validation.ownerAgentNameRequired"),
       ownerAgentIdPattern: t("flowEditor.validation.ownerAgentIdPattern"),
@@ -1189,7 +1384,7 @@ export function FlowEditor() {
   // Save click and feels broken.
   useEffect(() => {
     setSaveBlockers(null);
-  }, [name, description, leaderId, leaderKind, leaderRepo, leaderTargetBranch, tasks]);
+  }, [name, description, leaderId, leaderKind, leaderIsTemporary, leaderRepo, leaderTargetBranch, tasks]);
   const globalIssues = useMemo(
     () => Array.from(new Set(issues.filter((i) => !i.rowKey).map((i) => i.message))),
     [issues],
@@ -1210,6 +1405,8 @@ export function FlowEditor() {
     if (!leaderId.trim()) {
       return t("flowEditor.validation.pickLeader");
     }
+    const kindIssue = leaderKindIssueText(leaderKind, leaderIsTemporary, mergedOwnerKinds);
+    if (kindIssue) return kindIssue;
     if (leaderKind === "openclaw") {
       if (openclawOptions.length === 0) {
         return t("flowEditor.decompose.leaderEmpty");
@@ -1222,7 +1419,7 @@ export function FlowEditor() {
     // A temporary (ad-hoc / "new") leader is typed as free text and never
     // appears in the managed-agent picklist, so only require picklist
     // membership for existing/persistent leaders.
-    if (!leaderIsTemporary && isManagedPickKind(leaderKind)) {
+    if (!leaderIsTemporary && isOwnerKind(leaderKind) && isManagedPickKind(leaderKind)) {
       // Managed agent required (no ad-hoc creation), plus a working dir.
       const opts = pickAgentsForKind(leaderKind, hermesOptions);
       if (!opts.some((a) => a.id === leaderId.trim())) {
@@ -1242,6 +1439,7 @@ export function FlowEditor() {
     leaderIsTemporary,
     leaderRepo,
     leaderTargetBranch,
+    mergedOwnerKinds,
     openclawOptions,
     hermesOptions,
     t,
@@ -1379,15 +1577,12 @@ export function FlowEditor() {
       );
       return; // keep leaderId untouched — select snaps back via controlled value
     }
-    if (isManagedPickKind(leaderKind)) {
+    if (isOwnerKind(leaderKind) && isManagedPickKind(leaderKind)) {
       // Managed kinds (Hermes/Claude/Codex) bind identity via the managed id,
       // but the working directory (repo/branch) is chosen separately — preserve it.
       setLeaderId(normalized);
       return;
     }
-    setLeaderKind("openclaw");
-    setLeaderRepo("");
-    setLeaderTargetBranch("");
     setLeaderId(normalized);
   }
 
@@ -1649,6 +1844,11 @@ export function FlowEditor() {
   }
 
   async function onSubmit() {
+    const detectedNow = await refreshOwnerKindsFast({ silent: true });
+    const ownerKindsNow = mergeOwnerKindAvailability(
+      detectedNow,
+      usedOwnerKinds(tasks, leaderKind),
+    );
     // Aggregate every unmet condition (Flow-level + per-task) so the
     // user sees the full punch-list at once. Dedupe so the same
     // per-row issue doesn't show twice when a task has multiple rule
@@ -1662,6 +1862,16 @@ export function FlowEditor() {
     }
     if (!leaderId.trim()) {
       blockers.push(t("flowEditor.validation.pickLeader"));
+    }
+    const leaderKindIssue = leaderKindIssueText(
+      leaderKind,
+      leaderIsTemporary,
+      ownerKindsNow,
+    );
+    if (leaderKindIssue) blockers.push(leaderKindIssue);
+    for (const row of tasks) {
+      const issue = taskOwnerKindIssueText(row, ownerKindsNow);
+      if (issue) blockers.push(issue);
     }
     for (const issue of issues) blockers.push(issue.message);
     const uniqBlockers = Array.from(new Set(blockers));
@@ -1768,6 +1978,16 @@ export function FlowEditor() {
       setError(t("flowEditor.validation.pickLeader"));
       return;
     }
+    const detectedNow = await refreshOwnerKindsFast({ silent: true });
+    const ownerKindsNow = mergeOwnerKindAvailability(
+      detectedNow,
+      usedOwnerKinds(tasks, leaderKind),
+    );
+    const kindIssue = leaderKindIssueText(leaderKind, leaderIsTemporary, ownerKindsNow);
+    if (kindIssue) {
+      setError(kindIssue);
+      return;
+    }
     if (leaderKind === "openclaw") {
       if (openclawOptions.length === 0) {
         setError(t("flowEditor.decompose.leaderEmpty"));
@@ -1780,6 +2000,7 @@ export function FlowEditor() {
     } else {
       if (
         !leaderIsTemporary &&
+        isOwnerKind(leaderKind) &&
         isManagedPickKind(leaderKind) &&
         !pickAgentsForKind(leaderKind, hermesOptions).some(
           (a) => a.id === leaderId.trim(),
@@ -2000,17 +2221,15 @@ export function FlowEditor() {
                   value={leaderIsTemporary ? "new" : "existing"}
                   onChange={(e) => {
                     const nextMode = e.target.value as OwnerMode;
-                    // P5: toggling temporary↔persistent resets the leader's
-                    // 平台-名称 block to the category default (temp → claude,
-                    // persistent → hermes) and clears the name; repo/branch (and
-                    // their validation seed) are preserved untouched.
+                    // Toggling source keeps repo/branch as-is, but requires the
+                    // user to explicitly re-pick owner kind + id.
                     if (nextMode === "new") {
                       setLeaderIsTemporary(true);
-                      setLeaderKind("claude");
+                      setLeaderKind("");
                       setLeaderId("");
                     } else {
                       setLeaderIsTemporary(false);
-                      setLeaderKind("hermes");
+                      setLeaderKind("");
                       setLeaderId("");
                     }
                   }}
@@ -2023,9 +2242,15 @@ export function FlowEditor() {
                 <label className="label">{t("flowEditor.leaderKindLabel")}</label>
                 <select
                   className="select"
-                  value={leaderKind}
+                  value={leaderKind || ""}
+                  onFocus={() => {
+                    void refreshOwnerKindsFast({ silent: true });
+                  }}
+                  onMouseDown={() => {
+                    void refreshOwnerKindsFast({ silent: true });
+                  }}
                   onChange={(e) => {
-                    const nextKind = e.target.value as OwnerKind;
+                    const nextKind = e.target.value as OwnerKindDraft;
                     const sourceMode: OwnerMode = leaderIsTemporary ? "new" : "existing";
                     const nextLeaderId = ownerIdAfterPlatformChange({
                       sourceMode,
@@ -2044,7 +2269,10 @@ export function FlowEditor() {
                     }
                   }}
                 >
-                  {(leaderIsTemporary ? NEW_OWNER_KINDS : PERSISTENT_OWNER_KINDS).map((k) => (
+                  <option value="">{t("flowEditor.taskFields.ownerKindPlaceholder")}</option>
+                  {(leaderIsTemporary
+                    ? mergedOwnerKinds.temporaryKinds
+                    : mergedOwnerKinds.persistentKinds).map((k) => (
                     <option key={k} value={k}>
                       {ownerKindLabel(k, (key) => t(key))}
                     </option>
@@ -2053,7 +2281,15 @@ export function FlowEditor() {
               </div>
               <div>
                 <label className="label">{t("flowEditor.leaderAgentLabel")}</label>
-                {!leaderIsTemporary && leaderKind === "openclaw" ? (
+                {!isOwnerKind(leaderKind) ? (
+                  <input
+                    className="input"
+                    value={leaderId}
+                    placeholder={t("flowEditor.taskFields.pickOwnerKindFirst")}
+                    onChange={(e) => tryChangeLeader(e.target.value)}
+                    disabled
+                  />
+                ) : !leaderIsTemporary && leaderKind === "openclaw" ? (
                   <select
                     className="select"
                     value={leaderId}
@@ -2069,7 +2305,9 @@ export function FlowEditor() {
                       </option>
                     ))}
                   </select>
-                ) : !leaderIsTemporary && isManagedPickKind(leaderKind) ? (
+                ) : !leaderIsTemporary
+                  && isOwnerKind(leaderKind)
+                  && isManagedPickKind(leaderKind) ? (
                   <>
                     <select
                       className="select"
@@ -2103,7 +2341,7 @@ export function FlowEditor() {
                 )}
               </div>
             </div>
-            {leaderKind !== "openclaw" && (
+            {isNonOpenclawKind(leaderKind) && (
               <div className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
                 <div>
                   <label className="label">{t("flowEditor.leaderRepoLabel")}</label>
@@ -2478,6 +2716,8 @@ export function FlowEditor() {
           devMode={devMode}
           openclawOptions={openclawOptions}
           hermesOptions={hermesOptions}
+          persistentOwnerKinds={mergedOwnerKinds.persistentKinds}
+          temporaryOwnerKinds={mergedOwnerKinds.temporaryKinds}
           openclawIds={openclawIds}
           hermesIds={hermesIds}
           validationMessages={validationMessages}
@@ -2487,6 +2727,7 @@ export function FlowEditor() {
           leaderTargetBranch={leaderTargetBranch.trim()}
           deploymentMode={deploymentMode}
           workspaceDirOptions={workspaceDirOptions}
+          onRefreshOwnerKinds={() => refreshOwnerKindsFast({ silent: true })}
           onSave={(row) => {
             if (editing.mode === "create") commitNewTask(row);
             else if (editing.mode === "edit")
@@ -2774,6 +3015,8 @@ function TaskEditModal({
   devMode,
   openclawOptions,
   hermesOptions,
+  persistentOwnerKinds,
+  temporaryOwnerKinds,
   openclawIds,
   hermesIds,
   validationMessages,
@@ -2783,6 +3026,7 @@ function TaskEditModal({
   leaderTargetBranch,
   deploymentMode,
   workspaceDirOptions,
+  onRefreshOwnerKinds,
   onSave,
   onCancel,
 }: {
@@ -2792,10 +3036,12 @@ function TaskEditModal({
   devMode: boolean;
   openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
+  persistentOwnerKinds: OwnerKind[];
+  temporaryOwnerKinds: NonOpenclawOwnerKind[];
   openclawIds: Set<string>;
   hermesIds: Set<string>;
   validationMessages: ValidationMessages;
-  leaderKind: OwnerKind;
+  leaderKind: OwnerKindDraft;
   /** Currently-selected leader id. Excluded from sub-task agent picker
    *  (leader can only own the auto-summary task). */
   leaderId: string;
@@ -2803,6 +3049,7 @@ function TaskEditModal({
   leaderTargetBranch: string;
   deploymentMode: DeploymentMode;
   workspaceDirOptions: string[];
+  onRefreshOwnerKinds: () => Promise<OwnerKindsAvailability>;
   onSave: (row: TaskRow) => void;
   onCancel: () => void;
 }) {
@@ -2868,7 +3115,7 @@ function TaskEditModal({
   }
 
   useEffect(() => {
-    if (isOpenclawKind(draft.ownerKind)) {
+    if (!isNonOpenclawKind(draft.ownerKind)) {
       setBranchOptions([]);
       setBranchEditable(false);
       return;
@@ -3009,10 +3256,28 @@ function TaskEditModal({
 
   async function attemptSave() {
     if (repoChecking) return;
+    const prospective = buildProspectiveRows(draft);
+    const detectedNow = await onRefreshOwnerKinds();
+    const ownerKindsNow = mergeOwnerKindAvailability(
+      detectedNow,
+      usedOwnerKinds(prospective, leaderKind),
+    );
+    if (!isOwnerKind(draft.ownerKind)) {
+      setSaveError(validationMessages.ownerKindRequired);
+      return;
+    }
+    if (!ownerKindAvailableForSource(draft.ownerKind, draft.ownerIsTemporary, ownerKindsNow)) {
+      setSaveError(
+        validationMessages.ownerKindUnavailable({
+          subject: draft.subject.trim() || draft.id || t("flowEditor.rowUntitled"),
+          kindLabel: ownerKindLabel(draft.ownerKind, (key) => t(key)),
+        }),
+      );
+      return;
+    }
     // P6 — comprehensive check at "保存子任务". Runs cheap field/cross-task
     // validation first (the SAME validator the Flow save uses, scoped to this
     // row), then the cross-task unity confirm, then async repo/branch existence.
-    const prospective = buildProspectiveRows(draft);
     const cycle = detectTaskCycle(prospective);
     if (cycle.length > 0) {
       setSaveError(validationMessages.cycleDetected(cycle.join(" -> ")));
@@ -3076,6 +3341,8 @@ function TaskEditModal({
         ownerMode={ownerMode}
         openclawOptions={openclawOptions}
         hermesOptions={hermesOptions}
+        persistentOwnerKinds={persistentOwnerKinds}
+        temporaryOwnerKinds={temporaryOwnerKinds}
         deploymentMode={deploymentMode}
         workspaceDirOptions={workspaceDirOptions}
         branchOptions={branchOptions}
@@ -3083,16 +3350,16 @@ function TaskEditModal({
         branchLoading={branchLoading}
         onRepoPathCommit={commitRepoCheck}
         onRepoPathEditStart={() => snapshotRepoBeforeEdit(draft)}
+        onOwnerKindMenuOpen={() => {
+          void onRefreshOwnerKinds();
+        }}
         onOwnerModeChange={(nextMode) => {
           setOwnerMode(nextMode);
-          // P5: toggling temporary↔persistent resets the 平台-名称 block to the
-          // category default (temp → claude, persistent → hermes) and clears the
-          // name; the repo-分支 block is preserved untouched (patch merge keeps
-          // ownerRepo/ownerTargetBranch since we don't pass them).
+          // Switching source clears kind+id so user re-picks explicitly.
           if (nextMode === "new") {
-            patch({ ownerKind: "claude", ownerId: "", ownerIsTemporary: true });
+            patch({ ownerKind: "", ownerId: "", ownerIsTemporary: true });
           } else {
-            patch({ ownerKind: "hermes", ownerId: "", ownerIsTemporary: false });
+            patch({ ownerKind: "", ownerId: "", ownerIsTemporary: false });
           }
         }}
         onChange={patch}
@@ -3130,6 +3397,8 @@ function TaskFormBody({
   ownerMode,
   openclawOptions,
   hermesOptions,
+  persistentOwnerKinds,
+  temporaryOwnerKinds,
   deploymentMode,
   workspaceDirOptions,
   branchOptions,
@@ -3137,6 +3406,7 @@ function TaskFormBody({
   branchLoading,
   onRepoPathCommit,
   onRepoPathEditStart,
+  onOwnerKindMenuOpen,
   onOwnerModeChange,
   onChange,
 }: {
@@ -3149,6 +3419,8 @@ function TaskFormBody({
   ownerMode: OwnerMode;
   openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
+  persistentOwnerKinds: OwnerKind[];
+  temporaryOwnerKinds: NonOpenclawOwnerKind[];
   deploymentMode: DeploymentMode;
   workspaceDirOptions: string[];
   branchOptions: string[];
@@ -3156,6 +3428,7 @@ function TaskFormBody({
   branchLoading: boolean;
   onRepoPathCommit: (repo: string) => void;
   onRepoPathEditStart: () => void;
+  onOwnerKindMenuOpen: () => void;
   onOwnerModeChange: (mode: OwnerMode) => void;
   onChange: (patch: Partial<TaskRow>) => void;
 }) {
@@ -3163,7 +3436,9 @@ function TaskFormBody({
   const { alert } = useDialog();
   const [pickingRepo, setPickingRepo] = useState(false);
   const ownerLocked = readOnly || isSummary;
+  const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
+  const ownerNeedsRepo = ownerKindSelected && isNonOpenclawKind(row.ownerKind);
   const ownerIsNew = ownerMode === "new";
   const ownerKindEditable = !ownerLocked;
   const branchHelperText = branchEditable
@@ -3295,10 +3570,12 @@ function TaskFormBody({
         <label className="label">{t("flowEditor.taskFields.ownerKind")}</label>
         <select
           className="select"
-          value={row.ownerKind}
+          value={row.ownerKind || ""}
           disabled={!ownerKindEditable}
+          onFocus={onOwnerKindMenuOpen}
+          onMouseDown={onOwnerKindMenuOpen}
           onChange={(e) => {
-            const nextKind = e.target.value as OwnerKind;
+            const nextKind = e.target.value as OwnerKindDraft;
             const nextOwnerId = ownerIdAfterPlatformChange({
               sourceMode: ownerMode,
               previousKind: row.ownerKind,
@@ -3317,7 +3594,16 @@ function TaskFormBody({
             });
           }}
         >
-          {(ownerIsNew ? NEW_OWNER_KINDS : PERSISTENT_OWNER_KINDS).map((k) => (
+          <option value="">{t("flowEditor.taskFields.ownerKindPlaceholder")}</option>
+          {ownerKindSelected
+            && !(
+              ownerIsNew
+                ? temporaryOwnerKinds.includes(row.ownerKind as NonOpenclawOwnerKind)
+                : persistentOwnerKinds.includes(row.ownerKind as OwnerKind)
+            ) && (
+            <option value={row.ownerKind}>{ownerKindLabel(row.ownerKind, (key) => t(key))}</option>
+          )}
+          {(ownerIsNew ? temporaryOwnerKinds : persistentOwnerKinds).map((k) => (
             <option key={k} value={k}>
               {ownerKindLabel(k, (key) => t(key))}
             </option>
@@ -3335,7 +3621,15 @@ function TaskFormBody({
             ? t("flowEditor.taskFields.newAgentName")
             : t("flowEditor.taskFields.existingAgent")}
         </label>
-        {ownerIsNew ? (
+        {!ownerKindSelected ? (
+          <input
+            className="input"
+            value={row.ownerId}
+            disabled
+            placeholder={t("flowEditor.taskFields.pickOwnerKindFirst")}
+            onChange={(e) => onChange({ ownerId: e.target.value })}
+          />
+        ) : ownerIsNew ? (
           // Temporary: a single editable combobox. Free-TYPE to create a
           // brand-new temporary agent (name only — repo/branch stay independent,
           // P2). Or open the dropdown and SELECT a temporary agent already
@@ -3343,11 +3637,13 @@ function TaskFormBody({
           // repo + target branch (the user-confirmed exception — selecting an
           // enumerated definition overwrites repo/branch).
           (() => {
-            const opts = flowTempAgentsForKind(
-              row.ownerKind as NonOpenclawOwnerKind,
-              tasks,
-              row.rowKey,
-            );
+            const opts = isNonOpenclawKind(row.ownerKind)
+              ? flowTempAgentsForKind(
+                  row.ownerKind,
+                  tasks,
+                  row.rowKey,
+                )
+              : [];
             const current = row.ownerId.trim()
               ? tempAgentValue({
                   id: row.ownerId.trim(),
@@ -3418,7 +3714,7 @@ function TaskFormBody({
                 const ownerId = e.target.value;
                 const existing = findFlowOwnerWorkspace(
                   tasks,
-                  { ownerKind: row.ownerKind, ownerId },
+                  { ownerKind: isOwnerKind(row.ownerKind) ? row.ownerKind : "hermes", ownerId },
                   row.rowKey,
                 );
                 onChange({
@@ -3437,16 +3733,25 @@ function TaskFormBody({
             >
               <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
               {row.ownerId &&
-                !pickAgentsForKind(row.ownerKind, hermesOptions).some(
+                !pickAgentsForKind(
+                  isOwnerKind(row.ownerKind) ? row.ownerKind : "hermes",
+                  hermesOptions,
+                ).some(
                   (a) => a.id === row.ownerId,
                 ) && <option value={row.ownerId}>{row.ownerId}</option>}
-              {pickAgentsForKind(row.ownerKind, hermesOptions).map((a) => (
+              {pickAgentsForKind(
+                isOwnerKind(row.ownerKind) ? row.ownerKind : "hermes",
+                hermesOptions,
+              ).map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name} ({a.id})
                 </option>
               ))}
             </select>
-            {pickAgentsForKind(row.ownerKind, hermesOptions).length === 0 && (
+            {pickAgentsForKind(
+              isOwnerKind(row.ownerKind) ? row.ownerKind : "hermes",
+              hermesOptions,
+            ).length === 0 && (
               <div className="text-xs text-ink-500 mt-1">
                 {t("flowEditor.hermesAgentEmpty")}
               </div>
@@ -3455,7 +3760,7 @@ function TaskFormBody({
         )}
       </div>
 
-      {!ownerIsOpenclaw && (
+      {ownerNeedsRepo && (
         <div className="md:col-span-2">
           <div className="grid gap-2 md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
             <div>
@@ -4362,6 +4667,30 @@ function validate(
         message: messages.descriptionRequired(subjectLabel),
       });
     }
+    if (!isOwnerKind(r.ownerKind)) {
+      issues.push({ rowKey: r.rowKey, message: messages.ownerKindRequired });
+      continue;
+    }
+    if (r.ownerIsTemporary && !isNonOpenclawKind(r.ownerKind)) {
+      issues.push({
+        rowKey: r.rowKey,
+        message: messages.ownerKindUnavailable({
+          subject: subjectLabel,
+          kindLabel: r.ownerKind,
+        }),
+      });
+      continue;
+    }
+    if (!r.ownerIsTemporary && !isPersistentOwnerKind(r.ownerKind)) {
+      issues.push({
+        rowKey: r.rowKey,
+        message: messages.ownerKindUnavailable({
+          subject: subjectLabel,
+          kindLabel: r.ownerKind,
+        }),
+      });
+      continue;
+    }
     if (!r.ownerId.trim()) {
       issues.push({
         rowKey: r.rowKey,
@@ -4500,6 +4829,7 @@ function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
   for (const r of rows) {
     const k = r.ownerId.trim();
     if (!k) continue;
+    if (!isOwnerKind(r.ownerKind)) continue;
     if (byKey.has(k)) continue;
     const isLeader = r.isLeaderSummary;
     const agent: FlowAgent =
@@ -4579,7 +4909,7 @@ function DecomposeModal({
 }: {
   open: boolean;
   goal: string;
-  leaderKind: OwnerKind;
+  leaderKind: OwnerKindDraft;
   leaderId: string;
   leaderRepo: string;
   leaderTargetBranch: string;
@@ -4672,7 +5002,7 @@ function DecomposeModal({
         const r = await api.startDecompose({
           goal: normalizedGoal,
           leaderAgentId: normalizedLeaderId,
-          leaderKind,
+          leaderKind: isOwnerKind(leaderKind) ? leaderKind : undefined,
           leaderRepo: isNonOpenclawKind(leaderKind) ? normalizedLeaderRepo : null,
           leaderTargetBranch: isNonOpenclawKind(leaderKind)
             ? normalizedLeaderTargetBranch

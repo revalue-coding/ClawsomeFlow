@@ -341,6 +341,9 @@ const en = {
     modalCancel: "Cancel",
     validation: {
       pickLeader: "Please pick a leader at the top of the page.",
+      leaderKindRequired: "Please pick a leader kind first.",
+      leaderKindUnavailable:
+        "Leader kind \"{{kindLabel}}\" is currently unavailable. Re-probe and choose an available kind.",
       nameRequired: "Flow name is required.",
       goalRequired: "Overall goal is required.",
       pickOneSummary: "Please pick a leader at the top — the summary task is generated automatically.",
@@ -349,6 +352,9 @@ const en = {
       taskIdPattern: "Task id must be [A-Za-z0-9_-]+.",
       duplicateTaskId: "Duplicate task id {{taskId}}.",
       subjectRequired: "Subject is required.",
+      ownerKindRequired: "Owner kind is required.",
+      ownerKindUnavailable:
+        "\"{{subject}}\" uses owner kind \"{{kindLabel}}\" which is currently unavailable. Re-probe and choose an available kind.",
       pickOpenclawAgent: "Pick an OpenClaw agent.",
       ownerAgentNameRequired: "Owner agent name is required.",
       ownerAgentIdPattern: "Owner agent name must be [A-Za-z0-9_-]+.",
@@ -392,6 +398,8 @@ const en = {
       existingAgentPlaceholder: "— pick an existing agent —",
       existingAgentEmpty: "No available agent. Create one first.",
       ownerKind: "Owner kind *",
+      ownerKindPlaceholder: "— pick an owner kind —",
+      pickOwnerKindFirst: "Pick owner kind first",
       ownerKindClaude: "Claude Code",
       ownerKindCodex: "Codex",
       ownerKindCursor: "Cursor",

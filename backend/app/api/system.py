@@ -69,6 +69,11 @@ class UiCapabilitiesResponse(_CamelModel):
     native_directory_client_colocated: bool
 
 
+class OwnerKindsFastResponse(_CamelModel):
+    persistent_kinds: list[str] = Field(default_factory=list)
+    temporary_kinds: list[str] = Field(default_factory=list)
+
+
 class EnsureGitRepoPayload(_CamelModel):
     path: str
     create_dir_if_missing: bool = True
@@ -99,6 +104,36 @@ class RepoBranchesResponse(_CamelModel):
     editable: bool
     current_branch: str
     branches: list[str] = Field(default_factory=list)
+
+
+# Owner-kind "fast probe": ONLY `which` checks (millisecond-level), no full
+# runtime/version probing. Order defines dropdown order in the frontend.
+_FAST_PERSISTENT_OWNER_KIND_BINARIES: tuple[tuple[str, str], ...] = (
+    ("hermes", "hermes"),
+    ("openclaw", "openclaw"),
+)
+
+_FAST_TEMP_OWNER_KIND_BINARIES: tuple[tuple[str, str], ...] = (
+    ("claude", "claude"),
+    ("codex", "codex"),
+    # Cursor owner kind must probe the `agent` binary (not `cursor`).
+    ("cursor", "agent"),
+    ("gemini", "gemini"),
+    ("kimi", "kimi"),
+    ("qwen", "qwen"),
+    ("opencode", "opencode"),
+    ("qoder", "qodercli"),
+    ("codebuddy", "codebuddy"),
+    ("hermes", "hermes"),
+)
+
+
+def _detect_owner_kinds_fast(entries: tuple[tuple[str, str], ...]) -> list[str]:
+    kinds: list[str] = []
+    for kind, binary in entries:
+        if shutil.which(binary):
+            kinds.append(kind)
+    return kinds
 
 
 @router.post("/pick-directory", response_model=PickDirectoryResponse)
@@ -708,6 +743,15 @@ def ui_capabilities(request: Request, _user: UserDep = "") -> UiCapabilitiesResp
         allow_native_directory_picker=caps.allow_native_directory_picker,
         native_directory_ui_available=native_ui,
         native_directory_client_colocated=native_directory_client_colocated(request),
+    )
+
+
+@router.get("/owner-kinds/fast", response_model=OwnerKindsFastResponse)
+def owner_kinds_fast(_user: UserDep = "") -> OwnerKindsFastResponse:
+    """Fast owner-kind availability probe via `which` only."""
+    return OwnerKindsFastResponse(
+        persistent_kinds=_detect_owner_kinds_fast(_FAST_PERSISTENT_OWNER_KIND_BINARIES),
+        temporary_kinds=_detect_owner_kinds_fast(_FAST_TEMP_OWNER_KIND_BINARIES),
     )
 
 

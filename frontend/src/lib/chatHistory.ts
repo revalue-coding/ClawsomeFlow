@@ -20,6 +20,16 @@ export interface PersistedMessage {
 
 export const HISTORY_LIMIT = 20;
 
+/** Backend marker when OpenClaw/Hermes completes a tool-only turn with no visible text. */
+export const NO_TEXT_REPLY_MARKER = "[[NO_TEXT_REPLY]]";
+
+/** Normalize assistant content from server history / turn registry snapshots. */
+export function normalizeAssistantContent(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed || trimmed === NO_TEXT_REPLY_MARKER) return "";
+  return content;
+}
+
 /** Format a chat message timestamp as a short local time (e.g. "14:05"). */
 export function formatChatTime(ts?: number): string {
   if (typeof ts !== "number" || !Number.isFinite(ts)) return "";

@@ -125,6 +125,110 @@ def test_snapshot_shape() -> None:
     assert "elapsedSec" in snap["progress"]
 
 
+def test_extract_assistant_text_last_non_empty() -> None:
+    data = {
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "first"},
+            {"role": "tool", "content": "ok"},
+            {"role": "assistant", "content": "  final answer  "},
+        ]
+    }
+    assert chat_svc._extract_assistant_text(data) == "final answer"
+
+
+def test_extract_assistant_text_content_blocks() -> None:
+    data = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "block one"}, {"text": "block two"}],
+            }
+        ]
+    }
+    assert chat_svc._extract_assistant_text(data) == "block one\nblock two"
+
+
+def test_resolve_turn_outcome_prefers_stdout() -> None:
+    out = chat_svc._resolve_turn_outcome(
+        rc=0, stdout="from stdout", stderr="", export_data=None, tool_calls=0
+    )
+    assert out["status"] == "done"
+    assert out["final_text"] == "from stdout"
+    assert out["final_source"] == "stdout"
+
+
+def test_resolve_turn_outcome_session_export_when_stdout_empty() -> None:
+    export = {"messages": [{"role": "assistant", "content": "from export"}]}
+    out = chat_svc._resolve_turn_outcome(
+        rc=0, stdout="", stderr="", export_data=export, tool_calls=2
+    )
+    assert out["status"] == "done"
+    assert out["final_text"] == "from export"
+    assert out["final_source"] == "session_export"
+
+
+def test_resolve_turn_outcome_tool_only_turn() -> None:
+    out = chat_svc._resolve_turn_outcome(
+        rc=0, stdout="", stderr="", export_data={"messages": []}, tool_calls=3
+    )
+    assert out["status"] == "done"
+    assert out["final_text"] == chat_svc._NO_TEXT_REPLY_MARKER
+    assert out["final_source"] == "none_after_tools"
+
+
+def test_resolve_turn_outcome_error_when_no_reply() -> None:
+    out = chat_svc._resolve_turn_outcome(
+        rc=0, stdout="", stderr="", export_data=None, tool_calls=0
+    )
+    assert out["status"] == "error"
+    assert out["final_source"] == "none"
+
+
+class _DonePopen:
+    def __init__(self, *, rc: int, out: str, err: str) -> None:
+        self.pid = 9999
+        self._rc = rc
+        self._out = out
+        self._err = err
+
+    def poll(self):
+        return self._rc
+
+    def communicate(self):
+        return self._out, self._err
+
+
+def test_run_poller_session_export_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When hermes -z leaves stdout empty, poller recovers text from export."""
+    job = _mk_job("sk-poll", agent_id="opc")
+    job.proc = _DonePopen(rc=0, out="", err="")
+    io_done = __import__("threading").Event()
+    io_done.set()
+    io_result = {"rc": 0, "out": "", "err": ""}
+
+    export_payload = {
+        "messages": [{"role": "assistant", "content": "recovered reply"}],
+        "tool_call_count": 1,
+    }
+
+    def _fake_discover(agent_id: str) -> str | None:
+        return "20260622_120000_abc123"
+
+    def _fake_export(agent_id: str, session_id: str) -> dict | None:
+        return export_payload
+
+    monkeypatch.setattr(chat_svc, "_discover_session_id", _fake_discover)
+    monkeypatch.setattr(chat_svc, "_export_session", _fake_export)
+    monkeypatch.setattr(chat_svc._subproc_registry, "unregister", lambda proc: None)
+
+    chat_svc._run_poller(job, "hello", io_done, io_result)
+
+    assert job.status == "done"
+    assert job.final_text == "recovered reply"
+    assert job.hermes_session_id == "20260622_120000_abc123"
+
+
 # ── kill / supersede ──────────────────────────────────────────────────
 
 

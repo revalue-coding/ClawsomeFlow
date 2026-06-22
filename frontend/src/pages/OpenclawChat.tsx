@@ -72,6 +72,7 @@ import {
   formatChatTime,
   loadChatHistory,
   loadLastSeenCount,
+  normalizeAssistantContent,
   reconcileTranscript,
   saveChatHistory,
   saveLastSeenCount,
@@ -1904,7 +1905,10 @@ function ChatRoom({
         if (cancelled) return;
         const server: Message[] = hist.messages.map((m) => ({
           role: m.role,
-          content: m.content,
+          content:
+            m.role === "assistant"
+              ? normalizeAssistantContent(m.content)
+              : m.content,
           attachments: m.attachments ?? [],
         }));
         // Server history has no timestamps; backfill from the local cache (which
@@ -1921,10 +1925,42 @@ function ChatRoom({
         // user was away (settled count grew beyond what they'd last seen).
         const shown = settledCount(merged);
         setNewDividerAt(seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1);
-        // A trailing user turn means a reply is still being produced
-        // server-side (its stream was detached); poll for it.
-        const last = merged[merged.length - 1];
-        if (last && last.role === "user") setRecovering(true);
+        // Reconnect: server turn registry is authoritative for in-flight work.
+        // History alone can miss a running turn (e.g. cache holds a partial
+        // assistant bubble while the server still says running).
+        try {
+          const st = await api.getOpenclawChatStatus(agentId);
+          if (cancelled) return;
+          if (st.status === "running") {
+            setRecovering(true);
+            setSteps(st.steps ?? []);
+            setProgress(st.progress ?? null);
+          } else {
+            const last = merged[merged.length - 1];
+            const needsFinal =
+              st.status === "done" &&
+              st.final.trim() &&
+              (!last || last.role !== "assistant" || !last.content.trim());
+            if (needsFinal) {
+              const text = normalizeAssistantContent(st.final);
+              const next =
+                last && last.role === "assistant"
+                  ? merged.map((m, i) =>
+                      i === merged.length - 1 ? { ...m, content: text, ts: Date.now() } : m,
+                    )
+                  : [...merged, { role: "assistant" as const, content: text, ts: Date.now() }];
+              setMessages(next);
+              saveChatHistory(agentId, next);
+            } else if (last && last.role === "user") {
+              // Trailing user with no live turn — still poll once in case the
+              // registry hasn't caught up yet.
+              setRecovering(true);
+            }
+          }
+        } catch {
+          const last = merged[merged.length - 1];
+          if (last && last.role === "user") setRecovering(true);
+        }
       } catch {
         /* keep the cached view if history fetch fails */
       }
@@ -1949,7 +1985,10 @@ function ChatRoom({
         if (cancelled) return;
         const server: Message[] = hist.messages.map((m) => ({
           role: m.role,
-          content: m.content,
+          content:
+            m.role === "assistant"
+              ? normalizeAssistantContent(m.content)
+              : m.content,
           attachments: m.attachments ?? [],
         }));
         const last = server[server.length - 1];
@@ -1961,6 +2000,20 @@ function ChatRoom({
         /* leave the transcript as-is */
       }
     };
+    const adoptFinal = (text: string) => {
+      const normalized = normalizeAssistantContent(text);
+      setMessages((prev) => {
+        const next = [...prev];
+        const ts = Date.now();
+        if (next.length > 0 && next[next.length - 1].role === "assistant") {
+          next[next.length - 1] = { role: "assistant", content: normalized, ts };
+        } else {
+          next.push({ role: "assistant", content: normalized, ts });
+        }
+        saveChatHistory(agentId, next);
+        return next;
+      });
+    };
     const tick = async () => {
       try {
         const st = await api.getOpenclawChatStatus(agentId);
@@ -1971,7 +2024,11 @@ function ChatRoom({
         } else {
           setSteps([]);
           setProgress(null);
-          await adoptFinalFromHistory();
+          if (st.status === "done" && st.final.trim()) {
+            adoptFinal(st.final);
+          } else {
+            await adoptFinalFromHistory();
+          }
           if (st.status === "error" && st.error && st.error !== "cancelled") {
             setActionError(st.error);
           }
@@ -2158,13 +2215,37 @@ function ChatRoom({
           }
           return out;
         });
+      } else {
+        // SSE may end without emitting the final delta (NO_TEXT_REPLY / proxy
+        // buffering). Pull authoritative history once the turn finishes.
+        try {
+          const hist = await api.getOpenclawAgentChatHistory(agentId);
+          const server: Message[] = hist.messages.map((m) => ({
+            role: m.role,
+            content:
+              m.role === "assistant"
+                ? normalizeAssistantContent(m.content)
+                : m.content,
+            attachments: m.attachments ?? [],
+          }));
+          const last = server[server.length - 1];
+          if (last && last.role === "assistant") {
+            setMessages((prev) => {
+              const merged = reconcileTranscript(prev, server);
+              saveChatHistory(agentId, merged);
+              return merged;
+            });
+          }
+        } catch {
+          /* keep streamed partial */
+        }
       }
     }
   }
 
   async function onSend(e: FormEvent) {
     e.preventDefault();
-    if (streaming || uploadingAttachments) return;
+    if (streaming || recovering || uploadingAttachments) return;
     const text = input.trim();
     if (!text && pendingFiles.length === 0) return;
     let uploadedAttachments: ChatAttachmentMeta[] = [];
@@ -2189,10 +2270,13 @@ function ChatRoom({
     } catch {
       /* best-effort — the client stream is already cut */
     }
+    setRecovering(false);
+    setSteps([]);
+    setProgress(null);
   }
 
   async function regenerate() {
-    if (streaming || resetting || uploadingAttachments) return;
+    if (streaming || recovering || resetting || uploadingAttachments) return;
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
     // Drop the trailing assistant reply; runTurn appends a fresh one.
@@ -2534,12 +2618,12 @@ function ChatRoom({
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
                   handleChatTextareaEnterKey(e, () => {
-                    if (!streaming && !uploadingAttachments) {
+                    if (!streaming && !recovering && !uploadingAttachments) {
                       (e.currentTarget.form as HTMLFormElement).requestSubmit();
                     }
                   });
                 }}
-                disabled={streaming || uploadingAttachments}
+                disabled={streaming || recovering || uploadingAttachments}
               />
               <button
                 type="button"
@@ -2549,7 +2633,7 @@ function ChatRoom({
               >
                 {resetting ? t("chat.resetting") : t("chat.reset")}
               </button>
-              {streaming ? (
+              {streaming || recovering ? (
                 <button
                   type="button"
                   className="btn-outline border-rose-300 text-rose-600 hover:bg-rose-50"
