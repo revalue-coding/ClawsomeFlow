@@ -20,6 +20,7 @@ const STATUS_OPTIONS = [
   "completed_with_conflicts",
   "failed",
   "aborted",
+  "orphaned",
 ] as const;
 
 const ACTIVE_STATUSES = new Set([

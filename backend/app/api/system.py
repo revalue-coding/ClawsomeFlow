@@ -806,6 +806,50 @@ class TriggerUpgradeResponse(_CamelModel):
     via: str  # "systemd-run" | "subprocess"
 
 
+class TriggerUpgradePayload(_CamelModel):
+    # When True, proceed even though ACTIVE_DRIVING runs exist (they will be
+    # gracefully aborted by the pre-stop drain when the upgrade restarts the
+    # service). The WebUI sets this after the user confirms the warning popup.
+    confirm_active_runs: bool = False
+
+
+class ActiveRunView(_CamelModel):
+    id: str
+    flow_id: str
+    status: str
+    started_at: str
+
+
+class ActiveRunsResponse(_CamelModel):
+    count: int
+    runs: list[ActiveRunView]
+
+
+@router.get("/active-runs", response_model=ActiveRunsResponse)
+async def active_runs(_user: UserDep = "") -> ActiveRunsResponse:
+    """List runs that need a live process (ACTIVE_DRIVING) and would be aborted.
+
+    Used by the WebUI upgrade flow and (indirectly, via the DB) by the CLI
+    stop/restart guards to warn before a stop terminates in-flight runs.
+    Excludes the PRESERVED states (awaiting_user_review/complaint), which
+    survive a restart losslessly and are NOT aborted.
+    """
+    from app.models import iso_utc
+
+    storage = get_storage()
+    runs = storage.list_active_driving_runs()
+    items = [
+        ActiveRunView(
+            id=r.id,
+            flow_id=r.flow_id,
+            status=r.status.value if hasattr(r.status, "value") else str(r.status),
+            started_at=iso_utc(r.started_at),
+        )
+        for r in runs
+    ]
+    return ActiveRunsResponse(count=len(items), runs=items)
+
+
 @router.get("/update-status", response_model=UpdateStatusResponse)
 async def update_status(
     force: bool = Query(default=False),
@@ -835,12 +879,17 @@ async def update_status(
 
 
 @router.post("/upgrade", response_model=TriggerUpgradeResponse)
-async def trigger_upgrade(_user: UserDep = "") -> TriggerUpgradeResponse:
+async def trigger_upgrade(
+    payload: Annotated[TriggerUpgradePayload, Body()] = TriggerUpgradePayload(),
+    _user: UserDep = "",
+) -> TriggerUpgradeResponse:
     """Launch the official upgrade script in the background.
 
     Guards: the check must be enabled, the current build must be a final
     release (we never auto-upgrade pre-release installs), and an update must
-    actually be available.
+    actually be available. Additionally, if any ACTIVE_DRIVING runs are
+    in-flight, the caller must confirm (``confirmActiveRuns=true``) — those runs
+    will be gracefully aborted by the pre-stop drain when the service restarts.
 
     The upgrade script ends by restarting the managed service, which would
     kill any child living in this service's cgroup. So we launch it as an
@@ -854,6 +903,18 @@ async def trigger_upgrade(_user: UserDep = "") -> TriggerUpgradeResponse:
             "Update checking is disabled in configuration.",
             status_code=409,
         )
+    if not payload.confirm_active_runs:
+        active_count = await asyncio.to_thread(
+            get_storage().count_active_driving_runs,
+        )
+        if active_count > 0:
+            raise ApiError(
+                "ACTIVE_RUNS_PRESENT",
+                f"{active_count} run(s) are still executing; confirm to abort "
+                "them and upgrade.",
+                status_code=409,
+                details={"active_runs": active_count},
+            )
     status = await asyncio.to_thread(update_check.compute_update_status, force=True)
     if status.is_prerelease:
         raise ApiError(

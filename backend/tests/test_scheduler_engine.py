@@ -323,3 +323,66 @@ async def test_cancelled_complaint_preserves_worktree_dirs_on_tail_cleanup(
     assert refreshed is not None
     assert refreshed.status == RunStatus.aborted
     assert captured.get("preserve_worktree_dirs") is True
+
+
+def _persist_run(run_id: str, status: RunStatus) -> FlowRun:
+    storage = get_storage()
+    flow = Flow(name="t", description="", owner_user="alice").with_spec(_spec())
+    saved = storage.flow_create(flow)
+    return storage.run_create(FlowRun(
+        id=run_id, flow_id=saved.id, flow_version=1,
+        team_name=team_name_for_run(run_id),
+        status=status, inputs={}, user="alice",
+    ))
+
+
+@pytest.mark.asyncio
+async def test_drain_to_terminal_aborts_active_orphans_residual_keeps_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _spec()
+
+    # A truly-active run: a live controller blocked in run_loop until cancel.
+    active = _persist_run("run-active-01", RunStatus.running)
+
+    async def _block_loop(self, *, max_ticks: int | None = None):
+        await self._cancel_evt.wait()
+        return engine.RunOutcome(
+            final_status=RunStatus.aborted,
+            completed_task_ids=[], failed_task_ids=[], skipped_task_ids=[],
+            reason="cancelled",
+        )
+
+    monkeypatch.setattr(engine.RunController, "run_loop", _block_loop)
+
+    # Residual run: ACTIVE_DRIVING in the DB but with NO live controller.
+    residual = _persist_run("run-residual-02", RunStatus.running)
+    # Preserved runs: survive a restart losslessly; must NOT be touched.
+    review = _persist_run("run-review-03", RunStatus.awaiting_user_review)
+    complaint = _persist_run("run-complaint-04", RunStatus.awaiting_user_complaint)
+
+    sched = engine.get_scheduler()
+    sched.start_run(run=active, spec=spec, compile=False)
+    await asyncio.sleep(0.02)
+    assert sched.get_controller(active.id) is not None
+
+    result = await sched.drain_to_terminal(timeout=3.0)
+    assert result == {"aborted": 1, "orphaned": 1}
+
+    storage = get_storage()
+    assert storage.run_get(active.id).status == RunStatus.aborted
+    assert storage.run_get(active.id).finished_at is not None
+    assert storage.run_get(residual.id).status == RunStatus.orphaned
+    assert storage.run_get(residual.id).finished_at is not None
+    # Preserved states are left intact for post-restart merge/complaint.
+    assert storage.run_get(review.id).status == RunStatus.awaiting_user_review
+    assert storage.run_get(complaint.id).status == RunStatus.awaiting_user_complaint
+    assert sched.active_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_drain_to_terminal_noop_when_no_active_runs() -> None:
+    _persist_run("run-review-only", RunStatus.awaiting_user_review)
+    sched = engine.get_scheduler()
+    result = await sched.drain_to_terminal(timeout=2.0)
+    assert result == {"aborted": 0, "orphaned": 0}

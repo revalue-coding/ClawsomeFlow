@@ -16,16 +16,51 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
 
-from app import __version__, bootstrap, config as cfg_mod, logging_setup
+from app import __version__, bootstrap, logging_setup
+from app import config as cfg_mod
 from app.concurrency import get_lock_manager
 from app.deployment import get_deployment_capabilities
 from app.runtime_bins import resolve_binary
 from app.storage import get_storage
+
+
+def _sweep_orphaned_runs(storage, log) -> int:
+    """Reconcile leftover ACTIVE_DRIVING runs to the terminal ``orphaned`` state.
+
+    Called once at startup. We never resume runs, so a run still in
+    pending/compiling/running/awaiting_user_checkpoint/complaint_processing has
+    lost its driving process (e.g. the previous backend was SIGKILLed before a
+    graceful drain). Mark it terminal + stamp ``finished_at`` + append an audit
+    event; do NOT run any termination/cleanup flow. Idempotent.
+    """
+    from datetime import datetime, timezone
+
+    from app.models import RunEvent, RunStatus
+
+    orphaned = 0
+    for run in storage.list_active_driving_runs():
+        previous = run.status.value if hasattr(run.status, "value") else str(run.status)
+        run.status = RunStatus.orphaned
+        if run.finished_at is None:
+            run.finished_at = datetime.now(timezone.utc)
+        storage.run_update(run)
+        try:
+            storage.event_append(RunEvent(
+                run_id=run.id,
+                type="run_orphaned",
+                payload={"reason": "startup_orphan_sweep", "previous_status": previous},
+            ))
+        except Exception:  # pragma: no cover - audit event is best-effort
+            pass
+        orphaned += 1
+    if orphaned:
+        log.info("orphan_sweep_done", orphaned=orphaned)
+    return orphaned
 
 
 @asynccontextmanager
@@ -40,6 +75,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg_mod.patch_env_from_config(cfg)
     get_lock_manager(cfg)
     get_storage(cfg)  # also runs init_schema()
+    # Startup orphan reconciliation: any run still in an ACTIVE_DRIVING state in
+    # the DB has no live process behind it (we do NOT resume runs), so reconcile
+    # it to the terminal ``orphaned`` status. Runs only change status — no
+    # termination/cleanup flow. PRESERVED states (awaiting_user_review/complaint)
+    # survive losslessly and are left untouched. Gated for the TestClient suite.
+    if os.environ.get("CSFLOW_DISABLE_ORPHAN_SWEEP") != "1":
+        try:
+            _sweep_orphaned_runs(get_storage(), log)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("orphan_sweep_failed", error=str(exc))
     if os.environ.get("CSFLOW_DISABLE_COMPLAINT_AUTO_SKIP_WORKER") != "1":
         try:
             from app.scheduler.engine import get_scheduler
@@ -129,10 +174,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             reset_run_schedule_worker()
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("run_schedule_worker_shutdown_failed", error=str(exc))
-        # Drain any in-flight RunControllers before exiting (Phase 5).
+        # Pre-stop drain: gracefully terminate every ACTIVE_DRIVING run to a
+        # terminal state (aborted/orphaned) before the process exits, so no run
+        # is left dangling and no DB record stays non-terminal. This is the
+        # universal chokepoint every stop/restart/upgrade path funnels through.
         try:
             from app.scheduler.engine import get_scheduler, reset_scheduler
-            await get_scheduler().shutdown(timeout=10.0)
+            await get_scheduler().drain_to_terminal()
             reset_scheduler()
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("scheduler_shutdown_failed", error=str(exc))

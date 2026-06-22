@@ -60,6 +60,7 @@ export function StatusPill({ status }: { status: string }) {
     completed_with_conflicts: "pill-warning",
     failed: "pill-danger",
     aborted: "pill-default",
+    orphaned: "pill-danger",
     succeeded: "pill-success",
     dispatched: "pill-info",
     timed_out: "pill-danger",

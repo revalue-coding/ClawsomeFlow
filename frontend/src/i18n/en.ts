@@ -125,6 +125,12 @@ const en = {
     updateDismiss: "Skip this version",
     updateClose: "Later",
     updateInProgress: "Upgrading…",
+    updateActiveRunsWarn:
+      "{{count}} run(s) are still executing. Upgrading now will gracefully stop the service and abort them. Upgrade anyway?",
+    updateLater: "Upgrade later",
+    updateAnyway: "Upgrade anyway",
+    updateStopping: "Stopping the background service…",
+    updateStopped: "Background service stopped. Upgrading…",
     updateRestartHint:
       "Upgrading and restarting the service — this can take a few minutes. This page will reload automatically once the new version is live; please keep it open.",
     updateDone: "Upgraded to v{{version}}. Reloading…",
@@ -1466,6 +1472,7 @@ const en = {
     completed_with_conflicts: "Completed (conflicts)",
     failed: "Failed",
     aborted: "Aborted",
+    orphaned: "Orphaned",
     succeeded: "Succeeded",
     dispatched: "Dispatched",
     timed_out: "Timed out",

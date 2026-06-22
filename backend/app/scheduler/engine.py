@@ -31,11 +31,11 @@ from app.models import Flow, FlowRun, FlowSpec, RunEvent, RunStatus, iso_utc
 from app.scheduler.compiler import compile_flow_to_clawteam
 from app.scheduler.controller import RunController, RunOutcome
 from app.scheduler.finalize import (
+    _POST_COMPLAINT_STATUS_KEY,
+    _POST_REVIEW_TERMINAL_STATUS_KEY,
     run_terminal_tail_cleanup,
 )
-from app.scheduler.naming import team_name_for_run
 from app.scheduler.providers import (
-    DispatchClock,
     McpLeaderInboxProvider,
     McpSnapshotProvider,
 )
@@ -46,6 +46,43 @@ logger = get_logger("scheduler.engine")
 _COMPLAINT_AUTO_SKIP_TIMEOUT = timedelta(hours=12)
 _COMPLAINT_AUTO_SKIP_POLL_SEC = 60.0
 _COMPLAINT_AUTO_SKIP_BATCH = 200
+
+# Bounded grace window for the pre-stop drain's best-effort session/team
+# cleanup. Kept comfortably below systemd ``TimeoutStopSec=30`` so the actual
+# service stop is never blocked even if cleanup hangs (DB is already terminal
+# by then). See cli/_user_service.py.
+_DRAIN_CLEANUP_TIMEOUT_SEC = 15.0
+
+
+def abort_run_to_terminal(
+    run: FlowRun,
+    *,
+    sched: FlowScheduler,
+    storage: StorageBackend,
+    final_status: RunStatus = RunStatus.aborted,
+) -> bool:
+    """Flip *run* to a terminal state instantly and signal cooperative cancel.
+
+    Shared by the run-abort button (``api/runs.py``) and the pre-stop drain
+    (:meth:`FlowScheduler.drain_to_terminal`) so "stop terminates the run" and
+    "user clicks 中止执行流" go through exactly one code path.
+
+    The DB flip is synchronous + immediate (so the record is terminal even if
+    the process is SIGKILLed a moment later). Returns whether a live scheduler
+    task (controller loop or complaint task) was signalled to cancel — callers
+    with no live task may want to run inline cleanup themselves.
+    """
+    cancelled = sched.cancel_run(run.id)
+    run.status = final_status
+    run.pending_merges = None
+    merged_inputs = dict(run.inputs or {})
+    merged_inputs.pop(_POST_COMPLAINT_STATUS_KEY, None)
+    merged_inputs.pop(_POST_REVIEW_TERMINAL_STATUS_KEY, None)
+    run.inputs = merged_inputs
+    if run.finished_at is None:
+        run.finished_at = datetime.now(timezone.utc)
+    storage.run_update(run)
+    return cancelled
 
 
 @dataclass
@@ -208,6 +245,69 @@ class FlowScheduler:
             name=f"csflow-complaint-skip:{run.id}",
         )
         self._complaints[run.id] = job
+
+    async def drain_to_terminal(
+        self,
+        *,
+        storage: StorageBackend | None = None,
+        timeout: float = _DRAIN_CLEANUP_TIMEOUT_SEC,
+    ) -> dict[str, int]:
+        """Terminate every ACTIVE_DRIVING run before the service stops.
+
+        Universal pre-stop drain (invoked from the FastAPI lifespan shutdown,
+        which is the single chokepoint every stop/restart/upgrade path funnels
+        SIGTERM through). Two phases:
+
+        * **Phase 1 (instant, guaranteed):** flip every ACTIVE_DRIVING DB row
+          to a terminal status — ``aborted`` when a live controller / complaint
+          task owns it (equivalent to the user pressing 中止执行流), else
+          ``orphaned`` (residual from a previously SIGKILLed process). The flip
+          is synchronous, so the DB is consistent even if a SIGKILL lands a
+          moment later.
+        * **Phase 2 (bounded, best-effort):** cancel the live tasks and wait up
+          to ``timeout`` for graceful session / team cleanup. A timeout only
+          warns — the actual service stop is never blocked.
+
+        PRESERVED non-terminal states (``awaiting_user_review`` /
+        ``awaiting_user_complaint``) are left untouched so the user can still
+        merge / complain after the restart.
+        """
+        store = storage or get_storage()
+        self._stopped = True
+        self._complaint_auto_skip_stop_evt.set()
+
+        aborted = 0
+        orphaned = 0
+        try:
+            active_runs = store.list_active_driving_runs()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("drain_list_active_failed", error=str(exc))
+            active_runs = []
+        for run in active_runs:
+            owned = (
+                self.get_controller(run.id) is not None
+                or self.complaint_in_progress(run.id)
+            )
+            final_status = RunStatus.aborted if owned else RunStatus.orphaned
+            try:
+                abort_run_to_terminal(
+                    run, sched=self, storage=store, final_status=final_status,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "drain_abort_failed", run_id=run.id, error=str(exc),
+                )
+                continue
+            if owned:
+                aborted += 1
+            else:
+                orphaned += 1
+
+        # Phase 2: bounded best-effort graceful cleanup of any still-live tasks.
+        await self.shutdown(timeout=timeout)
+
+        logger.info("scheduler_drained", aborted=aborted, orphaned=orphaned)
+        return {"aborted": aborted, "orphaned": orphaned}
 
     async def shutdown(self, *, timeout: float = 30.0) -> None:
         """Cancel every active Run and wait up to *timeout* for them to exit."""

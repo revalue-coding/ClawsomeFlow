@@ -37,20 +37,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.config import load_config
+from app.flow_modes import flow_mode
 from app.integrations.clawteam_cli import (
     ClawTeamCli,
     get_clawteam_cli,
 )
-from app.integrations.git_repo import delete_clawteam_team_branches
 from app.integrations.clawteam_mcp import (
     ClawTeamMcpClient,
     get_mcp_client,
 )
-from app.config import load_config
-from app.flow_modes import flow_mode
+from app.integrations.git_repo import delete_clawteam_team_branches
 from app.logging_setup import get_logger
 from app.models import (
     DEFAULT_TARGET_BRANCH,
+    TERMINAL_RUN_STATUSES,
     AgentKind,
     Flow,
     FlowAgent,
@@ -69,15 +70,9 @@ from app.worktree.lookup import WorktreeInfo, WorktreeLookup
 logger = get_logger("scheduler.finalize")
 
 
-# Terminal RunStatus values (mirrored from controller / sqlite layer to avoid
-# circular import). Used to decide when to stamp ``finished_at``.
-_TERMINAL_STATUSES: frozenset[RunStatus] = frozenset({
-    RunStatus.completed,
-    RunStatus.completed_with_conflicts,
-    RunStatus.complaint_failed,
-    RunStatus.failed,
-    RunStatus.aborted,
-})
+# Terminal RunStatus values. Used to decide when to stamp ``finished_at``.
+# Single source of truth lives in app.models (TERMINAL_RUN_STATUSES).
+_TERMINAL_STATUSES: frozenset[RunStatus] = TERMINAL_RUN_STATUSES
 _CSFLOW_TEAM_PREFIX = "csflow-"
 _POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
 _POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"

@@ -53,8 +53,10 @@ from app.api.errors import ApiError
 from app.config import Config, load_config
 from app.deployment import get_deployment_capabilities
 from app.integrations.clawteam_mcp import get_mcp_client
+from app.logging_setup import get_logger
 from app.models import (
     DEFAULT_TARGET_BRANCH,
+    TERMINAL_RUN_STATUSES,
     Flow,
     FlowAgent,
     FlowRun,
@@ -65,9 +67,8 @@ from app.models import (
     RunStatus,
     iso_utc,
 )
-from app.logging_setup import get_logger
 from app.scheduler.controller import RunController
-from app.scheduler.engine import get_scheduler
+from app.scheduler.engine import abort_run_to_terminal, get_scheduler
 from app.scheduler.finalize import (
     classify_merge_failure,
     perform_manual_merge,
@@ -104,13 +105,7 @@ StorageDep = Annotated[StorageBackend, Depends(_storage_dep)]
 ConfigDep = Annotated[Config, Depends(_config_dep)]
 
 
-_TERMINAL = {
-    RunStatus.completed,
-    RunStatus.completed_with_conflicts,
-    RunStatus.complaint_failed,
-    RunStatus.failed,
-    RunStatus.aborted,
-}
+_TERMINAL = TERMINAL_RUN_STATUSES
 _MERGE_DECISION_ALLOWED = {
     RunStatus.awaiting_user_review,
     RunStatus.failed,
@@ -1064,17 +1059,8 @@ async def abort_run(
             status_code=409,
         )
     sched = get_scheduler()
-    cancelled = sched.cancel_run(run.id)
-    # Always mark aborted immediately so UI can reflect stop action instantly.
-    run.status = RunStatus.aborted
-    run.pending_merges = None
-    merged_inputs = dict(run.inputs or {})
-    merged_inputs.pop(_POST_COMPLAINT_STATUS_KEY, None)
-    merged_inputs.pop(_POST_REVIEW_TERMINAL_STATUS_KEY, None)
-    run.inputs = merged_inputs
-    if run.finished_at is None:
-        run.finished_at = datetime.now(timezone.utc)
-    storage.run_update(run)
+    # Shared primitive: instant DB flip to aborted + cooperative cancel.
+    cancelled = abort_run_to_terminal(run, sched=sched, storage=storage)
     if not cancelled:
         # No live scheduler task to finalize cleanup; do best-effort here.
         flow = storage.flow_get(run.flow_id)

@@ -734,6 +734,18 @@ export interface TriggerUpgradeResult {
   via: string;
 }
 
+export interface ActiveRunView {
+  id: string;
+  flowId: string;
+  status: string;
+  startedAt: string;
+}
+
+export interface ActiveRunsResult {
+  count: number;
+  runs: ActiveRunView[];
+}
+
 // ── Hermes agents ───────────────────────────────────────────────────────
 export interface HermesAgentSummary {
   id: string;
@@ -1548,6 +1560,10 @@ export const api = {
       "GET",
       `/api/system/update-status${force ? "?force=true" : ""}`,
     ),
-  triggerUpgrade: () =>
-    request<TriggerUpgradeResult>("POST", "/api/system/upgrade"),
+  triggerUpgrade: (confirmActiveRuns = false) =>
+    request<TriggerUpgradeResult>("POST", "/api/system/upgrade", {
+      confirmActiveRuns,
+    }),
+  getActiveRuns: () =>
+    request<ActiveRunsResult>("GET", "/api/system/active-runs"),
 };

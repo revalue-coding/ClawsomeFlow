@@ -9,9 +9,9 @@ file-based logger re-targets the new tmp home.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 import sys
-from typing import Iterator
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -59,6 +59,10 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
     monkeypatch.setenv("CSFLOW_DISABLE_BOARD", "1")
     monkeypatch.setenv("CSFLOW_DISABLE_CLAWTEAM_STACK_CHECK", "1")
     monkeypatch.setenv("CSFLOW_DISABLE_RUN_SCHEDULE_WORKER", "1")
+    # The startup orphan sweep flips any ACTIVE_DRIVING run to ``orphaned`` on
+    # app start; disabled by default so it doesn't reconcile fixtures created
+    # before a TestClient lifespan boots. Sweep tests opt back in explicitly.
+    monkeypatch.setenv("CSFLOW_DISABLE_ORPHAN_SWEEP", "1")
     # Don't fork real `openclaw sessions tail/list` progress followers in tests.
     monkeypatch.setenv("CSFLOW_DISABLE_OPENCLAW_CHAT_FOLLOWER", "1")
     _reset_all_singletons()

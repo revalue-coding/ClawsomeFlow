@@ -33,7 +33,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlmodel import JSON, Column, Field as SQLField, SQLModel
+from sqlmodel import JSON, Column, SQLModel
+from sqlmodel import Field as SQLField
 
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
@@ -195,6 +196,45 @@ class RunStatus(str, Enum):
     completed_with_conflicts = "completed_with_conflicts"
     failed = "failed"
     aborted = "aborted"
+    # A run that was non-terminal in the DB but whose driving process is gone
+    # (killed without a graceful drain). The startup orphan sweep reconciles
+    # these to a terminal record WITHOUT running any termination/cleanup flow.
+    orphaned = "orphaned"
+
+
+# ── RunStatus taxonomy (single source of truth) ─────────────────────────
+# Imported by storage / scheduler / api layers instead of re-declaring local
+# terminal-status sets, so the classification stays consistent everywhere.
+
+#: Terminal statuses — a run here is finished and needs no driving process.
+TERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset({
+    RunStatus.completed,
+    RunStatus.completed_with_conflicts,
+    RunStatus.complaint_failed,
+    RunStatus.failed,
+    RunStatus.aborted,
+    RunStatus.orphaned,
+})
+
+#: Non-terminal states that survive a restart losslessly — they hold NO
+#: in-process state (data lives in the DB + on-disk worktrees), so the merge
+#: review / complaint APIs keep working after a restart. The startup orphan
+#: sweep and the pre-stop drain both SKIP these.
+PRESERVED_NONTERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset({
+    RunStatus.awaiting_user_review,
+    RunStatus.awaiting_user_complaint,
+})
+
+#: Non-terminal states that REQUIRE a live driving process (RunController loop
+#: or complaint task). On shutdown these are gracefully aborted; any that
+#: outlive their process (crash) are swept to ``orphaned`` at next startup.
+ACTIVE_DRIVING_RUN_STATUSES: frozenset[RunStatus] = frozenset({
+    RunStatus.pending,
+    RunStatus.compiling,
+    RunStatus.running,
+    RunStatus.awaiting_user_checkpoint,
+    RunStatus.complaint_processing,
+})
 
 
 class OpenclawRequestStatus(str, Enum):
@@ -316,7 +356,7 @@ class FlowAgent(_ApiBase):
         return text
 
     @model_validator(mode="after")
-    def _resolve_defaults(self) -> "FlowAgent":
+    def _resolve_defaults(self) -> FlowAgent:
         # Default merge_strategy depends on kind.
         if self.merge_strategy is None:
             self.merge_strategy = (
@@ -410,7 +450,7 @@ class FlowTask(_ApiBase):
         return v
 
     @model_validator(mode="after")
-    def _normalise_description(self) -> "FlowTask":
+    def _normalise_description(self) -> FlowTask:
         """Fold the helper field into description (canonical persisted form).
 
         Idempotent: re-validating an already-merged FlowTask is safe:
@@ -497,7 +537,7 @@ class Flow(_SQLBase, table=True):
         """Parse and validate the raw ``spec`` JSON into a :class:`FlowSpec`."""
         return FlowSpec.model_validate(self.spec)
 
-    def with_spec(self, spec: FlowSpec) -> "Flow":
+    def with_spec(self, spec: FlowSpec) -> Flow:
         """Return *self* with ``spec`` set from a validated :class:`FlowSpec`."""
         self.spec = spec.model_dump(mode="json", by_alias=False)
         return self

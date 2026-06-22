@@ -16,8 +16,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from app import __version__, config as cfg_mod
+from app import __version__
+from app import config as cfg_mod
 from app.cli import app
+from app.cli._runtime import confirm_no_active_runs_or_exit
+from app.cli._user_service import ServiceError, restart_and_enable, service_status_hint
 from app.cli.deps import (
     check_non_openclaw_agent_tools,
     check_openclaw,
@@ -27,7 +30,6 @@ from app.cli.deps import (
     run_all,
 )
 from app.cli.init import init as do_init
-from app.cli._user_service import ServiceError, restart_and_enable, service_status_hint
 from app.config import DEFAULT_CLAWTEAM_BOARD_PORT, DEFAULT_PORT
 
 console = Console()
@@ -76,11 +78,11 @@ def _render_agent_runtime_summary() -> None:
 
     console.print(table)
     console.print(
-        f"[bold]Currently available agents:[/bold] "
+        "[bold]Currently available agents:[/bold] "
         + (", ".join(available_labels) if available_labels else "(none)")
     )
     console.print(
-        f"[bold]Also supported (setup required):[/bold] "
+        "[bold]Also supported (setup required):[/bold] "
         + (", ".join(missing_labels) if missing_labels else "(none)")
     )
 
@@ -112,6 +114,10 @@ def start(
 ) -> None:
     """Run dependency check → init/upgrade → restart managed background service."""
     console.print("[bold]🦞 ClawsomeFlow first-time setup[/bold]\n")
+    # `start` restarts the running service; confirm before aborting in-flight runs.
+    confirm_no_active_runs_or_exit(
+        non_interactive=yes, action="restart the service", console=console,
+    )
     config_path = cfg_mod.paths.clawsomeflow_home_path() / "config.json"
 
     if not skip_deps:

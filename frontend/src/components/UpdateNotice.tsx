@@ -85,7 +85,7 @@ export function useUpdateStatus(): UpdateStatus | null {
   return status;
 }
 
-type Phase = "idle" | "upgrading" | "done" | "failed";
+type Phase = "idle" | "confirm" | "stopping" | "upgrading" | "done" | "failed";
 
 export function UpgradeModal({
   status,
@@ -98,6 +98,10 @@ export function UpgradeModal({
 }) {
   const { t } = useTranslation();
   const [phase, setPhase] = useState<Phase>("idle");
+  const [activeRunCount, setActiveRunCount] = useState(0);
+  // Set once the backend stops responding after an upgrade was triggered, so we
+  // can switch the message from "stopping the service" to "service stopped".
+  const [serviceStopped, setServiceStopped] = useState(false);
   const pollRef = useRef<number | null>(null);
   const timeoutRef = useRef<number | null>(null);
 
@@ -113,11 +117,17 @@ export function UpgradeModal({
   // Keyed on `open` only — reacting to `phase` would wipe the failure message
   // the instant it appears. We don't reset while an upgrade is in progress.
   useEffect(() => {
-    if (open && phase === "failed") setPhase("idle");
+    // Reopening returns to the selection page from a transient/failed state
+    // (so "Later" on the active-runs warning doesn't strand the modal there),
+    // but never while an upgrade is actually in progress.
+    if (open && (phase === "failed" || phase === "confirm")) setPhase("idle");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const dismissible = phase !== "done";
+  // Once an upgrade is in flight (stopping/upgrading) or finished (done) the
+  // modal masks everything and can't be dismissed.
+  const dismissible =
+    phase !== "done" && phase !== "stopping" && phase !== "upgrading";
 
   function stopHealthPoll() {
     if (pollRef.current !== null) {
@@ -162,18 +172,31 @@ export function UpgradeModal({
           }
         })
         .catch(() => {
-          /* service is restarting — keep polling */
+          // Backend unreachable → it has begun stopping. Switch the message
+          // from "stopping the service" to "service stopped, upgrading".
+          setServiceStopped(true);
         });
     }, UPGRADE_POLL_MS);
   }
 
-  function onUpgrade() {
-    setPhase("upgrading");
+  function proceedUpgrade(confirmActiveRuns: boolean) {
+    setServiceStopped(false);
+    setPhase("stopping");
     api
-      .triggerUpgrade()
+      .triggerUpgrade(confirmActiveRuns)
       .then(() => startHealthPoll())
       .catch((e) => {
         stopHealthPoll();
+        // Active runs appeared between the precheck and the trigger — surface
+        // the confirmation step instead of failing.
+        if (e instanceof ApiError && e.code === "ACTIVE_RUNS_PRESENT") {
+          const count = Number(
+            (e.details as { active_runs?: number } | undefined)?.active_runs ?? 0,
+          );
+          setActiveRunCount(count > 0 ? count : 1);
+          setPhase("confirm");
+          return;
+        }
         // "Already on the latest stable release" means a previous attempt
         // actually succeeded — typically the service finished restarting only
         // after our poll window elapsed, so the first attempt was wrongly shown
@@ -186,6 +209,22 @@ export function UpgradeModal({
         }
         setPhase("failed");
       });
+  }
+
+  function onUpgrade() {
+    // Warn before aborting in-flight runs (the pre-stop drain terminates them
+    // when the service restarts). On any check error, proceed rather than block.
+    api
+      .getActiveRuns()
+      .then((res) => {
+        if (res.count > 0) {
+          setActiveRunCount(res.count);
+          setPhase("confirm");
+        } else {
+          proceedUpgrade(false);
+        }
+      })
+      .catch(() => proceedUpgrade(false));
   }
 
   function onDismiss() {
@@ -201,11 +240,13 @@ export function UpgradeModal({
       }}
       title={t("shell.updateModalTitle")}
       dismissible={dismissible}
-      // While the upgrade is actually running (and during the post-upgrade
-      // restart wait), fully mask everything behind the modal so the user can't
-      // interact with a backend that is restarting. The idle "update available"
-      // notice keeps the normal modeless dim.
-      fullscreenBackdrop={phase === "upgrading" || phase === "done"}
+      // While the upgrade is actually running (stopping the service + the
+      // post-upgrade restart wait), fully mask everything behind the modal so
+      // the user can't interact with a backend that is restarting. The idle
+      // "update available" notice keeps the normal modeless dim.
+      fullscreenBackdrop={
+        phase === "stopping" || phase === "upgrading" || phase === "done"
+      }
     >
       <div className="space-y-4 text-sm text-ink-700">
         <p>{t("shell.updateIntro")}</p>
@@ -224,6 +265,18 @@ export function UpgradeModal({
           </div>
         </div>
 
+        {phase === "confirm" && (
+          <p className="text-amber-700">
+            {t("shell.updateActiveRunsWarn", { count: activeRunCount })}
+          </p>
+        )}
+        {phase === "stopping" && (
+          <p className="text-amber-700">
+            {serviceStopped
+              ? t("shell.updateStopped")
+              : t("shell.updateStopping")}
+          </p>
+        )}
         {phase === "upgrading" && (
           <p className="text-amber-700">{t("shell.updateRestartHint")}</p>
         )}
@@ -255,7 +308,21 @@ export function UpgradeModal({
               </button>
             </>
           )}
-          {phase === "upgrading" && (
+          {phase === "confirm" && (
+            <>
+              <button className="btn-outline" onClick={onClose} type="button">
+                {t("shell.updateLater")}
+              </button>
+              <button
+                className="btn-primary"
+                onClick={() => proceedUpgrade(true)}
+                type="button"
+              >
+                {t("shell.updateAnyway")}
+              </button>
+            </>
+          )}
+          {(phase === "stopping" || phase === "upgrading") && (
             <button className="btn-ghost" disabled type="button">
               {t("shell.updateInProgress")}
             </button>

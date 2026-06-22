@@ -7,7 +7,13 @@ from rich.console import Console
 
 from app import config as cfg_mod
 from app.cli import app
-from app.cli._runtime import is_alive, read_pid, remove_pid, stop_process
+from app.cli._runtime import (
+    confirm_no_active_runs_or_exit,
+    is_alive,
+    read_pid,
+    remove_pid,
+    stop_process,
+)
 from app.cli._user_service import (
     ServiceError,
     reclaim_stale_port_listeners,
@@ -22,8 +28,17 @@ def stop(
     grace: float = typer.Option(
         8.0, "--grace", help="Seconds to wait for SIGTERM before SIGKILL.",
     ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Skip the in-flight-run confirmation (use for scripts/automation).",
+    ),
 ) -> None:
     """Stop the running backend (PID file at ``~/.clawsomeflow/csflow.pid``)."""
+    # Confirm before terminating in-flight runs (the pre-stop drain aborts them).
+    confirm_no_active_runs_or_exit(
+        non_interactive=yes, action="stop the service", console=console,
+    )
+
     stopped_any = False
 
     try:

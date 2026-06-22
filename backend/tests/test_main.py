@@ -6,7 +6,71 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import __version__
-from app.main import create_app
+from app.logging_setup import get_logger
+from app.main import _sweep_orphaned_runs, create_app
+
+
+def _make_run(run_id: str, status):
+    """Create a Flow + FlowRun in *status*; return the run."""
+    from app.models import (
+        AgentKind,
+        Flow,
+        FlowAgent,
+        FlowRun,
+        FlowSpec,
+        FlowTask,
+    )
+    from app.storage import get_storage
+
+    spec = FlowSpec(
+        agents=[FlowAgent(
+            id="leader", kind=AgentKind.claude, repo="/tmp/main", is_leader=True,
+        )],
+        tasks=[FlowTask(
+            id="ts", owner_agent_id="leader", subject="x", description="",
+            depends_on=[], is_leader_summary=True,
+        )],
+    )
+    storage = get_storage()
+    flow = storage.flow_create(
+        Flow(name="t", description="", owner_user="alice").with_spec(spec)
+    )
+    return storage.run_create(FlowRun(
+        id=run_id, flow_id=flow.id, flow_version=1, team_name=f"csflow-{run_id}",
+        status=status, inputs={}, user="alice",
+    ))
+
+
+def test_sweep_orphaned_runs_reconciles_active_driving_only() -> None:
+    from app.models import RunStatus
+    from app.storage import get_storage
+
+    running = _make_run("run-sweep-running", RunStatus.running)
+    pending = _make_run("run-sweep-pending", RunStatus.pending)
+    checkpoint = _make_run("run-sweep-ckpt", RunStatus.awaiting_user_checkpoint)
+    review = _make_run("run-sweep-review", RunStatus.awaiting_user_review)
+    complaint = _make_run("run-sweep-complaint", RunStatus.awaiting_user_complaint)
+    completed = _make_run("run-sweep-done", RunStatus.completed)
+
+    log = get_logger("test")
+    swept = _sweep_orphaned_runs(get_storage(), log)
+    assert swept == 3
+
+    storage = get_storage()
+    for r in (running, pending, checkpoint):
+        refreshed = storage.run_get(r.id)
+        assert refreshed.status == RunStatus.orphaned
+        assert refreshed.finished_at is not None
+    # PRESERVED + already-terminal states untouched.
+    assert storage.run_get(review.id).status == RunStatus.awaiting_user_review
+    assert storage.run_get(complaint.id).status == RunStatus.awaiting_user_complaint
+    assert storage.run_get(completed.id).status == RunStatus.completed
+
+    # Idempotent: a second sweep finds nothing new.
+    assert _sweep_orphaned_runs(get_storage(), log) == 0
+
+    events = storage.event_list(run_id=running.id, since_id=None, limit=50)
+    assert any(e.type == "run_orphaned" for e in events)
 
 
 @pytest.fixture

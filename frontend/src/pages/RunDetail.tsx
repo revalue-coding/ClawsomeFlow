@@ -39,6 +39,7 @@ const TERMINAL = new Set([
   "complaint_failed",
   "failed",
   "aborted",
+  "orphaned",
 ]);
 const LEADER_REPLY_VISIBLE = new Set([
   "awaiting_user_review",

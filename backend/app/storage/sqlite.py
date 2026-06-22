@@ -14,14 +14,16 @@ Notes:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
 
-from sqlalchemy import event, update as sa_update
+from sqlalchemy import event
+from sqlalchemy import update as sa_update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, delete, func, select
 
 from app import paths
 from app.models import (
+    ACTIVE_DRIVING_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
     AgentStoreOrder,
     AgentStoreOwnership,
     Flow,
@@ -29,16 +31,16 @@ from app.models import (
     FlowRunSchedule,
     FlowRunScheduleExecution,
     HermesAgent,
-    OpenclawRequestStatus,
     OpenclawAgent,
     OpenclawAgentRequest,
+    OpenclawRequestStatus,
     OpenclawTeam,
     RunEvent,
     RunStatus,
-    TaskDecomposeStatus,
     TaskDecomposeRequest,
+    TaskDecomposeStatus,
 )
-from app.storage import StorageBackend, StorageVersionConflict
+from app.storage import StorageVersionConflict
 
 
 def _enable_wal(engine: Engine) -> None:
@@ -53,13 +55,9 @@ def _enable_wal(engine: Engine) -> None:
         cursor.close()
 
 
-_TERMINAL_STATUSES: frozenset[RunStatus] = frozenset({
-    RunStatus.completed,
-    RunStatus.completed_with_conflicts,
-    RunStatus.complaint_failed,
-    RunStatus.failed,
-    RunStatus.aborted,
-})
+# Single source of truth lives in app.models (TERMINAL_RUN_STATUSES).
+_TERMINAL_STATUSES: frozenset[RunStatus] = TERMINAL_RUN_STATUSES
+_ACTIVE_DRIVING_STATUSES: frozenset[RunStatus] = ACTIVE_DRIVING_RUN_STATUSES
 
 
 class SqliteStorage:
@@ -270,6 +268,39 @@ class SqliteStorage:
                 .select_from(FlowRun)
                 .where(FlowRun.flow_id == flow_id)
                 .where(FlowRun.status.notin_([s.value for s in _TERMINAL_STATUSES]))
+            )
+            return int(s.exec(stmt).one())
+
+    def list_active_driving_runs(self) -> list[FlowRun]:
+        """Runs in an ACTIVE_DRIVING state (need a live process to progress).
+
+        Used by the startup orphan sweep and the pre-stop drain. Excludes the
+        PRESERVED non-terminal states (awaiting_user_review/complaint), which
+        survive a restart losslessly.
+        """
+        with self._session() as s:
+            stmt = (
+                select(FlowRun)
+                .where(
+                    FlowRun.status.in_(
+                        [st.value for st in _ACTIVE_DRIVING_STATUSES]
+                    )
+                )
+                .order_by(FlowRun.started_at.desc())
+            )
+            return list(s.exec(stmt).all())
+
+    def count_active_driving_runs(self) -> int:
+        """Cheap count of ACTIVE_DRIVING runs (for upgrade/CLI guards)."""
+        with self._session() as s:
+            stmt = (
+                select(func.count())
+                .select_from(FlowRun)
+                .where(
+                    FlowRun.status.in_(
+                        [st.value for st in _ACTIVE_DRIVING_STATUSES]
+                    )
+                )
             )
             return int(s.exec(stmt).one())
 

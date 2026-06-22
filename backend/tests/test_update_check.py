@@ -211,3 +211,92 @@ def test_upgrade_rejected_when_disabled(monkeypatch) -> None:
         r = client.post("/api/system/upgrade")
     assert r.status_code == 409
     assert r.json()["error"] == "UPDATE_CHECK_DISABLED"
+
+
+# ── API: active-runs gate on /upgrade + GET /active-runs ───────────────
+
+
+def _make_active_run(status, run_id: str = "run-active-up01"):
+    from app.models import (
+        AgentKind,
+        Flow,
+        FlowAgent,
+        FlowRun,
+        FlowSpec,
+        FlowTask,
+    )
+    from app.storage import get_storage
+
+    spec = FlowSpec(
+        agents=[FlowAgent(
+            id="leader", kind=AgentKind.claude, repo="/tmp/main", is_leader=True,
+        )],
+        tasks=[FlowTask(
+            id="ts", owner_agent_id="leader", subject="x", description="",
+            depends_on=[], is_leader_summary=True,
+        )],
+    )
+    storage = get_storage()
+    flow = storage.flow_create(
+        Flow(name="t", description="", owner_user="alice").with_spec(spec)
+    )
+    return storage.run_create(FlowRun(
+        id=run_id, flow_id=flow.id, flow_version=1, team_name=f"csflow-{run_id}",
+        status=status, inputs={}, user="alice",
+    ))
+
+
+def test_upgrade_rejected_when_active_runs_unconfirmed(monkeypatch) -> None:
+    from app.models import RunStatus
+
+    monkeypatch.setattr(
+        "app.api.system.update_check.compute_update_status",
+        lambda **k: _stub_status(),
+    )
+    monkeypatch.setattr(
+        "app.api.system._launch_self_upgrade",
+        lambda url: (_ for _ in ()).throw(AssertionError("must not launch")),
+    )
+    _make_active_run(RunStatus.running)
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/upgrade")
+    assert r.status_code == 409, r.text
+    assert r.json()["error"] == "ACTIVE_RUNS_PRESENT"
+    assert r.json()["details"]["active_runs"] == 1
+
+
+def test_upgrade_proceeds_when_active_runs_confirmed(monkeypatch) -> None:
+    from app.models import RunStatus
+
+    monkeypatch.setattr(
+        "app.api.system.update_check.compute_update_status",
+        lambda **k: _stub_status(),
+    )
+    launched: dict = {}
+
+    def _fake_launch(url: str) -> str:
+        launched["url"] = url
+        return "subprocess"
+
+    monkeypatch.setattr("app.api.system._launch_self_upgrade", _fake_launch)
+    _make_active_run(RunStatus.running)
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/upgrade", json={"confirmActiveRuns": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["started"] is True
+    assert launched["url"] == "https://clawsomeflow.com/upgrade.sh"
+
+
+def test_active_runs_endpoint_excludes_preserved(monkeypatch) -> None:
+    from app.models import RunStatus
+
+    _make_active_run(RunStatus.running, run_id="run-up-running")
+    # PRESERVED state survives a restart losslessly → not "active" for the gate.
+    _make_active_run(RunStatus.awaiting_user_review, run_id="run-up-review")
+    with TestClient(create_app()) as client:
+        r = client.get("/api/system/active-runs")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 1
+    assert body["runs"][0]["id"] == "run-up-running"
+    assert body["runs"][0]["status"] == "running"

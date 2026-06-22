@@ -12,11 +12,11 @@ from app.models import (
     FlowAgent,
     FlowRun,
     FlowRunScheduleExecution,
-    OpenclawAgentRequest,
-    OpenclawRequestStatus,
     FlowSpec,
     FlowTask,
     OpenclawAgent,
+    OpenclawAgentRequest,
+    OpenclawRequestStatus,
     RunEvent,
     RunStatus,
     TaskDecomposeRequest,
@@ -117,6 +117,42 @@ class TestFlowCRUD:
             status=RunStatus.completed,
         ))
         assert s.run_count_active_for_flow(flow.id) == 1
+
+    def test_orphaned_counts_as_terminal_and_unblocks_flow_edit(self) -> None:
+        s = get_storage()
+        flow = s.flow_create(_flow())
+        # An orphaned run is terminal — it must not keep the flow locked for
+        # editing/deletion (run_count_active_for_flow treats it as finished).
+        s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1,
+            team_name="csflow-orph", user="alice",
+            status=RunStatus.orphaned,
+        ))
+        assert s.run_count_active_for_flow(flow.id) == 0
+
+    def test_active_driving_helpers(self) -> None:
+        s = get_storage()
+        flow = s.flow_create(_flow())
+        s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1, team_name="csflow-d1",
+            user="alice", status=RunStatus.running,
+        ))
+        s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1, team_name="csflow-d2",
+            user="alice", status=RunStatus.pending,
+        ))
+        # PRESERVED + terminal states are excluded from ACTIVE_DRIVING helpers.
+        s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1, team_name="csflow-d3",
+            user="alice", status=RunStatus.awaiting_user_review,
+        ))
+        s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1, team_name="csflow-d4",
+            user="alice", status=RunStatus.orphaned,
+        ))
+        assert s.count_active_driving_runs() == 2
+        ids = {r.status for r in s.list_active_driving_runs()}
+        assert ids == {RunStatus.running, RunStatus.pending}
 
 
 class TestFlowRunCRUD:

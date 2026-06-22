@@ -70,7 +70,50 @@ def stop_process(pid: int, *, grace_seconds: float = 8.0) -> bool:
     return not is_alive(pid)
 
 
+def active_driving_run_count() -> int:
+    """Best-effort count of runs that need a live process. 0 on any error.
+
+    Read directly from the local DB (the CLI cannot see the live process's
+    in-memory scheduler). The startup orphan sweep guarantees that while the
+    backend is up, any ACTIVE_DRIVING row is genuinely in-flight.
+    """
+    try:
+        from app.storage import get_storage
+        return int(get_storage().count_active_driving_runs())
+    except Exception:
+        return 0
+
+
+def confirm_no_active_runs_or_exit(*, non_interactive: bool, action: str, console) -> None:
+    """Interactively confirm before a stop/restart that would abort live runs.
+
+    Skipped entirely when ``non_interactive`` (``--yes`` / backend self-calls)
+    or when the service is not running (nothing in-flight to terminate). Only
+    prompts when the backend is up AND has ACTIVE_DRIVING runs. ``action`` is a
+    short verb phrase, e.g. ``"stop the service"`` / ``"restart the service"``.
+    """
+    if non_interactive:
+        return
+    pid = read_pid()
+    if pid is None or not is_alive(pid):
+        return
+    count = active_driving_run_count()
+    if count <= 0:
+        return
+    import typer
+
+    console.print(
+        f"[yellow]⚠ {count} run(s) are still executing.[/yellow] "
+        f"They will be gracefully aborted when you {action}."
+    )
+    if not typer.confirm(f"Continue and {action}?", default=False):
+        console.print("[dim]Cancelled; service left running.[/dim]")
+        raise typer.Exit(code=0)
+
+
 __all__ = [
+    "active_driving_run_count",
+    "confirm_no_active_runs_or_exit",
     "is_alive",
     "pid_file",
     "read_pid",
