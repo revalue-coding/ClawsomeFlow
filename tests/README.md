@@ -14,6 +14,7 @@
 - 快速门禁：`./scripts/test-fast.sh`（本地首次可用 `--install` 自动执行前端 `npm ci`）
 - 运行态门禁：`./scripts/test-runtime.sh`
 - 性能门禁：`./scripts/test-perf.sh`
+- 发版脚本：`scripts/release.sh` 默认跑 L1 后端 pytest + 前端 tsc/vite（进程内 TestClient，**不依赖**本机 `17017` 上已部署的 csflow 版本）；`--skip-full-tests` 仅跳过 L1 后端 pytest，其余发版步骤不变。L2/L3 不在发版脚本内，需单独跑 `test-runtime.sh` / `test-perf.sh`。
 
 ## 环境隔离红线
 

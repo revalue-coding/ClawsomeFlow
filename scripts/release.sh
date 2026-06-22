@@ -30,6 +30,12 @@
 #   scripts/release.sh patch                 # non-interactive, channel=release
 #   scripts/release.sh patch beta            # non-interactive beta
 #   scripts/release.sh --testpypi minor      # dry-run upload to TestPyPI
+#   scripts/release.sh --skip-full-tests patch
+#      Skip L1 backend pytest only; frontend typecheck + vite build still run
+#      in step 2. All other release steps unchanged. Use on hosts where the
+#      deployed csflow service (17017) is an older build — release gate pytest
+#      uses in-process TestClient, not that service, but you may skip it for
+#      speed when L1 was already green elsewhere.
 #   scripts/release.sh --skip-tests --skip-upload patch
 #   scripts/release.sh --skip-install-sync patch
 #   scripts/release.sh patch beta --sync-site-repo --site-push -y
@@ -40,7 +46,7 @@
 #   scripts/release.sh --dry-run patch       # rehearsal mode: no push/upload and no persisted file edits
 #
 # Reversibility:
-#   Steps 0–2 (venv bootstrap, pre-flight, full test matrix) never touch
+#   Steps 0–2 (venv bootstrap, pre-flight, test/build gate) never touch
 #   release-mutation files. Abort there (Ctrl+C / test failure) and re-run
 #   as-is — no manual rollback.
 #   After you confirm the target version, the script snapshots those files and
@@ -126,7 +132,25 @@ build_frontend_vite() {
   if [[ ! -d frontend/node_modules ]]; then
     fail "frontend/node_modules missing — run 'cd frontend && pnpm install' before releasing."
   fi
+  ( cd frontend && npx tsc -b --noEmit ) || fail "frontend tsc failed"
   ( cd frontend && npx vite build ) || fail "frontend vite build failed"
+}
+
+run_backend_full_tests() {
+  # L1 backend gate: in-process TestClient only — never hits the loopback
+  # csflow user service on 17017 (that service may be an older install).
+  ( cd backend && python -m pytest -q ) || fail "pytest failed"
+  ( cd backend && python -m pytest -q tests/test_clawteam_cli.py tests/test_dispatch_prompts.py ) \
+    || fail "anti-loop invariant tests failed"
+}
+
+run_frontend_build_gates() {
+  if [[ ! -d frontend/node_modules ]]; then
+    warn "  frontend/node_modules missing — skipping front-end gate."
+    warn "  Run 'cd frontend && pnpm install' to enable."
+    return 0
+  fi
+  build_frontend_vite
 }
 
 deactivate_release_env() {
@@ -212,6 +236,7 @@ trap cleanup_on_exit EXIT INT TERM
 YES=0
 DRY_RUN=0
 SKIP_TESTS=0
+SKIP_FULL_TESTS=0
 SKIP_BUILD=0
 SKIP_UPLOAD=0
 SKIP_PUSH=0
@@ -228,6 +253,7 @@ while (( $# )); do
     -y|--yes) YES=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --skip-tests) SKIP_TESTS=1 ;;
+    --skip-full-tests) SKIP_FULL_TESTS=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --skip-upload) SKIP_UPLOAD=1 ;;
     --skip-push) SKIP_PUSH=1 ;;
@@ -237,7 +263,7 @@ while (( $# )); do
     --testpypi) PYPI_REPO="testpypi" ;;
     --pypi) PYPI_REPO="pypi" ;;
     -h|--help)
-      sed -n '2,40p' "$0"; exit 0 ;;
+      sed -n '2,46p' "$0"; exit 0 ;;
     patch|minor|major) BUMP_PART="$1" ;;
     release|beta|rc) CHANNEL="$1" ;;
     *) fail "Unknown argument: $1" ;;
@@ -288,22 +314,20 @@ echo
 # ── 2. Tests + build ───────────────────────────────────────────────
 if [[ "$SKIP_TESTS" == "0" ]]; then
   say "[2/9] Running test matrix"
-  ( cd backend && python -m pytest -q ) || fail "pytest failed"
-  if [[ -d frontend/node_modules ]]; then
-    ( cd frontend && npx tsc -b --noEmit ) || fail "frontend tsc failed"
-    ( cd frontend && npx vite build ) || fail "frontend build failed"
+  if [[ "$SKIP_FULL_TESTS" == "0" ]]; then
+    run_backend_full_tests
   else
-    warn "  frontend/node_modules missing — skipping front-end gate."
-    warn "  Run 'cd frontend && npm install' to enable."
+    warn "  Skipping full backend pytest (--skip-full-tests)"
   fi
+  run_frontend_build_gates
   ok "  tests + builds green"
   RELEASE_TESTS_GATE_PASSED=1
   echo
 else
   if [[ "$CHANNEL" == "beta" ]]; then
-    warn "[2/9] Skipping test matrix (beta channel; vite build runs before wheel)"
+    warn "[2/9] Skipping test matrix (beta channel; frontend build runs before wheel)"
   else
-    warn "[2/9] Skipping test matrix (--skip-tests; vite build runs before wheel)"
+    warn "[2/9] Skipping test matrix (--skip-tests; frontend build runs before wheel)"
   fi
   RELEASE_TESTS_GATE_PASSED=1
   echo
@@ -389,7 +413,10 @@ if [[ "$SKIP_BUILD" == "0" ]]; then
   say "[8/10] Building wheel + sdist into ./dist/"
   if [[ "$SKIP_TESTS" == "1" ]]; then
     say "  Building frontend/dist (required — wheel bundles prebuilt SPA)"
-    build_frontend_vite
+    if [[ ! -d frontend/node_modules ]]; then
+      fail "frontend/node_modules missing — run 'cd frontend && pnpm install' before releasing."
+    fi
+    ( cd frontend && npx vite build ) || fail "frontend vite build failed"
     ok "  frontend/dist refreshed"
   fi
   rm -rf dist/
