@@ -160,6 +160,31 @@ function errText(e: unknown): string {
   return String(e);
 }
 
+function workdirValidationError(
+  e: unknown,
+  t: (key: string) => string,
+): string {
+  if (e instanceof ApiError) {
+    switch (e.code) {
+      case "PATH_NOT_FOUND":
+        return t("hermes.workdirErrors.notFound");
+      case "PATH_NOT_A_DIRECTORY":
+        return t("hermes.workdirErrors.notDirectory");
+      case "PATH_NOT_ACCESSIBLE":
+      case "PATH_INVALID":
+        return t("hermes.workdirErrors.notAccessible");
+      case "INVALID_PAYLOAD":
+        return t("hermes.workdirErrors.required");
+      default:
+        if (e.message && !/^HTTP \d+$/.test(e.message.trim())) {
+          return e.message;
+        }
+        return t("hermes.workdirErrors.invalid");
+    }
+  }
+  return errText(e);
+}
+
 function formatLocalFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -299,12 +324,16 @@ function Picker() {
   const [createNewTeamName, setCreateNewTeamName] = useSessionBackedState("hermes:create:newTeamName", "");
   const [createError, setCreateError] = useState("");
 
-  // ── Build-progress popup (mirrors OpenClaw's work popup). `workPopupText`
-  // and `createCancelState` are session-backed so the popup restores on return;
-  // `workPopupRunning`/`workPopupSuccess` are transient (recomputed from
-  // createCancelState after a remount).
+  // ── Build-progress popup (mirrors OpenClaw's work popup). `workPopupText`,
+  // `workPopupRunning`, `workPopupSuccess` and `createCancelState` are all
+  // session-backed so the popup restores in its true state on return — the
+  // setters write through to storage synchronously even after unmount, so a
+  // create that finishes while we're navigated away restores as done/failed
+  // rather than flashing back to a stale "running".
   const [workPopupOpen, setWorkPopupOpen] = useSessionBackedModalFlag("hermes:create:workPopupOpen");
-  const [workPopupRunning, setWorkPopupRunning] = useState(false);
+  const [workPopupRunning, setWorkPopupRunning] = useSessionBackedState(
+    "hermes:create:workPopupRunning", false, { isClosed: (v) => v === false },
+  );
   // Session-backed (unlike OpenClaw's transient flag) so a *failed* build that
   // finishes while we're unmounted restores in red, not just as green text:
   // useSessionBackedState's setter writes to storage synchronously even after
@@ -454,6 +483,9 @@ function Picker() {
   // fires when the awaiting closure is gone (the page was reloaded/reopened).
   const { track: trackOp, clear: clearOp } = useOpRecovery("hermes:create:op", {
     onRunning: (p) => {
+      // A cancel may already be resuming on this same mount (it sets the ref
+      // synchronously in its own effect); don't clobber its cancelling state.
+      if (createCancelRequestedRef.current) return;
       setCreateCancelState({ agentId: p.agentId, cancelling: false });
       openWorkPopup();
     },
@@ -469,6 +501,15 @@ function Picker() {
         false,
         detail === "cancelled" ? t("hermes.create.workPopup.cancelled") : detail,
       );
+    },
+    onMissing: () => {
+      // The op never registered within the grace window — tear the popup down
+      // silently rather than leaving a stale "running" shell.
+      if (createCancelRequestedRef.current) return;
+      setWorkPopupOpen(false);
+      resetWorkPopupDisplayState();
+      resetCreateCancelState();
+      createInFlightRef.current = false;
     },
   });
 
@@ -696,52 +737,12 @@ function Picker() {
     reload, trackOp, clearOp, t,
   ]);
 
-  // Recovery across refresh / close+reopen is handled by useOpRecovery above
-  // (durable localStorage pointer + GET status + WS), replacing the old 3s list
-  // poll + list-presence reconcile effect.
-
-  useEffect(() => {
-    const agentId = createCancelState?.agentId;
-    if (!workPopupOpen || createCancelState?.cancelling) return;
-    if (!agentId) {
-      if (!workPopupText.trim() && !workPopupRunning) {
-        setWorkPopupOpen(false);
-      }
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const op = await api.getOperationStatus(`hermes_create:${agentId}`);
-        if (cancelled || createCancelRequestedRef.current) return;
-        if (op.state === "succeeded") {
-          clearOp();
-          finishWorkPopup(true, t("hermes.create.workPopup.created", { id: agentId }));
-          resetCreateForm();
-          void reload();
-        } else if (op.state === "failed" && op.detail !== "cancelled") {
-          clearOp();
-          finishWorkPopup(false, op.detail);
-        } else if ((op.state === "failed" && op.detail === "cancelled") || (op.state === "not_found" && !op.inFlight)) {
-          clearOp();
-          setWorkPopupOpen(false);
-          resetWorkPopupDisplayState();
-          resetCreateCancelState();
-        } else if (op.state === "running" || op.inFlight) {
-          setWorkPopupRunning(true);
-          if (!workPopupText.trim()) {
-            setWorkPopupText(t("hermes.create.workPopup.running"));
-          }
-        }
-      } catch {
-        /* transient */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Recovery across refresh / close+reopen is owned solely by useOpRecovery
+  // above (durable localStorage pointer → WS subscribe + graceful status poll).
+  // There is intentionally no separate on-mount "reconcile popup vs op status"
+  // effect: it duplicated that work and closed the popup on a transient
+  // `not_found` during the create's pre-registration window — the popup-vanishes
+  // bug. The session-backed popup fields restore the visible state on their own.
 
   const grouped = useMemo(() => {
     const UNGROUPED = "__ungrouped__";
@@ -1816,7 +1817,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
       setWorkdirEditing(false);
       setWorkdirDraft("");
     } catch (e) {
-      setWorkdirError(errText(e));
+      setWorkdirError(workdirValidationError(e, t));
     } finally {
       setWorkdirSaving(false);
     }
@@ -2268,12 +2269,21 @@ function ChatRoom({ agentId }: { agentId: string }) {
               <input
                 className={cn(
                   "input flex-1 font-mono text-xs",
-                  !workdirEditing && "cursor-default bg-ink-50/80",
+                  !workdirEditing &&
+                    "cursor-default bg-ink-50/80 focus:border-ink-200 focus:ring-0",
                 )}
                 value={workdirEditing ? workdirDraft : workdir}
                 placeholder={t("hermes.workdirNeeded")}
                 readOnly={!workdirEditing}
+                tabIndex={workdirEditing ? 0 : -1}
+                aria-readonly={!workdirEditing}
                 disabled={workdirSaving}
+                onMouseDown={(e) => {
+                  if (!workdirEditing) e.preventDefault();
+                }}
+                onFocus={(e) => {
+                  if (!workdirEditing) e.currentTarget.blur();
+                }}
                 onChange={(e) => {
                   if (!workdirEditing) return;
                   setWorkdirDraft(e.target.value);
@@ -2288,7 +2298,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
                     onClick={() => void pickWorkdir()}
                     disabled={workdirSaving}
                   >
-                    {t("hermes.pickWorkdir")}
+                    {t("hermes.chooseWorkdir")}
                   </button>
                   <button
                     type="button"
@@ -2319,7 +2329,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
                 </button>
               )}
             </div>
-            {workdirError && (
+            {workdirEditing && workdirError && (
               <p className="text-xs text-rose-600">{workdirError}</p>
             )}
           </div>

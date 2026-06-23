@@ -31,12 +31,37 @@ export interface OpRecoveryCallbacks {
   onRunning: (p: OpPointer) => void;
   onSucceeded: (p: OpPointer, result: Record<string, unknown>) => void;
   onFailed: (p: OpPointer, detail: string) => void;
+  /**
+   * The op is genuinely gone — it stayed `not_found` (and not in-flight) for the
+   * whole grace window, so it was never registered (or was evicted with no
+   * recoverable entity). Tear the popup down silently. Optional: callers that
+   * have nothing to dismiss can omit it.
+   */
+  onMissing?: (p: OpPointer) => void;
 }
 
 export interface OpRecoveryHandle {
   track: (p: OpPointer) => void;
   clear: () => void;
 }
+
+/**
+ * How long a fresh mount tolerates a `not_found` / transient-error status before
+ * concluding the op is truly gone. The op (and the in-flight marker) is recorded
+ * server-side only *after* the create POST finishes its synchronous registration
+ * work — id reindex, openclaw.json sanitize (an up-to-8s gateway call), runtime
+ * default sync — so `GET /api/operations/{id}` legitimately returns `not_found`
+ * for that whole window. Giving up early here is exactly what used to make the
+ * popup vanish mid-create, so the budget is set comfortably above the worst-case
+ * pre-registration latency. Erring long is cheap: the only cost is a stale
+ * "running" shell for a genuinely-never-registered op (a create POST that never
+ * reached the backend at all), which is rare and self-heals at the deadline.
+ */
+const OP_RECOVERY_GRACE_MS = 45_000;
+/** Re-query cadence while waiting for a terminal transition (WS is the fast path). */
+const OP_RECOVERY_POLL_MS = 1_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
 export function useOpRecovery(storageKey: string, cb: OpRecoveryCallbacks): OpRecoveryHandle {
   const [, setPointer] = useLocalStorageBackedState<OpPointer | null>(storageKey, null, {
@@ -91,7 +116,9 @@ export function useOpRecovery(storageKey: string, cb: OpRecoveryCallbacks): OpRe
     // returns running" and the WS subscribe would otherwise be lost, leaving the
     // popup stuck "running" (the tab-switch-during-create symptom). Subscribing
     // first closes that gap: the WS catches anything published from now on, and
-    // the GET below catches anything already recorded.
+    // the poll below catches anything already recorded. The stream also survives
+    // the whole grace window, so a terminal frame that lands during a transient
+    // `not_found` is still delivered.
     streamRef.current = openOpStream(p.opId, {
       onStatus: (f) => {
         if (cancelled) return;
@@ -100,26 +127,56 @@ export function useOpRecovery(storageKey: string, cb: OpRecoveryCallbacks): OpRe
       },
     });
 
+    // Poll the status until it resolves to a terminal state, rather than acting
+    // on a single shot. This is what keeps the popup stable across a remount:
+    //   • running / still-in-flight  → rebuild the popup and keep reconciling
+    //     (the WS frame, or a later poll, delivers the terminal transition);
+    //   • not_found / transient error within the grace window → the create POST
+    //     hasn't registered the op yet — rebuild the popup as running and keep
+    //     waiting. Crucially we DO NOT clear the pointer or close the popup here;
+    //     that premature teardown was the "弹窗直接不见了" bug;
+    //   • not_found past the grace window → the op never materialised → onMissing.
     (async () => {
-      let st;
-      try {
-        st = await api.getOperationStatus(p.opId);
-      } catch {
-        return; // transient — leave the pointer + live stream for a later recovery
-      }
-      if (cancelled || terminalHandled) return;
-      if (st.state === "succeeded") {
-        finishTerminal("succeeded", st.result, st.detail);
-      } else if (st.state === "failed") {
-        finishTerminal("failed", st.result, st.detail);
-      } else if (st.state === "not_found") {
-        setPointer(null);
-        streamRef.current?.close();
-        streamRef.current = null;
-      } else {
-        // running → reconstruct the popup; the already-open stream above will
-        // deliver the terminal transition.
+      const deadline = Date.now() + OP_RECOVERY_GRACE_MS;
+      let rebuilt = false;
+      const ensureRunning = () => {
+        if (rebuilt) return;
+        rebuilt = true;
         cbRef.current.onRunning(p);
+      };
+      while (!cancelled && !terminalHandled) {
+        let st;
+        try {
+          st = await api.getOperationStatus(p.opId);
+        } catch {
+          // Transient (offline / server blip): keep the popup + live stream and
+          // retry; only stop polling once the grace window is exhausted (the WS
+          // stream stays open as a last-resort delivery path).
+          ensureRunning();
+          if (Date.now() >= deadline) return;
+          await sleep(OP_RECOVERY_POLL_MS);
+          continue;
+        }
+        if (cancelled || terminalHandled) return;
+        if (st.state === "succeeded") return finishTerminal("succeeded", st.result, st.detail);
+        if (st.state === "failed") return finishTerminal("failed", st.result, st.detail);
+        if (st.state === "running" || st.inFlight) {
+          // Confirmed live. Keep the popup up and keep reconciling (poll acts as
+          // the safety net if a WS terminal frame is ever missed).
+          ensureRunning();
+          await sleep(OP_RECOVERY_POLL_MS);
+          continue;
+        }
+        // not_found
+        if (Date.now() >= deadline) {
+          cbRef.current.onMissing?.(p);
+          setPointer(null);
+          streamRef.current?.close();
+          streamRef.current = null;
+          return;
+        }
+        ensureRunning();
+        await sleep(OP_RECOVERY_POLL_MS);
       }
     })();
 

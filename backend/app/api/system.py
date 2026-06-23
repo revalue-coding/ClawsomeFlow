@@ -728,12 +728,34 @@ def _validate_existing_directory(path: str) -> Path:
     raw = (path or "").strip()
     if not raw:
         raise ApiError("INVALID_PAYLOAD", "path is required", status_code=400)
-    candidate = Path(raw).expanduser()
-    if not candidate.exists():
+    try:
+        candidate = Path(raw).expanduser()
+    except (ValueError, TypeError) as exc:
+        raise ApiError("PATH_INVALID", f"path is not valid: {path}", status_code=400) from exc
+    try:
+        exists = candidate.exists()
+    except OSError as exc:
+        raise ApiError(
+            "PATH_NOT_ACCESSIBLE",
+            f"cannot access path: {path}",
+            status_code=400,
+        ) from exc
+    if not exists:
         raise ApiError("PATH_NOT_FOUND", f"path does not exist: {path}", status_code=400)
-    if not candidate.is_dir():
+    try:
+        is_directory = candidate.is_dir()
+    except OSError as exc:
+        raise ApiError(
+            "PATH_NOT_ACCESSIBLE",
+            f"cannot access path: {path}",
+            status_code=400,
+        ) from exc
+    if not is_directory:
         raise ApiError("PATH_NOT_A_DIRECTORY", f"path is not a directory: {path}", status_code=400)
-    return candidate.resolve(strict=False)
+    try:
+        return candidate.resolve(strict=False)
+    except OSError as exc:
+        raise ApiError("PATH_INVALID", f"path is not valid: {path}", status_code=400) from exc
 
 
 @router.get("/ui-capabilities", response_model=UiCapabilitiesResponse)

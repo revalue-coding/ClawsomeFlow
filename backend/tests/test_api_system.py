@@ -193,6 +193,18 @@ def test_validate_directory_rejects_missing(tmp_path: Path) -> None:
     assert r.json()["error"] == "PATH_NOT_FOUND"
 
 
+def test_validate_directory_rejects_inaccessible(monkeypatch) -> None:
+    class _BrokenPath(type(Path())):
+        def exists(self) -> bool:
+            raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr("app.api.system.Path", _BrokenPath)
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/validate-directory", json={"path": "/secret/path"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"] == "PATH_NOT_ACCESSIBLE"
+
+
 def test_ui_capabilities_client_not_colocated_same_platform_ssh(monkeypatch) -> None:
     """Linux browser + Linux server over SSH -L must still be treated as remote."""
     monkeypatch.setattr(

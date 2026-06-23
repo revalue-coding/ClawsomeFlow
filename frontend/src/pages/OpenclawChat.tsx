@@ -331,7 +331,17 @@ function AgentQuickActions({
   const [workPopupOpen, setWorkPopupOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:work-popup-open",
   );
-  const [workPopupRunning, setWorkPopupRunning] = useState(false);
+  // Session-backed (not transient) so the "running" status is stably maintained
+  // across SPA-nav / refresh: useSessionBackedState's setter writes through to
+  // storage synchronously even after unmount, so when the create finishes while
+  // we're navigated away, the popup restores in its true terminal state instead
+  // of flashing back to a stale "running" with a close button. isClosed clears
+  // the key on the default (false) so a fresh visit starts clean.
+  const [workPopupRunning, setWorkPopupRunning] = useSessionBackedState(
+    "openclaw-chat:quick-actions:work-popup-running",
+    false,
+    { isClosed: (value) => value === false },
+  );
   // Session-backed so a *failed* operation that finishes while we're unmounted
   // restores in red, not just as green text: useSessionBackedState's setter
   // writes to storage synchronously even after unmount, so the failure outcome
@@ -371,6 +381,9 @@ function AgentQuickActions({
   // localStorage pointer + on-mount status query (+ WS for the terminal frame).
   const { track: trackOp, clear: clearOp } = useOpRecovery("openclaw:create:op", {
     onRunning: (p) => {
+      // A cancel may already be resuming on this same mount (it sets the ref
+      // synchronously in its own effect); don't clobber its cancelling state.
+      if (createCancelRequestedRef.current) return;
       setCreateCancelState({ agentId: p.agentId, cancelling: false });
       openWorkPopup();
     },
@@ -387,6 +400,15 @@ function AgentQuickActions({
           ? t("assistant.workPopup.cancelled")
           : detail,
       );
+    },
+    onMissing: () => {
+      // The op never registered within the grace window — tear the popup down
+      // silently rather than leaving a stale "running" shell.
+      if (createCancelRequestedRef.current) return;
+      setWorkPopupOpen(false);
+      resetWorkPopupDisplayState();
+      resetCreateCancelState();
+      createRequestInFlightRef.current = false;
     },
   });
 
@@ -410,49 +432,14 @@ function AgentQuickActions({
     void loadTeams();
   }, []);
 
-  // Reconcile a session-restored progress popup against live op status so a
-  // completed create is not shown as "running" after navigating away and back.
-  useEffect(() => {
-    const agentId = createCancelState?.agentId;
-    if (!workPopupOpen || createCancelState?.cancelling) return;
-    if (!agentId) {
-      if (!workPopupText.trim() && !workPopupRunning) {
-        setWorkPopupOpen(false);
-      }
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const op = await api.getOperationStatus(`openclaw_create:${agentId}`);
-        if (cancelled || createCancelRequestedRef.current) return;
-        if (op.state === "succeeded") {
-          clearOp();
-          finishWorkPopup(true, t("assistant.workPopup.createdWithId", { id: agentId }));
-          notifyOpenclawAgentsUpdated();
-        } else if (op.state === "failed" && op.detail !== "cancelled") {
-          clearOp();
-          finishWorkPopup(false, op.detail);
-        } else if ((op.state === "failed" && op.detail === "cancelled") || (op.state === "not_found" && !op.inFlight)) {
-          clearOp();
-          setWorkPopupOpen(false);
-          resetWorkPopupDisplayState();
-          resetCreateCancelState();
-        } else if (op.state === "running" || op.inFlight) {
-          setWorkPopupRunning(true);
-          if (!workPopupText.trim()) {
-            setWorkPopupText(t("assistant.workPopup.running"));
-          }
-        }
-      } catch {
-        /* transient — op recovery / user retry will retry */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // NB: there is intentionally no separate on-mount "reconcile popup vs op
+  // status" effect here. Recovery is owned solely by useOpRecovery above
+  // (durable localStorage pointer → WS subscribe + graceful status poll). The
+  // old reconcile effect duplicated that work and — fatally — closed the popup
+  // on a transient `not_found` during the pre-registration window, which is what
+  // made the popup "直接不见了" after navigating away and back. The session-backed
+  // popup fields (workPopupOpen/Text/Success/Running + createCancelState) already
+  // restore the visible terminal/running state without a reconcile pass.
 
   useEffect(() => {
     const query = new URLSearchParams(location.search);

@@ -53,6 +53,10 @@ export function OpenclawAgentStore() {
       setRunning(p.agentId, null);
       setActionError(detail);
     },
+    onMissing: (p) => {
+      // Load op never registered within the grace window — drop the spinner.
+      setRunning(p.agentId, null);
+    },
   });
 
   const [loginOpen, setLoginOpen] = useSessionBackedModalFlag("agent-store:login-open");
