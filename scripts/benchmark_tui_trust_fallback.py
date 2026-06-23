@@ -186,6 +186,10 @@ def _cleanup(team: str, agent: str, repo: Path | None) -> None:
         capture_output=True,
     )
     subprocess.run(["tmux", "kill-session", "-t", f"clawteam-{team}"], capture_output=True)
+    subprocess.run(
+        ["clawteam", "team", "cleanup", team, "--force"],
+        capture_output=True,
+    )
     if repo is not None:
         shutil.rmtree(repo, ignore_errors=True)
 

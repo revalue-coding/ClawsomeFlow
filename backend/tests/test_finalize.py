@@ -976,6 +976,29 @@ async def test_perform_manual_merge_drops_resolved_pending_entry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_perform_manual_merge_expands_tilde_repo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "/tmp/fakehome")
+    run, flow, spec = _make_run_and_spec(agents_kw=[
+        {"id": "alice", "kind": AgentKind.claude, "repo": "~/342test",
+         "is_leader": False, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+        {"id": "leader", "kind": AgentKind.claude, "repo": "~/342test",
+         "is_leader": True, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+    ])
+    run.pending_merges = [{"agent_id": "alice", "branch": "x", "diff_summary": {}}]
+    run.status = RunStatus.awaiting_user_review
+    get_storage().run_update(run)
+
+    cli = _StubCli()
+    ok, _ = await fin.perform_manual_merge(
+        run=run, agent_id="alice", storage=get_storage(), cli=cli,
+    )
+    assert ok is True
+    assert cli.merge_calls[0].get("repo") == "/tmp/fakehome/342test"
+
+
+@pytest.mark.asyncio
 async def test_perform_manual_merge_conflict_marks_completed_with_conflicts() -> None:
     run, flow, spec = _make_run_and_spec(agents_kw=[
         {"id": "alice", "kind": AgentKind.claude, "repo": "/r",

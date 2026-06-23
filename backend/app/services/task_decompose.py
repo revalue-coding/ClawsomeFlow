@@ -1161,9 +1161,17 @@ async def start_decompose_request(
             }
         )
     try:
-        from app.services.hermes_agents import list_agents as _hermes_list_agents
+        from app.services.hermes_agents import (
+            RECONCILE_FAST,
+            list_agents as _hermes_list_agents,
+        )
 
-        for row in _hermes_list_agents(user=user, storage=storage, config=cfg):
+        for row in _hermes_list_agents(
+            user=user,
+            storage=storage,
+            config=cfg,
+            reconcile=RECONCILE_FAST,
+        ):
             persistent_agents.append(
                 {
                     "id": row.id,

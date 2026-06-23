@@ -431,6 +431,8 @@ async def perform_manual_merge(
                         source_branch = parsed_branch
                     raw_repo = str(item.get("repo_root") or item.get("repo") or "")
                     merge_repo = raw_repo.strip() or None
+                    if merge_repo:
+                        merge_repo = str(Path(merge_repo).expanduser())
                     break
         if merge_repo is None:
             merge_repo = _resolve_agent_repo_for_run(
@@ -807,7 +809,9 @@ def _resolve_agent_repo_for_run(
         if agent.id != agent_id:
             continue
         repo = str(agent.repo or "").strip()
-        return repo or None
+        if not repo:
+            return None
+        return str(Path(repo).expanduser())
     return None
 
 

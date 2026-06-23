@@ -353,6 +353,42 @@ async def test_start_request_persists_and_dispatches(fake_openclaw_home: Path) -
 
 
 @pytest.mark.asyncio
+async def test_start_decompose_hermes_inventory_uses_fast_reconcile(
+    fake_openclaw_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decompose startup must not block on ``hermes profile list`` (same as WebUI fast list)."""
+    from app.services import hermes_agents as hermes_svc
+
+    hermes_home = tmp_path / "hermes_home"
+    (hermes_home / "profiles" / "fsagent").mkdir(parents=True)
+    monkeypatch.setenv(hermes_svc.HERMES_HOME_ENV, str(hermes_home))
+
+    cli_called: list[bool] = []
+
+    def _cli_checked() -> tuple[bool, list[str]]:
+        cli_called.append(True)
+        return True, []
+
+    monkeypatch.setattr(hermes_svc, "list_profile_names_checked", _cli_checked)
+
+    _seed_openclaw_agent("leader-1")
+    fake = _FakeBridge()
+    await svc.start_decompose_request(
+        goal="Fast hermes inventory.",
+        leader_agent_id="leader-1",
+        user="alice",
+        api_base="http://127.0.0.1:17017",
+        bridge_factory=lambda cfg: fake,
+        background=False,
+    )
+    assert cli_called == []
+    msg = fake.captured["messages"][0]["content"]
+    assert "id=fsagent" in msg and "kind=hermes" in msg
+
+
+@pytest.mark.asyncio
 async def test_start_reuses_existing_active_request_for_same_payload(
     fake_openclaw_home: Path,
 ) -> None:

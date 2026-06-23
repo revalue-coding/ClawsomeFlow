@@ -351,6 +351,23 @@ def test_cli_env_falls_back_to_default_user() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workspace_list_expands_tilde_repo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "/tmp/fakehome")
+    seen: list[list[str]] = []
+
+    async def _fake_run(argv: list[str], *, env: dict[str, str]):
+        del env
+        seen.append(argv)
+        return 0, '{"workspaces": []}', ""
+
+    monkeypatch.setattr(cli_mod, "_run", _fake_run)
+    await ClawTeamCli().workspace_list(team="csflow-x", repo="~/342test")
+    assert seen
+    assert "/tmp/fakehome/342test" in seen[0]
+    assert "~/342test" not in seen[0]
+
+
+@pytest.mark.asyncio
 async def test_workspace_cleanup_uses_agent_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
 

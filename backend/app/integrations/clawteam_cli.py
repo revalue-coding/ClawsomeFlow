@@ -434,7 +434,7 @@ class ClawTeamCli:
         """
         argv = ["clawteam", "--json", "workspace", "list", team]
         if repo:
-            argv += ["--repo", repo]
+            argv += ["--repo", _expand_repo(repo)]
         exit_code, stdout, stderr = await _run(argv, env=self._env())
         if exit_code != 0:
             # `clawteam` prints "Not in a git repo" + exits 1 when neither
@@ -468,7 +468,7 @@ class ClawTeamCli:
         for workspace metadata and optional cleanup.
         Returns ``(success, output)``; callers decide how to classify failures.
         """
-        repo_hint = (repo or "").strip() or None
+        repo_hint = _expand_repo((repo or "").strip()) or None
         rows = await self.workspace_list(team=team, repo=repo_hint)
         row = next(
             (
@@ -700,7 +700,7 @@ class ClawTeamCli:
         self, *, team: str, agent: str, repo: str | None = None,
     ) -> WorkspaceCleanupResult:
         branch_name: str | None = None
-        repo_root = (repo or "").strip()
+        repo_root = _expand_repo((repo or "").strip())
         try:
             rows = await self.workspace_list(team=team, repo=repo_root or None)
             row = next(

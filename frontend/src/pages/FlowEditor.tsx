@@ -258,6 +258,10 @@ function isNonOpenclawKind(kind: OwnerKindDraft): kind is NonOpenclawOwnerKind {
   return kind !== "" && kind !== "openclaw";
 }
 
+function needsRepoBranchFields(kind: OwnerKindDraft): boolean {
+  return !isOpenclawKind(kind);
+}
+
 function isPersistentOwnerKind(kind: OwnerKindDraft): kind is OwnerKind {
   return kind === "openclaw" || kind === "hermes";
 }
@@ -1157,10 +1161,10 @@ export function FlowEditor() {
   // summary row instead of deleting/recreating it.
   useEffect(() => {
     const normalizedLeaderId = leaderId.trim();
-    const normalizedLeaderRepo = isNonOpenclawKind(leaderKind)
+    const normalizedLeaderRepo = needsRepoBranchFields(leaderKind)
       ? leaderRepo.trim()
       : "";
-    const normalizedLeaderTargetBranch = isNonOpenclawKind(leaderKind)
+    const normalizedLeaderTargetBranch = needsRepoBranchFields(leaderKind)
       ? leaderTargetBranch.trim()
       : "";
     const normalizedLeaderTemporary = leaderKind !== "openclaw" && leaderIsTemporary;
@@ -1215,7 +1219,7 @@ export function FlowEditor() {
   }, [leaderId, leaderKind, leaderIsTemporary, leaderRepo, leaderTargetBranch, t]);
 
   useEffect(() => {
-    if (!isNonOpenclawKind(leaderKind)) {
+    if (isOpenclawKind(leaderKind)) {
       setLeaderBranchOptions([]);
       setLeaderBranchEditable(false);
       return;
@@ -1272,7 +1276,7 @@ export function FlowEditor() {
   // while the user is still typing into the repo text field (that commits on blur).
   useEffect(() => {
     if (leaderRepoCheckSeededRef.current) return;
-    if (!isNonOpenclawKind(leaderKind)) return;
+    if (isOpenclawKind(leaderKind)) return;
     const repo = leaderRepo.trim();
     if (!repo) return;
     commitLeaderRepoCheck(repo);
@@ -2747,10 +2751,10 @@ export function FlowEditor() {
           const rows = proposalToRows(proposal, openclawOptions, hermesOptions);
           const idx = rows.findIndex((r) => r.isLeaderSummary);
           if (idx >= 0 && leaderId.trim()) {
-            const normalizedLeaderRepo = isNonOpenclawKind(leaderKind)
+            const normalizedLeaderRepo = needsRepoBranchFields(leaderKind)
               ? leaderRepo.trim()
               : "";
-            const normalizedLeaderTargetBranch = isNonOpenclawKind(leaderKind)
+            const normalizedLeaderTargetBranch = needsRepoBranchFields(leaderKind)
               ? leaderTargetBranch.trim()
               : "";
             rows[idx] = {
@@ -3055,7 +3059,7 @@ function TaskEditModal({
   const [repoChecking, setRepoChecking] = useState(false);
   const [branchOptions, setBranchOptions] = useState<string[]>([]);
   const [branchEditable, setBranchEditable] = useState(
-    isNonOpenclawKind(initialRow.ownerKind),
+    needsRepoBranchFields(initialRow.ownerKind),
   );
   const [branchLoading, setBranchLoading] = useState(false);
   /** Repo path last committed for validation (blur / pick / select), not every keystroke. */
@@ -3110,7 +3114,7 @@ function TaskEditModal({
   }
 
   useEffect(() => {
-    if (!isNonOpenclawKind(draft.ownerKind)) {
+    if (isOpenclawKind(draft.ownerKind)) {
       setBranchOptions([]);
       setBranchEditable(false);
       return;
