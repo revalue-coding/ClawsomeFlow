@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,11 @@ from app.config import Config, load_config
 from app.logging_setup import get_logger
 from app.models import Flow, HermesAgent
 from app.services import subprocess_registry as _subproc_registry
+from app.services.chat_retry import (
+    CHAT_CONNECTION_RETRY_ATTEMPTS,
+    CHAT_CONNECTION_RETRY_DELAYS_SEC,
+    is_transient_connection_error,
+)
 from app.storage import StorageBackend, get_storage
 
 logger = get_logger("services.hermes_agents")
@@ -1900,6 +1906,9 @@ def chat_once(agent_id: str, *, message: str, workdir: str, resume: bool = False
     When ``resume=True`` but the CLI session cannot be continued (e.g. after a
     restart), we silently fall back to a fresh turn without ``-c`` so the user
     can keep chatting; UI history remains the source of truth for the thread.
+
+    Transient DNS/connection failures are retried up to
+    :data:`CHAT_CONNECTION_RETRY_ATTEMPTS` times before surfacing an error.
     """
     aid = _validate_agent_id(agent_id)
     wd = _existing_directory(workdir, field_name="workdir")
@@ -1908,22 +1917,43 @@ def chat_once(agent_id: str, *, message: str, workdir: str, resume: bool = False
         args = ["--yolo", *(["-c"] if with_resume else []), "-z", message]
         return _hermes_profile(aid, args, cwd=wd, timeout=_CHAT_TIMEOUT_SEC)
 
-    rc, out, err = _run(with_resume=resume)
-    if rc == 0:
-        return out.strip()
-    if resume:
-        resume_err = (_strip_ansi(err) or _strip_ansi(out)).strip()[:500]
-        logger.warning(
-            "hermes_chat_resume_failed_fallback_fresh",
-            agent_id=aid,
-            error=resume_err,
-        )
-        rc, out, err = _run(with_resume=False)
+    use_resume = resume
+    last_detail = ""
+    for attempt in range(CHAT_CONNECTION_RETRY_ATTEMPTS):
+        rc, out, err = _run(with_resume=use_resume)
         if rc == 0:
             return out.strip()
-    raise ProfileOpFailed(
-        f"hermes chat failed: {(_strip_ansi(err) or _strip_ansi(out)).strip()[:1000]}"
-    )
+        if use_resume:
+            resume_err = (_strip_ansi(err) or _strip_ansi(out)).strip()[:500]
+            logger.warning(
+                "hermes_chat_resume_failed_fallback_fresh",
+                agent_id=aid,
+                error=resume_err,
+            )
+            use_resume = False
+            rc, out, err = _run(with_resume=False)
+            if rc == 0:
+                return out.strip()
+        last_detail = (_strip_ansi(err) or _strip_ansi(out)).strip()
+        if (
+            attempt + 1 < CHAT_CONNECTION_RETRY_ATTEMPTS
+            and is_transient_connection_error(last_detail)
+        ):
+            delay = CHAT_CONNECTION_RETRY_DELAYS_SEC[
+                min(attempt, len(CHAT_CONNECTION_RETRY_DELAYS_SEC) - 1)
+            ]
+            logger.warning(
+                "hermes_chat_connection_retry",
+                agent_id=aid,
+                attempt=attempt + 1,
+                delay_sec=delay,
+                error_preview=last_detail[:240],
+            )
+            time.sleep(delay)
+            use_resume = resume
+            continue
+        break
+    raise ProfileOpFailed(f"hermes chat failed: {last_detail[:1000]}")
 
 
 __all__ = [

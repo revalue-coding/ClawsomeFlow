@@ -1147,18 +1147,8 @@ async def chat_with_agent(
     _spawn_detached(_finalize_chat_history(job, session_key))
 
     async def _stream():
-        emitted = 0
         while True:
             snap = job.snapshot()
-            steps = snap["steps"]
-            for step in steps[emitted:]:
-                yield f"data: {json.dumps({'step': step})}\n\n"
-            emitted = len(steps)
-            # Emit progress on EVERY tick (not only when tool/api/message counts
-            # change). ``elapsedSec`` advances every poll, so this keeps the live
-            # timer + counters moving and the stream from sitting idle — fixes the
-            # "progress freezes until refresh" symptom during a long model turn
-            # that makes no new tool calls.
             yield f"data: {json.dumps({'progress': snap['progress']})}\n\n"
             if snap["status"] != "running":
                 if snap["status"] == "done":

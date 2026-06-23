@@ -148,6 +148,26 @@ export function saveLastSeenCount(scope: string, n: number): void {
   }
 }
 
+/** Index (in the non-system message list) for the "new messages" divider when a
+ *  turn completes in-page — same semantics as re-entry after navigation. */
+export function turnDividerIndex(msgs: PersistedMessage[], appendUser: boolean): number {
+  const count = settledCount(msgs);
+  return appendUser ? count : Math.max(0, count - 1);
+}
+
+/** Scroll so the divider sits in the upper-middle of the chat viewport. */
+export function scrollToNewMessagesDivider(
+  container: HTMLElement,
+  divider: HTMLElement,
+): void {
+  const dividerRect = divider.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  const dividerTopInContainer =
+    dividerRect.top - containerRect.top + container.scrollTop;
+  const targetTop = Math.max(0, dividerTopInContainer - container.clientHeight * 0.35);
+  container.scrollTo({ top: targetTop });
+}
+
 /**
  * Reconcile a locally-cached transcript against the server's chat history.
  *

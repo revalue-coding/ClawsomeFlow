@@ -33,14 +33,35 @@ export function useStickyScroll<T extends HTMLElement = HTMLDivElement>() {
     setAtBottom(true);
   }, []);
 
+  const suppressStickyRef = useRef(false);
+
+  /** Skip the next auto-stick and mark the user as scrolled away — used when a
+   *  completed turn should scroll to the "new messages" divider instead. */
+  const suppressNextStickyScroll = useCallback(() => {
+    suppressStickyRef.current = true;
+    atBottomRef.current = false;
+    setAtBottom(false);
+  }, []);
+
   /** Stick to the bottom, but only if the user was already there. Call from an
    *  effect keyed on the transcript so live updates don't fight manual scroll. */
   const stickIfAtBottom = useCallback(() => {
+    if (suppressStickyRef.current) {
+      suppressStickyRef.current = false;
+      return;
+    }
     if (atBottomRef.current) {
       const el = ref.current;
       if (el) el.scrollTo({ top: el.scrollHeight });
     }
   }, []);
 
-  return { ref, atBottom, scrollToBottom, handleScroll, stickIfAtBottom };
+  return {
+    ref,
+    atBottom,
+    scrollToBottom,
+    handleScroll,
+    stickIfAtBottom,
+    suppressNextStickyScroll,
+  };
 }

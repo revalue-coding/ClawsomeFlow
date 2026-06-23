@@ -63,6 +63,11 @@ from app.services import chat_attachments as attachment_svc
 from app.services import openclaw_agents as svc
 from app.services import openclaw_chat as chat_progress
 from app.services import openclaw_chat_history as chat_history
+from app.services.chat_retry import (
+    CHAT_CONNECTION_RETRY_ATTEMPTS,
+    CHAT_CONNECTION_RETRY_DELAYS_SEC,
+    is_transient_connection_error,
+)
 from app.services import subprocess_registry as _subproc_registry
 from app.storage import StorageBackend, get_storage
 
@@ -3154,6 +3159,7 @@ async def _chat_completion_via_cli(
     should_retry_unknown_agent = ("-bootstrap-" in session_key) or (message == _IMPORT_OPTIMIZE_PROMPT)
     unknown_agent_retry_index = 0
     scope_repair_attempted = False
+    connection_retry_index = 0
     while True:
         _raise_if_agent_create_cancelled(agent_id=agent_id)
         proc = await asyncio.create_subprocess_exec(
@@ -3271,6 +3277,24 @@ async def _chat_completion_via_cli(
                 )
                 await asyncio.sleep(delay)
                 continue
+            if (
+                connection_retry_index + 1 < CHAT_CONNECTION_RETRY_ATTEMPTS
+                and is_transient_connection_error(detail)
+            ):
+                delay = CHAT_CONNECTION_RETRY_DELAYS_SEC[
+                    min(connection_retry_index, len(CHAT_CONNECTION_RETRY_DELAYS_SEC) - 1)
+                ]
+                connection_retry_index += 1
+                logger.warning(
+                    "openclaw_cli_connection_retry",
+                    agent_id=agent_id,
+                    session_key=session_key,
+                    retry_index=connection_retry_index,
+                    retry_delay_sec=delay,
+                    detail=detail[:240],
+                )
+                await asyncio.sleep(delay)
+                continue
             raise ApiError(
                 "OPENCLAW_CLI_FAILED",
                 f"openclaw agent invocation failed: {detail[:800]}",
@@ -3353,15 +3377,8 @@ async def _chat_via_cli(
     _spawn_detached_chat(_run_completion())
 
     async def _event_stream():
-        emitted = 0
         while True:
-            snap = ct.snapshot() if ct is not None else {"status": "done", "steps": [], "final": "", "error": ""}
-            for step in snap["steps"][emitted:]:
-                yield f"data: {json.dumps({'step': step})}\n\n"
-            emitted = len(snap["steps"])
-            # Emit progress on every tick so the live elapsed timer + counters
-            # keep moving (previously the running stream emitted only steps, so
-            # the timer stayed frozen at 0 until a refresh hit the status poll).
+            snap = ct.snapshot() if ct is not None else {"status": "done", "final": "", "error": ""}
             if snap.get("progress"):
                 yield f"data: {json.dumps({'progress': snap['progress']})}\n\n"
             if snap["status"] != "running":

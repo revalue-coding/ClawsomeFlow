@@ -31,8 +31,6 @@ import {
   ApiError,
   ChatAttachmentMeta,
   isNetworkError,
-  type ChatProgress,
-  type ChatStep,
   ExternalOpenclawImportCandidate,
   ExternalOpenclawImportFailure,
   ExternalOpenclawImportResult,
@@ -56,7 +54,6 @@ import {
 import { useDialog } from "@/components/dialog";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
 import { CopyButton, NewMessagesDivider, PendingReply } from "@/components/ChatBubble";
-import { ChatStepTrail } from "@/components/ChatStepTrail";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import {
   AgentManagementHeader,
@@ -76,7 +73,9 @@ import {
   reconcileTranscript,
   saveChatHistory,
   saveLastSeenCount,
+  scrollToNewMessagesDivider,
   settledCount,
+  turnDividerIndex,
 } from "@/lib/chatHistory";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
@@ -1671,10 +1670,6 @@ function ChatRoom({
   // (the answer is still landing in server history). Drives a pending bubble
   // without persisting an empty placeholder to the cache.
   const [recovering, setRecovering] = useState(false);
-  // Live step-level progress for the in-flight turn (transient; recoverable
-  // from /chat/status while running).
-  const [steps, setSteps] = useState<ChatStep[]>([]);
-  const [progress, setProgress] = useState<ChatProgress | null>(null);
   const [resetting, setResetting] = useState(false);
   const [teamEditOpen, setTeamEditOpen] = useSessionBackedModalFlag(
     `openclaw-chat:room:${agentId}:team-edit-open`,
@@ -1705,6 +1700,7 @@ function ChatRoom({
     scrollToBottom,
     handleScroll,
     stickIfAtBottom,
+    suppressNextStickyScroll,
   } = useStickyScroll<HTMLDivElement>();
   // AbortController for the in-flight SSE fetch, so "Stop" can cut the stream.
   const abortRef = useRef<AbortController | null>(null);
@@ -1715,6 +1711,8 @@ function ChatRoom({
   // returns to this chat and new messages arrived while away.
   const newDividerRef = useRef<HTMLDivElement | null>(null);
   const didJumpToNewDividerRef = useRef(false);
+  /** Divider index for the in-flight turn (armed at send/regenerate). */
+  const turnDividerAtRef = useRef(-1);
   // Latest transcript, so the unmount cleanup can persist how many messages the
   // user had seen when they navigated away.
   const messagesRef = useRef<Message[]>([]);
@@ -1931,35 +1929,51 @@ function ChatRoom({
         try {
           const st = await api.getOpenclawChatStatus(agentId);
           if (cancelled) return;
+          let nextMessages = merged;
           if (st.status === "running") {
             setRecovering(true);
-            setSteps(st.steps ?? []);
-            setProgress(st.progress ?? null);
+            const last = nextMessages[nextMessages.length - 1];
+            if (!last || last.role === "user") {
+              nextMessages = [
+                ...nextMessages,
+                { role: "assistant" as const, content: "", ts: Date.now() },
+              ];
+            }
           } else {
-            const last = merged[merged.length - 1];
+            const last = nextMessages[nextMessages.length - 1];
             const needsFinal =
               st.status === "done" &&
               st.final.trim() &&
               (!last || last.role !== "assistant" || !last.content.trim());
             if (needsFinal) {
               const text = normalizeAssistantContent(st.final);
-              const next =
+              nextMessages =
                 last && last.role === "assistant"
-                  ? merged.map((m, i) =>
-                      i === merged.length - 1 ? { ...m, content: text, ts: Date.now() } : m,
+                  ? nextMessages.map((m, i) =>
+                      i === nextMessages.length - 1 ? { ...m, content: text, ts: Date.now() } : m,
                     )
-                  : [...merged, { role: "assistant" as const, content: text, ts: Date.now() }];
-              setMessages(next);
-              saveChatHistory(agentId, next);
+                  : [...nextMessages, { role: "assistant" as const, content: text, ts: Date.now() }];
             } else if (last && last.role === "user") {
-              // Trailing user with no live turn — still poll once in case the
-              // registry hasn't caught up yet.
               setRecovering(true);
+              nextMessages = [
+                ...nextMessages,
+                { role: "assistant" as const, content: "", ts: Date.now() },
+              ];
             }
           }
+          setMessages(nextMessages);
+          if (nextMessages.length > 0) saveChatHistory(agentId, nextMessages);
         } catch {
           const last = merged[merged.length - 1];
-          if (last && last.role === "user") setRecovering(true);
+          if (last && last.role === "user") {
+            setRecovering(true);
+            const nextMessages = [
+              ...merged,
+              { role: "assistant" as const, content: "", ts: Date.now() },
+            ];
+            setMessages(nextMessages);
+            saveChatHistory(agentId, nextMessages);
+          }
         }
       } catch {
         /* keep the cached view if history fetch fails */
@@ -1969,6 +1983,14 @@ function ChatRoom({
       cancelled = true;
     };
   }, [agentId]);
+
+  const revealCompletedTurn = useCallback(() => {
+    const at = turnDividerAtRef.current;
+    if (at < 0) return;
+    suppressNextStickyScroll();
+    setNewDividerAt(at);
+    didJumpToNewDividerRef.current = false;
+  }, [suppressNextStickyScroll]);
 
   // Reconnect to a turn whose SSE stream was detached (tab switch / refresh):
   // poll GET /chat/status and keep going *as long as the server says running*
@@ -1995,6 +2017,7 @@ function ChatRoom({
         if (last && last.role === "assistant" && last.content.trim() !== "") {
           setMessages(server);
           saveChatHistory(agentId, server);
+          revealCompletedTurn();
         }
       } catch {
         /* leave the transcript as-is */
@@ -2013,17 +2036,15 @@ function ChatRoom({
         saveChatHistory(agentId, next);
         return next;
       });
+      revealCompletedTurn();
     };
     const tick = async () => {
       try {
         const st = await api.getOpenclawChatStatus(agentId);
         if (cancelled) return;
         if (st.status === "running") {
-          setSteps(st.steps);
-          setProgress(st.progress);
+          // Keep recovering — PendingReply shows in the assistant bubble.
         } else {
-          setSteps([]);
-          setProgress(null);
           if (st.status === "done" && st.final.trim()) {
             adoptFinal(st.final);
           } else {
@@ -2046,7 +2067,7 @@ function ChatRoom({
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [recovering, agentId]);
+  }, [recovering, agentId, revealCompletedTurn]);
 
   // Persist on every transcript change. ``saveChatHistory`` keeps only
   // the trailing ``HISTORY_LIMIT`` entries so the storage stays bounded.
@@ -2069,21 +2090,15 @@ function ChatRoom({
     stickIfAtBottom();
   }, [messages, agent, stickIfAtBottom]);
 
-  // On re-entry, if we have unread messages, start the viewport from the
-  // "new messages" divider instead of forcing the latest tail.
+  // On re-entry (or when a turn completes in-page), scroll to the "new messages"
+  // divider instead of pinning the latest tail.
   useEffect(() => {
     if (newDividerAt < 0 || didJumpToNewDividerRef.current) return;
     const divider = newDividerRef.current;
     const container = scrollRef.current;
     if (!divider || !container) return;
     const raf = window.requestAnimationFrame(() => {
-      const dividerRect = divider.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-      const dividerTopInContainer =
-        dividerRect.top - containerRect.top + container.scrollTop;
-      // Keep the divider around the upper-middle area (not pinned to top).
-      const targetTop = Math.max(0, dividerTopInContainer - container.clientHeight * 0.35);
-      container.scrollTo({ top: targetTop });
+      scrollToNewMessagesDivider(container, divider);
       handleScroll();
       didJumpToNewDividerRef.current = true;
     });
@@ -2097,10 +2112,10 @@ function ChatRoom({
     opts: { appendUser: boolean; attachments?: ChatAttachmentMeta[] },
   ) {
     setActionError(null);
-    setRecovering(false); // a fresh send supersedes any in-flight recovery poll
-    setSteps([]);
-    setProgress(null);
-    setNewDividerAt(-1); // engaging with the chat clears the "new messages" mark
+    setRecovering(false);
+    setNewDividerAt(-1);
+    didJumpToNewDividerRef.current = true;
+    turnDividerAtRef.current = turnDividerIndex(messagesRef.current, opts.appendUser);
     setStreaming(true);
     const turnAttachments = opts.attachments ?? [];
     setMessages((m) => {
@@ -2154,18 +2169,10 @@ function ChatRoom({
           if (payload === "[DONE]") continue;
           try {
             const chunk = JSON.parse(payload);
-            if (chunk.step) {
-              const step = chunk.step as ChatStep;
-              setSteps((prev) =>
-                prev.some((s) => s.seq === step.seq) ? prev : [...prev, step],
-              );
-              continue;
-            }
-            if (chunk.progress) {
-              setProgress(chunk.progress as ChatProgress);
-              continue;
-            }
             const delta = extractDelta(chunk);
+            if (chunk.error) {
+              throw new Error(String(chunk.error));
+            }
             if (delta) {
               setMessages((m) => {
                 const out = m.slice();
@@ -2199,8 +2206,6 @@ function ChatRoom({
     } finally {
       abortRef.current = null;
       setStreaming(false);
-      setSteps([]);
-      setProgress(null);
       if (aborted) {
         // Mark the (still-empty) pending reply as stopped; keep any partial text.
         setMessages((m) => {
@@ -2236,8 +2241,10 @@ function ChatRoom({
               return merged;
             });
           }
+          revealCompletedTurn();
         } catch {
           /* keep streamed partial */
+          revealCompletedTurn();
         }
       }
     }
@@ -2271,8 +2278,6 @@ function ChatRoom({
       /* best-effort — the client stream is already cut */
     }
     setRecovering(false);
-    setSteps([]);
-    setProgress(null);
   }
 
   async function regenerate() {
@@ -2298,8 +2303,6 @@ function ChatRoom({
     try {
       await api.resetOpenclawAgentChat(agentId);
       setRecovering(false);
-      setSteps([]);
-      setProgress(null);
       setMessages([]);
       setNewDividerAt(-1);
       setInput("");
@@ -2531,9 +2534,6 @@ function ChatRoom({
                   </button>
                 </div>
               )}
-            {(streaming || recovering) && (progress || steps.length > 0) && (
-              <ChatStepTrail steps={steps} progress={progress} />
-            )}
           </div>
           {!atBottom && (
             <button

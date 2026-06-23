@@ -35,7 +35,6 @@ import {
   AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
 import { ChatBubble, NewMessagesDivider } from "@/components/ChatBubble";
-import { ChatStepTrail } from "@/components/ChatStepTrail";
 import { DesktopIcon, ExternalLinkIcon, RefreshIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import {
   clearChatHistory,
@@ -45,7 +44,9 @@ import {
   reconcileTranscript,
   saveChatHistory,
   saveLastSeenCount,
+  scrollToNewMessagesDivider,
   settledCount,
+  turnDividerIndex,
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
@@ -60,8 +61,6 @@ import {
   isNetworkError,
   type ChatHistoryMessage,
   type HermesAgentSummary,
-  type ChatProgress,
-  type ChatStep,
   type HermesCronJob,
   type HermesCronDeliveryTarget,
   type HermesModelSetting,
@@ -1161,10 +1160,6 @@ function ChatRoom({ agentId }: { agentId: string }) {
   // "running") to drive the pending bubble + step trail, then adopt the final
   // answer — instead of giving up after a fixed window.
   const [recovering, setRecovering] = useState(false);
-  // Live step-level progress for the in-flight turn (tool calls + counters).
-  // Transient: recoverable from /chat/status while running, irrelevant once done.
-  const [steps, setSteps] = useState<ChatStep[]>([]);
-  const [progress, setProgress] = useState<ChatProgress | null>(null);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
   const [showSettings, setShowSettings] = useSessionBackedModalFlag(`hermes:${agentId}:settings:open`);
@@ -1181,6 +1176,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
     scrollToBottom,
     handleScroll,
     stickIfAtBottom,
+    suppressNextStickyScroll,
   } = useStickyScroll<HTMLDivElement>();
   // AbortController for the in-flight SSE fetch, so "Stop" can cut the stream.
   const abortRef = useRef<AbortController | null>(null);
@@ -1191,6 +1187,8 @@ function ChatRoom({ agentId }: { agentId: string }) {
   // returns to this chat and new messages arrived while away.
   const newDividerRef = useRef<HTMLDivElement | null>(null);
   const didJumpToNewDividerRef = useRef(false);
+  /** Divider index for the in-flight turn (armed at send/regenerate). */
+  const turnDividerAtRef = useRef(-1);
   // Latest transcript, so the unmount cleanup can persist how many messages the
   // user had seen when they navigated away.
   const messagesRef = useRef<ChatMsg[]>([]);
@@ -1392,33 +1390,51 @@ function ChatRoom({ agentId }: { agentId: string }) {
         setNewDividerAt(seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1);
         try {
           const st = await api.getHermesChatStatus(agentId);
+          let nextMessages = merged;
           if (st.status === "running") {
             setRecovering(true);
-            setSteps(st.steps ?? []);
-            setProgress(st.progress ?? null);
+            const last = nextMessages[nextMessages.length - 1];
+            if (!last || last.role === "user") {
+              nextMessages = [
+                ...nextMessages,
+                { role: "assistant" as const, content: "", ts: Date.now() },
+              ];
+            }
           } else {
-            const last = merged[merged.length - 1];
+            const last = nextMessages[nextMessages.length - 1];
             const needsFinal =
               st.status === "done" &&
               st.final.trim() &&
               (!last || last.role !== "assistant" || !last.content.trim());
             if (needsFinal) {
               const text = normalizeAssistantContent(st.final);
-              const next =
+              nextMessages =
                 last && last.role === "assistant"
-                  ? merged.map((m, i) =>
-                      i === merged.length - 1 ? { ...m, content: text, ts: Date.now() } : m,
+                  ? nextMessages.map((m, i) =>
+                      i === nextMessages.length - 1 ? { ...m, content: text, ts: Date.now() } : m,
                     )
-                  : [...merged, { role: "assistant" as const, content: text, ts: Date.now() }];
-              setMessages(next);
-              saveChatHistory(chatScope, next);
+                  : [...nextMessages, { role: "assistant" as const, content: text, ts: Date.now() }];
             } else if (last && last.role === "user") {
               setRecovering(true);
+              nextMessages = [
+                ...nextMessages,
+                { role: "assistant" as const, content: "", ts: Date.now() },
+              ];
             }
           }
+          setMessages(nextMessages);
+          if (nextMessages.length > 0) saveChatHistory(chatScope, nextMessages);
         } catch {
           const last = merged[merged.length - 1];
-          if (last && last.role === "user") setRecovering(true);
+          if (last && last.role === "user") {
+            setRecovering(true);
+            const nextMessages = [
+              ...merged,
+              { role: "assistant" as const, content: "", ts: Date.now() },
+            ];
+            setMessages(nextMessages);
+            saveChatHistory(chatScope, nextMessages);
+          }
         }
       } catch (e) {
         setError(errText(e));
@@ -1440,25 +1456,27 @@ function ChatRoom({ agentId }: { agentId: string }) {
     return () => saveLastSeenCount(chatScope, settledCount(messagesRef.current));
   }, [chatScope]);
 
+  const revealCompletedTurn = useCallback(() => {
+    const at = turnDividerAtRef.current;
+    if (at < 0) return;
+    suppressNextStickyScroll();
+    setNewDividerAt(at);
+    didJumpToNewDividerRef.current = false;
+  }, [suppressNextStickyScroll]);
+
   useEffect(() => {
     stickIfAtBottom();
   }, [messages, recovering, stickIfAtBottom]);
 
-  // On re-entry, if we have unread messages, start the viewport from the
-  // "new messages" divider instead of forcing the latest tail.
+  // On re-entry (or when a turn completes in-page), scroll to the "new messages"
+  // divider instead of pinning the latest tail.
   useEffect(() => {
     if (newDividerAt < 0 || didJumpToNewDividerRef.current) return;
     const divider = newDividerRef.current;
     const container = scrollRef.current;
     if (!divider || !container) return;
     const raf = window.requestAnimationFrame(() => {
-      const dividerRect = divider.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-      const dividerTopInContainer =
-        dividerRect.top - containerRect.top + container.scrollTop;
-      // Keep the divider around the upper-middle area (not pinned to top).
-      const targetTop = Math.max(0, dividerTopInContainer - container.clientHeight * 0.35);
-      container.scrollTo({ top: targetTop });
+      scrollToNewMessagesDivider(container, divider);
       handleScroll();
       didJumpToNewDividerRef.current = true;
     });
@@ -1490,6 +1508,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
         if (last && last.role === "assistant" && last.content.trim() !== "") {
           setMessages(server);
           saveChatHistory(chatScope, server);
+          revealCompletedTurn();
         }
       } catch {
         /* ignore — leave the transcript as-is */
@@ -1508,17 +1527,15 @@ function ChatRoom({ agentId }: { agentId: string }) {
         saveChatHistory(chatScope, next);
         return next;
       });
+      revealCompletedTurn();
     };
     const tick = async () => {
       try {
         const st = await api.getHermesChatStatus(agentId);
         if (cancelled) return;
         if (st.status === "running") {
-          setSteps(st.steps);
-          setProgress(st.progress);
+          // Keep recovering — PendingReply shows in the assistant bubble.
         } else {
-          setSteps([]);
-          setProgress(null);
           if (st.status === "done" && st.final.trim()) {
             adoptFinal(st.final);
           } else {
@@ -1607,10 +1624,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
       return;
     }
     setError("");
-    setRecovering(false); // a fresh send supersedes any in-flight recovery poll
-    setSteps([]);
-    setProgress(null);
-    setNewDividerAt(-1); // engaging with the chat clears the "new messages" mark
+    setRecovering(false);
+    setNewDividerAt(-1);
+    didJumpToNewDividerRef.current = true;
+    turnDividerAtRef.current = turnDividerIndex(messagesRef.current, opts.appendUser);
     setSending(true);
     const turnAttachments = opts.attachments ?? [];
     setMessages((prev) => {
@@ -1660,18 +1677,9 @@ function ChatRoom({ agentId }: { agentId: string }) {
             const obj = JSON.parse(data) as {
               delta?: string;
               error?: string;
-              step?: ChatStep;
-              progress?: ChatProgress;
             };
             if (obj.error) {
               streamErr = obj.error;
-            } else if (obj.step) {
-              const step = obj.step;
-              setSteps((prev) =>
-                prev.some((s) => s.seq === step.seq) ? prev : [...prev, step],
-              );
-            } else if (obj.progress) {
-              setProgress(obj.progress);
             } else if (typeof obj.delta === "string") {
               setMessages((prev) => {
                 const next = [...prev];
@@ -1698,8 +1706,6 @@ function ChatRoom({ agentId }: { agentId: string }) {
     } finally {
       abortRef.current = null;
       setSending(false);
-      setSteps([]);
-      setProgress(null);
       if (aborted) {
         // Mark the (still-empty) pending reply as stopped; keep any partial text.
         setMessages((prev) => {
@@ -1733,8 +1739,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
               return merged;
             });
           }
+          if (!streamErr) revealCompletedTurn();
         } catch {
           /* keep streamed partial */
+          if (!streamErr) revealCompletedTurn();
         }
       }
     }
@@ -1767,8 +1775,6 @@ function ChatRoom({ agentId }: { agentId: string }) {
       /* best-effort — the client stream is already cut */
     }
     setRecovering(false);
-    setSteps([]);
-    setProgress(null);
   };
 
   const regenerate = async () => {
@@ -1795,8 +1801,6 @@ function ChatRoom({ agentId }: { agentId: string }) {
       await api.resetHermesAgentChat(agentId);
       clearChatHistory(chatScope);
       setRecovering(false);
-      setSteps([]);
-      setProgress(null);
       setMessages([]);
       setNewDividerAt(-1);
       setInput("");
@@ -1994,9 +1998,6 @@ function ChatRoom({ agentId }: { agentId: string }) {
                   </button>
                 </div>
               )}
-            {(sending || recovering) && (progress || steps.length > 0) && (
-              <ChatStepTrail steps={steps} progress={progress} />
-            )}
           </div>
           {!atBottom && (
             <button
