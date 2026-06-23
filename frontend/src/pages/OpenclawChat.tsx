@@ -120,6 +120,8 @@ const OPENCLAW_PENDING_FILES_CACHE = new Map<string, File[]>();
 type CreateCancelState = {
   agentId: string;
   cancelling: boolean;
+  /** Cancel did not fully converge — user may force-close; cleanup banner persists. */
+  failed?: boolean;
 };
 
 function createEmptySettingsData(): _SettingsData {
@@ -246,11 +248,13 @@ export function OpenclawChat() {
     );
   }
 
-  if (id) return <ChatRoom agentId={id} runtimeGatewayUrl={runtimeGatewayUrl} />;
   return (
-    <AgentQuickActions>
-      {(actions) => <ChatPicker actions={actions} />}
-    </AgentQuickActions>
+    <>
+      <AgentQuickActions>
+        {(actions) => (id ? null : <ChatPicker actions={actions} />)}
+      </AgentQuickActions>
+      {id ? <ChatRoom agentId={id} runtimeGatewayUrl={runtimeGatewayUrl} /> : null}
+    </>
   );
 }
 
@@ -344,12 +348,16 @@ function AgentQuickActions({
     null,
     { isClosed: (value) => value === null },
   );
+  const [createCancelCleanupNotice, setCreateCancelCleanupNotice] = useSessionBackedState<
+    string | null
+  >("openclaw-chat:cancel-cleanup-notice", null, { isClosed: (v) => v === null });
   const createRequestAbortRef = useRef<AbortController | null>(null);
   const createCancelRequestedRef = useRef(false);
   // Guards against a double-submit firing two POST /openclaw/agents for the same
   // id — which on the backend would race into one shared workspace and the
   // loser's rollback could wipe the winner's files.
   const createRequestInFlightRef = useRef(false);
+  const cancelVerifyInFlightRef = useRef(false);
   const [storeComingSoonOpen, setStoreComingSoonOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:store-coming-soon-open",
   );
@@ -363,13 +371,17 @@ function AgentQuickActions({
       openWorkPopup();
     },
     onSucceeded: (p) => {
+      if (createCancelRequestedRef.current) return;
       finishWorkPopup(true, t("assistant.workPopup.createdWithId", { id: p.agentId }));
       notifyOpenclawAgentsUpdated();
     },
     onFailed: (_p, detail) => {
+      if (createCancelRequestedRef.current) return;
       finishWorkPopup(
         false,
-        detail === "cancelled" ? t("assistant.workPopup.cancelled") : detail,
+        detail === "cancelled" || detail === "bootstrap_incomplete"
+          ? t("assistant.workPopup.cancelled")
+          : detail,
       );
     },
   });
@@ -459,6 +471,9 @@ function AgentQuickActions({
   }
 
   function finishWorkPopup(success: boolean, detail?: string) {
+    // User-initiated cancel owns the popup until verifyCreateCancelConverged()
+    // completes — recovery / the aborted create fetch must not unlock early.
+    if (createCancelRequestedRef.current) return;
     setWorkPopupRunning(false);
     setWorkPopupSuccess(success);
     setWorkPopupText(
@@ -469,41 +484,98 @@ function AgentQuickActions({
     resetCreateCancelState();
   }
 
-  async function onCancelCreate() {
-    if (createCancelState === null || createCancelState.cancelling) return;
-    createCancelRequestedRef.current = true;
-    createRequestAbortRef.current?.abort();
-    setCreateCancelState((prev) =>
-      prev === null
-        ? prev
-        : {
-            ...prev,
-            cancelling: true,
-          },
-    );
-    setWorkPopupText(t("assistant.workPopup.cancelRunning"));
-    try {
-      await api.cancelOpenclawAgentCreate(createCancelState.agentId);
-      setWorkPopupText(t("assistant.workPopup.cancelVerifying"));
-      const verifyDeadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
-      while (true) {
-        const listed = await api.listOpenclawAgents();
-        if (!listed.items.some((item) => item.id === createCancelState.agentId)) break;
-        if (Date.now() >= verifyDeadline) {
+  async function verifyCreateCancelConverged(agentId: string): Promise<void> {
+    const verifyDeadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
+    while (true) {
+      const [listed, op] = await Promise.all([
+        api.listOpenclawAgents(),
+        api.getOperationStatus(`openclaw_create:${agentId}`),
+      ]);
+      const absent = !listed.items.some((item) => item.id === agentId);
+      const opSettled = op.state !== "running";
+      if (absent && opSettled) return;
+      if (Date.now() >= verifyDeadline) {
+        if (!absent) {
           throw new Error(t("assistant.workPopup.cancelAgentStillVisible"));
         }
-        await new Promise((resolve) => window.setTimeout(resolve, CREATE_CANCEL_VERIFY_POLL_MS));
+        throw new Error(t("assistant.workPopup.cancelOpStillRunning"));
       }
-      clearOp();
-      notifyOpenclawAgentsUpdated();
-      setWorkPopupOpen(false);
-      resetWorkPopupDisplayState();
-      resetCreateCancelState();
-    } catch (e) {
-      const err = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
-      finishWorkPopup(false, t("assistant.workPopup.cancelFailed", { message: err }));
+      await new Promise((resolve) => window.setTimeout(resolve, CREATE_CANCEL_VERIFY_POLL_MS));
     }
   }
+
+  function closeWorkPopupAfterCancel(): void {
+    clearOp();
+    notifyOpenclawAgentsUpdated();
+    setWorkPopupOpen(false);
+    resetWorkPopupDisplayState();
+    resetCreateCancelState();
+    createRequestInFlightRef.current = false;
+  }
+
+  function dismissCancelFailureNotice(agentId: string): void {
+    setCreateCancelCleanupNotice(agentId);
+    clearOp();
+    setWorkPopupOpen(false);
+    resetWorkPopupDisplayState();
+    resetCreateCancelState();
+    createRequestInFlightRef.current = false;
+    createCancelRequestedRef.current = false;
+  }
+
+  function closeWorkPopupFromModal(): void {
+    if (createCancelState?.failed && createCancelState.agentId) {
+      dismissCancelFailureNotice(createCancelState.agentId);
+      return;
+    }
+    setWorkPopupOpen(false);
+    resetWorkPopupDisplayState();
+    resetCreateCancelState();
+  }
+
+  async function runCreateCancelFlow(
+    agentId: string,
+    options: { postCancel: boolean },
+  ): Promise<void> {
+    if (cancelVerifyInFlightRef.current) return;
+    cancelVerifyInFlightRef.current = true;
+    createCancelRequestedRef.current = true;
+    setWorkPopupOpen(true);
+    setWorkPopupRunning(true);
+    setCreateCancelState({ agentId, cancelling: true });
+    try {
+      if (options.postCancel) {
+        createRequestAbortRef.current?.abort();
+        setWorkPopupText(t("assistant.workPopup.cancelRunning"));
+        await api.cancelOpenclawAgentCreate(agentId);
+      }
+      setWorkPopupText(t("assistant.workPopup.cancelVerifying"));
+      await verifyCreateCancelConverged(agentId);
+      closeWorkPopupAfterCancel();
+    } catch (e) {
+      const err = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+      createCancelRequestedRef.current = false;
+      setWorkPopupRunning(false);
+      setWorkPopupSuccess(false);
+      setWorkPopupText(t("assistant.workPopup.cancelFailed", { message: err }));
+      setCreateCancelState({ agentId, cancelling: false, failed: true });
+    } finally {
+      cancelVerifyInFlightRef.current = false;
+    }
+  }
+
+  async function onCancelCreate() {
+    if (createCancelState === null || createCancelState.cancelling) return;
+    await runCreateCancelFlow(createCancelState.agentId, { postCancel: true });
+  }
+
+  useEffect(() => {
+    const state = createCancelState;
+    if (state === null || !state.cancelling) return;
+    void runCreateCancelFlow(state.agentId, { postCancel: false });
+    // Resume verify-only after refresh / remount while a cancel was in flight.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function resolveCreateTeamId(): Promise<string | null> {
     if (createTeamChoice === CREATE_TEAM_SENTINEL) {
@@ -634,6 +706,7 @@ function AgentQuickActions({
     const responsibility = createResponsibility.trim();
     const extra = createExtra.trim();
     if (!agentId || !agentName || !responsibility) return;
+    if (createRequestInFlightRef.current || createCancelState?.cancelling) return;
     if (/\s/.test(agentId)) {
       setCreateError(t("assistant.createModal.invalidAgentIdNoSpaces"));
       return;
@@ -653,8 +726,13 @@ function AgentQuickActions({
         setCreateError(t("assistant.createModal.idDuplicate", { id: agentId }));
         return;
       }
+      const opStatus = await api.getOperationStatus(`openclaw_create:${agentId}`);
+      if (opStatus.state === "running") {
+        setCreateError(t("assistant.createModal.idInProgress", { id: agentId }));
+        return;
+      }
     } catch {
-      /* list unavailable \u2014 fall through; backend still rejects duplicates */
+      /* list / op status unavailable — fall through; backend still rejects duplicates */
     }
     let teamId: string | null = null;
     try {
@@ -692,6 +770,7 @@ function AgentQuickActions({
         },
         { signal: abortController.signal },
       );
+      if (createCancelRequestedRef.current) return;
       clearOp();
       finishWorkPopup(
         true,
@@ -705,19 +784,30 @@ function AgentQuickActions({
       setCreateResponsibility("");
       setCreateExtra("");
       notifyOpenclawAgentsUpdated();
+      createRequestInFlightRef.current = false;
     } catch (e) {
       if (createCancelRequestedRef.current || isAbortError(e)) return;
       // A user-input rejection (id already taken / invalid) belongs back IN the
       // form, not buried in the progress popup — reopen it with the message.
       if (
         e instanceof ApiError &&
-        (e.code === "AGENT_ALREADY_EXISTS" || e.code === "INVALID_PAYLOAD")
+        (e.code === "AGENT_ALREADY_EXISTS" ||
+          e.code === "AGENT_EXISTS" ||
+          e.code === "INVALID_PAYLOAD")
       ) {
         clearOp();
         setWorkPopupOpen(false);
         resetWorkPopupDisplayState();
         resetCreateCancelState();
-        setCreateError(`${e.code}: ${e.message}`);
+        const duplicate =
+          e.code === "AGENT_ALREADY_EXISTS" ||
+          e.code === "AGENT_EXISTS" ||
+          /already in progress/i.test(e.message);
+        setCreateError(
+          duplicate
+            ? t("assistant.createModal.idInProgress", { id: agentId })
+            : `${e.code}: ${e.message}`,
+        );
         setCreateModalOpen(true);
         return;
       }
@@ -725,7 +815,9 @@ function AgentQuickActions({
       const err = e instanceof Error ? e.message : String(e);
       finishWorkPopup(false, err);
     } finally {
-      createRequestInFlightRef.current = false;
+      if (!createCancelRequestedRef.current) {
+        createRequestInFlightRef.current = false;
+      }
       if (createRequestAbortRef.current === abortController) {
         createRequestAbortRef.current = null;
       }
@@ -833,7 +925,9 @@ function AgentQuickActions({
     createResponsibility.trim() &&
     createTeamReady,
   );
-  const workPopupBusy = workPopupRunning || createCancelState !== null;
+  const workPopupBusy =
+    createCancelState?.cancelling === true ||
+    (workPopupRunning && !createCancelState?.failed);
   const showCreateCancelAction = createCancelState !== null;
   const createCancelEnabled =
     showCreateCancelAction && !(createCancelState?.cancelling ?? false);
@@ -854,6 +948,20 @@ function AgentQuickActions({
 
   return (
     <>
+      {createCancelCleanupNotice && (
+        <div className="mb-4 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
+          <p className="flex-1">
+            {t("assistant.workPopup.cancelCleanupHint", { id: createCancelCleanupNotice })}
+          </p>
+          <button
+            type="button"
+            className="shrink-0 text-amber-700 underline hover:text-amber-900 dark:text-amber-200"
+            onClick={() => setCreateCancelCleanupNotice(null)}
+          >
+            {t("assistant.workPopup.cancelCleanupDismiss")}
+          </button>
+        </div>
+      )}
       {children?.(pickerActions)}
 
       <Modal
@@ -1214,9 +1322,7 @@ function AgentQuickActions({
         open={workPopupOpen}
         onClose={() => {
           if (workPopupBusy) return;
-          setWorkPopupOpen(false);
-          resetWorkPopupDisplayState();
-          resetCreateCancelState();
+          closeWorkPopupFromModal();
         }}
         title={t("assistant.workPopup.title")}
         width="max-w-xl"
@@ -1234,9 +1340,14 @@ function AgentQuickActions({
           >
             {workPopupDisplayText}
           </p>
+          {createCancelState?.failed && (
+            <p className="text-sm text-amber-800 dark:text-amber-200">
+              {t("assistant.workPopup.cancelCleanupHint", { id: createCancelState.agentId })}
+            </p>
+          )}
           {workPopupBusy && <Loading />}
           {showCreateCancelAction && (
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
               <button
                 type="button"
                 className="btn-outline"
@@ -1245,20 +1356,27 @@ function AgentQuickActions({
               >
                 {createCancelState?.cancelling
                   ? t("assistant.workPopup.cancellingCreate")
-                  : t("assistant.workPopup.cancelCreate")}
+                  : createCancelState?.failed
+                    ? t("assistant.workPopup.cancelRetry")
+                    : t("assistant.workPopup.cancelCreate")}
               </button>
+              {createCancelState?.failed && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => dismissCancelFailureNotice(createCancelState.agentId)}
+                >
+                  {t("assistant.workPopup.cancelForceClose")}
+                </button>
+              )}
             </div>
           )}
-          {!workPopupBusy && (
+          {!workPopupBusy && !createCancelState?.failed && (
             <div className="flex justify-end">
               <button
                 type="button"
                 className="btn-primary"
-                onClick={() => {
-                  setWorkPopupOpen(false);
-                  resetWorkPopupDisplayState();
-                  resetCreateCancelState();
-                }}
+                onClick={closeWorkPopupFromModal}
               >
                 {t("assistant.workPopup.close")}
               </button>

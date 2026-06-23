@@ -76,6 +76,27 @@ def test_not_found(client) -> None:
     assert body["state"] == "not_found"
 
 
+def test_openclaw_entity_fallback_requires_bootstrap_complete(client) -> None:
+    from app.models import OpenclawAgent
+    from app.storage import get_storage
+
+    storage = get_storage()
+    storage.openclaw_create(
+        OpenclawAgent(
+            id="half",
+            name="Half",
+            workspace_path="/tmp/half-workspace",
+            created_by_user="alice",
+        )
+    )
+    body = client.get("/api/operations/openclaw_create:half").json()
+    assert body["state"] == "failed"
+    assert body["detail"] == "bootstrap_incomplete"
+    assert body["source"] == "entity"
+
+    storage.openclaw_delete("half")
+
+
 def test_wrong_user_op_is_not_found(client, monkeypatch: pytest.MonkeyPatch) -> None:
     ops.get_op_registry().start(op_id="hermes_create:secret", user="bob", kind="hermes_create")
     # Current user is alice → bob's op is invisible → falls through to not_found.

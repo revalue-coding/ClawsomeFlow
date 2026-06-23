@@ -61,7 +61,13 @@ def _entity_exists(kind: str, target: str, *, user: str, storage: StorageBackend
     if kind in ("hermes_create",):
         row = storage.hermes_get(target)
         return row is not None and (not row.created_by_user or row.created_by_user == user)
-    if kind in ("openclaw_create", "openclaw_import"):
+    if kind == "openclaw_create":
+        row = storage.openclaw_get(target)
+        if row is None or (row.created_by_user and row.created_by_user != user):
+            return False
+        # Registration alone is not success — bootstrap must have committed.
+        return oc_svc.is_bootstrap_complete(target, storage=storage)
+    if kind in ("openclaw_import",):
         row = storage.openclaw_get(target)
         return row is not None and (not row.created_by_user or row.created_by_user == user)
     # store_load yields multiple agents; success is not a single derivable entity,
@@ -103,7 +109,25 @@ async def get_operation_status(
                                        detail="recovered", source="entity")
     if target and _in_flight(kind, target):
         return OperationStatusResponse(op_id=op_id, state="running", kind=kind, source="in_flight")
+    if (
+        kind == "openclaw_create"
+        and target
+        and _openclaw_row_owned(target, user=user, storage=storage)
+        and not oc_svc.is_bootstrap_complete(target, storage=storage)
+    ):
+        return OperationStatusResponse(
+            op_id=op_id,
+            state="failed",
+            kind=kind,
+            detail="bootstrap_incomplete",
+            source="entity",
+        )
     return OperationStatusResponse(op_id=op_id, state="not_found", kind=kind)
+
+
+def _openclaw_row_owned(target: str, *, user: str, storage: StorageBackend) -> bool:
+    row = storage.openclaw_get(target)
+    return row is not None and (not row.created_by_user or row.created_by_user == user)
 
 
 __all__ = ["router", "OperationStatusResponse"]

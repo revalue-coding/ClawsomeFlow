@@ -84,6 +84,7 @@ const HERMES_PENDING_FILES_CACHE = new Map<string, File[]>();
 type CreateCancelState = {
   agentId: string;
   cancelling: boolean;
+  failed?: boolean;
 };
 
 function isAbortError(value: unknown): boolean {
@@ -317,12 +318,16 @@ function Picker() {
   const [createCancelState, setCreateCancelState] = useSessionBackedState<CreateCancelState | null>(
     "hermes:create:cancelState", null, { isClosed: (v) => v === null },
   );
+  const [createCancelCleanupNotice, setCreateCancelCleanupNotice] = useSessionBackedState<
+    string | null
+  >("hermes:create:cancel-cleanup-notice", null, { isClosed: (v) => v === null });
   const createAbortRef = useRef<AbortController | null>(null);
   const createCancelRequestedRef = useRef(false);
   // Guards against a double-submit (e.g. a fast double-click in the window
   // before the modal closes) firing two POST /hermes/agents for the same id —
   // which on the backend would race and could clobber the winner's profile.
   const createInFlightRef = useRef(false);
+  const cancelVerifyInFlightRef = useRef(false);
   const pickerMountedRef = useRef(true);
 
   useEffect(() => {
@@ -378,7 +383,9 @@ function Picker() {
     void reload();
   }, [reload]);
 
-  const workPopupBusy = workPopupRunning || createCancelState !== null;
+  const workPopupBusy =
+    createCancelState?.cancelling === true ||
+    (workPopupRunning && !createCancelState?.failed);
   const showCreateCancelAction = createCancelState !== null;
   const createCancelEnabled =
     showCreateCancelAction && !(createCancelState?.cancelling ?? false);
@@ -426,6 +433,7 @@ function Picker() {
 
   const finishWorkPopup = useCallback(
     (success: boolean, detail?: string) => {
+      if (createCancelRequestedRef.current) return;
       setWorkPopupRunning(false);
       setWorkPopupSuccess(success);
       setWorkPopupText(
@@ -448,17 +456,141 @@ function Picker() {
       openWorkPopup();
     },
     onSucceeded: (p) => {
+      if (createCancelRequestedRef.current) return;
       finishWorkPopup(true, t("hermes.create.workPopup.created", { id: p.agentId }));
       resetCreateForm();
       void reload();
     },
     onFailed: (_p, detail) => {
+      if (createCancelRequestedRef.current) return;
       finishWorkPopup(
         false,
         detail === "cancelled" ? t("hermes.create.workPopup.cancelled") : detail,
       );
     },
   });
+
+  const verifyHermesCancelConverged = useCallback(async (agentId: string): Promise<void> => {
+    const verifyDeadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
+    while (true) {
+      const [listed, op] = await Promise.all([
+        api.listHermesAgents("fast"),
+        api.getOperationStatus(`hermes_create:${agentId}`),
+      ]);
+      const absent = !listed.items.some((item) => item.id === agentId);
+      const opSettled = op.state !== "running";
+      if (absent && opSettled) return;
+      if (Date.now() >= verifyDeadline) {
+        if (!absent) {
+          throw new Error(t("hermes.create.workPopup.cancelAgentStillVisible"));
+        }
+        throw new Error(t("hermes.create.workPopup.cancelOpStillRunning"));
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, CREATE_CANCEL_VERIFY_POLL_MS));
+    }
+  }, [t]);
+
+  const closeWorkPopupAfterCancel = useCallback(() => {
+    clearOp();
+    setWorkPopupOpen(false);
+    resetWorkPopupDisplayState();
+    resetCreateCancelState();
+    createInFlightRef.current = false;
+    void refreshAgents();
+  }, [
+    clearOp,
+    refreshAgents,
+    resetCreateCancelState,
+    resetWorkPopupDisplayState,
+    setWorkPopupOpen,
+  ]);
+
+  const dismissCancelFailureNotice = useCallback(
+    (agentId: string) => {
+      setCreateCancelCleanupNotice(agentId);
+      clearOp();
+      setWorkPopupOpen(false);
+      resetWorkPopupDisplayState();
+      resetCreateCancelState();
+      createInFlightRef.current = false;
+      createCancelRequestedRef.current = false;
+    },
+    [
+      clearOp,
+      resetCreateCancelState,
+      resetWorkPopupDisplayState,
+      setCreateCancelCleanupNotice,
+      setWorkPopupOpen,
+    ],
+  );
+
+  const closeWorkPopupFromModal = useCallback(() => {
+    if (createCancelState?.failed && createCancelState.agentId) {
+      dismissCancelFailureNotice(createCancelState.agentId);
+      return;
+    }
+    setWorkPopupOpen(false);
+    resetWorkPopupDisplayState();
+    resetCreateCancelState();
+  }, [
+    createCancelState,
+    dismissCancelFailureNotice,
+    resetCreateCancelState,
+    resetWorkPopupDisplayState,
+    setWorkPopupOpen,
+  ]);
+
+  const runCreateCancelFlow = useCallback(
+    async (agentId: string, options: { postCancel: boolean }) => {
+      if (cancelVerifyInFlightRef.current) return;
+      cancelVerifyInFlightRef.current = true;
+      createCancelRequestedRef.current = true;
+      setWorkPopupOpen(true);
+      setWorkPopupRunning(true);
+      setCreateCancelState({ agentId, cancelling: true });
+      try {
+        if (options.postCancel) {
+          createAbortRef.current?.abort();
+          setWorkPopupText(t("hermes.create.workPopup.cancelRunning"));
+          await api.cancelHermesAgentCreate(agentId);
+        }
+        setWorkPopupText(t("hermes.create.workPopup.cancelVerifying"));
+        await verifyHermesCancelConverged(agentId);
+        closeWorkPopupAfterCancel();
+      } catch (e) {
+        createCancelRequestedRef.current = false;
+        setWorkPopupRunning(false);
+        setWorkPopupSuccess(false);
+        setWorkPopupText(
+          t("hermes.create.workPopup.cancelFailed", { message: errText(e) }),
+        );
+        setCreateCancelState({ agentId, cancelling: false, failed: true });
+      } finally {
+        cancelVerifyInFlightRef.current = false;
+      }
+    },
+    [
+      closeWorkPopupAfterCancel,
+      setCreateCancelState,
+      setWorkPopupOpen,
+      setWorkPopupText,
+      verifyHermesCancelConverged,
+      t,
+    ],
+  );
+
+  const cancelCreate = useCallback(async () => {
+    if (createCancelState === null || createCancelState.cancelling) return;
+    await runCreateCancelFlow(createCancelState.agentId, { postCancel: true });
+  }, [createCancelState, runCreateCancelFlow]);
+
+  useEffect(() => {
+    const state = createCancelState;
+    if (state === null || !state.cancelling) return;
+    void runCreateCancelFlow(state.agentId, { postCancel: false });
+    // Resume verify-only after refresh / remount while a cancel was in flight.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submitCreate = useCallback(async () => {
     if (createInFlightRef.current) return;
@@ -514,6 +646,7 @@ function Picker() {
           },
           { signal: ac.signal },
         );
+        if (createCancelRequestedRef.current) return;
         clearOp();
         finishWorkPopup(true, t("hermes.create.workPopup.created", { id: created.id }));
         resetCreateForm();
@@ -546,7 +679,9 @@ function Picker() {
         if (createAbortRef.current === ac) createAbortRef.current = null;
       }
     } finally {
-      createInFlightRef.current = false;
+      if (!createCancelRequestedRef.current) {
+        createInFlightRef.current = false;
+      }
     }
   }, [
     createProfileId, createName, createResponsibility, createModelInheritFrom,
@@ -555,38 +690,6 @@ function Picker() {
     agents, setShowCreate, setCreateCancelState, openWorkPopup, finishWorkPopup,
     resetCreateForm, resetWorkPopupDisplayState, resetCreateCancelState, setWorkPopupOpen,
     reload, trackOp, clearOp, t,
-  ]);
-
-  const cancelCreate = useCallback(async () => {
-    if (createCancelState === null || createCancelState.cancelling) return;
-    const agentId = createCancelState.agentId;
-    createCancelRequestedRef.current = true;
-    createAbortRef.current?.abort();
-    setCreateCancelState((prev) => (prev === null ? prev : { ...prev, cancelling: true }));
-    setWorkPopupText(t("hermes.create.workPopup.cancelRunning"));
-    try {
-      await api.cancelHermesAgentCreate(agentId);
-      setWorkPopupText(t("hermes.create.workPopup.cancelVerifying"));
-      const deadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
-      for (;;) {
-        const listed = await api.listHermesAgents("fast");
-        if (!listed.items.some((item) => item.id === agentId)) break;
-        if (Date.now() >= deadline) {
-          throw new Error(t("hermes.create.workPopup.cancelAgentStillVisible"));
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, CREATE_CANCEL_VERIFY_POLL_MS));
-      }
-      clearOp();
-      setWorkPopupOpen(false);
-      resetWorkPopupDisplayState();
-      resetCreateCancelState();
-      void refreshAgents();
-    } catch (e) {
-      finishWorkPopup(false, t("hermes.create.workPopup.cancelFailed", { message: errText(e) }));
-    }
-  }, [
-    createCancelState, setCreateCancelState, setWorkPopupText, setWorkPopupOpen,
-    resetWorkPopupDisplayState, resetCreateCancelState, finishWorkPopup, refreshAgents, clearOp, t,
   ]);
 
   // Recovery across refresh / close+reopen is handled by useOpRecovery above
@@ -645,6 +748,21 @@ function Picker() {
           </button>
         }
       />
+
+      {createCancelCleanupNotice && (
+        <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
+          <p className="flex-1">
+            {t("hermes.create.workPopup.cancelCleanupHint", { id: createCancelCleanupNotice })}
+          </p>
+          <button
+            type="button"
+            className="shrink-0 text-amber-700 underline hover:text-amber-900 dark:text-amber-200"
+            onClick={() => setCreateCancelCleanupNotice(null)}
+          >
+            {t("hermes.create.workPopup.cancelCleanupDismiss")}
+          </button>
+        </div>
+      )}
 
       {error && <ErrorBox>{error}</ErrorBox>}
       {loading ? (
@@ -760,9 +878,7 @@ function Picker() {
         open={workPopupOpen}
         onClose={() => {
           if (workPopupBusy) return;
-          setWorkPopupOpen(false);
-          resetWorkPopupDisplayState();
-          resetCreateCancelState();
+          closeWorkPopupFromModal();
         }}
         title={t("hermes.create.workPopup.title")}
         width="max-w-xl"
@@ -780,9 +896,14 @@ function Picker() {
           >
             {workPopupDisplayText}
           </p>
+          {createCancelState?.failed && (
+            <p className="text-sm text-amber-800 dark:text-amber-200">
+              {t("hermes.create.workPopup.cancelCleanupHint", { id: createCancelState.agentId })}
+            </p>
+          )}
           {workPopupBusy && <Loading />}
           {showCreateCancelAction && (
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
               <button
                 type="button"
                 className="btn-outline"
@@ -791,20 +912,27 @@ function Picker() {
               >
                 {createCancelState?.cancelling
                   ? t("hermes.create.cancelling")
-                  : t("hermes.create.cancelCreate")}
+                  : createCancelState?.failed
+                    ? t("hermes.create.workPopup.cancelRetry")
+                    : t("hermes.create.cancelCreate")}
               </button>
+              {createCancelState?.failed && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => dismissCancelFailureNotice(createCancelState.agentId)}
+                >
+                  {t("hermes.create.workPopup.cancelForceClose")}
+                </button>
+              )}
             </div>
           )}
-          {!workPopupBusy && (
+          {!workPopupBusy && !createCancelState?.failed && (
             <div className="flex justify-end">
               <button
                 type="button"
                 className="btn-primary"
-                onClick={() => {
-                  setWorkPopupOpen(false);
-                  resetWorkPopupDisplayState();
-                  resetCreateCancelState();
-                }}
+                onClick={closeWorkPopupFromModal}
               >
                 {t("hermes.create.workPopup.close")}
               </button>

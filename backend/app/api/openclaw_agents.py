@@ -129,6 +129,24 @@ _IMPORT_OPTIMIZE_PROMPT = (
     "content; fix incorrect or redundant parts as needed. If existing managed work data is scattered in the workspace, "
     "consolidate it under `my-desktop/` when appropriate and update the management rules accordingly."
 )
+# Strong refs to detached create/bootstrap tasks so a client disconnect doesn't
+# GC the task before it records the op's terminal state.
+_DETACHED_CREATE_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_detached_create(coro) -> asyncio.Task:
+    """Run *coro* as a task whose lifecycle is independent of the request.
+
+    Callers ``await asyncio.shield(task)`` so the happy path still propagates the
+    result/exception, while a client disconnect (which cancels the request
+    coroutine) leaves the bootstrap running to completion.
+    """
+    task = asyncio.ensure_future(coro)
+    _DETACHED_CREATE_TASKS.add(task)
+    task.add_done_callback(_DETACHED_CREATE_TASKS.discard)
+    return task
+
+
 _CREATE_SELF_DEFINE_COMMIT_MESSAGE_PREFIX = "[csflow] bootstrap self-definition"
 _NEW_AGENT_GATEWAY_RETRY_DELAYS_SEC: tuple[float, ...] = (0.4, 0.8, 1.6)
 
@@ -183,6 +201,7 @@ def _agent_create_cancellation_event(agent_id: str) -> asyncio.Event | None:
 
 
 def _request_agent_create_cancellation(agent_id: str) -> bool:
+    svc.request_create_cancellation(agent_id)
     _REQUESTED_AGENT_CREATE_CANCELLATIONS.add(agent_id)
     _schedule_clear_agent_create_cancellation_request(agent_id)
     event = _PENDING_AGENT_CREATE_CANCELLATIONS.get(agent_id)
@@ -1565,12 +1584,21 @@ async def create_agent(
         nl_prompt=payload.nl_prompt,
         extra_skills=tuple(payload.extra_skills),
     )
-    created = await svc.commit_agent(
-        cmd,
-        user=user,
-        team_id=payload.team_id,
-        storage=storage,
-    )
+    try:
+        created = await svc.commit_agent(
+            cmd,
+            user=user,
+            team_id=payload.team_id,
+            storage=storage,
+        )
+    except svc.AgentCreateCancelled as exc:
+        raise ApiError(
+            "AGENT_CREATE_CANCELLED",
+            str(exc),
+            status_code=409,
+            details={"agent_id": payload.id.strip()},
+        ) from exc
+
     # Op-status tracking starts once registration succeeds (the pre-registration
     # window is short and covered by the GET in-flight layer); op_id uses the
     # canonical created.id. The DB row already exists here, but bootstrap (below)
@@ -1585,77 +1613,88 @@ async def create_agent(
         user_requirement=payload.description or payload.nl_prompt,
     )
     session_key = f"{openclaw_user_chat_session_id(user, created.id)}-bootstrap-{int(time.time())}"
-    try:
-        if _should_wait_until_gateway_agent_ready():
-            await _wait_until_gateway_agent_ready(agent_id=created.id)
-        _raise_if_agent_create_cancelled(agent_id=created.id)
-        bootstrap_reply = await _chat_completion_via_cli(
-            agent_id=created.id,
-            session_key=session_key,
-            message=bootstrap_prompt,
-            model_override=payload.model,
-            timeout_sec=_chat_cli_timeout_seconds(),
-        )
-        _raise_if_agent_create_cancelled(agent_id=created.id)
-        bootstrap_text = _normalize_assistant_text(_extract_chunk_text(bootstrap_reply))
-        commit_sha = await asyncio.to_thread(
-            _commit_bootstrap_workspace,
-            workspace_path=created.workspace_path,
-            agent_id=created.id,
-        )
-    except Exception as exc:
-        cleanup_error = await _cleanup_failed_agent_create(
-            agent_id=created.id,
-            storage=storage,
-        )
-        if cleanup_error:
-            logger.warning(
-                "openclaw_agent_create_bootstrap_cleanup_failed",
+
+    async def _bootstrap_and_finish() -> OpenclawAgentDetail:
+        try:
+            if _should_wait_until_gateway_agent_ready():
+                await _wait_until_gateway_agent_ready(agent_id=created.id)
+            _raise_if_agent_create_cancelled(agent_id=created.id)
+            bootstrap_reply = await _chat_completion_via_cli(
                 agent_id=created.id,
-                error=cleanup_error,
+                session_key=session_key,
+                message=bootstrap_prompt,
+                model_override=payload.model,
+                timeout_sec=_chat_cli_timeout_seconds(),
             )
-        if isinstance(exc, ApiError) and exc.code == "AGENT_CREATE_CANCELLED":
-            reg.fail(op_id, detail="cancelled", result={"agentId": created.id})
+            _raise_if_agent_create_cancelled(agent_id=created.id)
+            bootstrap_text = _normalize_assistant_text(_extract_chunk_text(bootstrap_reply))
+            commit_sha = await asyncio.to_thread(
+                _commit_bootstrap_workspace,
+                workspace_path=created.workspace_path,
+                agent_id=created.id,
+            )
+        except Exception as exc:
+            cleanup_error = await _cleanup_failed_agent_create(
+                agent_id=created.id,
+                storage=storage,
+            )
+            if cleanup_error:
+                logger.warning(
+                    "openclaw_agent_create_bootstrap_cleanup_failed",
+                    agent_id=created.id,
+                    error=cleanup_error,
+                )
+            if isinstance(exc, ApiError) and exc.code == "AGENT_CREATE_CANCELLED":
+                reg.fail(op_id, detail="cancelled", result={"agentId": created.id})
+                raise ApiError(
+                    "AGENT_CREATE_CANCELLED",
+                    f'agent creation cancelled for "{created.id}"',
+                    status_code=409,
+                    details={
+                        "agent_id": created.id,
+                        "workspace": created.workspace_path,
+                        **({"cleanup_error": cleanup_error} if cleanup_error else {}),
+                    },
+                ) from exc
+            message = str(exc)
+            if isinstance(exc, ApiError):
+                message = f"{exc.code}: {exc.message}"
+            reg.fail(op_id, detail=message)
             raise ApiError(
-                "AGENT_CREATE_CANCELLED",
-                f'agent creation cancelled for "{created.id}"',
-                status_code=409,
+                "AGENT_BOOTSTRAP_FAILED",
+                f"agent bootstrap failed after registration: {message}",
+                status_code=502,
                 details={
                     "agent_id": created.id,
                     "workspace": created.workspace_path,
                     **({"cleanup_error": cleanup_error} if cleanup_error else {}),
                 },
             ) from exc
-        message = str(exc)
-        if isinstance(exc, ApiError):
-            message = f"{exc.code}: {exc.message}"
-        reg.fail(op_id, detail=message)
-        raise ApiError(
-            "AGENT_BOOTSTRAP_FAILED",
-            f"agent bootstrap failed after registration: {message}",
-            status_code=502,
-            details={
-                "agent_id": created.id,
-                "workspace": created.workspace_path,
-                **({"cleanup_error": cleanup_error} if cleanup_error else {}),
-            },
-        ) from exc
-    finally:
-        _unregister_agent_create_cancellation(
+        finally:
+            _unregister_agent_create_cancellation(
+                agent_id=created.id,
+                event=cancellation_event,
+            )
+            _clear_agent_create_cancellation_request(created.id)
+            svc.finish_create_in_flight(created.id)
+            svc.clear_create_cancellation(created.id)
+
+        logger.info(
+            "openclaw_agent_create_bootstrap_completed",
             agent_id=created.id,
-            event=cancellation_event,
+            session_key=session_key,
+            bootstrap_reply_excerpt=bootstrap_text[:280],
+            workspace_commit=commit_sha,
         )
-        _clear_agent_create_cancellation_request(created.id)
-    logger.info(
-        "openclaw_agent_create_bootstrap_completed",
-        agent_id=created.id,
-        session_key=session_key,
-        bootstrap_reply_excerpt=bootstrap_text[:280],
-        workspace_commit=commit_sha,
-    )
-    reg.succeed(op_id, result={"agentId": created.id})
-    team_name = _team_name_map(storage=storage, user=user).get(created.team_id, "")
-    return _to_detail(created, team_name=team_name)
+        reg.succeed(op_id, result={"agentId": created.id})
+        team_name = _team_name_map(storage=storage, user=user).get(created.team_id, "")
+        return _to_detail(created, team_name=team_name)
+
+    # Detached + shield: a tab switch / client abort cancels the request
+    # coroutine but the bootstrap keeps running and records the op terminal
+    # state — otherwise recovery falsely succeeds via entity-existence fallback
+    # while the self-definition turn never ran.
+    return await asyncio.shield(_spawn_detached_create(_bootstrap_and_finish()))
 
 
 @router.post("/{agent_id}/cancel-create", status_code=202)
@@ -1698,6 +1737,8 @@ async def cancel_create_agent(
         agent_id=target,
         storage=storage,
     )
+    svc.finish_create_in_flight(target)
+    svc.clear_create_cancellation(target)
     logger.info(
         "openclaw_agent_cancel_create_requested",
         agent_id=target,

@@ -1076,7 +1076,14 @@ const en = {
         cancelVerifying: "Cancellation accepted. Verifying that this agent is no longer visible…",
         cancelAgentStillVisible:
           "Cancellation cleanup is still converging. This agent is still visible in the list.",
+        cancelOpStillRunning:
+          "Cancellation cleanup is still running on the server. Please wait or retry cancel.",
         cancelFailed: "Cancel request failed: {{message}}",
+        cancelRetry: "Retry cancel",
+        cancelForceClose: "Close anyway",
+        cancelCleanupHint:
+          'Cancel cleanup for agent "{{id}}" may not have finished. The agent may still appear in the list or leave a partial Hermes profile. Retry cancel or remove the agent manually.',
+        cancelCleanupDismiss: "Dismiss",
         cancelled: "Creation was cancelled.",
         close: "Close",
       },
@@ -1328,6 +1335,7 @@ const en = {
       invalidAgentIdNoSpaces: "Agent ID cannot contain spaces.",
       invalidAgentIdNoChinese: "Agent ID cannot contain Chinese characters.",
       idDuplicate: 'Agent ID "{{id}}" already exists. Please choose a different ID.',
+      idInProgress: 'Agent "{{id}}" is still being created. Wait for it to finish or cancel it first.',
       invalidAgentNameNoSpaces: "Agent name cannot contain spaces.",
       submit: "Submit creation",
     },
@@ -1380,7 +1388,14 @@ const en = {
       cancelled: "Creation has been cancelled. Cleanup has been requested.",
       cancelAgentStillVisible:
         "Cancellation cleanup is still converging. This agent is still visible in the list.",
+      cancelOpStillRunning:
+        "Cancellation cleanup is still running on the server. Please wait or retry cancel.",
       cancelFailed: "Cancel request failed: {{message}}",
+      cancelRetry: "Retry cancel",
+      cancelForceClose: "Close anyway",
+      cancelCleanupHint:
+        'Cancel cleanup for agent "{{id}}" may not have finished. The agent may still appear in the list or leave residual files. Retry cancel, remove the agent manually, or use restore/purge if needed.',
+      cancelCleanupDismiss: "Dismiss",
       close: "Close",
     },
     importAgents: {

@@ -136,6 +136,11 @@ class AgentAlreadyExists(OpenclawAgentError):
     status_code = 409
 
 
+class AgentCreateCancelled(OpenclawAgentError):
+    code = "AGENT_CREATE_CANCELLED"
+    status_code = 409
+
+
 class AgentNotFound(OpenclawAgentError):
     code = "OPENCLAW_AGENT_NOT_FOUND"
     status_code = 404
@@ -2006,25 +2011,70 @@ def reindex_registered_agents(
 # ──────────────────────────────────────────────────────────────────────
 
 
-# Ids with an in-flight create. A duplicate / concurrent create of the same id
-# fails fast instead of racing the in-flight one — the two share one id-keyed
-# workspace, and the loser's rollback (``_safe_rmtree``) would otherwise wipe
-# it, taking the winner's agent down with it. The backend runs one event loop,
-# so a check-then-add with no await in between is race-free.
+# Ids with an in-flight create (registration + bootstrap). A duplicate /
+# concurrent create of the same id fails fast instead of racing the in-flight
+# one — the two share one id-keyed workspace, and the loser's rollback
+# (``_safe_rmtree``) would otherwise wipe it, taking the winner's agent down
+# with it. The backend runs one event loop, so a check-then-add with no await
+# in between is race-free.
 _CREATE_IN_PROGRESS: set[str] = set()
+_CANCELLED_CREATES: set[str] = set()
+_CREATE_SELF_DEFINE_COMMIT_MESSAGE_PREFIX = "[csflow] bootstrap self-definition"
 
 
 def is_create_in_flight(aid: str) -> bool:
-    """True while a create for *aid* is registering side effects.
+    """True while a create for *aid* is registering side effects or bootstrapping.
 
-    Used by the operation-status recovery layer (``GET /api/operations``).
-    NOTE: this set is held only across ``commit_agent``'s registration, NOT the
-    subsequent bootstrap chat (which the API handler runs after commit_agent
-    returns) — so it under-reports during bootstrap. The op registry is the
-    authoritative ``running`` source; this is a restart-only fallback. Read on
-    the event loop only (the set is mutated loop-side without a lock).
+    Used by the operation-status recovery layer (``GET /api/operations``) when
+    the in-memory op registry entry was missed or evicted. Held from the start
+    of ``commit_agent`` until the API handler finishes bootstrap (success,
+    failure, or cancel). Read on the event loop only (no lock).
     """
     return aid in _CREATE_IN_PROGRESS
+
+
+def finish_create_in_flight(aid: str) -> None:
+    """Release the in-flight reservation after bootstrap terminates."""
+    _CREATE_IN_PROGRESS.discard(aid)
+
+
+def request_create_cancellation(aid: str) -> None:
+    """Mark an in-flight create as cancelled (honoured at the next await point)."""
+    _CANCELLED_CREATES.add(aid)
+
+
+def clear_create_cancellation(aid: str) -> None:
+    """Clear a stale cancel flag before a fresh create attempt for the same id."""
+    _CANCELLED_CREATES.discard(aid)
+
+
+def is_create_cancelled(aid: str) -> bool:
+    return aid in _CANCELLED_CREATES
+
+
+def is_bootstrap_complete(agent_id: str, *, storage: StorageBackend | None = None) -> bool:
+    """True once the bootstrap self-definition git commit landed in the workspace."""
+    store = storage or get_storage()
+    row = store.openclaw_get(agent_id)
+    if row is None:
+        return False
+    workspace = Path(row.workspace_path).expanduser().resolve(strict=False)
+    if not workspace.is_dir():
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", "log", "-1", "--format=%s"],
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    return _CREATE_SELF_DEFINE_COMMIT_MESSAGE_PREFIX in (proc.stdout or "")
 
 
 async def commit_agent(
@@ -2074,11 +2124,18 @@ async def commit_agent(
     if not cmd.name:
         raise OpenclawAgentError("name is required")
 
-    # Reserve the id for the whole create so a duplicate / concurrent request
-    # fails fast instead of racing into the shared, id-keyed workspace below —
-    # whose files the loser's rollback (``_safe_rmtree``) would otherwise wipe,
-    # taking the winner's agent with it. Check-then-add is race-free on the
-    # single event loop (no await between).
+    # Fresh attempt: clear any stale cancel flag from a previous create of the
+    # same id (the user may retry after cancelling).
+    clear_create_cancellation(aid)
+
+    # Reserve the id for the whole create (registration + bootstrap) so a
+    # duplicate / concurrent request fails fast instead of racing into the
+    # shared, id-keyed workspace below — whose files the loser's rollback
+    # (``_safe_rmtree``) would otherwise wipe, taking the winner's agent with
+    # it. Check-then-add is race-free on the single event loop (no await
+    # between). The reservation is released by :func:`finish_create_in_flight`
+    # once bootstrap terminates (API layer); failures during registration
+    # release it in the ``except`` below.
     if aid in _CREATE_IN_PROGRESS:
         raise AgentAlreadyExists(f"a create for {aid!r} is already in progress")
     _CREATE_IN_PROGRESS.add(aid)
@@ -2092,8 +2149,37 @@ async def commit_agent(
             config=cfg,
             auth_seed_source_agent_id=auth_seed_source_agent_id,
         )
-    finally:
-        _CREATE_IN_PROGRESS.discard(aid)
+    except Exception:
+        finish_create_in_flight(aid)
+        raise
+
+
+async def _abort_commit_if_cancelled(
+    aid: str,
+    *,
+    workspace: Path,
+    config: Config,
+    storage: StorageBackend,
+    json_registered: bool,
+    row_persisted: bool,
+) -> None:
+    if not is_create_cancelled(aid):
+        return
+    if row_persisted:
+        try:
+            await delete_agent(aid, mode="purge", storage=storage, config=config)
+        except AgentNotFound:
+            pass
+    elif json_registered:
+        try:
+            await oj.remove_managed_agent(aid, config=config)
+        except Exception:  # pragma: no cover - rollback best-effort
+            logger.warning("rollback_openclaw_json_failed", agent_id=aid)
+        _safe_rmtree(workspace.parent)
+    else:
+        _safe_rmtree(workspace.parent)
+    clear_create_cancellation(aid)
+    raise AgentCreateCancelled(f"creation of {aid!r} cancelled by user")
 
 
 async def _commit_agent_reserved(
@@ -2131,6 +2217,8 @@ async def _commit_agent_reserved(
         )
 
     workspace = _agent_workspace(aid)
+    json_registered = False
+    row_persisted = False
 
     # Filesystem-side preparation (cheap; reversible). Offloaded to a worker
     # thread — git init shells out repeatedly and must not block the loop.
@@ -2146,6 +2234,14 @@ async def _commit_agent_reserved(
         _ensure_workspace_templates, workspace, agent_id=aid, agent_name=cmd.name
     )
     await asyncio.to_thread(_git_init_workspace, workspace)
+    await _abort_commit_if_cancelled(
+        aid,
+        workspace=workspace,
+        config=cfg,
+        storage=storage,
+        json_registered=json_registered,
+        row_persisted=row_persisted,
+    )
     installed_skills = await asyncio.to_thread(
         _install_user_skills, workspace, cmd.extra_skills
     )
@@ -2172,6 +2268,7 @@ async def _commit_agent_reserved(
     # mirroring the Hermes fix.
     try:
         await oj.append_managed_agent(entry, config=cfg)
+        json_registered = True
     except oj.OpenclawJsonError as exc:
         # Roll back FS (best-effort) so retry works.
         _safe_rmtree(workspace.parent)
@@ -2189,6 +2286,7 @@ async def _commit_agent_reserved(
             nl_prompt=cmd.nl_prompt,
         )
         saved = storage.openclaw_create(agent)
+        row_persisted = True
     except Exception as exc:
         # Roll back openclaw.json change so the id is free again.
         try:
@@ -2212,6 +2310,15 @@ async def _commit_agent_reserved(
             agent_id=aid,
             error=str(exc)[:240],
         )
+
+    await _abort_commit_if_cancelled(
+        aid,
+        workspace=workspace,
+        config=cfg,
+        storage=storage,
+        json_registered=json_registered,
+        row_persisted=row_persisted,
+    )
 
     sessions_dir_ready = False
     try:
@@ -2987,8 +3094,14 @@ __all__ = [
     "OpenclawAgentError",
     "UpdateInput",
     "create_team",
+    "AgentCreateCancelled",
+    "clear_create_cancellation",
     "commit_agent",
+    "finish_create_in_flight",
+    "is_bootstrap_complete",
     "is_create_in_flight",
+    "is_create_cancelled",
+    "request_create_cancellation",
     "delete_agent",
     "get_team",
     "get_agent",

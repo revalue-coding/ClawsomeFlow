@@ -201,8 +201,10 @@ async def test_commit_agent_fails_fast_when_create_in_progress(
     monkeypatch.setattr(svc, "_commit_agent_reserved", _reserved)
     cmd = svc.CommitInput(id="dupe", name="Dupe")
 
-    # Normal create runs the body and releases the reservation afterwards.
+    # Normal create runs the body; reservation stays until finish_create_in_flight.
     assert await svc.commit_agent(cmd, user="u", storage=object(), config=object()) == "ok"
+    assert "dupe" in svc._CREATE_IN_PROGRESS
+    svc.finish_create_in_flight("dupe")
     assert "dupe" not in svc._CREATE_IN_PROGRESS
 
     # While a create for the id is in flight, a second one fails fast.
