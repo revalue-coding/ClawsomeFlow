@@ -76,9 +76,13 @@ import {
   scrollToNewMessagesDivider,
   settledCount,
   turnDividerIndex,
+  displayChatMessages,
 } from "@/lib/chatHistory";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
+import {
+  isCreateCancelConverged,
+} from "@/lib/createCancelVerify";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useStickyScroll } from "@/lib/useStickyScroll";
 
@@ -406,6 +410,50 @@ function AgentQuickActions({
     void loadTeams();
   }, []);
 
+  // Reconcile a session-restored progress popup against live op status so a
+  // completed create is not shown as "running" after navigating away and back.
+  useEffect(() => {
+    const agentId = createCancelState?.agentId;
+    if (!workPopupOpen || createCancelState?.cancelling) return;
+    if (!agentId) {
+      if (!workPopupText.trim() && !workPopupRunning) {
+        setWorkPopupOpen(false);
+      }
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const op = await api.getOperationStatus(`openclaw_create:${agentId}`);
+        if (cancelled || createCancelRequestedRef.current) return;
+        if (op.state === "succeeded") {
+          clearOp();
+          finishWorkPopup(true, t("assistant.workPopup.createdWithId", { id: agentId }));
+          notifyOpenclawAgentsUpdated();
+        } else if (op.state === "failed" && op.detail !== "cancelled") {
+          clearOp();
+          finishWorkPopup(false, op.detail);
+        } else if ((op.state === "failed" && op.detail === "cancelled") || (op.state === "not_found" && !op.inFlight)) {
+          clearOp();
+          setWorkPopupOpen(false);
+          resetWorkPopupDisplayState();
+          resetCreateCancelState();
+        } else if (op.state === "running" || op.inFlight) {
+          setWorkPopupRunning(true);
+          if (!workPopupText.trim()) {
+            setWorkPopupText(t("assistant.workPopup.running"));
+          }
+        }
+      } catch {
+        /* transient — op recovery / user retry will retry */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const query = new URLSearchParams(location.search);
     const shouldOpenCreate = query.get("createAgent") === "1";
@@ -486,14 +534,16 @@ function AgentQuickActions({
 
   async function verifyCreateCancelConverged(agentId: string): Promise<void> {
     const verifyDeadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
+    let consecutiveAbsent = 0;
     while (true) {
       const [listed, op] = await Promise.all([
         api.listOpenclawAgents(),
         api.getOperationStatus(`openclaw_create:${agentId}`),
       ]);
       const absent = !listed.items.some((item) => item.id === agentId);
-      const opSettled = op.state !== "running";
-      if (absent && opSettled) return;
+      if (absent) consecutiveAbsent += 1;
+      else consecutiveAbsent = 0;
+      if (isCreateCancelConverged(absent, op, consecutiveAbsent)) return;
       if (Date.now() >= verifyDeadline) {
         if (!absent) {
           throw new Error(t("assistant.workPopup.cancelAgentStillVisible"));
@@ -727,7 +777,7 @@ function AgentQuickActions({
         return;
       }
       const opStatus = await api.getOperationStatus(`openclaw_create:${agentId}`);
-      if (opStatus.state === "running") {
+      if (opStatus.state === "running" || opStatus.inFlight) {
         setCreateError(t("assistant.createModal.idInProgress", { id: agentId }));
         return;
       }
@@ -932,7 +982,8 @@ function AgentQuickActions({
   const createCancelEnabled =
     showCreateCancelAction && !(createCancelState?.cancelling ?? false);
   const workPopupDisplayText =
-    workPopupText || (workPopupOpen ? t("assistant.workPopup.running") : "");
+    workPopupText ||
+    (workPopupOpen && workPopupRunning ? t("assistant.workPopup.running") : "");
   const pickerActions: OpenclawPickerActions = {
     openCreate: onOpenCreateModal,
     openRestore: () => {
@@ -1835,6 +1886,15 @@ function ChatRoom({
   // user had seen when they navigated away.
   const messagesRef = useRef<Message[]>([]);
   messagesRef.current = messages;
+  const displayMessages = useMemo(() => {
+    const raw =
+      recovering &&
+      messages.length > 0 &&
+      messages[messages.length - 1].role === "user"
+        ? [...messages, { role: "assistant" as const, content: "" }]
+        : messages;
+    return displayChatMessages(raw);
+  }, [messages, recovering]);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const pendingFilesRef = useRef<File[]>([]);
   pendingFilesRef.current = pendingFiles;
@@ -2040,7 +2100,12 @@ function ChatRoom({
         // Draw the "new messages" divider above anything that arrived while the
         // user was away (settled count grew beyond what they'd last seen).
         const shown = settledCount(merged);
-        setNewDividerAt(seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1);
+        const dividerAt = seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1;
+        setNewDividerAt(dividerAt);
+        if (dividerAt >= 0) {
+          didJumpToNewDividerRef.current = false;
+          suppressNextStickyScroll();
+        }
         // Reconnect: server turn registry is authoritative for in-flight work.
         // History alone can miss a running turn (e.g. cache holds a partial
         // assistant bubble while the server still says running).
@@ -2204,9 +2269,12 @@ function ChatRoom({
   // When we restore history before agent detail finishes loading, the first
   // ``messages`` update can happen while the scroll container is still absent.
   // Including ``agent`` ensures we scroll to latest as soon as the panel appears.
+  // Skip while a divider jump is pending — ``revealCompletedTurn`` / re-entry
+  // will scroll to the divider instead of pinning the latest tail.
   useEffect(() => {
+    if (newDividerAt >= 0 && !didJumpToNewDividerRef.current) return;
     stickIfAtBottom();
-  }, [messages, agent, stickIfAtBottom]);
+  }, [messages, agent, stickIfAtBottom, newDividerAt]);
 
   // On re-entry (or when a turn completes in-page), scroll to the "new messages"
   // divider instead of pinning the latest tail.
@@ -2221,7 +2289,7 @@ function ChatRoom({
       didJumpToNewDividerRef.current = true;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [newDividerAt, messages.length, recovering, handleScroll, scrollRef]);
+  }, [newDividerAt, messages.length, recovering, streaming, agent, handleScroll, scrollRef]);
 
   // Core streaming turn. ``appendUser`` is false on regenerate (the user message
   // is already in the transcript — we only replace the assistant reply).
@@ -2611,12 +2679,7 @@ function ChatRoom({
             onScroll={handleScroll}
             className="min-h-[280px] flex-1 overflow-auto px-5 py-4 space-y-4 bg-ink-50/40"
           >
-            {(recovering &&
-            messages.length > 0 &&
-            messages[messages.length - 1].role === "user"
-              ? [...messages, { role: "assistant" as const, content: "" }]
-              : messages
-            ).map((m, i, list) => (
+            {displayMessages.map((m, i, list) => (
               <Fragment key={i}>
                 {i === newDividerAt && (
                   <div ref={newDividerRef}>

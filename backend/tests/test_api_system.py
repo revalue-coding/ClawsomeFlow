@@ -172,6 +172,25 @@ def test_ui_capabilities_local_default(monkeypatch) -> None:
     assert body["deploymentMode"] == "local"
     assert body["allowNativeDirectoryPicker"] is True
     assert body["nativeDirectoryClientColocated"] is True
+    assert body["userHomeDir"]
+    assert Path(body["userHomeDir"]).is_dir()
+
+
+def test_validate_directory_expands_and_resolves(tmp_path: Path) -> None:
+    target = tmp_path / "work"
+    target.mkdir()
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/validate-directory", json={"path": str(target)})
+    assert r.status_code == 200, r.text
+    assert r.json()["path"] == str(target.resolve())
+
+
+def test_validate_directory_rejects_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "nope"
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/validate-directory", json={"path": str(missing)})
+    assert r.status_code == 400
+    assert r.json()["error"] == "PATH_NOT_FOUND"
 
 
 def test_ui_capabilities_client_not_colocated_same_platform_ssh(monkeypatch) -> None:

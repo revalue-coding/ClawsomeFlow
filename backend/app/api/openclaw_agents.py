@@ -327,6 +327,28 @@ async def _wait_until_agent_create_cleanup_visible(
         )
 
 
+async def _wait_until_create_not_in_flight(*, agent_id: str) -> None:
+    """Wait until commit/bootstrap releases the in-flight reservation."""
+    deadline = time.monotonic() + _AGENT_CREATE_CANCEL_CLEANUP_WAIT_TIMEOUT_SEC
+    while svc.is_create_in_flight(agent_id):
+        now = time.monotonic()
+        if now >= deadline:
+            raise ApiError(
+                "AGENT_CANCEL_CLEANUP_TIMEOUT",
+                (
+                    f'create for "{agent_id}" did not release its in-flight lock within '
+                    f'{int(_AGENT_CREATE_CANCEL_CLEANUP_WAIT_TIMEOUT_SEC)}s'
+                ),
+                status_code=504,
+            )
+        await asyncio.sleep(
+            min(
+                _AGENT_CREATE_CANCEL_CLEANUP_POLL_SEC,
+                max(deadline - now, 0.0),
+            )
+        )
+
+
 def _settings_cache_get(*, user: str, agent_id: str) -> OpenclawAgentSettingsResponse | None:
     key = (user, agent_id)
     with _SETTINGS_CACHE_LOCK:
@@ -1572,6 +1594,15 @@ async def create_agent(
             status_code=503,
         )
 
+    agent_id = payload.id.strip()
+    if agent_id in _REQUESTED_AGENT_CREATE_CANCELLATIONS or svc.is_create_cancelled(agent_id):
+        raise ApiError(
+            "AGENT_CREATE_CANCELLED",
+            f'agent creation for "{agent_id}" was cancelled',
+            status_code=409,
+            details={"agent_id": agent_id},
+        )
+
     cmd = svc.CommitInput(
         id=payload.id,
         name=payload.name,
@@ -1737,7 +1768,13 @@ async def cancel_create_agent(
         agent_id=target,
         storage=storage,
     )
-    svc.finish_create_in_flight(target)
+    await _wait_until_create_not_in_flight(agent_id=target)
+    op_id = f"openclaw_create:{target}"
+    reg = get_op_registry()
+    op = reg.get(op_id, user=user)
+    if op is not None and op.state == "running":
+        reg.fail(op_id, detail="cancelled", result={"agentId": target})
+    _clear_agent_create_cancellation_request(target)
     svc.clear_create_cancellation(target)
     logger.info(
         "openclaw_agent_cancel_create_requested",

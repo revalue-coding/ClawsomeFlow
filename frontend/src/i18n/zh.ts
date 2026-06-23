@@ -1008,6 +1008,9 @@ const zh = {
     pickWorkdir: "工作目录",
     workdirNeeded: "请先选择一个工作目录。",
     workdir: "工作目录",
+    workdirEdit: "编辑工作目录",
+    workdirSave: "保存",
+    workdirSaving: "保存中…",
     messagePlaceholder: "给你的 Hermes Agent 发消息…",
     chatError: "对话失败：{{message}}",
     create: {

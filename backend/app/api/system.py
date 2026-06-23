@@ -71,6 +71,15 @@ class UiCapabilitiesResponse(_CamelModel):
     allow_native_directory_picker: bool
     native_directory_ui_available: bool
     native_directory_client_colocated: bool
+    user_home_dir: str = ""
+
+
+class ValidateDirectoryPayload(_CamelModel):
+    path: str
+
+
+class ValidateDirectoryResponse(_CamelModel):
+    path: str
 
 
 class OwnerKindsFastResponse(_CamelModel):
@@ -715,6 +724,18 @@ def _ensure_native_directory_client_colocated(request: Request, *, action: Liter
     )
 
 
+def _validate_existing_directory(path: str) -> Path:
+    raw = (path or "").strip()
+    if not raw:
+        raise ApiError("INVALID_PAYLOAD", "path is required", status_code=400)
+    candidate = Path(raw).expanduser()
+    if not candidate.exists():
+        raise ApiError("PATH_NOT_FOUND", f"path does not exist: {path}", status_code=400)
+    if not candidate.is_dir():
+        raise ApiError("PATH_NOT_A_DIRECTORY", f"path is not a directory: {path}", status_code=400)
+    return candidate.resolve(strict=False)
+
+
 @router.get("/ui-capabilities", response_model=UiCapabilitiesResponse)
 def ui_capabilities(request: Request, _user: UserDep = "") -> UiCapabilitiesResponse:
     """Expose deployment + native UI availability for frontend remote-client detection."""
@@ -726,7 +747,18 @@ def ui_capabilities(request: Request, _user: UserDep = "") -> UiCapabilitiesResp
         allow_native_directory_picker=caps.allow_native_directory_picker,
         native_directory_ui_available=native_ui,
         native_directory_client_colocated=native_directory_client_colocated(request),
+        user_home_dir=str(Path.home().resolve()),
     )
+
+
+@router.post("/validate-directory", response_model=ValidateDirectoryResponse)
+def validate_directory(
+    payload: Annotated[ValidateDirectoryPayload, Body()],
+    _user: UserDep = "",
+) -> ValidateDirectoryResponse:
+    """Validate that *path* exists on the server and return its expanded absolute form."""
+    resolved = _validate_existing_directory(payload.path)
+    return ValidateDirectoryResponse(path=str(resolved))
 
 
 @router.get("/workspace-directories", response_model=WorkspaceDirectoryListResponse)

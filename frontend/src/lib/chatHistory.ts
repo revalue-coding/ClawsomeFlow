@@ -155,6 +155,11 @@ export function turnDividerIndex(msgs: PersistedMessage[], appendUser: boolean):
   return appendUser ? count : Math.max(0, count - 1);
 }
 
+/** Transcript rows shown in the chat panel (system messages hidden). */
+export function displayChatMessages<T extends PersistedMessage>(msgs: T[]): T[] {
+  return msgs.filter((m) => m.role !== "system");
+}
+
 /** Scroll so the divider sits in the upper-middle of the chat viewport. */
 export function scrollToNewMessagesDivider(
   container: HTMLElement,

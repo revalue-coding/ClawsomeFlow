@@ -35,7 +35,7 @@ import {
   AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
 import { ChatBubble, NewMessagesDivider } from "@/components/ChatBubble";
-import { DesktopIcon, ExternalLinkIcon, RefreshIcon, SettingsIcon, TrashIcon } from "@/components/icons";
+import { DesktopIcon, EditIcon, ExternalLinkIcon, RefreshIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import {
   clearChatHistory,
   loadChatHistory,
@@ -47,10 +47,11 @@ import {
   scrollToNewMessagesDivider,
   settledCount,
   turnDividerIndex,
+  displayChatMessages,
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
-import { alertIfNativeDirectoryBlocked, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
+import { alertIfNativeDirectoryBlocked, ensureUiCapabilities, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
 import { cn } from "@/lib/cn";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useStickyScroll } from "@/lib/useStickyScroll";
@@ -70,9 +71,9 @@ import {
 } from "@/lib/api";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
+import { isCreateCancelConverged } from "@/lib/createCancelVerify";
 
 const CREATE_TEAM_SENTINEL = "__create_team__";
-const DEFAULT_WORKDIR = "~";
 // Cancel only unlocks once the backend confirms rollback; mirror OpenClaw's
 // verify-by-list loop so the popup doesn't close before the agent is gone.
 const CREATE_CANCEL_VERIFY_TIMEOUT_MS = 30 * 1000;
@@ -390,7 +391,8 @@ function Picker() {
   const createCancelEnabled =
     showCreateCancelAction && !(createCancelState?.cancelling ?? false);
   const workPopupDisplayText =
-    workPopupText || (workPopupOpen ? t("hermes.create.workPopup.running") : "");
+    workPopupText ||
+    (workPopupOpen && workPopupRunning ? t("hermes.create.workPopup.running") : "");
 
   const resetCreateForm = useCallback(() => {
     setCreateName("");
@@ -472,14 +474,16 @@ function Picker() {
 
   const verifyHermesCancelConverged = useCallback(async (agentId: string): Promise<void> => {
     const verifyDeadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
+    let consecutiveAbsent = 0;
     while (true) {
       const [listed, op] = await Promise.all([
         api.listHermesAgents("fast"),
         api.getOperationStatus(`hermes_create:${agentId}`),
       ]);
       const absent = !listed.items.some((item) => item.id === agentId);
-      const opSettled = op.state !== "running";
-      if (absent && opSettled) return;
+      if (absent) consecutiveAbsent += 1;
+      else consecutiveAbsent = 0;
+      if (isCreateCancelConverged(absent, op, consecutiveAbsent)) return;
       if (Date.now() >= verifyDeadline) {
         if (!absent) {
           throw new Error(t("hermes.create.workPopup.cancelAgentStillVisible"));
@@ -695,6 +699,49 @@ function Picker() {
   // Recovery across refresh / close+reopen is handled by useOpRecovery above
   // (durable localStorage pointer + GET status + WS), replacing the old 3s list
   // poll + list-presence reconcile effect.
+
+  useEffect(() => {
+    const agentId = createCancelState?.agentId;
+    if (!workPopupOpen || createCancelState?.cancelling) return;
+    if (!agentId) {
+      if (!workPopupText.trim() && !workPopupRunning) {
+        setWorkPopupOpen(false);
+      }
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const op = await api.getOperationStatus(`hermes_create:${agentId}`);
+        if (cancelled || createCancelRequestedRef.current) return;
+        if (op.state === "succeeded") {
+          clearOp();
+          finishWorkPopup(true, t("hermes.create.workPopup.created", { id: agentId }));
+          resetCreateForm();
+          void reload();
+        } else if (op.state === "failed" && op.detail !== "cancelled") {
+          clearOp();
+          finishWorkPopup(false, op.detail);
+        } else if ((op.state === "failed" && op.detail === "cancelled") || (op.state === "not_found" && !op.inFlight)) {
+          clearOp();
+          setWorkPopupOpen(false);
+          resetWorkPopupDisplayState();
+          resetCreateCancelState();
+        } else if (op.state === "running" || op.inFlight) {
+          setWorkPopupRunning(true);
+          if (!workPopupText.trim()) {
+            setWorkPopupText(t("hermes.create.workPopup.running"));
+          }
+        }
+      } catch {
+        /* transient */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const grouped = useMemo(() => {
     const UNGROUPED = "__ungrouped__";
@@ -1275,13 +1322,38 @@ function ChatRoom({ agentId }: { agentId: string }) {
   });
   const inputRef = useAutoGrowTextarea(input, { minHeightPx: 80, maxHeightPx: 240 });
   const [workdir, setWorkdir] = useState(
-    () => localStorage.getItem(`hermes-workdir-${agentId}`) || DEFAULT_WORKDIR,
+    () => localStorage.getItem(`hermes-workdir-${agentId}`) || "",
   );
-  const updateWorkdir = (next: string) => {
+  const [workdirEditing, setWorkdirEditing] = useState(false);
+  const [workdirDraft, setWorkdirDraft] = useState("");
+  const [workdirError, setWorkdirError] = useState("");
+  const [workdirSaving, setWorkdirSaving] = useState(false);
+  const updateWorkdir = useCallback((next: string) => {
     setWorkdir(next);
     if (next.trim()) localStorage.setItem(`hermes-workdir-${agentId}`, next);
     else localStorage.removeItem(`hermes-workdir-${agentId}`);
-  };
+  }, [agentId]);
+
+  useEffect(() => {
+    if (workdir.trim()) return;
+    let cancelled = false;
+    void ensureUiCapabilities()
+      .then((caps) => {
+        if (cancelled || !caps.userHomeDir) return;
+        const stored = localStorage.getItem(`hermes-workdir-${agentId}`);
+        if (stored && stored !== "~") {
+          updateWorkdir(stored);
+          return;
+        }
+        updateWorkdir(caps.userHomeDir);
+      })
+      .catch(() => {
+        /* leave empty until user sets manually */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, updateWorkdir, workdir]);
   const [sending, setSending] = useState(false);
   // True while reconnecting to a turn whose SSE stream was detached by a tab
   // switch / refresh: we poll GET /chat/status (unbounded while the server says
@@ -1321,6 +1393,15 @@ function ChatRoom({ agentId }: { agentId: string }) {
   // user had seen when they navigated away.
   const messagesRef = useRef<ChatMsg[]>([]);
   messagesRef.current = messages;
+  const displayMessages = useMemo(() => {
+    const raw =
+      recovering &&
+      messages.length > 0 &&
+      messages[messages.length - 1].role === "user"
+        ? [...messages, { role: "assistant" as const, content: "" }]
+        : messages;
+    return displayChatMessages(raw);
+  }, [messages, recovering]);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const pendingFilesRef = useRef<File[]>([]);
   pendingFilesRef.current = pendingFiles;
@@ -1515,7 +1596,12 @@ function ChatRoom({ agentId }: { agentId: string }) {
         // Draw the "new messages" divider above anything that arrived while the
         // user was away (settled count grew beyond what they'd last seen).
         const shown = settledCount(merged);
-        setNewDividerAt(seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1);
+        const dividerAt = seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1;
+        setNewDividerAt(dividerAt);
+        if (dividerAt >= 0) {
+          didJumpToNewDividerRef.current = false;
+          suppressNextStickyScroll();
+        }
         try {
           const st = await api.getHermesChatStatus(agentId);
           let nextMessages = merged;
@@ -1592,10 +1678,6 @@ function ChatRoom({ agentId }: { agentId: string }) {
     didJumpToNewDividerRef.current = false;
   }, [suppressNextStickyScroll]);
 
-  useEffect(() => {
-    stickIfAtBottom();
-  }, [messages, recovering, stickIfAtBottom]);
-
   // On re-entry (or when a turn completes in-page), scroll to the "new messages"
   // divider instead of pinning the latest tail.
   useEffect(() => {
@@ -1609,7 +1691,12 @@ function ChatRoom({ agentId }: { agentId: string }) {
       didJumpToNewDividerRef.current = true;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [newDividerAt, messages.length, recovering, handleScroll, scrollRef]);
+  }, [newDividerAt, messages.length, recovering, sending, handleScroll, scrollRef]);
+
+  useEffect(() => {
+    if (newDividerAt >= 0 && !didJumpToNewDividerRef.current) return;
+    stickIfAtBottom();
+  }, [messages, recovering, stickIfAtBottom, newDividerAt]);
 
   // Reconnect to a turn whose SSE stream was detached (tab switch / refresh):
   // poll GET /chat/status and keep going *as long as the server says running*
@@ -1692,10 +1779,46 @@ function ChatRoom({ agentId }: { agentId: string }) {
   const pickWorkdir = async () => {
     if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     try {
-      const out = await api.pickDirectory({ title: t("hermes.workdir"), initialPath: workdir || undefined });
-      if (out.path) updateWorkdir(out.path);
+      const out = await api.pickDirectory({
+        title: t("hermes.workdir"),
+        initialPath: (workdirEditing ? workdirDraft : workdir) || undefined,
+      });
+      if (out.path) {
+        if (workdirEditing) setWorkdirDraft(out.path);
+        else updateWorkdir(out.path);
+      }
     } catch (e) {
-      setError(errText(e));
+      if (workdirEditing) setWorkdirError(errText(e));
+      else setError(errText(e));
+    }
+  };
+
+  const startEditWorkdir = () => {
+    setWorkdirDraft(workdir);
+    setWorkdirError("");
+    setWorkdirEditing(true);
+  };
+
+  const cancelEditWorkdir = () => {
+    setWorkdirEditing(false);
+    setWorkdirDraft("");
+    setWorkdirError("");
+  };
+
+  const saveWorkdir = async () => {
+    const raw = workdirDraft.trim();
+    if (!raw || workdirSaving) return;
+    setWorkdirSaving(true);
+    setWorkdirError("");
+    try {
+      const out = await api.validateDirectory({ path: raw });
+      updateWorkdir(out.path);
+      setWorkdirEditing(false);
+      setWorkdirDraft("");
+    } catch (e) {
+      setWorkdirError(errText(e));
+    } finally {
+      setWorkdirSaving(false);
     }
   };
 
@@ -2084,31 +2207,25 @@ function ChatRoom({ agentId }: { agentId: string }) {
             onScroll={handleScroll}
             className="min-h-[280px] flex-1 space-y-4 overflow-auto bg-ink-50/40 px-5 py-4"
           >
-            {(recovering &&
-            messages.length > 0 &&
-            messages[messages.length - 1].role === "user"
-              ? [...messages, { role: "assistant" as const, content: "" }]
-              : messages)
-              .filter((m) => m.role !== "system")
-              .map((m, i, list) => (
-                <Fragment key={i}>
-                  {i === newDividerAt && (
-                    <div ref={newDividerRef}>
-                      <NewMessagesDivider label={t("chat.newMessages")} />
-                    </div>
-                  )}
-                  <ChatBubble
-                    msg={m}
-                    pending={
-                      (sending || recovering) &&
-                      i === list.length - 1 &&
-                      m.role === "assistant" &&
-                      !m.content
-                    }
-                    noTextReply={t("chat.noTextReply")}
-                  />
-                </Fragment>
-              ))}
+            {displayMessages.map((m, i, list) => (
+              <Fragment key={i}>
+                {i === newDividerAt && (
+                  <div ref={newDividerRef}>
+                    <NewMessagesDivider label={t("chat.newMessages")} />
+                  </div>
+                )}
+                <ChatBubble
+                  msg={m}
+                  pending={
+                    (sending || recovering) &&
+                    i === list.length - 1 &&
+                    m.role === "assistant" &&
+                    !m.content
+                  }
+                  noTextReply={t("chat.noTextReply")}
+                />
+              </Fragment>
+            ))}
             {!sending &&
               !recovering &&
               messages.length > 0 &&
@@ -2145,20 +2262,66 @@ function ChatRoom({ agentId }: { agentId: string }) {
           }}
           className="space-y-2 border-t border-ink-100 p-3"
         >
-          <div className="flex items-center gap-2 text-xs text-ink-500">
-            <button
-              type="button"
-              className="btn-outline shrink-0 !px-2 !py-1 text-xs"
-              onClick={() => void pickWorkdir()}
-            >
-              {t("hermes.pickWorkdir")}
-            </button>
-            <input
-              className="input flex-1 font-mono text-xs"
-              value={workdir}
-              placeholder={t("hermes.workdirNeeded")}
-              onChange={(e) => updateWorkdir(e.target.value)}
-            />
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-xs text-ink-500">
+              <span className="shrink-0 font-medium text-ink-600">{t("hermes.workdir")}</span>
+              <input
+                className={cn(
+                  "input flex-1 font-mono text-xs",
+                  !workdirEditing && "cursor-default bg-ink-50/80",
+                )}
+                value={workdirEditing ? workdirDraft : workdir}
+                placeholder={t("hermes.workdirNeeded")}
+                readOnly={!workdirEditing}
+                disabled={workdirSaving}
+                onChange={(e) => {
+                  if (!workdirEditing) return;
+                  setWorkdirDraft(e.target.value);
+                  setWorkdirError("");
+                }}
+              />
+              {workdirEditing ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn-outline shrink-0 !px-2 !py-1 text-xs"
+                    onClick={() => void pickWorkdir()}
+                    disabled={workdirSaving}
+                  >
+                    {t("hermes.pickWorkdir")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary shrink-0 !px-2 !py-1 text-xs"
+                    onClick={() => void saveWorkdir()}
+                    disabled={workdirSaving || !workdirDraft.trim()}
+                  >
+                    {workdirSaving ? t("hermes.workdirSaving") : t("hermes.workdirSave")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-outline shrink-0 !px-2 !py-1 text-xs"
+                    onClick={cancelEditWorkdir}
+                    disabled={workdirSaving}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-ink-200 text-ink-500 hover:bg-ink-50 hover:text-ink-800"
+                  title={t("hermes.workdirEdit")}
+                  aria-label={t("hermes.workdirEdit")}
+                  onClick={startEditWorkdir}
+                >
+                  <EditIcon className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+            {workdirError && (
+              <p className="text-xs text-rose-600">{workdirError}</p>
+            )}
           </div>
           <div
             className={cn(

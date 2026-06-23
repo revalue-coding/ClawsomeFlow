@@ -10,12 +10,12 @@ without polling. It layers four sources, first match wins:
 3. **Service in-flight** — a create is still registering → ``running``.
 4. Otherwise → ``not_found``.
 
-Caveat (documented intentionally): OpenClaw's in-flight set does NOT span its
-bootstrap, and the DB row is committed before bootstrap finishes. So after a
-*backend restart mid-bootstrap*, layer 2 reports ``succeeded`` for an OpenClaw
-agent whose bootstrap never committed. This is accepted under the "no
-persistence / live-only" decision — the registry is authoritative while the
-process runs, and the frontend treats entity-derived ``succeeded`` as "exists".
+Caveat (documented intentionally): after a *backend restart mid-bootstrap*,
+layer 2 can report ``succeeded`` for an OpenClaw agent whose bootstrap never
+committed if the registry entry was lost but the DB row remains. This is
+accepted under the "no persistence / live-only" decision — the registry is
+authoritative while the process runs, and the frontend treats entity-derived
+``succeeded`` as "exists".
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ class OperationStatusResponse(BaseModel):
     detail: str = ""
     result: dict[str, Any] = Field(default_factory=dict)
     source: str = ""  # "registry" | "entity" | "in_flight" — observability only
+    in_flight: bool = False
 
 
 def _entity_exists(kind: str, target: str, *, user: str, storage: StorageBackend) -> bool:
@@ -95,20 +96,57 @@ async def get_operation_status(
     which is mutated on the event loop — keeping this handler on the loop avoids a
     cross-thread read from FastAPI's sync threadpool.
     """
+    kind, _, target = op_id.partition(":")
+    in_flight = bool(target and _in_flight(kind, target))
+
     reg = get_op_registry()
     op = reg.get(op_id, user=user)
     if op is not None:
+        # Registry can lag behind bootstrap completion (``reg.succeed`` runs after
+        # ``finish_create_in_flight``). When the entity is complete and the
+        # service no longer holds the id, treat as succeeded for recovery UI.
+        if (
+            op.state == "running"
+            and target
+            and not in_flight
+            and _entity_exists(kind, target, user=user, storage=storage)
+        ):
+            return OperationStatusResponse(
+                op_id=op_id,
+                state="succeeded",
+                kind=kind,
+                detail="recovered",
+                result={"agentId": target},
+                source="entity",
+                in_flight=False,
+            )
         return OperationStatusResponse(
-            op_id=op_id, state=op.state, kind=op.kind,
-            detail=op.detail, result=op.result, source="registry",
+            op_id=op_id,
+            state=op.state,
+            kind=op.kind,
+            detail=op.detail,
+            result=op.result,
+            source="registry",
+            in_flight=in_flight,
         )
 
-    kind, _, target = op_id.partition(":")
     if target and _entity_exists(kind, target, user=user, storage=storage):
-        return OperationStatusResponse(op_id=op_id, state="succeeded", kind=kind,
-                                       detail="recovered", source="entity")
-    if target and _in_flight(kind, target):
-        return OperationStatusResponse(op_id=op_id, state="running", kind=kind, source="in_flight")
+        return OperationStatusResponse(
+            op_id=op_id,
+            state="succeeded",
+            kind=kind,
+            detail="recovered",
+            source="entity",
+            in_flight=False,
+        )
+    if in_flight:
+        return OperationStatusResponse(
+            op_id=op_id,
+            state="running",
+            kind=kind,
+            source="in_flight",
+            in_flight=True,
+        )
     if (
         kind == "openclaw_create"
         and target
@@ -121,8 +159,14 @@ async def get_operation_status(
             kind=kind,
             detail="bootstrap_incomplete",
             source="entity",
+            in_flight=False,
         )
-    return OperationStatusResponse(op_id=op_id, state="not_found", kind=kind)
+    return OperationStatusResponse(
+        op_id=op_id,
+        state="not_found",
+        kind=kind,
+        in_flight=False,
+    )
 
 
 def _openclaw_row_owned(target: str, *, user: str, storage: StorageBackend) -> bool:

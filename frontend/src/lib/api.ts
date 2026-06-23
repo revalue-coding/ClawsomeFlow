@@ -342,6 +342,7 @@ export interface OperationStatus {
   detail: string;
   result: Record<string, unknown>;
   source: string;
+  inFlight: boolean;
 }
 
 export interface RunScheduleItem {
@@ -694,6 +695,7 @@ export interface UiCapabilities {
   allowNativeDirectoryPicker: boolean;
   nativeDirectoryUiAvailable: boolean;
   nativeDirectoryClientColocated: boolean;
+  userHomeDir: string;
 }
 
 export interface OwnerKindsFast {
@@ -1511,6 +1513,8 @@ export const api = {
       "/api/system/open-directory",
       payload,
     ),
+  validateDirectory: (payload: { path: string }) =>
+    request<{ path: string }>("POST", "/api/system/validate-directory", payload),
   ensureGitRepo: (payload: {
     path: string;
     createDirIfMissing?: boolean;

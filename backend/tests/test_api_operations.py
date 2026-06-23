@@ -69,11 +69,39 @@ def test_in_flight_fallback(client, monkeypatch: pytest.MonkeyPatch) -> None:
     body = client.get("/api/operations/hermes_create:math").json()
     assert body["state"] == "running"
     assert body["source"] == "in_flight"
+    assert body["inFlight"] is True
 
 
-def test_not_found(client) -> None:
+def test_not_found_reports_in_flight_false(client) -> None:
     body = client.get("/api/operations/hermes_create:nope").json()
     assert body["state"] == "not_found"
+    assert body["inFlight"] is False
+
+
+def test_registry_running_recovers_when_entity_complete(
+    client, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import OpenclawAgent
+    from app.services import openclaw_agents as oc_svc
+
+    storage = get_storage()
+    storage.openclaw_create(
+        OpenclawAgent(
+            id="done",
+            name="Done",
+            workspace_path="/tmp/done-workspace",
+            created_by_user="alice",
+        )
+    )
+    monkeypatch.setattr(oc_svc, "is_bootstrap_complete", lambda aid, **_: aid == "done")
+    monkeypatch.setattr(oc_svc, "is_create_in_flight", lambda aid: False)
+    reg = ops.get_op_registry()
+    reg.start(op_id="openclaw_create:done", user="alice", kind="openclaw_create")
+    body = client.get("/api/operations/openclaw_create:done").json()
+    assert body["state"] == "succeeded"
+    assert body["source"] == "entity"
+    assert body["inFlight"] is False
+    storage.openclaw_delete("done")
 
 
 def test_openclaw_entity_fallback_requires_bootstrap_complete(client) -> None:

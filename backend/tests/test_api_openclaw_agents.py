@@ -870,6 +870,29 @@ def test_cancel_create_endpoint_cleans_residual_dir_without_db_row(
     assert not paths.agent_dir(orphan_id).exists()
 
 
+def test_create_rejected_while_cancel_pending(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import openclaw_agents as oc_api
+
+    oc_api._REQUESTED_AGENT_CREATE_CANCELLATIONS.add("pending-cancel")
+    try:
+        r = client.post(
+            "/api/openclaw/agents",
+            json={
+                "id": "pending-cancel",
+                "name": "Pending Cancel",
+                "description": "x",
+                "teamId": None,
+            },
+        )
+    finally:
+        oc_api._REQUESTED_AGENT_CREATE_CANCELLATIONS.discard("pending-cancel")
+    assert r.status_code == 409
+    assert r.json()["error"] == "AGENT_CREATE_CANCELLED"
+
+
 @pytest.mark.asyncio
 async def test_delete_other_user_forbidden(
     client: TestClient, fake_openclaw_home: Path, monkeypatch: pytest.MonkeyPatch,

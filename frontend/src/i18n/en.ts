@@ -1025,6 +1025,9 @@ const en = {
     pickWorkdir: "Working dir",
     workdirNeeded: "Pick a working directory first.",
     workdir: "Working directory",
+    workdirEdit: "Edit working directory",
+    workdirSave: "Save",
+    workdirSaving: "Saving…",
     messagePlaceholder: "Message your Hermes agent…",
     chatError: "Chat failed: {{message}}",
     create: {
