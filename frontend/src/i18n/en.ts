@@ -1378,10 +1378,8 @@ const en = {
     },
     restoreModal: {
       title: "Restore Agent",
-      hint: "Choose the Agent to re-register into OpenClaw runtime.",
-      targetLabel: "Target Agent",
-      empty: "No restorable Agent found.",
-      submit: "Submit restore",
+      hint: "Confirm re-registering the following Agent into OpenClaw runtime.",
+      submit: "Confirm restore",
       restoring: "Restoring…",
     },
     workPopup: {

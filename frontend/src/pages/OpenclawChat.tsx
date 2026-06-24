@@ -278,7 +278,7 @@ type OpenclawPickerActions = {
     agent: OpenclawAgentSummary,
     options?: { defaultMode?: OpenclawAgentRemoveMode },
   ) => void;
-  restoreAgent: (agentId: string) => Promise<void>;
+  openRestoreFor: (agent: Pick<OpenclawRestorableAgent, "id" | "name">) => void;
 };
 
 // ──────────────────────────────────────────────────────────────────────
@@ -315,6 +315,12 @@ function AgentQuickActions({
   const [removeTargetId, setRemoveTargetId] = useState("");
   const [removeMode, setRemoveMode] = useState<OpenclawAgentRemoveMode>("unregister");
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const [restoreModalOpen, setRestoreModalOpen] = useSessionBackedModalFlag(
+    "openclaw-chat:quick-actions:restore-modal-open",
+  );
+  const [restoreTarget, setRestoreTarget] = useState<{ id: string; name: string } | null>(null);
+  const [restoreSubmitting, setRestoreSubmitting] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [importModalOpen, setImportModalOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:import-modal-open",
   );
@@ -395,11 +401,12 @@ function AgentQuickActions({
   );
 
   // Block leaving the page while an irreversible/in-flight operation runs, so a
-  // remove / create-cancellation / import-cancellation can't be orphaned
-  // mid-flight. react-router allows a single blocker at a time, so every
-  // condition is folded into one expression here.
+  // remove / restore / create-cancellation / import-cancellation can't be
+  // orphaned mid-flight. react-router allows a single blocker at a time, so
+  // every condition is folded into one expression here.
   const navGuardActive =
     removeSubmitting ||
+    restoreSubmitting ||
     createCancelState?.cancelling === true ||
     importCancelState?.cancelling === true;
   useNavigationGuard(navGuardActive, () => {
@@ -1067,9 +1074,26 @@ function AgentQuickActions({
     setRemoveLoading(false);
   }
 
-  async function restoreAgent(agentId: string) {
-    await api.restoreOpenclawAgent(agentId);
-    notifyOpenclawAgentsUpdated();
+  function openRestoreForAgent(agent: Pick<OpenclawRestorableAgent, "id" | "name">) {
+    setRestoreModalOpen(true);
+    setRestoreError(null);
+    setRestoreTarget({ id: agent.id, name: agent.name });
+  }
+
+  async function onSubmitRestoreTarget() {
+    if (!restoreTarget) return;
+    setRestoreSubmitting(true);
+    setRestoreError(null);
+    try {
+      await api.restoreOpenclawAgent(restoreTarget.id);
+      setRestoreModalOpen(false);
+      setRestoreTarget(null);
+      notifyOpenclawAgentsUpdated();
+    } catch (e) {
+      setRestoreError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setRestoreSubmitting(false);
+    }
   }
 
   function buildFlowInUseError(e: ApiError): string {
@@ -1178,7 +1202,7 @@ function AgentQuickActions({
     openRemoveFor: (agent, options) => {
       void openRemoveForAgent(agent, options);
     },
-    restoreAgent,
+    openRestoreFor: openRestoreForAgent,
   };
 
   return (
@@ -1354,6 +1378,53 @@ function AgentQuickActions({
               </div>
             </>
           )}
+        </div>
+      </Modal>
+
+      <Modal
+        open={restoreModalOpen}
+        onClose={() => {
+          // Once restore is in flight it cannot be cancelled — keep the modal up.
+          if (restoreSubmitting) return;
+          setRestoreModalOpen(false);
+          setRestoreTarget(null);
+          setRestoreError(null);
+        }}
+        title={t("assistant.restoreModal.title")}
+        width="max-w-lg"
+        dismissible={!restoreSubmitting}
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-ink-600">{t("assistant.restoreModal.hint")}</p>
+          {restoreTarget ? (
+            <div className="rounded-md border border-ink-200 bg-ink-50 px-3 py-2 text-sm text-ink-800 dark:border-ink-700 dark:bg-ink-900/40">
+              {restoreTarget.name} ({restoreTarget.id})
+            </div>
+          ) : null}
+          {restoreError && <ErrorBox>{restoreError}</ErrorBox>}
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => {
+                if (restoreSubmitting) return;
+                setRestoreModalOpen(false);
+                setRestoreTarget(null);
+                setRestoreError(null);
+              }}
+              disabled={restoreSubmitting}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void onSubmitRestoreTarget()}
+              disabled={restoreSubmitting || !restoreTarget}
+            >
+              {restoreSubmitting ? t("assistant.restoreModal.restoring") : t("assistant.restoreModal.submit")}
+            </button>
+          </div>
         </div>
       </Modal>
 
@@ -1598,8 +1669,6 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
   const { t } = useTranslation();
   const [items, setItems] = useState<OpenclawPickerAgent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [restoreError, setRestoreError] = useState<string | null>(null);
-  const [restoringIds, setRestoringIds] = useState<Set<string>>(() => new Set());
   const [storeComingSoonOpen, setStoreComingSoonOpen] = useSessionBackedModalFlag(
     "openclaw-chat:picker:store-coming-soon-open",
   );
@@ -1640,24 +1709,6 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
       setError(e instanceof ApiError ? e.message : String(e));
     }
   }, []);
-
-  async function onRestoreAgent(agentId: string) {
-    if (restoringIds.has(agentId)) return;
-    setRestoreError(null);
-    setRestoringIds((prev) => new Set(prev).add(agentId));
-    try {
-      await actions.restoreAgent(agentId);
-      await loadAgents();
-    } catch (e) {
-      setRestoreError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-    } finally {
-      setRestoringIds((prev) => {
-        const next = new Set(prev);
-        next.delete(agentId);
-        return next;
-      });
-    }
-  }
 
   useEffect(() => {
     void loadAgents();
@@ -1757,7 +1808,6 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
         }
       />
       {error && <ErrorBox>{error}</ErrorBox>}
-      {restoreError && <ErrorBox>{restoreError}</ErrorBox>}
       {!items && !error && <Loading />}
       {items && items.length === 0 && (
         <EmptyState
@@ -1853,12 +1903,9 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                             className="inline-flex h-8 w-8 items-center justify-center rounded-md text-brand-600 hover:bg-brand-50 hover:text-brand-700 disabled:opacity-50 dark:hover:bg-brand-950/40"
                             title={t("assistant.askRestore")}
                             aria-label={t("assistant.askRestore")}
-                            disabled={restoringIds.has(a.id)}
-                            onClick={() => void onRestoreAgent(a.id)}
+                            onClick={() => actions.openRestoreFor(a)}
                           >
-                            <RefreshIcon
-                              className={cn("h-5 w-5", restoringIds.has(a.id) && "animate-spin")}
-                            />
+                            <RefreshIcon className="h-5 w-5" />
                           </button>
                           <button
                             type="button"
@@ -1942,12 +1989,9 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                           className="inline-flex h-8 w-8 items-center justify-center rounded-md text-brand-600 hover:bg-brand-50 hover:text-brand-700 disabled:opacity-50 dark:hover:bg-brand-950/40"
                           title={t("assistant.askRestore")}
                           aria-label={t("assistant.askRestore")}
-                          disabled={restoringIds.has(a.id)}
-                          onClick={() => void onRestoreAgent(a.id)}
+                          onClick={() => actions.openRestoreFor(a)}
                         >
-                          <RefreshIcon
-                            className={cn("h-5 w-5", restoringIds.has(a.id) && "animate-spin")}
-                          />
+                          <RefreshIcon className="h-5 w-5" />
                         </button>
                       ) : null}
                       <button

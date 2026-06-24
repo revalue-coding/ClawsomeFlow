@@ -1351,10 +1351,8 @@ const zh = {
     },
     restoreModal: {
       title: "恢复智能体",
-      hint: "请选择需要恢复注册到 OpenClaw 运行时的 Agent。",
-      targetLabel: "目标 Agent",
-      empty: "当前没有可恢复的 Agent。",
-      submit: "提交恢复",
+      hint: "确认将以下 Agent 重新注册到 OpenClaw 运行时吗？",
+      submit: "确认恢复",
       restoring: "恢复中…",
     },
     workPopup: {

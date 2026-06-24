@@ -263,6 +263,20 @@ function needsRepoBranchFields(kind: OwnerKindDraft): boolean {
   return !isOpenclawKind(kind);
 }
 
+/** Repo/branch binding carried by the leader summary task row, if any. */
+function summaryLeaderBinding(
+  rows: TaskRow[],
+): { repo: string; targetBranch: string } | null {
+  const summary = rows.find((r) => r.isLeaderSummary);
+  if (!summary || !needsRepoBranchFields(summary.ownerKind)) {
+    return null;
+  }
+  return {
+    repo: summary.ownerRepo.trim(),
+    targetBranch: summary.ownerTargetBranch.trim(),
+  };
+}
+
 function isPersistentOwnerKind(kind: OwnerKindDraft): kind is OwnerKind {
   return kind === "openclaw" || kind === "hermes";
 }
@@ -2763,6 +2777,16 @@ export function FlowEditor() {
             repo: leaderRepo.trim(),
             targetBranch: leaderTargetBranch.trim(),
           });
+          const binding = summaryLeaderBinding(rows);
+          if (binding) {
+            if (binding.repo) {
+              setLeaderRepo(binding.repo);
+              commitLeaderRepoCheck(binding.repo);
+            }
+            if (binding.targetBranch) {
+              setLeaderTargetBranch(binding.targetBranch);
+            }
+          }
           setTasks(rows);
           setDecomposeOpen(false);
         }}
@@ -5394,9 +5418,11 @@ function proposalToRows(
       const existing = byId.get(normalizedLeaderId);
       byId.set(normalizedLeaderId, {
         kind: ctxKind,
-        repo: leaderContext.repo.trim() || existing?.repo || "",
+        // Backend apply restores editor bindings into proposal.agents — those
+        // win over the leader picker snapshot passed as fallback context.
+        repo: (existing?.repo ?? "").trim() || leaderContext.repo.trim(),
         targetBranch:
-          leaderContext.targetBranch.trim() || existing?.targetBranch || "",
+          (existing?.targetBranch ?? "").trim() || leaderContext.targetBranch.trim(),
         isTemporary:
           ctxKind !== "openclaw"
           && !hermesOptions.some((h) => h.id === normalizedLeaderId),
