@@ -19,6 +19,7 @@ const en = {
     confirm: "Confirm",
     confirmTitle: "Please confirm",
     noticeTitle: "Notice",
+    navGuardBusy: "Please wait for the current operation to finish before leaving this page.",
     yes: "Yes",
     no: "No",
     notFound: "Not found",
@@ -1083,7 +1084,7 @@ const en = {
           "Request received! We are building a Hermes agent with its own persona and memory for you. This usually takes a couple of minutes — please wait patiently…",
         created: "Your Hermes agent is ready: {{id}}. Start putting it to work.",
         failed: "Creation finished with issues. Please check the result details.",
-        cancelPreparing: "Preparing cancel…",
+        cancelPreparing: "Creating…",
         cancelRunning: "Cancelling creation and rolling back residual files…",
         cancelVerifying: "Cancellation accepted. Verifying that this agent is no longer visible…",
         cancelAgentStillVisible:
@@ -1391,12 +1392,17 @@ const en = {
       createdWithPath: "Agent created: {{id}}\nworkspace: {{workspace}}",
       failed: "Processing finished with issues. Please check the result details.",
       cancelCreate: "Cancel creation",
-      cancelPreparing: "Preparing cancel…",
+      // Shown on the (disabled) cancel button before cancel is armed — surfaces
+      // that creation is still under way rather than "preparing to cancel".
+      cancelPreparing: "Creating…",
       cancellingCreate: "Cancelling…",
       cancelCountdownHint: "Cancellation unlocks in {{minutes}}m {{seconds}}s.",
       cancelReadyHint:
         "Creation has been running for over 5 minutes. You can cancel and rollback now.",
       cancelRunning: "Cancelling creation and cleaning up residual files...",
+      cancelImport: "Cancel import",
+      cancelImportPreparing: "Importing…",
+      cancelImportRunning: "Cancelling import (agents already imported are kept)…",
       cancelVerifying: "Cancellation accepted. Verifying that this agent is no longer visible...",
       cancelled: "Creation has been cancelled. Cleanup has been requested.",
       cancelAgentStillVisible:

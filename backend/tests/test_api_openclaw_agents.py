@@ -407,6 +407,74 @@ async def test_import_external_agents_assigns_selected_team(
 
 
 @pytest.mark.asyncio
+async def test_import_cancel_keeps_imported_and_stops_remaining(
+    client: TestClient,
+    fake_openclaw_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling mid-import keeps the already-imported agent and skips the rest."""
+    if not _has_git():
+        pytest.skip("git not available")
+    for aid, nm in [("legacy-a", "A"), ("legacy-b", "B")]:
+        ws = tmp_path / aid
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "notes.md").write_text("x\n", encoding="utf-8")
+        _seed_unmanaged_runtime_agent(
+            fake_openclaw_home, agent_id=aid, name=nm, workspace=ws, description="d"
+        )
+
+    from app.api import openclaw_agents as router_mod
+
+    calls = {"n": 0}
+
+    async def _fake_cli_chat_completion(
+        *, agent_id: str, session_key: str, message: str,
+        model_override: str | None, timeout_sec: float = 120.0,
+    ) -> dict[str, Any]:
+        del agent_id, session_key, message, model_override, timeout_sec
+        calls["n"] += 1
+        # Simulate the user clicking cancel right after the first agent's
+        # optimization turn — the loop must stop before the second agent.
+        router_mod._request_import_cancellation("batch1")
+        return {"id": "opt", "choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
+
+    r = client.post(
+        "/api/openclaw/agents/import",
+        json={"agentIds": ["legacy-a", "legacy-b"], "batchId": "batch1"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["cancelled"] is True
+    assert len(body["imported"]) == 1  # first kept
+    assert body["imported"][0]["sourceAgentId"] == "legacy-a"
+    assert calls["n"] == 1  # second agent never processed
+    # Batch op recorded as cancelled so the frontend cancel-verify converges.
+    op = client.get("/api/operations/openclaw_import_batch:batch1").json()
+    assert op["state"] == "failed"
+    assert op["detail"] == "cancelled"
+    # Flag cleared after the run (a fresh batch id would never re-match anyway).
+    assert router_mod._is_import_cancelled("batch1") is False
+
+
+def test_cancel_import_endpoint_marks_batch_op_cancelled(client: TestClient) -> None:
+    from app.api import openclaw_agents as router_mod
+    from app.operations import get_op_registry
+
+    reg = get_op_registry()
+    reg.start(op_id="openclaw_import_batch:b2", user="alice", kind="openclaw_import_batch")
+
+    r = client.post("/api/openclaw/agents/import/b2/cancel")
+    assert r.status_code == 202, r.text
+    assert router_mod._is_import_cancelled("b2") is True
+    op = client.get("/api/operations/openclaw_import_batch:b2").json()
+    assert op["state"] == "failed"
+    assert op["detail"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_get_returns_full_detail(client: TestClient, fake_openclaw_home: Path) -> None:
     if not _has_git():
         pytest.skip("git not available")

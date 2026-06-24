@@ -71,6 +71,7 @@ import {
 } from "@/lib/api";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
+import { useNavigationGuard } from "@/lib/useNavigationGuard";
 import {
   isCreateCancelConverged,
   isHermesCancelArmed,
@@ -298,7 +299,11 @@ export function HermesChat() {
 
 function Picker() {
   const { t } = useTranslation();
+  const { alert } = useDialog();
   const navigate = useNavigate();
+  // Lifted from RemoveModal so the page-level navigation guard can see an
+  // in-flight removal (the modal is a child component, mounted only while open).
+  const [removeBusy, setRemoveBusy] = useState(false);
   const [agents, setAgents] = useState<HermesAgentSummary[]>([]);
   const [teams, setTeams] = useState<OpenclawTeam[]>([]);
   const [loading, setLoading] = useState(true);
@@ -372,6 +377,13 @@ function Picker() {
   // Single-flights the "is it safe to cancel yet?" poll (see armCancelWhenSafe).
   const armPollInFlightRef = useRef(false);
   const pickerMountedRef = useRef(true);
+
+  // Block leaving the page while a removal or a create-cancellation is in flight,
+  // so neither can be orphaned mid-operation. (One blocker at a time, so both
+  // conditions are folded together.)
+  useNavigationGuard(removeBusy || createCancelState?.cancelling === true, () => {
+    void alert(t("common.navGuardBusy"));
+  });
 
   useEffect(() => {
     pickerMountedRef.current = true;
@@ -1040,8 +1052,10 @@ function Picker() {
       {removeTarget && (
         <RemoveModal
           agent={removeTarget}
+          onBusyChange={setRemoveBusy}
           onClose={() => setRemoveTarget(null)}
           onDone={() => {
+            setRemoveBusy(false);
             setRemoveTarget(null);
             void reload();
           }}
@@ -1275,25 +1289,36 @@ function RemoveModal({
   agent,
   onClose,
   onDone,
+  onBusyChange,
 }: {
   agent: HermesAgentSummary;
   onClose: () => void;
   onDone: () => void;
+  /** Lift busy state so the page-level navigation guard can observe it. */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const { t } = useTranslation();
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const setBusyBoth = (b: boolean) => {
+    setBusy(b);
+    onBusyChange?.(b);
+  };
+
+  // Make sure the lifted flag is released if the modal unmounts mid-busy.
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
+
   const remove = async () => {
-    setBusy(true);
+    setBusyBoth(true);
     setError("");
     try {
       await api.deleteHermesAgent(agent.id);
       onDone();
     } catch (e) {
       setError(errText(e));
-      setBusy(false);
+      setBusyBoth(false);
     }
   };
 

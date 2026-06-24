@@ -56,6 +56,7 @@ def _reset_all_singletons() -> None:
         _oc_api._AGENT_CREATE_TASKS.clear()
         _oc_api._PENDING_AGENT_CREATE_CANCELLATIONS.clear()
         _oc_api._REQUESTED_AGENT_CREATE_CANCELLATIONS.clear()
+        _oc_api._CANCELLED_IMPORT_BATCHES.clear()
     except Exception:
         pass
     logging_setup._configured = False

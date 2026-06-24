@@ -1027,17 +1027,23 @@ export const api = {
       "GET",
       "/api/openclaw/agents/import/candidates",
     ),
-  importOpenclawAgents: (payload: {
-    agentIds?: string[];
-    importAll?: boolean;
-    teamId?: string | null;
-    batchId?: string;
-  }) =>
+  importOpenclawAgents: (
+    payload: {
+      agentIds?: string[];
+      importAll?: boolean;
+      teamId?: string | null;
+      batchId?: string;
+    },
+    init?: RequestInit,
+  ) =>
     request<{
       requestedCount: number;
       imported: ExternalOpenclawImportResult[];
       failed: ExternalOpenclawImportFailure[];
-    }>("POST", "/api/openclaw/agents/import", payload),
+      cancelled: boolean;
+    }>("POST", "/api/openclaw/agents/import", payload, init),
+  cancelOpenclawImport: (batchId: string) =>
+    request<void>("POST", `/api/openclaw/agents/import/${batchId}/cancel`),
   getOpenclawAgent: (id: string) =>
     request<OpenclawAgentDetail>("GET", `/api/openclaw/agents/${id}`),
   getOpenclawAgentSettings: (id: string) =>

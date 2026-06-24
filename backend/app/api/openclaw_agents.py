@@ -91,6 +91,10 @@ _CHAT_SESSION_REVISIONS: dict[tuple[str, str], int] = {}
 _PENDING_AGENT_CREATE_CANCELLATIONS: dict[str, asyncio.Event] = {}
 _REQUESTED_AGENT_CREATE_CANCELLATIONS: set[str] = set()
 _REQUESTED_AGENT_CREATE_CANCELLATION_TTL_SEC = 120.0
+# Batch ids whose external-import run the user asked to cancel. The import loop
+# checks this between agents and stops (keeping already-imported agents). Cleared
+# by the import handler's ``finally`` once the run ends.
+_CANCELLED_IMPORT_BATCHES: set[str] = set()
 _OPENCLAW_RUNTIME_OP_TIMEOUT_SEC = 30.0
 _ENTROPY_CRON_NAME_PREFIX = "csflow-entropy-management-"
 _SKILL_ENTRY_FILENAME = "SKILL.md"
@@ -254,6 +258,20 @@ def _raise_if_agent_create_cancelled(*, agent_id: str) -> None:
         f'agent creation cancelled by user: "{agent_id}"',
         status_code=409,
     )
+
+
+def _request_import_cancellation(batch_id: str) -> None:
+    """Flag a batch import for cancellation; the loop stops at the next agent."""
+    if batch_id:
+        _CANCELLED_IMPORT_BATCHES.add(batch_id)
+
+
+def _is_import_cancelled(batch_id: str) -> bool:
+    return bool(batch_id) and batch_id in _CANCELLED_IMPORT_BATCHES
+
+
+def _clear_import_cancellation(batch_id: str) -> None:
+    _CANCELLED_IMPORT_BATCHES.discard(batch_id)
 
 
 def _best_effort_purge_agent_dir(*, agent_id: str) -> str:
@@ -858,6 +876,9 @@ class ImportExternalAgentsResponse(_CamelModel):
     requested_count: int
     imported: list[ImportedExternalAgentView]
     failed: list[ImportExternalAgentFailure]
+    # True when the user cancelled mid-run: agents already imported are kept,
+    # the remaining selected agents were skipped.
+    cancelled: bool = False
 
 
 class OpenclawAgentSkillView(_CamelModel):
@@ -1910,11 +1931,18 @@ async def import_external_agents(
 
     imported: list[ImportedExternalAgentView] = []
     failed: list[ImportExternalAgentFailure] = []
+    cancelled = False
     reg = get_op_registry()
     batch_op = f"openclaw_import_batch:{payload.batch_id}" if payload.batch_id else None
     if batch_op:
         reg.start(op_id=batch_op, user=user, kind="openclaw_import_batch")
     for source_agent_id in requested_ids:
+        # Cancel is checked between agents (chosen semantics: keep what's already
+        # imported, skip the rest). The agent being processed when cancel lands
+        # finishes so it is never left half-imported.
+        if _is_import_cancelled(payload.batch_id):
+            cancelled = True
+            break
         op_id = f"openclaw_import:{source_agent_id}"
         reg.start(op_id=op_id, user=user, kind="openclaw_import")
         imported_item: svc.ImportedExternalAgent | None = None
@@ -1976,18 +2004,60 @@ async def import_external_agents(
             continue
         reg.succeed(op_id, result={"targetAgentId": imported_item.target_agent_id})
         imported.append(_to_imported_external_agent_view(imported_item))
+    # Also honour a cancel that landed while the LAST agent was processing (loop
+    # ended normally without hitting the top-of-loop check).
+    if _is_import_cancelled(payload.batch_id):
+        cancelled = True
+    # Free the flag for this (always-unique) batch id; a leaked flag would never
+    # match a future import (fresh UUID each run) but we clean up anyway.
+    _clear_import_cancellation(payload.batch_id)
     if batch_op:
-        # The batch "succeeds" as a whole (per-item failures are in `failed`);
-        # the UI shows success iff failed == 0, matching the in-page path.
-        reg.succeed(
-            batch_op,
-            result={"importedCount": len(imported), "failedCount": len(failed)},
-        )
+        if cancelled:
+            # Cancelled mid-run: mark the batch op cancelled (mirrors the create
+            # cancel terminal state the frontend verifies against).
+            reg.fail(
+                batch_op,
+                detail="cancelled",
+                result={"importedCount": len(imported), "failedCount": len(failed)},
+            )
+        else:
+            # The batch "succeeds" as a whole (per-item failures are in `failed`);
+            # the UI shows success iff failed == 0, matching the in-page path.
+            reg.succeed(
+                batch_op,
+                result={"importedCount": len(imported), "failedCount": len(failed)},
+            )
     return ImportExternalAgentsResponse(
         requested_count=len(requested_ids),
         imported=imported,
         failed=failed,
+        cancelled=cancelled,
     )
+
+
+@router.post("/import/{batch_id}/cancel", status_code=202)
+async def cancel_import(
+    batch_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> None:
+    """Cancel an in-flight external-import batch.
+
+    Chosen semantics: agents already imported are KEPT; the import loop stops
+    before the next agent. The batch op is marked ``failed`` / ``cancelled`` so
+    the frontend's cancel verify converges immediately even while the agent
+    currently being processed finishes (it is never left half-imported)."""
+    del storage
+    target = (batch_id or "").strip()
+    if not target:
+        raise ApiError("INVALID_PAYLOAD", "batch id is required", status_code=400)
+    _request_import_cancellation(target)
+    op_id = f"openclaw_import_batch:{target}"
+    reg = get_op_registry()
+    op = reg.get(op_id, user=user)
+    if op is not None and op.state == "running":
+        reg.fail(op_id, detail="cancelled", result=op.result)
+    logger.info("openclaw_import_cancel_requested", batch_id=target)
 
 
 @router.get("/{agent_id}", response_model=OpenclawAgentDetail)

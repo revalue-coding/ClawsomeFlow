@@ -80,6 +80,7 @@ import {
 } from "@/lib/chatHistory";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
+import { useNavigationGuard } from "@/lib/useNavigationGuard";
 import {
   isCreateCancelConverged,
   isOpenclawCancelArmed,
@@ -286,7 +287,7 @@ function AgentQuickActions({
   children?: (actions: OpenclawPickerActions) => ReactNode;
 }) {
   const { t } = useTranslation();
-  const { confirm } = useDialog();
+  const { confirm, alert } = useDialog();
   const location = useLocation();
   const navigate = useNavigate();
   const [teams, setTeams] = useState<OpenclawTeam[]>([]);
@@ -373,6 +374,17 @@ function AgentQuickActions({
   const [createCancelCleanupNotice, setCreateCancelCleanupNotice] = useSessionBackedState<
     string | null
   >("openclaw-chat:cancel-cleanup-notice", null, { isClosed: (v) => v === null });
+  // Import cancel mirrors create cancel (same shape) — distinct op so it has its
+  // own state. `agentId` holds the batch id. Chosen semantics: cancel keeps
+  // already-imported agents and stops the rest.
+  const [importCancelState, setImportCancelState] = useSessionBackedState<CreateCancelState | null>(
+    "openclaw-chat:quick-actions:import-cancel-state",
+    null,
+    { isClosed: (value) => value === null },
+  );
+  const importCancelRequestedRef = useRef(false);
+  const importArmPollInFlightRef = useRef(false);
+  const importVerifyInFlightRef = useRef(false);
   const createRequestAbortRef = useRef<AbortController | null>(null);
   const createCancelRequestedRef = useRef(false);
   // Guards against a double-submit firing two POST /openclaw/agents for the same
@@ -386,6 +398,19 @@ function AgentQuickActions({
   const [storeComingSoonOpen, setStoreComingSoonOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:store-coming-soon-open",
   );
+
+  // Block leaving the page while an irreversible/in-flight operation runs, so a
+  // remove / restore / create-cancellation / import-cancellation can't be
+  // orphaned mid-flight. react-router allows a single blocker at a time, so every
+  // condition is folded into one expression here.
+  const navGuardActive =
+    removeSubmitting ||
+    restoreSubmitting ||
+    createCancelState?.cancelling === true ||
+    importCancelState?.cancelling === true;
+  useNavigationGuard(navGuardActive, () => {
+    void alert(t("common.navGuardBusy"));
+  });
 
   // Durable recovery across refresh / tab close+reopen (OpenClaw create
   // previously had NO recovery — a remount mid-build left the popup stuck). A
@@ -429,13 +454,27 @@ function AgentQuickActions({
   // Import is a batch op (one server op covering the whole import); recover its
   // popup across refresh / close+reopen via a client-generated batch id.
   const { track: trackImportOp, clear: clearImportOp } = useOpRecovery("openclaw:import:op", {
-    onRunning: () => openWorkPopup(),
+    onRunning: (p) => {
+      if (importCancelRequestedRef.current) return;
+      setImportCancelState({ agentId: p.agentId, cancelling: false, armed: false });
+      openWorkPopup();
+      // Recovered mid-import: re-derive whether cancel is safe yet.
+      void armImportCancelWhenSafe(p.agentId);
+    },
     onSucceeded: (_p, result) => {
+      if (importCancelRequestedRef.current) return;
+      resetImportCancelState();
       finishWorkPopup((Number(result.failedCount) || 0) === 0);
       void loadImportCandidates();
       notifyOpenclawAgentsUpdated();
     },
-    onFailed: (_p, detail) => finishWorkPopup(false, detail),
+    onFailed: (_p, detail) => {
+      if (importCancelRequestedRef.current) return;
+      resetImportCancelState();
+      finishWorkPopup(detail === "cancelled", detail === "cancelled" ? undefined : detail);
+      void loadImportCandidates();
+      notifyOpenclawAgentsUpdated();
+    },
   });
 
   function openStoreComingSoon() {
@@ -520,9 +559,9 @@ function AgentQuickActions({
   }
 
   function finishWorkPopup(success: boolean, detail?: string) {
-    // User-initiated cancel owns the popup until verifyCreateCancelConverged()
-    // completes — recovery / the aborted create fetch must not unlock early.
-    if (createCancelRequestedRef.current) return;
+    // A user-initiated create/import cancel owns the popup until its verify
+    // completes — recovery / the resolving request must not unlock early.
+    if (createCancelRequestedRef.current || importCancelRequestedRef.current) return;
     setWorkPopupRunning(false);
     setWorkPopupSuccess(success);
     setWorkPopupText(
@@ -579,9 +618,14 @@ function AgentQuickActions({
       dismissCancelFailureNotice(createCancelState.agentId);
       return;
     }
+    if (importCancelState?.failed) {
+      dismissImportCancelFailureNotice();
+      return;
+    }
     setWorkPopupOpen(false);
     resetWorkPopupDisplayState();
     resetCreateCancelState();
+    resetImportCancelState();
   }
 
   // Keep the cancel button disabled until the backend reaches a state where a
@@ -651,6 +695,108 @@ function AgentQuickActions({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Import cancel (mirrors create cancel; keeps already-imported agents) ──
+
+  function resetImportCancelState() {
+    setImportCancelState(null);
+    importCancelRequestedRef.current = false;
+  }
+
+  // Arm the import-cancel button once the batch op is registered (delayed
+  // release, like create) so a cancel always hits a live, cancellable run.
+  async function armImportCancelWhenSafe(batchId: string): Promise<void> {
+    if (importArmPollInFlightRef.current) return;
+    importArmPollInFlightRef.current = true;
+    try {
+      const armed = await waitForCancelArmed(
+        `openclaw_import_batch:${batchId}`,
+        isOpenclawCancelArmed,
+        {
+          getStatus: (opId) => api.getOperationStatus(opId),
+          shouldStop: () => importCancelRequestedRef.current,
+        },
+      );
+      if (!armed) return;
+      setImportCancelState((prev) =>
+        prev && prev.agentId === batchId && !prev.cancelling && !prev.failed
+          ? { ...prev, armed: true }
+          : prev,
+      );
+    } finally {
+      importArmPollInFlightRef.current = false;
+    }
+  }
+
+  // Import cancel converges as soon as the batch op goes terminal: the backend
+  // marks it cancelled synchronously, and a run that finished first is "done".
+  async function verifyImportCancelConverged(batchId: string): Promise<void> {
+    const verifyDeadline = Date.now() + CREATE_CANCEL_VERIFY_TIMEOUT_MS;
+    while (true) {
+      const op = await api.getOperationStatus(`openclaw_import_batch:${batchId}`);
+      if (op.state === "succeeded" || op.state === "not_found") return;
+      if (op.state === "failed" && op.detail === "cancelled") return;
+      if (Date.now() >= verifyDeadline) {
+        throw new Error(t("assistant.workPopup.cancelOpStillRunning"));
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, CREATE_CANCEL_VERIFY_POLL_MS));
+    }
+  }
+
+  function closeImportPopupAfterCancel(): void {
+    clearImportOp();
+    setWorkPopupOpen(false);
+    resetWorkPopupDisplayState();
+    resetImportCancelState();
+    void loadImportCandidates();
+    notifyOpenclawAgentsUpdated();
+  }
+
+  function dismissImportCancelFailureNotice(): void {
+    clearImportOp();
+    setWorkPopupOpen(false);
+    resetWorkPopupDisplayState();
+    resetImportCancelState();
+    importCancelRequestedRef.current = false;
+  }
+
+  async function runImportCancelFlow(batchId: string): Promise<void> {
+    if (importVerifyInFlightRef.current) return;
+    importVerifyInFlightRef.current = true;
+    importCancelRequestedRef.current = true;
+    setWorkPopupOpen(true);
+    setWorkPopupRunning(true);
+    setImportCancelState({ agentId: batchId, cancelling: true });
+    try {
+      setWorkPopupText(t("assistant.workPopup.cancelImportRunning"));
+      await api.cancelOpenclawImport(batchId);
+      setWorkPopupText(t("assistant.workPopup.cancelVerifying"));
+      await verifyImportCancelConverged(batchId);
+      closeImportPopupAfterCancel();
+    } catch (e) {
+      const err = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+      importCancelRequestedRef.current = false;
+      setWorkPopupRunning(false);
+      setWorkPopupSuccess(false);
+      setWorkPopupText(t("assistant.workPopup.cancelFailed", { message: err }));
+      setImportCancelState({ agentId: batchId, cancelling: false, failed: true });
+    } finally {
+      importVerifyInFlightRef.current = false;
+    }
+  }
+
+  async function onCancelImport() {
+    if (importCancelState === null || importCancelState.cancelling) return;
+    await runImportCancelFlow(importCancelState.agentId);
+  }
+
+  useEffect(() => {
+    const state = importCancelState;
+    if (state === null || !state.cancelling) return;
+    void runImportCancelFlow(state.agentId);
+    // Resume verify after refresh / remount while an import cancel was in flight.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function resolveCreateTeamId(): Promise<string | null> {
     if (createTeamChoice === CREATE_TEAM_SENTINEL) {
       const teamName = createTeamName.trim();
@@ -715,18 +861,26 @@ function AgentQuickActions({
     setImporting(true);
     setImportError(null);
     const batchId = crypto.randomUUID();
+    importCancelRequestedRef.current = false;
+    setImportCancelState({ agentId: batchId, cancelling: false, armed: false });
     trackImportOp({ opId: `openclaw_import_batch:${batchId}`, agentId: batchId });
     openWorkPopup();
+    void armImportCancelWhenSafe(batchId);
     try {
       const out = await api.importOpenclawAgents({ agentIds: selectedImportIds, teamId, batchId });
+      // A cancel in flight owns the popup (runImportCancelFlow) — don't clobber.
+      if (importCancelRequestedRef.current) return;
       clearImportOp();
+      resetImportCancelState();
       setLastImportResult(out);
       setSelectedImportIds([]);
       await loadImportCandidates();
       if (out.imported.length > 0) notifyOpenclawAgentsUpdated();
-      finishWorkPopup(out.failed.length === 0);
+      finishWorkPopup(!out.cancelled && out.failed.length === 0);
     } catch (e) {
+      if (importCancelRequestedRef.current) return;
       clearImportOp();
+      resetImportCancelState();
       const err = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
       setImportError(err);
       finishWorkPopup(false, err);
@@ -747,18 +901,25 @@ function AgentQuickActions({
     setImporting(true);
     setImportError(null);
     const batchId = crypto.randomUUID();
+    importCancelRequestedRef.current = false;
+    setImportCancelState({ agentId: batchId, cancelling: false, armed: false });
     trackImportOp({ opId: `openclaw_import_batch:${batchId}`, agentId: batchId });
     openWorkPopup();
+    void armImportCancelWhenSafe(batchId);
     try {
       const out = await api.importOpenclawAgents({ importAll: true, teamId, batchId });
+      if (importCancelRequestedRef.current) return;
       clearImportOp();
+      resetImportCancelState();
       setLastImportResult(out);
       setSelectedImportIds([]);
       await loadImportCandidates();
       if (out.imported.length > 0) notifyOpenclawAgentsUpdated();
-      finishWorkPopup(out.failed.length === 0);
+      finishWorkPopup(!out.cancelled && out.failed.length === 0);
     } catch (e) {
+      if (importCancelRequestedRef.current) return;
       clearImportOp();
+      resetImportCancelState();
       const err = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
       setImportError(err);
       finishWorkPopup(false, err);
@@ -1001,17 +1162,44 @@ function AgentQuickActions({
     createResponsibility.trim() &&
     createTeamReady,
   );
+  // The work popup is shared by create and import (mutually exclusive). Pick
+  // whichever cancellable op is active and drive the cancel button from it.
+  const popupCancelKind: "create" | "import" | null = createCancelState
+    ? "create"
+    : importCancelState
+      ? "import"
+      : null;
+  const popupCancelState = createCancelState ?? importCancelState;
   const workPopupBusy =
-    createCancelState?.cancelling === true ||
-    (workPopupRunning && !createCancelState?.failed);
-  const showCreateCancelAction = createCancelState !== null;
+    popupCancelState?.cancelling === true ||
+    (workPopupRunning && !popupCancelState?.failed);
+  const showCreateCancelAction = popupCancelState !== null;
   // Only allow cancel once it is armed (safe) — or to retry a failed cancel.
-  // While unarmed the button is shown but disabled ("准备取消…") so the user sees
-  // cancel is being prepared rather than racing a half-built create.
+  // While unarmed the button is shown but disabled ("正在创建/导入…") so the user
+  // sees the op is still running rather than racing a half-built operation.
   const createCancelEnabled =
     showCreateCancelAction &&
-    !(createCancelState?.cancelling ?? false) &&
-    ((createCancelState?.armed ?? false) || (createCancelState?.failed ?? false));
+    !(popupCancelState?.cancelling ?? false) &&
+    ((popupCancelState?.armed ?? false) || (popupCancelState?.failed ?? false));
+  const onPopupCancelClick = () => {
+    if (popupCancelKind === "import") void onCancelImport();
+    else void onCancelCreate();
+  };
+  const onPopupForceClose = () => {
+    if (popupCancelKind === "import") dismissImportCancelFailureNotice();
+    else if (createCancelState?.agentId) dismissCancelFailureNotice(createCancelState.agentId);
+  };
+  const popupCancelLabel = popupCancelState?.cancelling
+    ? t("assistant.workPopup.cancellingCreate")
+    : popupCancelState?.failed
+      ? t("assistant.workPopup.cancelRetry")
+      : popupCancelState?.armed
+        ? popupCancelKind === "import"
+          ? t("assistant.workPopup.cancelImport")
+          : t("assistant.workPopup.cancelCreate")
+        : popupCancelKind === "import"
+          ? t("assistant.workPopup.cancelImportPreparing")
+          : t("assistant.workPopup.cancelPreparing");
   const workPopupDisplayText =
     workPopupText ||
     (workPopupOpen && workPopupRunning ? t("assistant.workPopup.running") : "");
@@ -1148,9 +1336,14 @@ function AgentQuickActions({
 
       <Modal
         open={removeModalOpen}
-        onClose={() => setRemoveModalOpen(false)}
+        onClose={() => {
+          // Once removal is in flight it cannot be cancelled — keep the modal up.
+          if (removeSubmitting) return;
+          setRemoveModalOpen(false);
+        }}
         title={t("assistant.removeModal.title")}
         width="max-w-lg"
+        dismissible={!removeSubmitting}
       >
         <div className="space-y-3">
           <p className="text-sm text-ink-600">{t("assistant.removeModal.hint")}</p>
@@ -1181,6 +1374,7 @@ function AgentQuickActions({
                   type="button"
                   className="btn-outline"
                   onClick={() => setRemoveModalOpen(false)}
+                  disabled={removeSubmitting}
                 >
                   {t("common.cancel")}
                 </button>
@@ -1200,9 +1394,14 @@ function AgentQuickActions({
 
       <Modal
         open={restoreModalOpen}
-        onClose={() => setRestoreModalOpen(false)}
+        onClose={() => {
+          // Once restore is in flight it cannot be cancelled — keep the modal up.
+          if (restoreSubmitting) return;
+          setRestoreModalOpen(false);
+        }}
         title={t("assistant.restoreModal.title")}
         width="max-w-lg"
+        dismissible={!restoreSubmitting}
       >
         <div className="space-y-3">
           <p className="text-sm text-ink-600">{t("assistant.restoreModal.hint")}</p>
@@ -1234,6 +1433,7 @@ function AgentQuickActions({
                   type="button"
                   className="btn-outline"
                   onClick={() => setRestoreModalOpen(false)}
+                  disabled={restoreSubmitting}
                 >
                   {t("common.cancel")}
                 </button>
@@ -1433,29 +1633,23 @@ function AgentQuickActions({
               <button
                 type="button"
                 className="btn-outline"
-                onClick={() => void onCancelCreate()}
+                onClick={onPopupCancelClick}
                 disabled={!createCancelEnabled}
               >
-                {createCancelState?.cancelling
-                  ? t("assistant.workPopup.cancellingCreate")
-                  : createCancelState?.failed
-                    ? t("assistant.workPopup.cancelRetry")
-                    : createCancelState?.armed
-                      ? t("assistant.workPopup.cancelCreate")
-                      : t("assistant.workPopup.cancelPreparing")}
+                {popupCancelLabel}
               </button>
-              {createCancelState?.failed && (
+              {popupCancelState?.failed && (
                 <button
                   type="button"
                   className="btn-primary"
-                  onClick={() => dismissCancelFailureNotice(createCancelState.agentId)}
+                  onClick={onPopupForceClose}
                 >
                   {t("assistant.workPopup.cancelForceClose")}
                 </button>
               )}
             </div>
           )}
-          {!workPopupBusy && !createCancelState?.failed && (
+          {!workPopupBusy && !popupCancelState?.failed && (
             <div className="flex justify-end">
               <button
                 type="button"
