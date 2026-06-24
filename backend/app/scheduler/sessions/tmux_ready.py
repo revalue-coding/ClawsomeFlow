@@ -14,8 +14,11 @@ Why this exists:
 
 ClawTeam's spawn path runs ``_confirm_workspace_trust_if_prompted`` **only**
 for **claude**, **codex**, and **gemini** (plus Claude skip-permissions and
-Codex update gate). We mirror that scope here; all other platforms skip startup
-prompt handling (qoder/codebuddy rely on ``temp_agent_trust`` seeding instead).
+Codex update gate). We keep that scope intact and add one ClawsomeFlow-local
+Cursor special case for its explicit workspace-trust menu, which cannot be
+bypassed by ``--force``/``--approve-mcps`` in interactive TUI mode. All other
+platforms skip startup prompt handling (qoder/codebuddy rely on
+``temp_agent_trust`` seeding instead).
 
 Public API:
 * :data:`TRUST_HANDLED_PLATFORMS` — platforms with startup-prompt fallback.
@@ -39,7 +42,15 @@ from app.logging_setup import get_logger
 logger = get_logger("scheduler.tmux_ready")
 
 # ClawTeam ``_confirm_workspace_trust_if_prompted`` scope (tmux_backend.py).
-TRUST_HANDLED_PLATFORMS: frozenset[str] = frozenset({"claude", "codex", "gemini"})
+_CLAWTEAM_TRUST_HANDLED_PLATFORMS: frozenset[str] = frozenset({"claude", "codex", "gemini"})
+
+# Cursor is deliberately a ClawsomeFlow-local exception, not a ClawTeam behavior
+# change. Only explicit ``AgentKind.cursor`` enables it; a binary named
+# ``agent``/``cursor`` is not inferred as Cursor from argv alone.
+_CURSOR_TRUST_PLATFORM = "cursor"
+TRUST_HANDLED_PLATFORMS: frozenset[str] = (
+    _CLAWTEAM_TRUST_HANDLED_PLATFORMS | frozenset({_CURSOR_TRUST_PLATFORM})
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,11 +69,13 @@ def resolve_trust_platform(
     spawn_command: Sequence[str] | None = None,
 ) -> str | None:
     """Return the trust-handling platform key, or None when ClawTeam skips it."""
-    if agent_kind in TRUST_HANDLED_PLATFORMS:
+    if agent_kind == _CURSOR_TRUST_PLATFORM:
+        return _CURSOR_TRUST_PLATFORM
+    if agent_kind in _CLAWTEAM_TRUST_HANDLED_PLATFORMS:
         return agent_kind
     if spawn_command:
         exe = Path(spawn_command[0]).name.lower()
-        if exe in TRUST_HANDLED_PLATFORMS:
+        if exe in _CLAWTEAM_TRUST_HANDLED_PLATFORMS:
             return exe
     return None
 
@@ -141,6 +154,15 @@ def _looks_like_workspace_trust_prompt(pane_text: str, platform: str) -> bool:
             return False
         return "trust folder" in lower or "trust parent folder" in lower
 
+    if platform == "cursor":
+        return (
+            "workspace trust required" in lower
+            and "cursor agent can execute code" in lower
+            and "do you trust the contents of this directory" in lower
+            and "trust this workspace" in lower
+            and "press the key shown" in lower
+        )
+
     return False
 
 
@@ -172,6 +194,21 @@ def _looks_like_claude_skip_permissions_prompt(pane_text: str) -> bool:
     return has_accept_choice and has_permissions_warning
 
 
+def _looks_like_cursor_composer(pane_text: str) -> bool:
+    """Return True when Cursor Agent has reached its interactive composer."""
+    lower = pane_text.lower()
+    if not lower.strip():
+        return False
+    return (
+        "cursor agent" in lower
+        and "composer" in lower
+        and (
+            "run everything" in lower
+            or "plan, search, build anything" in lower
+        )
+    )
+
+
 def _startup_prompt_action(
     pane_text: str,
     trust_platform: str | None,
@@ -199,6 +236,11 @@ def _startup_prompt_action(
             return "enter"
         return None
 
+    if trust_platform == "cursor":
+        if _looks_like_workspace_trust_prompt(pane_text, "cursor"):
+            return "press-a"
+        return None
+
     return None
 
 
@@ -219,6 +261,8 @@ def _is_composer_ready(pane_text: str, *, trust_platform: str | None) -> bool:
     # Platforms ClawTeam does not handle: never treat a known gate as composer-ready.
     if trust_platform is None and _active_tail_looks_like_any_startup_prompt(pane_text):
         return False
+    if trust_platform == "cursor" and _looks_like_cursor_composer(active):
+        return True
     return any(pat.search(pane_text) for pat in _AGENT_PROMPT_PATTERNS)
 
 
@@ -275,6 +319,10 @@ async def _send_trust_action(
         await send(target, "\x1b[B", literal=True)
         await asyncio.sleep(0.2)
         await send(target, "Enter")
+        await asyncio.sleep(0.5)
+        return
+    if action == "press-a":
+        await send(target, "a")
         await asyncio.sleep(0.5)
 
 

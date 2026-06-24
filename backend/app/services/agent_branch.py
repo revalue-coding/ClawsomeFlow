@@ -9,7 +9,12 @@ from app.models import AgentKind, FlowAgent, FlowSpec
 
 
 def normalize_agent_branch_dict(agent: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of *agent* with a validated ``targetBranch`` when applicable."""
+    """Return a copy of *agent* with a validated ``targetBranch`` when applicable.
+
+    Leader entries and agents without a repo are left unchanged here; decompose
+    apply restores user-defined leader/worker bindings from the editor snapshot
+    afterward (see ``task_decompose._merge_decompose_editor_snapshot``).
+    """
     out = dict(agent)
     if bool(out.get("isLeader") or out.get("is_leader")):
         return out

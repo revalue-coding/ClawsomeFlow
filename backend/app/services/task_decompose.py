@@ -75,6 +75,7 @@ _DEFAULT_NON_OPENCLAW_CLI_TIMEOUT_SEC = float(_REQUEST_TTL_SECONDS)
 _MIN_NON_OPENCLAW_CLI_TIMEOUT_SEC = 1800.0
 _NON_OPENCLAW_CLI_TIMEOUT_ENV = "CSFLOW_NON_OPENCLAW_CLI_TIMEOUT_SECONDS"
 _DECOMPOSE_CANCEL_RESET_TIMEOUT_SEC = 30.0
+_CURSOR_RESULT_PROCESS_EXIT_GRACE_SEC = 2.0
 
 _INFLIGHT_DISPATCH_TASKS: dict[str, asyncio.Task[None]] = {}
 _START_REQUEST_LOCK = asyncio.Lock()
@@ -736,8 +737,11 @@ def _non_openclaw_dispatch_argv(
             "--approve-mcps",
             "--sandbox",
             "disabled",
+            "--trust",
             "-p",
             message,
+            "--output-format",
+            "stream-json",
         ]
     # gemini: `-p <prompt>` is the non-interactive one-shot mode. Use the
     # non-deprecated `--approval-mode yolo` (gemini rejects `--yolo` together with
@@ -784,6 +788,124 @@ def _non_openclaw_dispatch_argv(
         argv += ["-z", message]
         return argv
     raise RuntimeError(f"unsupported non-openclaw leader kind: {kind.value}")
+
+
+def _upsert_leader_editor_snapshot(
+    existing_agents: list[dict[str, Any]],
+    *,
+    leader_agent_id: str,
+    leader_kind: AgentKind,
+    leader_repo: str | None,
+    leader_target_branch: str | None,
+) -> list[dict[str, Any]]:
+    """Ensure the request snapshot carries authoritative leader repo/branch."""
+    if leader_kind == AgentKind.openclaw:
+        return [dict(item) for item in existing_agents]
+    repo = (leader_repo or "").strip()
+    branch = (leader_target_branch or "").strip()
+    if not repo and not branch:
+        return [dict(item) for item in existing_agents]
+
+    out = [dict(item) for item in existing_agents]
+    for index, item in enumerate(out):
+        if str(item.get("id") or "").strip() != leader_agent_id:
+            continue
+        merged = dict(item)
+        merged["kind"] = leader_kind.value
+        merged["isLeader"] = True
+        if repo:
+            merged["repo"] = repo
+        if branch:
+            merged["targetBranch"] = branch
+        out[index] = merged
+        return out
+
+    leader_entry: dict[str, Any] = {
+        "id": leader_agent_id,
+        "kind": leader_kind.value,
+        "isLeader": True,
+    }
+    if repo:
+        leader_entry["repo"] = repo
+    if branch:
+        leader_entry["targetBranch"] = branch
+    out.append(leader_entry)
+    return out
+
+
+def _editor_agent_bindings(
+    existing_agents: list[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Repo/branch/kind bindings captured when the decompose request started."""
+    out: dict[str, dict[str, str]] = {}
+    for item in existing_agents:
+        aid = str(item.get("id") or "").strip()
+        if not aid:
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind == AgentKind.openclaw.value:
+            continue
+        repo = str(item.get("repo") or "").strip()
+        branch = str(
+            item.get("targetBranch") or item.get("target_branch") or "",
+        ).strip()
+        if not repo and not branch:
+            continue
+        out[aid] = {
+            "kind": kind,
+            "repo": repo,
+            "targetBranch": branch,
+        }
+    return out
+
+
+def _merge_decompose_editor_snapshot(
+    agents: list[dict[str, Any]],
+    *,
+    leader_agent_id: str,
+    existing_agents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Restore user-defined repo/targetBranch regardless of decomposer output.
+
+    The editor snapshot stored on the request (``existing_agents``) is
+    authoritative on apply/backfill — LLM-returned repo/branch values are
+    overwritten for every non-OpenClaw agent id present in that snapshot.
+    """
+    bindings = _editor_agent_bindings(existing_agents)
+    if not bindings:
+        return [dict(agent) for agent in agents]
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for agent in agents:
+        aid = str(agent.get("id") or "").strip()
+        if aid:
+            by_id[aid] = dict(agent)
+
+    for aid, binding in bindings.items():
+        entry = dict(by_id.get(aid) or {"id": aid})
+        entry["id"] = aid
+        if binding["kind"]:
+            entry["kind"] = binding["kind"]
+        if binding["repo"]:
+            entry["repo"] = binding["repo"]
+        if binding["targetBranch"]:
+            entry["targetBranch"] = binding["targetBranch"]
+        if aid == leader_agent_id:
+            entry["isLeader"] = True
+        by_id[aid] = entry
+
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for agent in agents:
+        aid = str(agent.get("id") or "").strip()
+        if not aid or aid in seen:
+            continue
+        seen.add(aid)
+        out.append(by_id.get(aid, dict(agent)))
+    for aid in bindings:
+        if aid not in seen:
+            out.append(by_id[aid])
+    return out
 
 
 async def _resolve_leader_target(
@@ -950,6 +1072,178 @@ async def _dispatch_to_openclaw_leader_via_cli(
     raise RuntimeError("openclaw agent invocation failed after automatic scope-repair retry")
 
 
+async def _read_stream_best_effort(stream: Any) -> bytes:
+    if stream is None:
+        return b""
+    try:
+        return await stream.read()
+    except Exception:
+        return b""
+
+
+async def _finish_cursor_stderr_task(task: asyncio.Task[bytes]) -> bytes:
+    try:
+        return await asyncio.wait_for(
+            task,
+            timeout=_CURSOR_RESULT_PROCESS_EXIT_GRACE_SEC,
+        )
+    except asyncio.TimeoutError:
+        task.cancel()
+    except asyncio.CancelledError:
+        return b""
+    except Exception:
+        return b""
+    try:
+        await task
+    except asyncio.CancelledError:
+        return b""
+    except Exception:
+        return b""
+    return b""
+
+
+async def _terminate_cursor_process_best_effort(proc: Any) -> None:
+    if getattr(proc, "returncode", None) is not None:
+        return
+    for method_name in ("terminate", "kill"):
+        method = getattr(proc, method_name, None)
+        if method is None:
+            continue
+        try:
+            method()
+        except ProcessLookupError:
+            return
+        except Exception:
+            if method_name == "kill":
+                return
+            continue
+        wait = getattr(proc, "wait", None)
+        if wait is None:
+            return
+        try:
+            await asyncio.wait_for(
+                wait(),
+                timeout=_CURSOR_RESULT_PROCESS_EXIT_GRACE_SEC,
+            )
+            return
+        except asyncio.TimeoutError:
+            continue
+        except ProcessLookupError:
+            return
+        except Exception:
+            return
+
+
+async def _dispatch_to_cursor_leader_via_stream_json(
+    *,
+    request_id: str,
+    leader_target: _LeaderTarget,
+    proc: Any,
+    timeout_sec: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read Cursor headless stream-json until the final result event.
+
+    Cursor Agent can finish the model turn but keep the Node process alive while
+    background handles flush. This path is intentionally Cursor-only: once the
+    result event is available, ClawsomeFlow has the complete proposal text and
+    does not need to wait for natural process exit.
+    """
+    stdout_stream = getattr(proc, "stdout", None)
+    if stdout_stream is None:
+        raise RuntimeError("cursor agent did not expose stdout stream")
+    stderr_task = asyncio.create_task(_read_stream_best_effort(getattr(proc, "stderr", None)))
+    deadline = asyncio.get_event_loop().time() + timeout_sec
+    stdout_lines: list[str] = []
+    result_text: str | None = None
+    result_error: str | None = None
+
+    try:
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            line_bytes = await asyncio.wait_for(stdout_stream.readline(), timeout=remaining)
+            if not line_bytes:
+                break
+            line = line_bytes.decode("utf-8", errors="replace")
+            stdout_lines.append(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "result":
+                continue
+            if event.get("is_error") or event.get("subtype") != "success":
+                result_error = str(
+                    event.get("error")
+                    or event.get("result")
+                    or event.get("subtype")
+                    or "cursor result reported failure",
+                )
+                break
+            result_text = str(event.get("result") or "")
+            break
+    except asyncio.CancelledError:
+        await _terminate_cursor_process_best_effort(proc)
+        await _finish_cursor_stderr_task(stderr_task)
+        logger.info(
+            "decompose_cursor_stream_cancelled",
+            request_id=request_id,
+            leader=leader_target.id,
+            leader_kind=leader_target.kind.value,
+        )
+        raise
+    except asyncio.TimeoutError as exc:
+        await _terminate_cursor_process_best_effort(proc)
+        stderr = await _finish_cursor_stderr_task(stderr_task)
+        detail = (
+            stderr.decode("utf-8", errors="replace").strip()
+            or "".join(stdout_lines).strip()
+            or "timeout"
+        )
+        raise RuntimeError(
+            f"cursor agent invocation exceeded {int(timeout_sec)} seconds: "
+            f"{detail[:300]}",
+        ) from exc
+
+    if result_text is not None:
+        await _terminate_cursor_process_best_effort(proc)
+    stderr = await _finish_cursor_stderr_task(stderr_task)
+    err_text = stderr.decode("utf-8", errors="replace").strip()
+    out_text = "".join(stdout_lines).strip()
+
+    if result_error is not None:
+        raise RuntimeError(f"cursor agent invocation failed: {result_error[:1000]}")
+    if result_text is None:
+        returncode = getattr(proc, "returncode", None)
+        detail = (err_text or out_text or f"exit code {returncode}").strip()
+        raise RuntimeError(
+            f"cursor agent invocation did not emit a result event: {detail[:1000]}",
+        )
+
+    logger.info(
+        "decompose_cursor_stream_result_received",
+        request_id=request_id,
+        leader=leader_target.id,
+        leader_kind=leader_target.kind.value,
+        result_chars=len(result_text),
+        stream_stdout_chars=len(out_text),
+        stderr_chars=len(err_text),
+    )
+    logger.info(
+        "decompose_non_openclaw_session_completed",
+        request_id=request_id,
+        leader=leader_target.id,
+        leader_kind=leader_target.kind.value,
+        stdout_chars=len(result_text),
+        stderr_chars=len(err_text),
+    )
+    return _extract_non_openclaw_proposal(
+        stdout_text=result_text,
+        stderr_text=err_text,
+    )
+
+
 async def _dispatch_to_non_openclaw_leader_via_cli(
     *,
     request_id: str,
@@ -994,6 +1288,13 @@ async def _dispatch_to_non_openclaw_leader_via_cli(
         cwd=leader_target.repo,
         command=argv[:2],
     )
+    if leader_target.kind == AgentKind.cursor:
+        return await _dispatch_to_cursor_leader_via_stream_json(
+            request_id=request_id,
+            leader_target=leader_target,
+            proc=proc,
+            timeout_sec=timeout_sec,
+        )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
     except asyncio.CancelledError:
@@ -1092,6 +1393,15 @@ async def start_decompose_request(
         leader_repo=leader_repo,
         leader_target_branch=leader_target_branch,
     )
+    existing_agents_payload = normalize_agent_branch_dicts(
+        _upsert_leader_editor_snapshot(
+            existing_agents_payload,
+            leader_agent_id=leader_agent_id,
+            leader_kind=leader_target.kind,
+            leader_repo=leader_target.repo,
+            leader_target_branch=leader_target.target_branch,
+        ),
+    )
 
     async with _START_REQUEST_LOCK:
         reusable = _find_reusable_request(
@@ -1146,12 +1456,13 @@ async def start_decompose_request(
         config=cfg,
     )
 
-    # Hand the leader the user's full PERSISTENT agent inventory (the two
-    # persistent platforms: OpenClaw + Hermes) so it can reuse existing owners
-    # instead of inventing new ones. Shape: id / name / kind / isLeader, so the
-    # owner picker can dedupe against ``existing_agents``.
+    # Hand the leader the user's registered persistent agent inventory (OpenClaw +
+    # Hermes). Unregistered OpenClaw agents (unregister-only) are excluded — they
+    # are not runnable until restored.
     persistent_agents: list[dict[str, Any]] = []
-    for row in storage.openclaw_list(owner_user=user):
+    from app.services.openclaw_agents import list_agents as list_openclaw_agents
+
+    for row in list_openclaw_agents(user=user, storage=storage, config=cfg):
         persistent_agents.append(
             {
                 "id": row.id,
@@ -1387,6 +1698,13 @@ async def _dispatch_to_leader(
                 agents,
                 tasks,
                 expected_leader=leader_target.id,
+                registered_openclaw_ids={
+                    str(agent["id"])
+                    for agent in persistent_agents
+                    if str(agent.get("kind") or "").strip().lower() == "openclaw"
+                    and isinstance(agent.get("id"), str)
+                    and str(agent["id"]).strip()
+                },
             )
             mark_request_succeeded(
                 request_id,
@@ -1549,8 +1867,13 @@ def mark_request_succeeded(
     row = storage.task_decompose_get(request_id)
     if row is None:
         raise KeyError(request_id)
+    merged_agents = _merge_decompose_editor_snapshot(
+        normalize_agent_branch_dicts(agents),
+        leader_agent_id=row.leader_agent_id,
+        existing_agents=list(row.existing_agents or []),
+    )
     row.status = TaskDecomposeStatus.succeeded
-    row.result_agents = normalize_agent_branch_dicts(agents)
+    row.result_agents = merged_agents
     row.result_tasks = tasks
     row.error_code = None
     row.error_message = None
@@ -1567,7 +1890,7 @@ def apply_decompose_proposal(
     user: str,
     storage: StorageBackend | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return branch-normalized worker-agent decompose results for the Flow editor."""
+    """Return decompose results with editor repo/branch bindings restored."""
     storage = storage or get_storage()
     row = storage.task_decompose_get(request_id)
     if row is None:
@@ -1586,7 +1909,12 @@ def apply_decompose_proposal(
             f"(status={row.status.value})",
             details={"request_id": request_id, "status": row.status.value},
         )
-    agents = normalize_agent_branch_dicts(row.result_agents or [])
+    merged_agents = _merge_decompose_editor_snapshot(
+        normalize_agent_branch_dicts(list(row.result_agents or [])),
+        leader_agent_id=row.leader_agent_id,
+        existing_agents=list(row.existing_agents or []),
+    )
+    agents = merged_agents
     tasks = list(row.result_tasks or [])
     return agents, tasks
 

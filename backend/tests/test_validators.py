@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from app import paths
+from app.config import load_config
+from app.integrations import openclaw_json as oj
 from app.models import AgentKind, FlowAgent, FlowSpec, FlowTask, MergeStrategy, OpenclawAgent
 from app.storage import get_storage
 from app.validators import FlowValidationError, validate_flow_against_db, validate_flow_spec
@@ -22,8 +26,63 @@ from app.validators.flow import (
     ERROR_MISSING_AGENT_REPO,
     ERROR_MISSING_LEADER_SUMMARY,
     ERROR_OPENCLAW_AGENT_NOT_FOUND,
+    ERROR_OPENCLAW_AGENT_UNREGISTERED,
     ERROR_SUMMARY_NO_DEPENDENCY,
 )
+
+
+def _register_runtime_openclaw(
+    storage,
+    agent_id: str,
+    *,
+    user: str = "alice",
+) -> None:
+    workspace = paths.agent_dir(agent_id) / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    if storage.openclaw_get(agent_id) is None:
+        storage.openclaw_create(
+            OpenclawAgent(
+                id=agent_id,
+                name=agent_id,
+                workspace_path=str(workspace),
+                created_by_user=user,
+            )
+        )
+    cfg = load_config()
+    oc_home = Path(cfg.openclaw_home).expanduser()
+    oc_home.mkdir(parents=True, exist_ok=True)
+    payload_path = oc_home / "openclaw.json"
+    if payload_path.exists():
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    else:
+        payload = {
+            "agents": {"defaults": {}, "list": []},
+            "gateway": {"port": 18789, "auth": {"token": "T"}},
+        }
+    agents_list = payload.setdefault("agents", {}).setdefault("list", [])
+    if not any(
+        isinstance(item, dict) and item.get("id") == agent_id
+        for item in agents_list
+    ):
+        agents_list.append(
+            {
+                "id": agent_id,
+                "name": agent_id,
+                "workspace": str(workspace),
+                "default": False,
+            }
+        )
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    registry = oj.managed_registry_path()
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    if registry.exists():
+        reg = json.loads(registry.read_text(encoding="utf-8"))
+    else:
+        reg = {"agent_ids": []}
+    ids = reg.setdefault("agent_ids", [])
+    if agent_id not in ids:
+        ids.append(agent_id)
+    registry.write_text(json.dumps(reg), encoding="utf-8")
 
 
 def _git_default_branch(repo: Path) -> str:
@@ -190,14 +249,7 @@ class TestPureValidation:
 class TestStorageAwareValidation:
     @staticmethod
     def _register_openclaw_leader(storage, agent_id: str = "oc-lead") -> None:
-        storage.openclaw_create(
-            OpenclawAgent(
-                id=agent_id,
-                name="Leader",
-                workspace_path=f"/tmp/{agent_id}/workspace",
-                created_by_user="alice",
-            )
-        )
+        _register_runtime_openclaw(storage, agent_id)
 
     def test_repo_must_be_git_repo(self, tmp_path: Path) -> None:
         storage = get_storage()
@@ -386,18 +438,8 @@ class TestStorageAwareValidation:
 
     def test_openclaw_agent_present(self) -> None:
         storage = get_storage()
-        storage.openclaw_create(OpenclawAgent(
-            id="oc-real",
-            name="Test agent",
-            workspace_path="/tmp/oc-real/workspace",
-            created_by_user="alice",
-        ))
-        storage.openclaw_create(OpenclawAgent(
-            id="oc-worker",
-            name="Worker agent",
-            workspace_path="/tmp/oc-worker/workspace",
-            created_by_user="alice",
-        ))
+        _register_runtime_openclaw(storage, "oc-real")
+        _register_runtime_openclaw(storage, "oc-worker")
         spec = FlowSpec(
             agents=[
                 FlowAgent(id="oc-real", kind=AgentKind.openclaw, is_leader=True),
@@ -410,6 +452,35 @@ class TestStorageAwareValidation:
             ],
         )
         validate_flow_against_db(spec, storage)
+
+    def test_openclaw_agent_unregistered_rejected(self, tmp_path: Path) -> None:
+        storage = get_storage()
+        _register_runtime_openclaw(storage, "oc-lead")
+        _register_runtime_openclaw(storage, "oc-unreg")
+        cfg = load_config()
+        oc_home = Path(cfg.openclaw_home).expanduser()
+        payload = json.loads((oc_home / "openclaw.json").read_text(encoding="utf-8"))
+        payload["agents"]["list"] = [
+            item
+            for item in payload["agents"]["list"]
+            if not (isinstance(item, dict) and item.get("id") == "oc-unreg")
+        ]
+        (oc_home / "openclaw.json").write_text(json.dumps(payload), encoding="utf-8")
+        spec = FlowSpec(
+            agents=[
+                FlowAgent(id="oc-lead", kind=AgentKind.openclaw, is_leader=True),
+                FlowAgent(id="oc-unreg", kind=AgentKind.openclaw, is_leader=False),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="oc-unreg", subject="w"),
+                FlowTask(id="t1", owner_agent_id="oc-lead", subject="x",
+                         depends_on=["t0"], is_leader_summary=True),
+            ],
+        )
+        with pytest.raises(FlowValidationError) as exc:
+            validate_flow_against_db(spec, storage)
+        assert exc.value.code == ERROR_OPENCLAW_AGENT_UNREGISTERED
+        assert exc.value.details.get("agent_id") == "oc-unreg"
 
 
 class TestTemporaryAgents:

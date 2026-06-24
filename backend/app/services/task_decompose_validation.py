@@ -26,6 +26,7 @@ def validate_decompose_proposal(
     tasks: list[dict[str, Any]],
     *,
     expected_leader: str,
+    registered_openclaw_ids: set[str] | None = None,
 ) -> None:
     """Validate the minimal scheduler invariants for a proposed DAG."""
     if not agents:
@@ -38,6 +39,29 @@ def validate_decompose_proposal(
             "INVALID_PROPOSAL",
             "decomposer returned no tasks.",
         )
+
+    agent_kinds: dict[str, str] = {}
+    for agent in agents:
+        aid = agent.get("id")
+        if not isinstance(aid, str) or not aid:
+            continue
+        agent_kinds[aid] = str(agent.get("kind") or "").strip().lower()
+
+    if registered_openclaw_ids is not None:
+        for agent in agents:
+            kind = str(agent.get("kind") or "").strip().lower()
+            if kind != "openclaw":
+                continue
+            if bool(agent.get("isTemporary") or agent.get("is_temporary")):
+                continue
+            aid = str(agent.get("id") or "").strip()
+            if aid and aid not in registered_openclaw_ids:
+                raise ProposalValidationError(
+                    "OPENCLAW_AGENT_UNREGISTERED",
+                    f"agent {aid!r} is unregistered in OpenClaw runtime "
+                    "(restore it before assigning tasks)",
+                    details={"agent_id": aid},
+                )
 
     agent_ids = {a.get("id") for a in agents if a.get("id")}
     task_ids: set[str] = set()
@@ -83,6 +107,18 @@ def validate_decompose_proposal(
                 raise ProposalValidationError(
                     "INVALID_PROPOSAL",
                     f"task {task_id!r} has unknown ownerAgentId={owner!r}",
+                )
+            if (
+                registered_openclaw_ids is not None
+                and owner
+                and agent_kinds.get(owner) == "openclaw"
+                and owner not in registered_openclaw_ids
+            ):
+                raise ProposalValidationError(
+                    "OPENCLAW_AGENT_UNREGISTERED",
+                    f"task {task_id!r} assigns unregistered OpenClaw agent "
+                    f"{owner!r} (restore it before assigning tasks)",
+                    details={"agent_id": owner, "task_id": task_id},
                 )
 
     if leader_summary_count != 1:

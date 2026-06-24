@@ -28,7 +28,7 @@ from app.integrations import internal_token as it
 from app.integrations import openclaw_json as oj
 from app.integrations.openclaw_bridge import OpenclawGatewayUnavailable
 from app.main import create_app
-from app.models import AgentKind, OpenclawAgent, TaskDecomposeStatus
+from app.models import AgentKind, OpenclawAgent, TaskDecomposeRequest, TaskDecomposeStatus
 from app.services import task_decompose as svc
 from app.storage import get_storage
 
@@ -70,15 +70,64 @@ def disable_decompose_cli_dispatch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(svc, "_resolve_openclaw_executable", lambda: None)
 
 
+def _register_openclaw_runtime_entry(
+    agent_id: str,
+    *,
+    workspace: Path | None = None,
+    write_registry: bool = True,
+) -> None:
+    cfg = load_config()
+    oc_home = Path(cfg.openclaw_home).expanduser()
+    oc_home.mkdir(parents=True, exist_ok=True)
+    ws = workspace or (paths.agent_dir(agent_id) / "workspace")
+    ws.mkdir(parents=True, exist_ok=True)
+    payload_path = oc_home / "openclaw.json"
+    if payload_path.exists():
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    else:
+        payload = {
+            "agents": {"defaults": {}, "list": []},
+            "gateway": {"port": 18789, "auth": {"token": "T"}},
+        }
+    agents_list = payload.setdefault("agents", {}).setdefault("list", [])
+    if not any(
+        isinstance(item, dict) and item.get("id") == agent_id
+        for item in agents_list
+    ):
+        agents_list.append({
+            "id": agent_id,
+            "name": agent_id.title(),
+            "workspace": str(ws),
+            "default": False,
+        })
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    if not write_registry:
+        return
+    registry = oj.managed_registry_path()
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    if registry.exists():
+        reg = json.loads(registry.read_text(encoding="utf-8"))
+    else:
+        reg = {"agent_ids": []}
+    ids = reg.setdefault("agent_ids", [])
+    if agent_id not in ids:
+        ids.append(agent_id)
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+
+
 def _seed_openclaw_agent(agent_id: str = "leader-bot",
                          user: str = "alice") -> OpenclawAgent:
     storage = get_storage()
+    workspace = paths.agent_dir(agent_id) / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
     agent = OpenclawAgent(
         id=agent_id, name=agent_id.title(),
-        workspace_path=f"/tmp/{agent_id}",
+        workspace_path=str(workspace),
         created_by_user=user,
     )
-    return storage.openclaw_create(agent)
+    created = storage.openclaw_create(agent)
+    _register_openclaw_runtime_entry(agent_id, workspace=workspace)
+    return created
 
 
 def _seed_registered_openclaw_entry_without_db(
@@ -86,28 +135,12 @@ def _seed_registered_openclaw_entry_without_db(
     *,
     write_registry: bool = True,
 ) -> None:
-    cfg = load_config()
-    oc_home = Path(cfg.openclaw_home).expanduser()
-    oc_home.mkdir(parents=True, exist_ok=True)
     workspace = paths.agent_dir(agent_id) / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
-    (oc_home / "openclaw.json").write_text(json.dumps({
-        "agents": {
-            "defaults": {},
-            "list": [{
-                "id": agent_id,
-                "name": agent_id.title(),
-                "workspace": str(workspace),
-                "default": False,
-            }],
-        },
-        "gateway": {"port": 18789, "auth": {"token": "T"}},
-    }), encoding="utf-8")
-    if not write_registry:
-        return
-    registry = oj.managed_registry_path()
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_text(json.dumps({"agent_ids": [agent_id]}), encoding="utf-8")
+    _register_openclaw_runtime_entry(
+        agent_id,
+        workspace=workspace,
+        write_registry=write_registry,
+    )
 
 
 # ── ① skill removed + self-contained dispatch prompt -----------------
@@ -524,6 +557,41 @@ async def test_start_refuses_leader_owned_by_other_user(fake_openclaw_home: Path
 
 
 @pytest.mark.asyncio
+async def test_start_persists_leader_repo_branch_in_existing_agents_snapshot(
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = Path("/tmp/leader-claude-repo")
+    repo_path.mkdir(parents=True, exist_ok=True)
+
+    async def _noop_dispatch(**kwargs):
+        return None
+
+    monkeypatch.setattr(svc, "_dispatch_to_leader", _noop_dispatch)
+
+    res = await svc.start_decompose_request(
+        goal="x",
+        leader_agent_id="leader-claude",
+        user="alice",
+        api_base="http://x",
+        leader_kind="claude",
+        leader_repo=str(repo_path),
+        leader_target_branch="feature/x",
+        existing_agents=[],
+        background=False,
+    )
+    row = svc.get_request(res.request_id)
+    assert row is not None
+    leader = next(
+        item for item in (row.existing_agents or [])
+        if item.get("id") == "leader-claude"
+    )
+    assert leader["repo"] == str(repo_path)
+    assert leader["targetBranch"] == "feature/x"
+    assert leader["isLeader"] is True
+
+
+@pytest.mark.asyncio
 async def test_start_dispatches_non_openclaw_leader_via_direct_cli(
     fake_openclaw_home: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -661,36 +729,70 @@ async def test_start_dispatches_cursor_leader_with_force_flags(
     repo_path.mkdir(parents=True, exist_ok=True)
     seen: dict[str, Any] = {}
 
-    class _Proc:
-        returncode = 0
+    class _Stream:
+        def __init__(self, lines: list[bytes] | None = None) -> None:
+            self._lines = list(lines or [])
 
-        async def communicate(self):
-            payload = {
-                "agents": [{
-                    "id": "leader-cursor",
-                    "kind": "cursor",
-                    "repo": str(repo_path),
-                    "targetBranch": "main",
-                    "isLeader": True,
-                }],
-                "tasks": [{
-                    "id": "summary",
-                    "ownerAgentId": "leader-cursor",
-                    "subject": "Summary",
-                    "description": "Produce final summary.",
-                    "dependsOn": [],
-                    "isLeaderSummary": True,
-                }],
+        async def readline(self) -> bytes:
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+        async def read(self) -> bytes:
+            return b""
+
+    payload = {
+        "agents": [{
+            "id": "leader-cursor",
+            "kind": "cursor",
+            "repo": str(repo_path),
+            "targetBranch": "main",
+            "isLeader": True,
+        }],
+        "tasks": [{
+            "id": "summary",
+            "ownerAgentId": "leader-cursor",
+            "subject": "Summary",
+            "description": "Produce final summary.",
+            "dependsOn": [],
+            "isLeaderSummary": True,
+        }],
+    }
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.terminated = False
+            self._done = asyncio.Event()
+            result = {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": json.dumps(payload),
             }
-            return json.dumps(payload).encode("utf-8"), b""
+            self.stdout = _Stream([json.dumps(result).encode("utf-8") + b"\n"])
+            self.stderr = _Stream()
 
         def kill(self):
-            return None
+            self.terminated = True
+            self.returncode = -9
+            self._done.set()
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+            self._done.set()
+
+        async def wait(self):
+            await self._done.wait()
+            return self.returncode
+
+    proc = _Proc()
 
     async def _fake_spawn(*argv, **kwargs):
         seen["argv"] = argv
         seen["cwd"] = kwargs.get("cwd")
-        return _Proc()
+        return proc
 
     monkeypatch.setattr(svc.asyncio, "create_subprocess_exec", _fake_spawn)
 
@@ -726,12 +828,142 @@ async def test_start_dispatches_cursor_leader_with_force_flags(
         "--sandbox",
         "disabled",
     ]
-    assert argv[5] == "-p"
-    msg = str(argv[-1])
+    assert "--trust" in argv
+    assert "--output-format" in argv
+    assert "stream-json" in argv
+    msg = str(argv[argv.index("-p") + 1])
     assert "exactly one JSON object" in msg
     assert "/api/internal/task-decompose/commit" not in msg  # stdout, not curl
     assert "leader-cursor" in msg
     assert seen["cwd"] == str(repo_path)
+    assert proc.terminated is True
+
+
+@pytest.mark.asyncio
+async def test_cursor_stream_result_tolerates_process_exit_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "agents": [{
+            "id": "leader-cursor",
+            "kind": "cursor",
+            "repo": str(tmp_path),
+            "targetBranch": "main",
+            "isLeader": True,
+        }],
+        "tasks": [{
+            "id": "summary",
+            "ownerAgentId": "leader-cursor",
+            "subject": "Summary",
+            "description": "Produce final summary.",
+            "dependsOn": [],
+            "isLeaderSummary": True,
+        }],
+    }
+
+    class _Stream:
+        def __init__(self) -> None:
+            result = {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": json.dumps(payload),
+            }
+            self._lines = [json.dumps(result).encode("utf-8") + b"\n"]
+
+        async def readline(self) -> bytes:
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+        async def read(self) -> bytes:
+            return b""
+
+    class _Proc:
+        returncode = None
+        stdout = _Stream()
+        stderr = _Stream()
+
+        def terminate(self) -> None:
+            raise ProcessLookupError
+
+        def kill(self) -> None:
+            raise ProcessLookupError
+
+    async def _fake_spawn(*argv, **kwargs):
+        del argv, kwargs
+        return _Proc()
+
+    monkeypatch.setattr(svc.asyncio, "create_subprocess_exec", _fake_spawn)
+
+    agents, tasks = await svc._dispatch_to_non_openclaw_leader_via_cli(
+        request_id="req-cursor-race",
+        leader_target=svc._LeaderTarget(
+            id="leader-cursor",
+            kind=AgentKind.cursor,
+            repo=str(tmp_path),
+            target_branch="main",
+        ),
+        message="decompose this",
+    )
+
+    assert agents[0]["id"] == "leader-cursor"
+    assert tasks[0]["ownerAgentId"] == "leader-cursor"
+
+
+@pytest.mark.asyncio
+async def test_cancel_cursor_decompose_tolerates_process_exit_race(
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = Path("/tmp/leader-cursor-cancel")
+    repo_path.mkdir(parents=True, exist_ok=True)
+    spawned = asyncio.Event()
+
+    class _BlockingStdout:
+        async def readline(self) -> bytes:
+            await asyncio.Event().wait()
+            return b""
+
+    class _BlockingStderr:
+        async def read(self) -> bytes:
+            await asyncio.Event().wait()
+            return b""
+
+    class _Proc:
+        returncode = None
+        stdout = _BlockingStdout()
+        stderr = _BlockingStderr()
+
+        def terminate(self) -> None:
+            raise ProcessLookupError
+
+        def kill(self) -> None:
+            raise ProcessLookupError
+
+    async def _fake_spawn(*argv, **kwargs):
+        del argv, kwargs
+        spawned.set()
+        return _Proc()
+
+    monkeypatch.setattr(svc.asyncio, "create_subprocess_exec", _fake_spawn)
+
+    res = await svc.start_decompose_request(
+        goal="cancel cursor",
+        leader_agent_id="leader-cursor-cancel",
+        leader_kind="cursor",
+        leader_repo=str(repo_path),
+        user="alice",
+        api_base="http://127.0.0.1:17017",
+        background=True,
+    )
+    await asyncio.wait_for(spawned.wait(), timeout=1.0)
+
+    row = await svc.cancel_decompose_request(res.request_id)
+    assert row is not None
+    assert row.status == TaskDecomposeStatus.failed
+    assert row.error_code == "USER_CANCELLED"
 
 
 @pytest.mark.asyncio
@@ -1604,6 +1836,7 @@ def test_commit_rejects_request_id_mismatch(app_client: TestClient) -> None:
 
 def test_commit_happy_path(app_client: TestClient) -> None:
     _seed_openclaw_agent("leader-i3")
+    _seed_openclaw_agent("writer")
     rid = _seed_request(leader="leader-i3")
     tok = it.mint_token(
         request_id=rid, user="alice", purpose="task_decompose",
@@ -1761,3 +1994,146 @@ def test_reinstall_skills_excludes_removed_decomposer(
         Path(agent.workspace_path) / "skills" / "csflow-task-decomposer"
     ).exists()
     assert "self-definition-maintenance" in installed
+
+
+def test_merge_decompose_editor_snapshot_preserves_leader_branch() -> None:
+    merged = svc._merge_decompose_editor_snapshot(
+        [
+            {
+                "id": "hermes-lead",
+                "kind": "hermes",
+                "repo": "/tmp/wrong",
+                "targetBranch": "",
+                "isLeader": True,
+            },
+            {"id": "w1", "kind": "claude", "isTemporary": True},
+        ],
+        leader_agent_id="hermes-lead",
+        existing_agents=[{
+            "id": "hermes-lead",
+            "kind": "hermes",
+            "repo": "/tmp/right",
+            "targetBranch": "feature/x",
+            "isLeader": True,
+        }],
+    )
+    leader = next(item for item in merged if item["id"] == "hermes-lead")
+    assert leader["repo"] == "/tmp/right"
+    assert leader["targetBranch"] == "feature/x"
+
+
+def test_merge_decompose_editor_snapshot_preserves_worker_binding() -> None:
+    merged = svc._merge_decompose_editor_snapshot(
+        [
+            {"id": "hermes-lead", "kind": "hermes", "isLeader": True},
+            {
+                "id": "worker-1",
+                "kind": "hermes",
+                "repo": "/tmp/llm-wrong",
+                "targetBranch": "main",
+            },
+        ],
+        leader_agent_id="hermes-lead",
+        existing_agents=[
+            {
+                "id": "worker-1",
+                "kind": "hermes",
+                "repo": "/tmp/user-repo",
+                "targetBranch": "dev",
+            },
+        ],
+    )
+    worker = next(item for item in merged if item["id"] == "worker-1")
+    assert worker["repo"] == "/tmp/user-repo"
+    assert worker["targetBranch"] == "dev"
+
+
+def test_upsert_leader_editor_snapshot_adds_missing_leader() -> None:
+    out = svc._upsert_leader_editor_snapshot(
+        [],
+        leader_agent_id="hermes-lead",
+        leader_kind=AgentKind.hermes,
+        leader_repo="/tmp/repo",
+        leader_target_branch="feature/x",
+    )
+    assert out == [{
+        "id": "hermes-lead",
+        "kind": "hermes",
+        "isLeader": True,
+        "repo": "/tmp/repo",
+        "targetBranch": "feature/x",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_mark_request_succeeded_preserves_leader_branch(
+    fake_openclaw_home: Path,
+) -> None:
+    storage = get_storage()
+    row = TaskDecomposeRequest(
+        user="alice",
+        goal="x",
+        leader_agent_id="hermes-lead",
+        existing_agents=[{
+            "id": "hermes-lead",
+            "kind": "hermes",
+            "repo": "/tmp/repo",
+            "targetBranch": "dev",
+            "isLeader": True,
+        }],
+        status=TaskDecomposeStatus.pending,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+    )
+    saved = storage.task_decompose_create(row)
+    svc.mark_request_succeeded(
+        saved.request_id,
+        agents=[{
+            "id": "hermes-lead",
+            "kind": "hermes",
+            "repo": "/tmp/repo",
+            "targetBranch": "",
+            "isLeader": True,
+        }],
+        tasks=[{
+            "id": "sum",
+            "ownerAgentId": "hermes-lead",
+            "subject": "summary",
+            "isLeaderSummary": True,
+        }],
+        storage=storage,
+    )
+    updated = svc.get_request(saved.request_id, storage=storage)
+    assert updated is not None
+    leader = next(
+        item for item in (updated.result_agents or [])
+        if item.get("id") == "hermes-lead"
+    )
+    assert leader["targetBranch"] == "dev"
+
+
+def test_validate_decompose_rejects_unregistered_openclaw() -> None:
+    from app.services.task_decompose_validation import (
+        ProposalValidationError,
+        validate_decompose_proposal,
+    )
+
+    with pytest.raises(ProposalValidationError) as exc:
+        validate_decompose_proposal(
+            agents=[
+                {"id": "leader-oc", "kind": "openclaw", "isLeader": True},
+                {"id": "ghost-oc", "kind": "openclaw", "isLeader": False},
+            ],
+            tasks=[
+                {"id": "w1", "ownerAgentId": "ghost-oc", "subject": "work"},
+                {
+                    "id": "sum",
+                    "ownerAgentId": "leader-oc",
+                    "subject": "summary",
+                    "isLeaderSummary": True,
+                },
+            ],
+            expected_leader="leader-oc",
+            registered_openclaw_ids={"leader-oc"},
+        )
+    assert exc.value.code == "OPENCLAW_AGENT_UNREGISTERED"
+    assert exc.value.details.get("agent_id") == "ghost-oc"

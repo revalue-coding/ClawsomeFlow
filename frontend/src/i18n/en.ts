@@ -850,6 +850,7 @@ const en = {
     },
     youLabel: "You",
     agentLabel: "Agent",
+    agentUnregistered: "Unregistered",
     error: "Chat error: {{message}}",
     reset: "Reset conversation",
     resetting: "Resetting…",

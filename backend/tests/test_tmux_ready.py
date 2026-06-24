@@ -55,6 +55,93 @@ async def test_wait_tui_ready_succeeds_on_cursor_agent_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_tui_ready_dismisses_cursor_workspace_trust_prompt() -> None:
+    trust_pane = (
+        "  ╭──────────────────────────────────────────────────────────────────────────╮\n"
+        "  │                                                                          │\n"
+        "  │  ⚠ Workspace Trust Required                                              │\n"
+        "  │                                                                          │\n"
+        "  │  Cursor Agent can execute code and access files in this directory.       │\n"
+        "  │                                                                          │\n"
+        "  │  Do you trust the contents of this directory?                            │\n"
+        "  │                                                                          │\n"
+        "  │    /home/user/project                                                    │\n"
+        "  │                                                                          │\n"
+        "  │  ▶ [a] Trust this workspace                                              │\n"
+        "  │    [q] Quit                                                              │\n"
+        "  │                                                                          │\n"
+        "  │  Use arrow keys to navigate, Enter to select, or press the key shown     │\n"
+        "  │                                                                          │\n"
+        "  ╰──────────────────────────────────────────────────────────────────────────╯\n"
+    )
+    ready_pane = (
+        "Cursor Agent\n"
+        "v2026.06.19-20-24-33-653a7fb\n"
+        "Use subagents to parallelize work and preserve context.\n"
+        "\n"
+        "→ Plan, search, build anything\n"
+        "\n"
+        "Composer 2.5 Fast                                             Run Everything\n"
+        "/home/user/project · abc123\n"
+    )
+    panes = iter([trust_pane, ready_pane])
+    sent: list[tuple[str, str, bool]] = []
+
+    async def capture(_target: str) -> str:
+        return next(panes)
+
+    async def send_keys(target: str, keys: str, *, literal: bool = False) -> None:
+        sent.append((target, keys, literal))
+
+    result = await tmux_ready.wait_tui_ready(
+        "team:cursor",
+        trust_platform="cursor",
+        timeout_sec=2.0,
+        poll_interval=0.01,
+        capture=capture,
+        send_keys=send_keys,
+    )
+
+    assert result.ok is True
+    assert sent == [("team:cursor", "a", False)]
+
+
+@pytest.mark.asyncio
+async def test_wait_tui_ready_ignores_stale_cursor_trust_text_in_scrollback() -> None:
+    pane = (
+        "Workspace Trust Required\n"
+        "Cursor Agent can execute code and access files in this directory.\n"
+        "Do you trust the contents of this directory?\n"
+        "▶ [a] Trust this workspace\n"
+        "Use arrow keys to navigate, Enter to select, or press the key shown\n"
+        + "\n" * 25
+        + "Cursor Agent\n"
+        "→ Plan, search, build anything\n"
+        "Composer 2.5 Fast                                             Run Everything\n"
+        "/home/user/project · abc123\n"
+    )
+    sent: list[tuple[str, str, bool]] = []
+
+    async def capture(_target: str) -> str:
+        return pane
+
+    async def send_keys(target: str, keys: str, *, literal: bool = False) -> None:
+        sent.append((target, keys, literal))
+
+    result = await tmux_ready.wait_tui_ready(
+        "team:cursor",
+        trust_platform="cursor",
+        timeout_sec=1.0,
+        poll_interval=0.01,
+        capture=capture,
+        send_keys=send_keys,
+    )
+
+    assert result.ok is True
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_wait_tui_ready_times_out() -> None:
     capture = lambda target: _async_return("nothing useful here")
     result = await tmux_ready.wait_tui_ready(
@@ -236,12 +323,15 @@ async def test_wait_tui_ready_ignores_stale_trust_text_in_scrollback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_trust_platform_only_clawteam_scope() -> None:
+async def test_resolve_trust_platform_includes_cursor_by_explicit_agent_kind() -> None:
     assert tmux_ready.resolve_trust_platform(agent_kind="claude") == "claude"
     assert tmux_ready.resolve_trust_platform(agent_kind="codex") == "codex"
+    assert tmux_ready.resolve_trust_platform(agent_kind="cursor") == "cursor"
     assert tmux_ready.resolve_trust_platform(agent_kind="gemini") == "gemini"
     assert tmux_ready.resolve_trust_platform(agent_kind="kimi") is None
     assert tmux_ready.resolve_trust_platform(agent_kind="codebuddy") is None
+    assert tmux_ready.resolve_trust_platform(spawn_command=["agent", "--force"]) is None
+    assert tmux_ready.resolve_trust_platform(spawn_command=["cursor"]) is None
     assert tmux_ready.resolve_trust_platform(spawn_command=["gemini", "--yolo"]) == "gemini"
     assert tmux_ready.resolve_trust_platform(spawn_command=["qodercli"]) is None
 

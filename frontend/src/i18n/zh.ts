@@ -835,6 +835,7 @@ const zh = {
     },
     youLabel: "你",
     agentLabel: "智能体",
+    agentUnregistered: "已取消注册",
     error: "对话出错：{{message}}",
     reset: "重置对话",
     resetting: "重置中…",

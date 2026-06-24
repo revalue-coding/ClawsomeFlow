@@ -59,7 +59,7 @@ import {
   AgentManagementHeader,
   AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
-import { DesktopIcon, EditIcon, PlusIcon, RefreshIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
+import { DesktopIcon, EditIcon, LockIcon, PlusIcon, RefreshIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
@@ -273,9 +273,12 @@ export function OpenclawChat() {
 
 type OpenclawPickerActions = {
   openCreate: () => void;
-  openRestore: () => void;
   openImport: () => void;
-  openRemoveFor: (agent: OpenclawAgentSummary) => void;
+  openRemoveFor: (
+    agent: OpenclawAgentSummary,
+    options?: { defaultMode?: OpenclawAgentRemoveMode },
+  ) => void;
+  restoreAgent: (agentId: string) => Promise<void>;
 };
 
 // ──────────────────────────────────────────────────────────────────────
@@ -312,14 +315,6 @@ function AgentQuickActions({
   const [removeTargetId, setRemoveTargetId] = useState("");
   const [removeMode, setRemoveMode] = useState<OpenclawAgentRemoveMode>("unregister");
   const [removeError, setRemoveError] = useState<string | null>(null);
-  const [restoreModalOpen, setRestoreModalOpen] = useSessionBackedModalFlag(
-    "openclaw-chat:quick-actions:restore-modal-open",
-  );
-  const [restoreTargets, setRestoreTargets] = useState<OpenclawRestorableAgent[]>([]);
-  const [restoreLoading, setRestoreLoading] = useState(false);
-  const [restoreSubmitting, setRestoreSubmitting] = useState(false);
-  const [restoreTargetId, setRestoreTargetId] = useState("");
-  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [importModalOpen, setImportModalOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:import-modal-open",
   );
@@ -400,12 +395,11 @@ function AgentQuickActions({
   );
 
   // Block leaving the page while an irreversible/in-flight operation runs, so a
-  // remove / restore / create-cancellation / import-cancellation can't be
-  // orphaned mid-flight. react-router allows a single blocker at a time, so every
+  // remove / create-cancellation / import-cancellation can't be orphaned
+  // mid-flight. react-router allows a single blocker at a time, so every
   // condition is folded into one expression here.
   const navGuardActive =
     removeSubmitting ||
-    restoreSubmitting ||
     createCancelState?.cancelling === true ||
     importCancelState?.cancelling === true;
   useNavigationGuard(navGuardActive, () => {
@@ -1061,31 +1055,21 @@ function AgentQuickActions({
     }
   }
 
-  async function openRemoveForAgent(agent: OpenclawAgentSummary) {
+  async function openRemoveForAgent(
+    agent: OpenclawAgentSummary,
+    options?: { defaultMode?: OpenclawAgentRemoveMode },
+  ) {
     setRemoveModalOpen(true);
     setRemoveError(null);
-    setRemoveMode("unregister");
+    setRemoveMode(options?.defaultMode ?? "unregister");
     setRemoveTargetId(agent.id);
     setRemoveTargets([agent]);
     setRemoveLoading(false);
   }
 
-  async function openRestoreModal() {
-    setRestoreModalOpen(true);
-    setRestoreError(null);
-    setRestoreLoading(true);
-    try {
-      const r = await api.listOpenclawRestoreCandidates();
-      setRestoreTargets(r.items);
-      setRestoreTargetId((prev) => {
-        if (prev && r.items.some((x) => x.id === prev)) return prev;
-        return r.items[0]?.id ?? "";
-      });
-    } catch (e) {
-      setRestoreError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-    } finally {
-      setRestoreLoading(false);
-    }
+  async function restoreAgent(agentId: string) {
+    await api.restoreOpenclawAgent(agentId);
+    notifyOpenclawAgentsUpdated();
   }
 
   function buildFlowInUseError(e: ApiError): string {
@@ -1124,23 +1108,6 @@ function AgentQuickActions({
       }
     } finally {
       setRemoveSubmitting(false);
-    }
-  }
-
-  async function onSubmitRestoreTarget() {
-    if (!restoreTargetId) return;
-    setRestoreSubmitting(true);
-    setRestoreError(null);
-    try {
-      await api.restoreOpenclawAgent(restoreTargetId);
-      setRestoreModalOpen(false);
-      setRestoreTargets((prev) => prev.filter((item) => item.id !== restoreTargetId));
-      setRestoreTargetId("");
-      notifyOpenclawAgentsUpdated();
-    } catch (e) {
-      setRestoreError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-    } finally {
-      setRestoreSubmitting(false);
     }
   }
 
@@ -1205,15 +1172,13 @@ function AgentQuickActions({
     (workPopupOpen && workPopupRunning ? t("assistant.workPopup.running") : "");
   const pickerActions: OpenclawPickerActions = {
     openCreate: onOpenCreateModal,
-    openRestore: () => {
-      void openRestoreModal();
-    },
     openImport: () => {
       void openImportModal();
     },
-    openRemoveFor: (agent) => {
-      void openRemoveForAgent(agent);
+    openRemoveFor: (agent, options) => {
+      void openRemoveForAgent(agent, options);
     },
+    restoreAgent,
   };
 
   return (
@@ -1385,65 +1350,6 @@ function AgentQuickActions({
                   disabled={removeSubmitting || !removeTargetId || removeTargets.length === 0}
                 >
                   {removeSubmitting ? t("assistant.removeModal.removing") : t("assistant.removeModal.submit")}
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </Modal>
-
-      <Modal
-        open={restoreModalOpen}
-        onClose={() => {
-          // Once restore is in flight it cannot be cancelled — keep the modal up.
-          if (restoreSubmitting) return;
-          setRestoreModalOpen(false);
-        }}
-        title={t("assistant.restoreModal.title")}
-        width="max-w-lg"
-        dismissible={!restoreSubmitting}
-      >
-        <div className="space-y-3">
-          <p className="text-sm text-ink-600">{t("assistant.restoreModal.hint")}</p>
-          {restoreLoading && <Loading />}
-          {restoreError && <ErrorBox>{restoreError}</ErrorBox>}
-          {!restoreLoading && !restoreError && (
-            <>
-              {restoreTargets.length === 0 ? (
-                <div className="text-sm text-ink-500">{t("assistant.restoreModal.empty")}</div>
-              ) : (
-                <div>
-                  <label className="label">{t("assistant.restoreModal.targetLabel")}</label>
-                  <select
-                    className="select"
-                    value={restoreTargetId}
-                    onChange={(e) => setRestoreTargetId(e.target.value)}
-                    disabled={restoreSubmitting}
-                  >
-                    {restoreTargets.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name} ({item.id})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  className="btn-outline"
-                  onClick={() => setRestoreModalOpen(false)}
-                  disabled={restoreSubmitting}
-                >
-                  {t("common.cancel")}
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={() => void onSubmitRestoreTarget()}
-                  disabled={restoreSubmitting || !restoreTargetId || restoreTargets.length === 0}
-                >
-                  {restoreSubmitting ? t("assistant.restoreModal.restoring") : t("assistant.restoreModal.submit")}
                 </button>
               </div>
             </>
@@ -1677,10 +1583,23 @@ function agentCardTitle(agent: { id: string; name: string }): string {
   return agentCardShowsIdLine(agent) ? name : agent.id;
 }
 
+type OpenclawPickerAgent =
+  | (OpenclawAgentSummary & { registered: true })
+  | (OpenclawRestorableAgent & { registered: false });
+
+function restorableToSummary(agent: OpenclawRestorableAgent): OpenclawAgentSummary {
+  return {
+    ...agent,
+    createdAt: "",
+  };
+}
+
 function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
   const { t } = useTranslation();
-  const [items, setItems] = useState<OpenclawAgentSummary[] | null>(null);
+  const [items, setItems] = useState<OpenclawPickerAgent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoringIds, setRestoringIds] = useState<Set<string>>(() => new Set());
   const [storeComingSoonOpen, setStoreComingSoonOpen] = useSessionBackedModalFlag(
     "openclaw-chat:picker:store-coming-soon-open",
   );
@@ -1705,12 +1624,40 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
   const loadAgents = useCallback(async () => {
     setError(null);
     try {
-      const r = await api.listOpenclawAgents();
-      setItems(r.items);
+      const [active, restorable] = await Promise.all([
+        api.listOpenclawAgents(),
+        api.listOpenclawRestoreCandidates(),
+      ]);
+      const activeIds = new Set(active.items.map((agent) => agent.id));
+      const merged: OpenclawPickerAgent[] = [
+        ...active.items.map((agent) => ({ ...agent, registered: true as const })),
+        ...restorable.items
+          .filter((agent) => !activeIds.has(agent.id))
+          .map((agent) => ({ ...agent, registered: false as const })),
+      ];
+      setItems(merged);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     }
   }, []);
+
+  async function onRestoreAgent(agentId: string) {
+    if (restoringIds.has(agentId)) return;
+    setRestoreError(null);
+    setRestoringIds((prev) => new Set(prev).add(agentId));
+    try {
+      await actions.restoreAgent(agentId);
+      await loadAgents();
+    } catch (e) {
+      setRestoreError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setRestoringIds((prev) => {
+        const next = new Set(prev);
+        next.delete(agentId);
+        return next;
+      });
+    }
+  }
 
   useEffect(() => {
     void loadAgents();
@@ -1729,7 +1676,7 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
 
   const groupedByTeam = useMemo(() => {
     const source = items ?? [];
-    const groups = new Map<string, { teamName: string; agents: OpenclawAgentSummary[] }>();
+    const groups = new Map<string, { teamName: string; agents: OpenclawPickerAgent[] }>();
     for (const agent of source) {
       const key = agent.teamId || "__ungrouped__";
       const teamName = agent.teamName || t("chat.ungroupedTeam");
@@ -1795,9 +1742,6 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
         }
         actions={
           <>
-            <button type="button" className="btn-outline h-9 px-3 text-sm" onClick={actions.openRestore}>
-              {t("assistant.askRestore")}
-            </button>
             <button type="button" className="btn-outline h-9 px-3 text-sm" onClick={actions.openImport}>
               {t("assistant.askImport")}
             </button>
@@ -1813,6 +1757,7 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
         }
       />
       {error && <ErrorBox>{error}</ErrorBox>}
+      {restoreError && <ErrorBox>{restoreError}</ErrorBox>}
       {!items && !error && <Loading />}
       {items && items.length === 0 && (
         <EmptyState
@@ -1856,40 +1801,94 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                 )}
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {group.agents.map((a) => (
-                  <SilentLink
-                    key={a.id}
-                    as="div"
-                    to={`/chat/${a.id}`}
-                    className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_rgb(var(--brand-300))]"
-                  >
-                    <div className="flex items-start justify-between">
-                      <AgentCardAvatar platform="openclaw" />
-                      <button
-                        type="button"
-                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-rose-500 hover:bg-rose-50 hover:text-rose-700"
-                        title={t("assistant.askRemove")}
-                        aria-label={t("assistant.askRemove")}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          actions.openRemoveFor(a);
-                        }}
-                      >
-                        <TrashIcon className="h-5 w-5" />
-                      </button>
-                    </div>
-                    <div className="font-semibold text-ink-900">{agentCardTitle(a)}</div>
-                    {agentCardShowsIdLine(a) && (
-                      <div className="mt-0.5 font-mono text-xs text-ink-500">{a.id}</div>
-                    )}
-                    {a.description && (
-                      <div className="text-xs text-ink-500 mt-2 line-clamp-3">
-                        {a.description}
+                {group.agents.map((a) =>
+                  a.registered ? (
+                    <SilentLink
+                      key={a.id}
+                      as="div"
+                      to={`/chat/${a.id}`}
+                      className="group card block p-5 transition-all hover:border-brand-300 hover:shadow-[0_0_24px_-6px_rgb(var(--brand-300))]"
+                    >
+                      <div className="flex items-start justify-between">
+                        <AgentCardAvatar platform="openclaw" />
+                        <button
+                          type="button"
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-rose-500 hover:bg-rose-50 hover:text-rose-700"
+                          title={t("assistant.askRemove")}
+                          aria-label={t("assistant.askRemove")}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            actions.openRemoveFor(a);
+                          }}
+                        >
+                          <TrashIcon className="h-5 w-5" />
+                        </button>
                       </div>
-                    )}
-                  </SilentLink>
-                ))}
+                      <div className="font-semibold text-ink-900">{agentCardTitle(a)}</div>
+                      {agentCardShowsIdLine(a) && (
+                        <div className="mt-0.5 font-mono text-xs text-ink-500">{a.id}</div>
+                      )}
+                      {a.description && (
+                        <div className="text-xs text-ink-500 mt-2 line-clamp-3">
+                          {a.description}
+                        </div>
+                      )}
+                    </SilentLink>
+                  ) : (
+                    <div
+                      key={a.id}
+                      className="card block cursor-default border-ink-200 bg-ink-50/80 p-5 opacity-90 ring-1 ring-inset ring-ink-200/70 dark:bg-ink-900/30"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="relative inline-block">
+                          <AgentCardAvatar platform="openclaw" className="grayscale opacity-60" />
+                          <span className="absolute -bottom-0.5 -right-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-ink-200 bg-white text-ink-400 shadow-sm dark:border-ink-700 dark:bg-ink-900">
+                            <LockIcon className="h-3 w-3" />
+                          </span>
+                        </div>
+                        <div className="inline-flex shrink-0 items-center gap-0.5">
+                          <button
+                            type="button"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-brand-600 hover:bg-brand-50 hover:text-brand-700 disabled:opacity-50 dark:hover:bg-brand-950/40"
+                            title={t("assistant.askRestore")}
+                            aria-label={t("assistant.askRestore")}
+                            disabled={restoringIds.has(a.id)}
+                            onClick={() => void onRestoreAgent(a.id)}
+                          >
+                            <RefreshIcon
+                              className={cn("h-5 w-5", restoringIds.has(a.id) && "animate-spin")}
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-rose-500 hover:bg-rose-50 hover:text-rose-700"
+                            title={t("assistant.askRemove")}
+                            aria-label={t("assistant.askRemove")}
+                            onClick={() =>
+                              actions.openRemoveFor(restorableToSummary(a), { defaultMode: "purge" })
+                            }
+                          >
+                            <TrashIcon className="h-5 w-5" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-1 inline-flex items-center gap-1 rounded-full border border-ink-200 bg-ink-100/90 px-2 py-0.5 text-[11px] font-medium text-ink-500 dark:border-ink-700 dark:bg-ink-900/60">
+                        <LockIcon className="h-3 w-3" />
+                        {t("chat.agentUnregistered")}
+                      </div>
+                      <div className="mt-2 font-semibold text-ink-600">{agentCardTitle(a)}</div>
+                      {agentCardShowsIdLine(a) && (
+                        <div className="mt-0.5 font-mono text-xs text-ink-400">{a.id}</div>
+                      )}
+                      {a.description && (
+                        <div className="mt-2 line-clamp-3 text-xs text-ink-400">
+                          {a.description}
+                        </div>
+                      )}
+                    </div>
+                  ),
+                )}
               </div>
             </div>
           ))}
@@ -1911,8 +1910,25 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
             </thead>
             <tbody>
               {items.map((a) => (
-                <tr key={a.id} className="table-row">
-                  <td className="px-4 py-3 text-ink-900 font-medium">{a.name}</td>
+                <tr
+                  key={a.id}
+                  className={cn("table-row", !a.registered && "bg-ink-50/70 dark:bg-ink-900/20")}
+                >
+                  <td className="px-4 py-3 font-medium">
+                    <div className="flex items-center gap-2">
+                      {!a.registered ? (
+                        <LockIcon className="h-4 w-4 shrink-0 text-ink-400" aria-hidden="true" />
+                      ) : null}
+                      <span className={a.registered ? "text-ink-900" : "text-ink-600"}>
+                        {a.name}
+                      </span>
+                      {!a.registered ? (
+                        <span className="rounded-full border border-ink-200 bg-ink-100 px-1.5 py-0.5 text-[10px] font-medium text-ink-500 dark:border-ink-700 dark:bg-ink-900/60">
+                          {t("chat.agentUnregistered")}
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
                   <td className="px-4 py-3 text-xs font-mono text-ink-500">{a.id}</td>
                   <td className="px-4 py-3 text-ink-600">{a.teamName || t("chat.ungroupedTeam")}</td>
                   <td className="px-4 py-3 text-ink-600">
@@ -1920,18 +1936,39 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="inline-flex items-center justify-end gap-2">
+                      {!a.registered ? (
+                        <button
+                          type="button"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-brand-600 hover:bg-brand-50 hover:text-brand-700 disabled:opacity-50 dark:hover:bg-brand-950/40"
+                          title={t("assistant.askRestore")}
+                          aria-label={t("assistant.askRestore")}
+                          disabled={restoringIds.has(a.id)}
+                          onClick={() => void onRestoreAgent(a.id)}
+                        >
+                          <RefreshIcon
+                            className={cn("h-5 w-5", restoringIds.has(a.id) && "animate-spin")}
+                          />
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         className="inline-flex h-8 w-8 items-center justify-center rounded-md text-rose-500 hover:bg-rose-50 hover:text-rose-700"
                         title={t("assistant.askRemove")}
                         aria-label={t("assistant.askRemove")}
-                        onClick={() => actions.openRemoveFor(a)}
+                        onClick={() =>
+                          actions.openRemoveFor(
+                            a.registered ? a : restorableToSummary(a),
+                            a.registered ? undefined : { defaultMode: "purge" },
+                          )
+                        }
                       >
                         <TrashIcon className="h-5 w-5" />
                       </button>
-                      <SilentLink className="btn-primary" to={`/chat/${a.id}`}>
-                        {t("agents.chatLink")}
-                      </SilentLink>
+                      {a.registered ? (
+                        <SilentLink className="btn-primary" to={`/chat/${a.id}`}>
+                          {t("agents.chatLink")}
+                        </SilentLink>
+                      ) : null}
                     </div>
                   </td>
                 </tr>

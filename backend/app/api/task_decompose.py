@@ -248,7 +248,7 @@ def apply_decompose(
     user: UserDep,
     storage: StorageDep,
 ) -> DecomposeApplyResponse:
-    """Normalize worker-agent branches against git repos before editor apply."""
+    """Restore editor repo/branch bindings, then return agents/tasks for apply."""
     svc.reap_expired_requests(storage=storage)
     try:
         agents, tasks = svc.apply_decompose_proposal(
@@ -323,11 +323,21 @@ async def commit_decompose(
     # Server-side validation of the proposed Flow. We deliberately use the
     # SAME Flow validators a normal Save would use, so the user can just
     # hit Save in the editor without a second round of validation errors.
+    from app.services.openclaw_agents import list_agents as list_registered_openclaw_agents
+
+    registered_openclaw_ids = {
+        agent.id
+        for agent in list_registered_openclaw_agents(
+            user=row.user,
+            storage=storage,
+        )
+    }
     try:
         validate_decompose_proposal(
             payload.agents,
             payload.tasks,
             expected_leader=row.leader_agent_id,
+            registered_openclaw_ids=registered_openclaw_ids,
         )
     except ProposalValidationError as exc:
         svc.mark_request_failed(

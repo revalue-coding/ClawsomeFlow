@@ -210,6 +210,15 @@ export function RefreshIcon(props: IconProps) {
   );
 }
 
+export function LockIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="6.5" y="10.5" width="11" height="9" rx="2" />
+      <path d="M8.5 10.5V8.5a3.5 3.5 0 0 1 7 0v2" />
+    </IconBase>
+  );
+}
+
 export function PlusIcon(props: IconProps) {
   return (
     <IconBase {...props}>

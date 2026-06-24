@@ -30,6 +30,7 @@ ERROR_INVALID_AGENT_REF = "INVALID_AGENT_REF"
 ERROR_INVALID_LEADER = "INVALID_LEADER"
 ERROR_MISSING_LEADER_SUMMARY = "MISSING_LEADER_SUMMARY"
 ERROR_OPENCLAW_AGENT_NOT_FOUND = "OPENCLAW_AGENT_NOT_FOUND"
+ERROR_OPENCLAW_AGENT_UNREGISTERED = "OPENCLAW_AGENT_UNREGISTERED"
 ERROR_HERMES_AGENT_NOT_FOUND = "HERMES_AGENT_NOT_FOUND"
 ERROR_MISSING_AGENT_REPO = "MISSING_AGENT_REPO"
 ERROR_INVALID_REPO = "INVALID_REPO"
@@ -277,8 +278,12 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
     # INVALID_TARGET_BRANCH regardless of repo state.
     _validate_non_openclaw_target_branches_nonempty(spec)
     # Keep DB index in sync with managed openclaw.json entries before checking refs.
+    from app.services.openclaw_agents import list_agents as list_registered_openclaw_agents
     from app.services.openclaw_agents import reindex_registered_agents
     reindex_registered_agents(storage=storage)
+    registered_openclaw_ids = {
+        row.id for row in list_registered_openclaw_agents(storage=storage)
+    }
     for a in spec.agents:
         if a.kind == AgentKind.openclaw:
             existing = storage.openclaw_get(a.id)
@@ -287,6 +292,13 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
                     ERROR_OPENCLAW_AGENT_NOT_FOUND,
                     f"agent {a.id!r}: kind=openclaw, but no OpenclawAgent with "
                     f"that id is registered in ClawsomeFlow",
+                    {"agent_id": a.id},
+                )
+            if a.id not in registered_openclaw_ids:
+                raise FlowValidationError(
+                    ERROR_OPENCLAW_AGENT_UNREGISTERED,
+                    f"agent {a.id!r}: kind=openclaw, but the agent is not "
+                    "registered in the OpenClaw runtime (restore it first)",
                     {"agent_id": a.id},
                 )
         else:

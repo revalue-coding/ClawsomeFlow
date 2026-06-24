@@ -56,6 +56,7 @@ import {
   useSessionBackedModalFlag,
   useSessionBackedState,
 } from "@/lib/sessionState";
+import { useNavigationGuard } from "@/lib/useNavigationGuard";
 
 // NOTE: nanobot is intentionally NOT listed — it is supported at the runtime
 // layer but temporarily not exposed to users (no UI option). Re-add it here (and
@@ -1029,6 +1030,10 @@ export function FlowEditor() {
   const [decomposeOpen, setDecomposeOpen] = useSessionBackedModalFlag(
     "flow-editor:decompose-open",
   );
+  const [decomposeCancelling, setDecomposeCancelling] = useState(false);
+  useNavigationGuard(decomposeCancelling, () => {
+    void alert(t("common.navGuardBusy"));
+  });
   const [mergeOpen, setMergeOpen] = useSessionBackedModalFlag(
     "flow-editor:merge-open",
   );
@@ -2746,25 +2751,18 @@ export function FlowEditor() {
         leaderTargetBranch={leaderTargetBranch.trim()}
         existingRows={tasks}
         openclawAgents={openclawOptions}
-        onClose={() => setDecomposeOpen(false)}
+        onCancellingChange={setDecomposeCancelling}
+        onClose={() => {
+          setDecomposeOpen(false);
+          setDecomposeCancelling(false);
+        }}
         onApply={(proposal) => {
-          const rows = proposalToRows(proposal, openclawOptions, hermesOptions);
-          const idx = rows.findIndex((r) => r.isLeaderSummary);
-          if (idx >= 0 && leaderId.trim()) {
-            const normalizedLeaderRepo = needsRepoBranchFields(leaderKind)
-              ? leaderRepo.trim()
-              : "";
-            const normalizedLeaderTargetBranch = needsRepoBranchFields(leaderKind)
-              ? leaderTargetBranch.trim()
-              : "";
-            rows[idx] = {
-              ...rows[idx],
-              ownerKind: leaderKind,
-              ownerId: leaderId.trim(),
-              ownerRepo: normalizedLeaderRepo,
-              ownerTargetBranch: normalizedLeaderTargetBranch,
-            };
-          }
+          const rows = proposalToRows(proposal, openclawOptions, hermesOptions, {
+            id: leaderId.trim(),
+            kind: leaderKind,
+            repo: leaderRepo.trim(),
+            targetBranch: leaderTargetBranch.trim(),
+          });
           setTasks(rows);
           setDecomposeOpen(false);
         }}
@@ -4900,6 +4898,7 @@ function DecomposeModal({
   leaderTargetBranch,
   existingRows,
   openclawAgents,
+  onCancellingChange,
   onClose,
   onApply,
 }: {
@@ -4911,6 +4910,7 @@ function DecomposeModal({
   leaderTargetBranch: string;
   existingRows: TaskRow[];
   openclawAgents: OpenclawAgentSummary[];
+  onCancellingChange?: (cancelling: boolean) => void;
   onClose: () => void;
   onApply: (proposal: DecomposeProposal) => void;
 }) {
@@ -4925,6 +4925,9 @@ function DecomposeModal({
   const [retrySeq, setRetrySeq] = useState(0);
   const [localTimeout, setLocalTimeout] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  useEffect(() => {
+    onCancellingChange?.(open && cancelling);
+  }, [cancelling, onCancellingChange, open]);
   const [applying, setApplying] = useState(false);
   const [confirmCloseOpen, setConfirmCloseOpen] = useState(false);
   const [dispatchStarted, setDispatchStarted] = useState(false);
@@ -5339,7 +5342,14 @@ function proposalToRows(
   proposal: DecomposeProposal,
   openclawOptions: OpenclawAgentSummary[],
   hermesOptions: HermesAgentSummary[],
+  leaderContext?: {
+    id: string;
+    kind: OwnerKindDraft;
+    repo: string;
+    targetBranch: string;
+  },
 ): TaskRow[] {
+  const registeredOpenclawIds = new Set(openclawOptions.map((agent) => agent.id));
   const byId = new Map<
     string,
     { kind: OwnerKind; repo: string; targetBranch: string; isTemporary: boolean }
@@ -5348,6 +5358,9 @@ function proposalToRows(
     const aid = String(a.id ?? "").trim();
     if (!aid) continue;
     const kind: OwnerKind = toOwnerKind(a.kind);
+    if (kind === "openclaw" && !registeredOpenclawIds.has(aid)) {
+      continue;
+    }
     const repo = String(a.repo ?? "");
     const rawBranch = a.targetBranch ?? a.target_branch;
     const targetBranch =
@@ -5359,8 +5372,7 @@ function proposalToRows(
     // persistent ONLY when it matches a registered managed Hermes profile; an
     // unregistered Hermes id (e.g. one the decomposer invented) is temporary —
     // exactly like Claude/Codex/Cursor — so it never trips the managed-existence
-    // check on save. OpenClaw is always persistent. This mirrors the backend
-    // _resolve_leader_target classification.
+    // check on save. OpenClaw is persistent only when registered in runtime.
     const isTemporary =
       kind === "openclaw"
         ? false
@@ -5375,14 +5387,41 @@ function proposalToRows(
     }
   }
 
+  const normalizedLeaderId = leaderContext?.id.trim() ?? "";
+  if (leaderContext && normalizedLeaderId && isOwnerKind(leaderContext.kind)) {
+    const ctxKind = leaderContext.kind;
+    if (needsRepoBranchFields(ctxKind)) {
+      const existing = byId.get(normalizedLeaderId);
+      byId.set(normalizedLeaderId, {
+        kind: ctxKind,
+        repo: leaderContext.repo.trim() || existing?.repo || "",
+        targetBranch:
+          leaderContext.targetBranch.trim() || existing?.targetBranch || "",
+        isTemporary:
+          ctxKind !== "openclaw"
+          && !hermesOptions.some((h) => h.id === normalizedLeaderId),
+      });
+    }
+  }
+
   return proposal.tasks.map((tk) => {
-    const ownerId = String(tk.ownerAgentId ?? tk.owner_agent_id ?? "").trim();
-    const meta = byId.get(ownerId) ?? {
-      kind: "claude" as OwnerKind,
-      repo: "",
-      targetBranch: "",
-      isTemporary: true,
-    };
+    let ownerId = String(tk.ownerAgentId ?? tk.owner_agent_id ?? "").trim();
+    if (ownerId && !byId.has(ownerId)) {
+      ownerId = "";
+    }
+    const meta = ownerId
+      ? byId.get(ownerId) ?? {
+          kind: "claude" as OwnerKind,
+          repo: "",
+          targetBranch: "",
+          isTemporary: true,
+        }
+      : {
+          kind: "claude" as OwnerKind,
+          repo: "",
+          targetBranch: "",
+          isTemporary: true,
+        };
     const dependsOn = Array.isArray(tk.dependsOn ?? tk.depends_on)
       ? ((tk.dependsOn ?? tk.depends_on) as unknown[]).map(String)
       : [];
