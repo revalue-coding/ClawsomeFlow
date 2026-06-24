@@ -268,7 +268,7 @@ scripts/test-in-docker.sh -q backend/tests/test_api_guard.py   # subset (args â†
 Requires Docker and a local ClawTeam checkout (a sibling `../ClawTeam`, or set
 `CLAWTEAM_SRC=/path/to/ClawTeam`). Do **not** run `pytest` directly on a host
 that has a csflow/openclaw service running â€” it would reach the real gateway on
-`:18789`. The release gate runs the suite the same way.
+`:18789`.
 
 ### Stop the contributor service
 
