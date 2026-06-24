@@ -82,6 +82,8 @@ import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionS
 import { useOpRecovery } from "@/lib/useOpRecovery";
 import {
   isCreateCancelConverged,
+  isOpenclawCancelArmed,
+  waitForCancelArmed,
 } from "@/lib/createCancelVerify";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useStickyScroll } from "@/lib/useStickyScroll";
@@ -124,6 +126,12 @@ const OPENCLAW_PENDING_FILES_CACHE = new Map<string, File[]>();
 type CreateCancelState = {
   agentId: string;
   cancelling: boolean;
+  /**
+   * Cancel is *safe* now — the backend has finished scaffolding and registered
+   * the op, so cancelling can no longer leave residual data. The button stays
+   * disabled until this flips true (see {@link isOpenclawCancelArmed}).
+   */
+  armed?: boolean;
   /** Cancel did not fully converge — user may force-close; cleanup banner persists. */
   failed?: boolean;
 };
@@ -372,6 +380,9 @@ function AgentQuickActions({
   // loser's rollback could wipe the winner's files.
   const createRequestInFlightRef = useRef(false);
   const cancelVerifyInFlightRef = useRef(false);
+  // Single-flights the "is it safe to cancel yet?" poll so a remount / retry
+  // can't stack duplicate loops for the same create.
+  const armPollInFlightRef = useRef(false);
   const [storeComingSoonOpen, setStoreComingSoonOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:store-coming-soon-open",
   );
@@ -384,8 +395,11 @@ function AgentQuickActions({
       // A cancel may already be resuming on this same mount (it sets the ref
       // synchronously in its own effect); don't clobber its cancelling state.
       if (createCancelRequestedRef.current) return;
-      setCreateCancelState({ agentId: p.agentId, cancelling: false });
+      setCreateCancelState({ agentId: p.agentId, cancelling: false, armed: false });
       openWorkPopup();
+      // Recovered mid-create (refresh / reopen): re-derive whether cancel is safe
+      // yet rather than trusting a stale armed flag.
+      void armCancelWhenSafe(p.agentId);
     },
     onSucceeded: (p) => {
       if (createCancelRequestedRef.current) return;
@@ -568,6 +582,29 @@ function AgentQuickActions({
     setWorkPopupOpen(false);
     resetWorkPopupDisplayState();
     resetCreateCancelState();
+  }
+
+  // Keep the cancel button disabled until the backend reaches a state where a
+  // cancel cannot leave residual data (op registered + bootstrap task tracked).
+  // This is the whole fix for "取消创建 总是出错": arming late is what guarantees
+  // the cancel/cleanup runs against a stable create instead of racing it.
+  async function armCancelWhenSafe(agentId: string): Promise<void> {
+    if (armPollInFlightRef.current) return;
+    armPollInFlightRef.current = true;
+    try {
+      const armed = await waitForCancelArmed(`openclaw_create:${agentId}`, isOpenclawCancelArmed, {
+        getStatus: (opId) => api.getOperationStatus(opId),
+        shouldStop: () => createCancelRequestedRef.current,
+      });
+      if (!armed) return;
+      setCreateCancelState((prev) =>
+        prev && prev.agentId === agentId && !prev.cancelling && !prev.failed
+          ? { ...prev, armed: true }
+          : prev,
+      );
+    } finally {
+      armPollInFlightRef.current = false;
+    }
   }
 
   async function runCreateCancelFlow(
@@ -793,9 +830,11 @@ function AgentQuickActions({
     setCreateCancelState({
       agentId,
       cancelling: false,
+      armed: false,
     });
     trackOp({ opId: `openclaw_create:${agentId}`, agentId });
     openWorkPopup();
+    void armCancelWhenSafe(agentId);
     try {
       const created = await api.createOpenclawAgent(
         {
@@ -966,8 +1005,13 @@ function AgentQuickActions({
     createCancelState?.cancelling === true ||
     (workPopupRunning && !createCancelState?.failed);
   const showCreateCancelAction = createCancelState !== null;
+  // Only allow cancel once it is armed (safe) — or to retry a failed cancel.
+  // While unarmed the button is shown but disabled ("准备取消…") so the user sees
+  // cancel is being prepared rather than racing a half-built create.
   const createCancelEnabled =
-    showCreateCancelAction && !(createCancelState?.cancelling ?? false);
+    showCreateCancelAction &&
+    !(createCancelState?.cancelling ?? false) &&
+    ((createCancelState?.armed ?? false) || (createCancelState?.failed ?? false));
   const workPopupDisplayText =
     workPopupText ||
     (workPopupOpen && workPopupRunning ? t("assistant.workPopup.running") : "");
@@ -1396,7 +1440,9 @@ function AgentQuickActions({
                   ? t("assistant.workPopup.cancellingCreate")
                   : createCancelState?.failed
                     ? t("assistant.workPopup.cancelRetry")
-                    : t("assistant.workPopup.cancelCreate")}
+                    : createCancelState?.armed
+                      ? t("assistant.workPopup.cancelCreate")
+                      : t("assistant.workPopup.cancelPreparing")}
               </button>
               {createCancelState?.failed && (
                 <button

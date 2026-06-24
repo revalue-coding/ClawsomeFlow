@@ -71,7 +71,11 @@ import {
 } from "@/lib/api";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
-import { isCreateCancelConverged } from "@/lib/createCancelVerify";
+import {
+  isCreateCancelConverged,
+  isHermesCancelArmed,
+  waitForCancelArmed,
+} from "@/lib/createCancelVerify";
 
 const CREATE_TEAM_SENTINEL = "__create_team__";
 // Cancel only unlocks once the backend confirms rollback; mirror OpenClaw's
@@ -85,6 +89,13 @@ const HERMES_PENDING_FILES_CACHE = new Map<string, File[]>();
 type CreateCancelState = {
   agentId: string;
   cancelling: boolean;
+  /**
+   * Cancel is *safe* now — the create has published itself in-flight, so a
+   * cancel can no longer be discarded by the "fresh attempt" reset and rollback
+   * always applies. The button stays disabled until this flips true (see
+   * {@link isHermesCancelArmed}).
+   */
+  armed?: boolean;
   failed?: boolean;
 };
 
@@ -358,6 +369,8 @@ function Picker() {
   // which on the backend would race and could clobber the winner's profile.
   const createInFlightRef = useRef(false);
   const cancelVerifyInFlightRef = useRef(false);
+  // Single-flights the "is it safe to cancel yet?" poll (see armCancelWhenSafe).
+  const armPollInFlightRef = useRef(false);
   const pickerMountedRef = useRef(true);
 
   useEffect(() => {
@@ -417,8 +430,12 @@ function Picker() {
     createCancelState?.cancelling === true ||
     (workPopupRunning && !createCancelState?.failed);
   const showCreateCancelAction = createCancelState !== null;
+  // Only allow cancel once armed (safe) — or to retry a failed cancel. Until
+  // armed the button is shown but disabled ("准备取消…").
   const createCancelEnabled =
-    showCreateCancelAction && !(createCancelState?.cancelling ?? false);
+    showCreateCancelAction &&
+    !(createCancelState?.cancelling ?? false) &&
+    ((createCancelState?.armed ?? false) || (createCancelState?.failed ?? false));
   const workPopupDisplayText =
     workPopupText ||
     (workPopupOpen && workPopupRunning ? t("hermes.create.workPopup.running") : "");
@@ -477,6 +494,32 @@ function Picker() {
     [setWorkPopupText, resetCreateCancelState, t],
   );
 
+  // Keep the cancel button disabled until the create publishes itself in-flight,
+  // i.e. until a cancel can no longer be discarded by the commit's "fresh
+  // attempt" reset. Arming late is what makes cancel reliable instead of racing
+  // a half-built create.
+  const armCancelWhenSafe = useCallback(
+    async (agentId: string) => {
+      if (armPollInFlightRef.current) return;
+      armPollInFlightRef.current = true;
+      try {
+        const armed = await waitForCancelArmed(`hermes_create:${agentId}`, isHermesCancelArmed, {
+          getStatus: (opId) => api.getOperationStatus(opId),
+          shouldStop: () => createCancelRequestedRef.current,
+        });
+        if (!armed) return;
+        setCreateCancelState((prev) =>
+          prev && prev.agentId === agentId && !prev.cancelling && !prev.failed
+            ? { ...prev, armed: true }
+            : prev,
+        );
+      } finally {
+        armPollInFlightRef.current = false;
+      }
+    },
+    [setCreateCancelState],
+  );
+
   // Durable recovery across refresh / tab close+reopen: a localStorage pointer
   // to the in-flight create op + on-mount status query (+ WS for the terminal
   // transition). The in-page awaited POST still drives the happy path; this only
@@ -486,8 +529,10 @@ function Picker() {
       // A cancel may already be resuming on this same mount (it sets the ref
       // synchronously in its own effect); don't clobber its cancelling state.
       if (createCancelRequestedRef.current) return;
-      setCreateCancelState({ agentId: p.agentId, cancelling: false });
+      setCreateCancelState({ agentId: p.agentId, cancelling: false, armed: false });
       openWorkPopup();
+      // Recovered mid-create: re-derive whether cancel is safe yet.
+      void armCancelWhenSafe(p.agentId);
     },
     onSucceeded: (p) => {
       if (createCancelRequestedRef.current) return;
@@ -674,9 +719,10 @@ function Picker() {
       const ac = new AbortController();
       createAbortRef.current = ac;
       createCancelRequestedRef.current = false;
-      setCreateCancelState({ agentId: profileId, cancelling: false });
+      setCreateCancelState({ agentId: profileId, cancelling: false, armed: false });
       trackOp({ opId: `hermes_create:${profileId}`, agentId: profileId });
       openWorkPopup();
+      void armCancelWhenSafe(profileId);
       try {
         const created = await api.createHermesAgent(
           {
@@ -734,7 +780,7 @@ function Picker() {
     createTeamChoice, createNewTeamName,
     agents, setShowCreate, setCreateCancelState, openWorkPopup, finishWorkPopup,
     resetCreateForm, resetWorkPopupDisplayState, resetCreateCancelState, setWorkPopupOpen,
-    reload, trackOp, clearOp, t,
+    reload, trackOp, clearOp, armCancelWhenSafe, t,
   ]);
 
   // Recovery across refresh / close+reopen is owned solely by useOpRecovery
@@ -962,7 +1008,9 @@ function Picker() {
                   ? t("hermes.create.cancelling")
                   : createCancelState?.failed
                     ? t("hermes.create.workPopup.cancelRetry")
-                    : t("hermes.create.cancelCreate")}
+                    : createCancelState?.armed
+                      ? t("hermes.create.cancelCreate")
+                      : t("hermes.create.workPopup.cancelPreparing")}
               </button>
               {createCancelState?.failed && (
                 <button

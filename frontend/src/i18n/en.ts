@@ -1083,6 +1083,7 @@ const en = {
           "Request received! We are building a Hermes agent with its own persona and memory for you. This usually takes a couple of minutes — please wait patiently…",
         created: "Your Hermes agent is ready: {{id}}. Start putting it to work.",
         failed: "Creation finished with issues. Please check the result details.",
+        cancelPreparing: "Preparing cancel…",
         cancelRunning: "Cancelling creation and rolling back residual files…",
         cancelVerifying: "Cancellation accepted. Verifying that this agent is no longer visible…",
         cancelAgentStillVisible:
@@ -1390,6 +1391,7 @@ const en = {
       createdWithPath: "Agent created: {{id}}\nworkspace: {{workspace}}",
       failed: "Processing finished with issues. Please check the result details.",
       cancelCreate: "Cancel creation",
+      cancelPreparing: "Preparing cancel…",
       cancellingCreate: "Cancelling…",
       cancelCountdownHint: "Cancellation unlocks in {{minutes}}m {{seconds}}s.",
       cancelReadyHint:
