@@ -956,12 +956,15 @@ def test_stop_no_pid_returns_zero(
 ) -> None:
     from app.cli import stop as stop_mod
 
-    # Keep the port-reclaim fallback from probing the real host port.
+    # Never touch the developer's real systemd unit — this test only covers the
+    # no-PID-file / no-managed-service path.
+    monkeypatch.setattr(stop_mod, "stop_if_running", lambda: False)
+    monkeypatch.setattr(stop_mod, "read_pid", lambda: None)
     monkeypatch.setattr(stop_mod, "reclaim_stale_port_listeners", lambda _port: [])
     result = runner.invoke(app, ["stop"])
     assert result.exit_code == 0
     out = result.stdout.lower()
-    assert "nothing to stop" in out or "stopped managed user service" in out
+    assert "nothing to stop" in out
 
 
 def test_stop_reclaims_orphaned_dev_listener_without_pid(

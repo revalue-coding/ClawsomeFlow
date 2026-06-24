@@ -254,6 +254,22 @@ CSFLOW_DEV_FRONTEND_PORT=5184 \
 bash scripts/deploy-contributor.sh
 ```
 
+### Running the test suite
+
+Run all tests inside Docker — a separate filesystem and network namespace mean a
+test can never touch your real `~/.clawsomeflow` / `~/.openclaw` or a running
+gateway:
+
+```bash
+scripts/test-in-docker.sh                                       # full backend suite
+scripts/test-in-docker.sh -q backend/tests/test_api_guard.py   # subset (args → pytest)
+```
+
+Requires Docker and a local ClawTeam checkout (a sibling `../ClawTeam`, or set
+`CLAWTEAM_SRC=/path/to/ClawTeam`). Do **not** run `pytest` directly on a host
+that has a csflow/openclaw service running — it would reach the real gateway on
+`:18789`. The release gate runs the suite the same way.
+
 ### Stop the contributor service
 
 To stop the contributor profile started by `deploy-contributor.sh`, use the

@@ -43,6 +43,10 @@ def test_ensure_user_service_file_writes_unit(
 
 def test_restart_and_enable_runs_expected_systemctl_commands(monkeypatch) -> None:
     calls: list[list[str]] = []
+    # This test verifies the default-name ("csflow") command sequence; _run is
+    # mocked so nothing real is touched. Bypass the prod-namespace guard, which
+    # only exists to block real operations against the live unit.
+    monkeypatch.setattr(svc, "_guard_service_namespace", lambda **_kw: None)
     monkeypatch.setattr(svc, "ensure_user_service_file", lambda **_kw: Path("/tmp/csflow.service"))
     monkeypatch.setattr(svc, "ensure_linger", lambda **_kw: None)
     monkeypatch.setattr(svc, "_cleanup_stale_port_conflicts", lambda _port: [])
@@ -67,6 +71,7 @@ def test_restart_and_enable_runs_expected_systemctl_commands(monkeypatch) -> Non
 
 def test_stop_if_running_stops_active_service(monkeypatch) -> None:
     calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_guard_service_namespace", lambda **_kw: None)
     monkeypatch.setattr(svc, "_require_command", lambda _name: "/usr/bin/systemctl")
 
     def _fake_run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -178,6 +183,7 @@ def test_ensure_launchd_service_file_writes_plist(monkeypatch, tmp_path: Path) -
 
 def test_restart_and_enable_runs_expected_launchctl_commands(monkeypatch) -> None:
     calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_guard_service_namespace", lambda **_kw: None)
     monkeypatch.setenv("CSFLOW_SERVICE_MANAGER", "launchd")
     monkeypatch.setenv("CSFLOW_LAUNCHD_LABEL", "dev.clawsomeflow.csflow-test")
     monkeypatch.setattr(svc.os, "getuid", lambda: 501)
@@ -255,6 +261,21 @@ def test_cleanup_stale_port_conflicts_skips_managed_csflow_serve_listeners(
     reclaimed = svc._cleanup_stale_port_conflicts(17017)
     assert reclaimed == [502]
     assert killed == [502]
+
+
+def test_stop_if_running_rejects_prod_service_with_pytest_home(
+    monkeypatch,
+) -> None:
+    """Backend pytest uses a tmp CSFLOW_HOME — must not stop the live ``csflow`` unit."""
+    monkeypatch.setenv("CSFLOW_HOME", "/tmp/pytest-csflow-home")
+    monkeypatch.delenv("CSFLOW_SERVICE_NAME", raising=False)
+    try:
+        svc.stop_if_running()
+    except svc.ServiceError as exc:
+        assert "Refusing to stop production-managed service" in str(exc)
+        assert "non-production path" in str(exc)
+    else:
+        raise AssertionError("expected ServiceError")
 
 
 def test_restart_and_enable_rejects_prod_service_with_isolated_home(
@@ -355,6 +376,7 @@ def test_restart_and_enable_retries_after_reclaiming_conflicted_port(
 ) -> None:
     calls: list[list[str]] = []
     cleanup_calls: list[int] = []
+    monkeypatch.setattr(svc, "_guard_service_namespace", lambda **_kw: None)
     monkeypatch.setattr(
         svc, "ensure_user_service_file", lambda **_kw: Path("/tmp/csflow.service")
     )

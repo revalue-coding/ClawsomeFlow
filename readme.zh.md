@@ -251,6 +251,17 @@ CSFLOW_DEV_FRONTEND_PORT=5184 \
 bash scripts/deploy-contributor.sh
 ```
 
+### 运行测试
+
+所有测试都在 Docker 容器中运行——独立的文件系统与网络命名空间,保证测试**永远不会**碰到你真实的 `~/.clawsomeflow` / `~/.openclaw` 或正在运行的网关:
+
+```bash
+scripts/test-in-docker.sh                                       # 全量后端测试
+scripts/test-in-docker.sh -q backend/tests/test_api_guard.py   # 子集(参数透传给 pytest)
+```
+
+需要 Docker 和本地 ClawTeam 源码(同级目录 `../ClawTeam`,或设 `CLAWTEAM_SRC=/path/to/ClawTeam`)。**不要**在跑着 csflow/openclaw 服务的机器上直接 `pytest`——那会连到真实网关 `:18789`。发版门禁(`scripts/release.sh`)也以同样方式跑测试。
+
 ### 停止贡献者服务
 
 停止 `deploy-contributor.sh` 启动的贡献者环境，请使用专用停止脚本：

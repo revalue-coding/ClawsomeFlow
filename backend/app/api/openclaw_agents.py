@@ -133,6 +133,11 @@ _IMPORT_OPTIMIZE_PROMPT = (
 # GC the task before it records the op's terminal state.
 _DETACHED_CREATE_TASKS: set[asyncio.Task] = set()
 
+# Per-agent handle on the live bootstrap task so cancel-create can await the
+# *actual* task release (its ``finally`` clears the in-flight reservation)
+# instead of blindly polling — see :func:`_await_create_release`.
+_AGENT_CREATE_TASKS: dict[str, asyncio.Task] = {}
+
 
 def _spawn_detached_create(coro) -> asyncio.Task:
     """Run *coro* as a task whose lifecycle is independent of the request.
@@ -145,6 +150,17 @@ def _spawn_detached_create(coro) -> asyncio.Task:
     _DETACHED_CREATE_TASKS.add(task)
     task.add_done_callback(_DETACHED_CREATE_TASKS.discard)
     return task
+
+
+def _track_agent_create_task(agent_id: str, task: asyncio.Task) -> None:
+    """Register the live bootstrap *task* for *agent_id* so cancel can await it."""
+    _AGENT_CREATE_TASKS[agent_id] = task
+
+    def _untrack(done: asyncio.Task, aid: str = agent_id) -> None:
+        if _AGENT_CREATE_TASKS.get(aid) is done:
+            _AGENT_CREATE_TASKS.pop(aid, None)
+
+    task.add_done_callback(_untrack)
 
 
 _CREATE_SELF_DEFINE_COMMIT_MESSAGE_PREFIX = "[csflow] bootstrap self-definition"
@@ -327,26 +343,45 @@ async def _wait_until_agent_create_cleanup_visible(
         )
 
 
-async def _wait_until_create_not_in_flight(*, agent_id: str) -> None:
-    """Wait until commit/bootstrap releases the in-flight reservation."""
-    deadline = time.monotonic() + _AGENT_CREATE_CANCEL_CLEANUP_WAIT_TIMEOUT_SEC
-    while svc.is_create_in_flight(agent_id):
-        now = time.monotonic()
-        if now >= deadline:
-            raise ApiError(
-                "AGENT_CANCEL_CLEANUP_TIMEOUT",
-                (
-                    f'create for "{agent_id}" did not release its in-flight lock within '
-                    f'{int(_AGENT_CREATE_CANCEL_CLEANUP_WAIT_TIMEOUT_SEC)}s'
-                ),
-                status_code=504,
+async def _await_create_release(*, agent_id: str) -> None:
+    """Guarantee the in-flight create reservation is released after a cancel.
+
+    By the time this runs the cancel has already (a) signalled the cancellation
+    event — so any live bootstrap aborts to a cleanup no-op — and (b) purged
+    every create artifact. We then converge the reservation:
+
+    * If a live bootstrap task is tracked, ``await`` it (bounded) so its own
+      ``finally`` releases the reservation *after* its workspace teardown
+      finishes — the race-safe path that prevents a retry from re-scaffolding the
+      same id while teardown is still running.
+    * Otherwise (no live task — e.g. a registration-only agent created via
+      ``commit_agent`` directly, or a genuine hang past the window) **force**
+      the release so a retry is never permanently blocked by a stale reservation.
+
+    This is the fix for the regression where a stuck reservation left re-creates
+    of the same id rejected with "a create for X is already in progress".
+    """
+    task = _AGENT_CREATE_TASKS.get(agent_id)
+    if task is not None and not task.done():
+        try:
+            # shield so wait_for's timeout cancels the wrapper, not the bootstrap.
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_AGENT_CREATE_CANCEL_CLEANUP_WAIT_TIMEOUT_SEC,
             )
-        await asyncio.sleep(
-            min(
-                _AGENT_CREATE_CANCEL_CLEANUP_POLL_SEC,
-                max(deadline - now, 0.0),
-            )
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            # Bootstrap raised (e.g. AGENT_CREATE_CANCELLED); its finally already
+            # ran. The reservation check below confirms.
+            pass
+    if svc.is_create_in_flight(agent_id):
+        logger.warning(
+            "openclaw_agent_cancel_force_release_in_flight",
+            agent_id=agent_id,
+            had_tracked_task=task is not None,
         )
+        svc.finish_create_in_flight(agent_id)
 
 
 def _settings_cache_get(*, user: str, agent_id: str) -> OpenclawAgentSettingsResponse | None:
@@ -1724,8 +1759,11 @@ async def create_agent(
     # Detached + shield: a tab switch / client abort cancels the request
     # coroutine but the bootstrap keeps running and records the op terminal
     # state — otherwise recovery falsely succeeds via entity-existence fallback
-    # while the self-definition turn never ran.
-    return await asyncio.shield(_spawn_detached_create(_bootstrap_and_finish()))
+    # while the self-definition turn never ran. Track the task by id so a later
+    # cancel-create can await its actual release (see _await_create_release).
+    bootstrap_task = _spawn_detached_create(_bootstrap_and_finish())
+    _track_agent_create_task(created.id, bootstrap_task)
+    return await asyncio.shield(bootstrap_task)
 
 
 @router.post("/{agent_id}/cancel-create", status_code=202)
@@ -1768,7 +1806,7 @@ async def cancel_create_agent(
         agent_id=target,
         storage=storage,
     )
-    await _wait_until_create_not_in_flight(agent_id=target)
+    await _await_create_release(agent_id=target)
     op_id = f"openclaw_create:{target}"
     reg = get_op_registry()
     op = reg.get(op_id, user=user)

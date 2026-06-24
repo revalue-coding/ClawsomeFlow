@@ -41,6 +41,23 @@ def _reset_all_singletons() -> None:
     reset_run_schedule_worker()
     reset_worktree_lookup()
     reset_event_broadcaster()
+    # Create/cancel coordination state is held in module-global sets/dicts that
+    # outlive a single test. Tests that call ``commit_agent`` directly leak the
+    # agent id into ``_CREATE_IN_PROGRESS`` (the API layer, not the service,
+    # releases it), so reusing the id in a later test would otherwise be rejected
+    # with "a create for X is already in progress". Clear them between tests.
+    from app.services import hermes_agents as _hermes_svc
+    from app.services import openclaw_agents as _oc_svc
+    _oc_svc._CREATE_IN_PROGRESS.clear()
+    _oc_svc._CANCELLED_CREATES.clear()
+    _hermes_svc._CREATES_IN_FLIGHT.clear()
+    try:
+        from app.api import openclaw_agents as _oc_api
+        _oc_api._AGENT_CREATE_TASKS.clear()
+        _oc_api._PENDING_AGENT_CREATE_CANCELLATIONS.clear()
+        _oc_api._REQUESTED_AGENT_CREATE_CANCELLATIONS.clear()
+    except Exception:
+        pass
     logging_setup._configured = False
     # Drop existing logging handlers so the next configure_logging call
     # reattaches to the (new) tmp logs directory.

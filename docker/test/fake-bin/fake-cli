@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Generic, auth-free fake agent CLI for the ClawsomeFlow Docker test image.
+#
+# It is symlinked under every login-gated agent name (claude, codex, hermes,
+# gemini, ...). Its only job is to let tests that *shell out* to an agent CLI
+# close the loop deterministically — without any real account, login, or API
+# key. Real behaviour is exercised by the actual openclaw/clawteam CLIs; the
+# LLM "thinking" step is what gets faked here.
+set -uo pipefail
+name="$(basename "$0")"
+
+case "${1:-}" in
+  --version|-V|-v|version)
+    echo "${name} 0.0.0-fake"
+    exit 0
+    ;;
+  -h|--help|help)
+    echo "${name}: fake test stand-in (auth-free). All commands return a canned reply."
+    exit 0
+    ;;
+esac
+
+# hermes path resolution: the backend calls `hermes -p <id> config path` to find
+# a profile's config.yaml and only falls back to the file path when that call
+# fails. A canned "ok" here would become a single bogus shared path (breaking
+# reads and leaking state across tests), so mimic real hermes: echo the real
+# per-profile path under $HERMES_HOME. Everything else stays faked.
+if [ "$name" = "hermes" ]; then
+  pid=""
+  prev=""
+  for a in "$@"; do
+    case "$prev" in
+      -p|--profile) pid="$a" ;;
+    esac
+    prev="$a"
+  done
+  if [ -n "$pid" ]; then
+    home="${HERMES_HOME:-$HOME/.hermes}"
+    case " $* " in
+      *" config env-path "*)
+        echo "${home}/profiles/${pid}/.env"; exit 0 ;;
+      *" config path "*|*" config file "*)
+        echo "${home}/profiles/${pid}/config.yaml"; exit 0 ;;
+    esac
+  fi
+fi
+
+# Detect a JSON/structured-output request and answer in kind; otherwise plain
+# text. (Bare `-p` is intentionally NOT a trigger: for hermes it selects a
+# profile, not print mode.)
+want_json=0
+for a in "$@"; do
+  case "$a" in
+    --json|-z|--output-format|--output-format=json|--print) want_json=1 ;;
+  esac
+done
+
+if [ "$want_json" -eq 1 ]; then
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"[fake '"${name}"'] ok"}'
+else
+  echo "[fake ${name}] ok"
+fi
+exit 0

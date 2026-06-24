@@ -137,11 +137,18 @@ build_frontend_vite() {
 }
 
 run_backend_full_tests() {
-  # L1 backend gate: in-process TestClient only — never hits the loopback
-  # csflow user service on 17017 (that service may be an older install).
-  ( cd backend && python -m pytest -q ) || fail "pytest failed"
-  ( cd backend && python -m pytest -q tests/test_clawteam_cli.py tests/test_dispatch_prompts.py ) \
-    || fail "anti-loop invariant tests failed"
+  # L1 backend gate runs INSIDE the Docker test image (scripts/test-in-docker.sh)
+  # so it is fully isolated from the host: a separate filesystem + network
+  # namespace mean the suite can never touch the real ~/.clawsomeflow /
+  # ~/.openclaw or a live gateway on :18789. The image bundles real openclaw +
+  # clawteam and auth-free fake agent CLIs; its default entrypoint runs
+  # backend/tests (which already includes the anti-loop invariant tests
+  # test_clawteam_cli / test_dispatch_prompts).
+  # No args → the image entrypoint runs `pytest -q backend/tests` (the L1 gate).
+  # Do NOT pass a bare `-q` here: that would be treated as the full pytest
+  # argv and pull in the repo-root tests/ dir, whose conftest collides with
+  # backend/tests under importlib mode.
+  "$REPO/scripts/test-in-docker.sh" || fail "docker pytest failed"
 }
 
 run_frontend_build_gates() {

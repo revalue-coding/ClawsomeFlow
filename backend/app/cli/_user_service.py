@@ -161,6 +161,10 @@ def _is_isolated_test_home(home: Path) -> bool:
         return False
 
 
+def _production_csflow_home() -> Path:
+    return Path("~/.clawsomeflow").expanduser().resolve()
+
+
 def _guard_service_namespace(*, op: str) -> None:
     """Block test-home runs from touching the production ``csflow`` unit."""
     home = _resolved_csflow_home()
@@ -172,6 +176,18 @@ def _guard_service_namespace(*, op: str) -> None:
                 f"CSFLOW_HOME points at isolated test data ({home}). "
                 "Set CSFLOW_SERVICE_NAME=csflow-test-<run-id> before runtime tests."
             )
+    if (
+        name == DEFAULT_SERVICE_NAME
+        and home is not None
+        and home != _production_csflow_home()
+    ):
+        raise ServiceError(
+            f"Refusing to {op} production-managed service {name!r} while "
+            f"CSFLOW_HOME points at a non-production path ({home}). "
+            "Backend tests and alternate data homes must not stop the live "
+            "``csflow`` unit — mock ``stop_if_running`` or use an isolated "
+            "``CSFLOW_SERVICE_NAME=csflow-test-<run-id>``."
+        )
     if name.startswith("csflow-test-"):
         if home is None or not _is_isolated_test_home(home):
             raise ServiceError(

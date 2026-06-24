@@ -100,7 +100,12 @@ def test_resolve_openclaw_uses_login_shell_probe_when_needed(
     monkeypatch.setattr(oc, "_probe_openclaw_from_default_gateway_service", lambda: None)
     monkeypatch.setattr(oc, "_probe_openclaw_from_npm_prefix", lambda: None)
     monkeypatch.setattr(oc.shutil, "which", lambda _: None)
-    monkeypatch.setenv("PATH", "/usr/bin")
+    # Neutralise the well-known-locations scan (step 4): the Docker test image
+    # installs a real openclaw at /usr/bin/openclaw, which would otherwise be
+    # discovered here before the login-shell probe (step 5) under test.
+    monkeypatch.setattr(oc, "_iter_fallback_candidates", lambda _home: iter(()))
+    # Point PATH at a dir with no `openclaw` so the PATH lookup also finds nothing.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-no-openclaw"))
     captured: dict[str, object] = {}
 
     def _fake_run(argv, **kwargs):
