@@ -48,6 +48,7 @@ import {
   setEasyMode,
   getDevMode,
   setDevMode,
+  collectUpstreamAgentIds,
 } from "@/lib/flowRuntime";
 import { branchAfterRepoCheck, ensureRepoAndListBranches } from "@/lib/flowRepoBranch";
 import { alertIfNativeDirectoryBlocked } from "@/lib/remoteClient";
@@ -2743,6 +2744,7 @@ export function FlowEditor() {
           leaderId={leaderId.trim()}
           leaderRepo={leaderRepo.trim()}
           leaderTargetBranch={leaderTargetBranch.trim()}
+          runInputFields={runInputFields}
           deploymentMode={deploymentMode}
           workspaceDirOptions={workspaceDirOptions}
           onRefreshOwnerKinds={() => refreshOwnerKindsFast({ silent: true })}
@@ -3045,6 +3047,7 @@ function TaskEditModal({
   leaderId,
   leaderRepo,
   leaderTargetBranch,
+  runInputFields,
   deploymentMode,
   workspaceDirOptions,
   onRefreshOwnerKinds,
@@ -3068,6 +3071,7 @@ function TaskEditModal({
   leaderId: string;
   leaderRepo: string;
   leaderTargetBranch: string;
+  runInputFields: string[];
   deploymentMode: DeploymentMode;
   workspaceDirOptions: string[];
   onRefreshOwnerKinds: () => Promise<OwnerKindsAvailability>;
@@ -3357,6 +3361,7 @@ function TaskEditModal({
         readOnly={readOnly}
         isSummary={isSummary}
         devMode={devMode}
+        runInputFields={runInputFields}
         showCheckpointField={mode !== "edit"}
         tasks={tasks}
         ownerMode={ownerMode}
@@ -3413,6 +3418,7 @@ function TaskFormBody({
   readOnly,
   isSummary,
   devMode,
+  runInputFields,
   showCheckpointField,
   tasks,
   ownerMode,
@@ -3435,6 +3441,7 @@ function TaskFormBody({
   readOnly: boolean;
   isSummary: boolean;
   devMode: boolean;
+  runInputFields: string[];
   showCheckpointField: boolean;
   tasks: TaskRow[];
   ownerMode: OwnerMode;
@@ -3479,6 +3486,10 @@ function TaskFormBody({
   const dependableTasks = tasks
     .filter((r) => r.rowKey !== row.rowKey && !r.isLeaderSummary && r.id.trim())
     .map((r) => r.id);
+  const upstreamAgentIds = useMemo(
+    () => collectUpstreamAgentIds(row, tasks),
+    [row, tasks],
+  );
 
   async function onPickRepo() {
     if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
@@ -3531,9 +3542,36 @@ function TaskFormBody({
       </div>
       <div className="md:col-span-2">
         <label className="label">{t("flowEditor.taskFields.description")}</label>
-        {!isSummary && devMode && (
+        {runInputFields.length > 0 && (
+          <div className="text-xs text-ink-600 bg-brand-50/60 border border-brand-100 rounded-md px-2.5 py-2 mb-2">
+            <span>{t("flowEditor.taskFields.paramFieldsHintPrefix")}</span>
+            <span className="mt-1 inline-flex flex-wrap gap-1.5">
+              {runInputFields.map((field) => (
+                <span
+                  key={field}
+                  className="inline-flex items-center rounded-full border border-blue-300 bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-800"
+                >
+                  {field}
+                </span>
+              ))}
+            </span>
+          </div>
+        )}
+        {devMode && (
           <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2 mb-2">
-            {t("flowEditor.taskFields.descriptionCollabHint")}
+            <p>{t("flowEditor.taskFields.descriptionCollabHint")}</p>
+            {upstreamAgentIds.length > 0 && (
+              <span className="mt-1 inline-flex flex-wrap gap-1.5">
+                {upstreamAgentIds.map((agentId) => (
+                  <span
+                    key={agentId}
+                    className="inline-flex items-center rounded-full border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900"
+                  >
+                    {agentId}
+                  </span>
+                ))}
+              </span>
+            )}
           </div>
         )}
         <textarea

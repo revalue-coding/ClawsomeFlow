@@ -385,7 +385,8 @@ const en = {
       description: "Detailed instruction *",
       descriptionPlaceholder: "All work the worker must complete when receiving this task.",
       descriptionCollabHint:
-        "Tip: you can direct upstream collaboration right here, e.g. \"merge [agent]'s worktree branch into xxx\" or \"open a PR for [agent]\". The [agent] you may direct is limited to this task's upstream dependency agents — their worktree path / branch / base branch are auto-injected into this task's prompt.",
+        "Tip: you can direct upstream collaboration in this description, e.g. \"merge [agent]'s worktree branch into xxx\" or \"open a PR for [agent]\". [agent] must be one of this task's upstream dependency agents:",
+      paramFieldsHintPrefix: "Reference Flow parameter fields:",
       outputSummary: "Output summary requirement",
       outputSummaryHint: "(optional; the summary will be sent to downstream dependent tasks)",
       outputSummaryHintSummary: "(optional)",
@@ -1375,6 +1376,11 @@ const en = {
       confirmPurge: "Confirm permanently remove this Agent? This cannot be undone.\n\n{{target}}",
       submit: "Submit removal",
       removing: "Removing…",
+    },
+    purgeUnregisteredModal: {
+      title: "Permanently remove Agent",
+      hint: "This deletes the agent workspace and metadata. This cannot be undone.",
+      submit: "Confirm removal",
     },
     restoreModal: {
       title: "Restore Agent",

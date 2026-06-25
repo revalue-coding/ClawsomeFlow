@@ -379,7 +379,8 @@ const zh = {
       description: "任务详细说明 *",
       descriptionPlaceholder: "Worker 收到本任务时需要完成的全部工作。",
       descriptionCollabHint:
-        "提示：可在说明中直接指挥上游协作，例如「将 [agent] 的 worktree 分支合入 xxx 分支」或「为 [agent] 提交 PR」。可指挥的 [agent] 仅限本任务的上游依赖 Agent —— 其 worktree 路径 / 分支 / 基线分支会自动注入到本任务提示词中。",
+        "提示：可在说明中直接指挥上游协作，例如「将 [agent] 的 worktree 分支合入 xxx 分支」或「为 [agent] 提交 PR」。可指挥的 [agent] 仅限本任务的上游依赖 Agent：",
+      paramFieldsHintPrefix: "可引用Flow 参数字段：",
       outputSummary: "输出摘要要求",
       outputSummaryHint: "（可选；摘要将发送给下游依赖任务）",
       outputSummaryHintSummary: "（可选）",
@@ -1348,6 +1349,11 @@ const zh = {
       confirmPurge: "确认要彻底移除该智能体吗？此操作不可恢复。\n\n{{target}}",
       submit: "提交移除",
       removing: "移除中…",
+    },
+    purgeUnregisteredModal: {
+      title: "彻底移除智能体",
+      hint: "将删除该智能体的工作目录与元数据，此操作不可恢复。",
+      submit: "确认彻底移除",
     },
     restoreModal: {
       title: "恢复智能体",

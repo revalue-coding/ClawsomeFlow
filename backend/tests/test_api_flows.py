@@ -650,6 +650,41 @@ def test_import_overwrite_forces_writeback(client: TestClient, repo: str) -> Non
     assert client.get(f"/api/flows/{flow_id}").json()["name"] == "force-win"
 
 
+@pytest.mark.parametrize("force_writeback", ["overwrite", "missing-version"])
+def test_import_writeback_blocked_by_active_run(
+    client: TestClient,
+    repo: str,
+    force_writeback: str,
+) -> None:
+    flow_id = client.post("/api/flows", json=_flow_payload(repo, name="orig")).json()["id"]
+    template = client.get(f"/api/flows/{flow_id}/export").json()
+    storage = get_storage()
+    storage.run_create(
+        FlowRun(
+            flow_id=flow_id,
+            flow_version=template["flow"]["version"],
+            team_name=f"csflow-{flow_id[-8:]}",
+            status=RunStatus.running,
+            user="alice",
+        )
+    )
+
+    template["flow"]["name"] = "should-not-import"
+    query = "?overwrite=true" if force_writeback == "overwrite" else ""
+    if force_writeback == "missing-version":
+        template["flow"].pop("version")
+
+    resp = client.post(f"/api/flows/import{query}", json=template)
+
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["results"][0]
+    assert item["action"] == "error"
+    assert item["errorCode"] == "RUNS_IN_PROGRESS"
+    detail = client.get(f"/api/flows/{flow_id}").json()
+    assert detail["name"] == "orig"
+    assert detail["version"] == template["flow"].get("version", 1)
+
+
 def test_import_recreates_deleted_id(client: TestClient, repo: str) -> None:
     flow_id = client.post("/api/flows", json=_flow_payload(repo, name="orig")).json()["id"]
     template = client.get(f"/api/flows/{flow_id}/export").json()

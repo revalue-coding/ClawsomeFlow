@@ -2587,12 +2587,21 @@ class RunController:
             platform="hermes",
         )
         # Bind the executor to its managed Hermes profile (-p) for persistent
-        # agents; one-shot -z. A temporary Hermes agent has NO managed profile
-        # (its id is only a ClawTeam marker, like temporary Claude/Codex) → run
-        # under the default profile with no ``-p``.
-        argv = [executable, "--yolo", "-z", message]
+        # agents. Hermes TUI's displayed "Session:" id is not accepted by
+        # ``hermes chat --resume`` (verified against v0.16.0), so complaint
+        # headless dispatch uses a fresh quiet chat turn.
+        argv = [executable, "chat", "--yolo", "-Q", "-q", message]
         if not agent.is_temporary:
-            argv = [executable, "-p", agent.id, "--yolo", "-z", message]
+            argv = [
+                executable,
+                "-p",
+                agent.id,
+                "chat",
+                "--yolo",
+                "-Q",
+                "-q",
+                message,
+            ]
         env = os.environ.copy()
         env.update({
             "CLAWTEAM_AGENT_NAME": agent.id,

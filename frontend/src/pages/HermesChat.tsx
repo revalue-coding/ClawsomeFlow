@@ -46,6 +46,7 @@ import {
   saveLastSeenCount,
   scrollToNewMessagesDivider,
   settledCount,
+  reentryDividerIndex,
   turnDividerIndex,
   displayChatMessages,
 } from "@/lib/chatHistory";
@@ -1669,8 +1670,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
         if (merged.length > 0) saveChatHistory(chatScope, merged);
         // Draw the "new messages" divider above anything that arrived while the
         // user was away (settled count grew beyond what they'd last seen).
-        const shown = settledCount(merged);
-        const dividerAt = seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1;
+        const dividerAt = reentryDividerIndex(merged, seenAtEntry);
         setNewDividerAt(dividerAt);
         if (dividerAt >= 0) {
           didJumpToNewDividerRef.current = false;
@@ -2128,8 +2128,6 @@ function ChatRoom({ agentId }: { agentId: string }) {
       setRecovering(false);
       setMessages([]);
       setNewDividerAt(-1);
-      setInput("");
-      setPendingFiles([]);
     } catch (e) {
       setError(errText(e));
     } finally {

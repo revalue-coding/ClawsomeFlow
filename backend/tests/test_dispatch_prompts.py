@@ -79,12 +79,29 @@ def test_worker_dispatch_starts_with_context_block() -> None:
     assert msg.startswith("## ClawsomeFlow Dispatch Context")
 
 
+def test_worker_dispatch_includes_runtime_inputs_not_flow_goal() -> None:
+    msg = prompts.build_worker_dispatch(_ctx(flow_inputs={"target_user": "alice"}))
+    assert "## Runtime inputs" in msg
+    assert "**target_user**: `alice`" in msg
+    assert "## Flow Goal" not in msg
+    assert "Build a tiny widget." not in msg
+
+
+def test_worker_dispatch_hides_internal_run_input_keys() -> None:
+    msg = prompts.build_worker_dispatch(_ctx(
+        flow_inputs={"target_user": "alice", "_csflow_post_complaint_final_status": "completed"},
+    ))
+    assert "**target_user**: `alice`" in msg
+    assert "_csflow_post_complaint_final_status" not in msg
+
+
 def test_worker_dispatch_includes_required_blocks_in_order() -> None:
     msg = prompts.build_worker_dispatch(_ctx())
     expected = [
         "## ClawsomeFlow Dispatch Context",
         "## Your Role",
         "## Workspace Context",
+        "## Runtime inputs",
         "## Task #t1: Do the thing",
         "## Completion Checklist",
     ]

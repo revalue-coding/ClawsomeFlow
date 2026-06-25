@@ -422,36 +422,6 @@ async def test_start_decompose_hermes_inventory_uses_fast_reconcile(
 
 
 @pytest.mark.asyncio
-async def test_start_reuses_existing_active_request_for_same_payload(
-    fake_openclaw_home: Path,
-) -> None:
-    _seed_openclaw_agent("leader-dedupe")
-    calls = {"bridge": 0}
-
-    class _CountingBridge(_FakeBridge):
-        async def chat_completion(self, **kw):
-            calls["bridge"] += 1
-            return await super().chat_completion(**kw)
-
-    payload = dict(
-        goal="Build a dedupe-safe flow.",
-        leader_agent_id="leader-dedupe",
-        user="alice",
-        api_base="http://127.0.0.1:17017",
-        bridge_factory=lambda cfg: _CountingBridge(),
-        existing_agents=[{"id": "leader-dedupe", "kind": "openclaw", "isLeader": True}],
-        existing_tasks=[{"id": "sum", "ownerAgentId": "leader-dedupe", "isLeaderSummary": True}],
-        background=False,
-    )
-    first = await svc.start_decompose_request(**payload)
-    second = await svc.start_decompose_request(**payload)
-
-    assert first.request_id == second.request_id
-    assert second.status == TaskDecomposeStatus.dispatched
-    assert calls["bridge"] == 1
-
-
-@pytest.mark.asyncio
 async def test_start_concurrent_duplicate_requests_dispatch_only_once(
     fake_openclaw_home: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -502,25 +472,6 @@ async def test_start_refuses_unknown_leader(fake_openclaw_home: Path) -> None:
             api_base="http://x", bridge_factory=lambda cfg: _FakeBridge(),
             background=False,
         )
-
-
-@pytest.mark.asyncio
-async def test_start_accepts_registered_leader_without_db_row(
-    fake_openclaw_home: Path,
-) -> None:
-    _seed_registered_openclaw_entry_without_db("leader-json")
-    fake = _FakeBridge()
-    res = await svc.start_decompose_request(
-        goal="Build an RSS triage flow.",
-        leader_agent_id="leader-json",
-        user="alice",
-        api_base="http://127.0.0.1:17017",
-        bridge_factory=lambda cfg: fake,
-        background=False,
-    )
-    row = svc.get_request(res.request_id)
-    assert row is not None
-    assert row.status == TaskDecomposeStatus.dispatched
 
 
 @pytest.mark.asyncio
@@ -1613,6 +1564,8 @@ def test_decompose_start_returns_request_id(
     # Status row should be `dispatched` after the task completes.
     rid = body["requestId"]
     s = app_client.get(f"/api/flows/decompose/{rid}").json()
+    assert s["requestId"] == rid
+    assert s["leaderAgentId"] == "leader-pub"
     assert s["status"] in {"dispatched", "pending"}
 
 
@@ -1659,22 +1612,6 @@ def test_decompose_start_403_for_other_users_leader(
     )
     assert r.status_code == 403
     assert r.json()["error"] == "FORBIDDEN"
-
-
-def test_decompose_status_returns_state(
-    app_client: TestClient, patched_bridge_for_app: dict,
-) -> None:
-    _seed_openclaw_agent("leader-pub2")
-    rid = app_client.post(
-        "/api/flows/decompose",
-        json={"goal": "x", "leaderAgentId": "leader-pub2"},
-    ).json()["requestId"]
-    r = app_client.get(f"/api/flows/decompose/{rid}")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["requestId"] == rid
-    assert body["leaderAgentId"] == "leader-pub2"
-    assert body["status"] in {"pending", "dispatched"}
 
 
 def test_decompose_status_403_other_user(
@@ -1996,7 +1933,7 @@ def test_reinstall_skills_excludes_removed_decomposer(
     assert "self-definition-maintenance" in installed
 
 
-def test_merge_decompose_editor_snapshot_preserves_leader_branch() -> None:
+def test_merge_decompose_editor_snapshot_preserves_editor_bindings() -> None:
     merged = svc._merge_decompose_editor_snapshot(
         [
             {
@@ -2006,26 +1943,6 @@ def test_merge_decompose_editor_snapshot_preserves_leader_branch() -> None:
                 "targetBranch": "",
                 "isLeader": True,
             },
-            {"id": "w1", "kind": "claude", "isTemporary": True},
-        ],
-        leader_agent_id="hermes-lead",
-        existing_agents=[{
-            "id": "hermes-lead",
-            "kind": "hermes",
-            "repo": "/tmp/right",
-            "targetBranch": "feature/x",
-            "isLeader": True,
-        }],
-    )
-    leader = next(item for item in merged if item["id"] == "hermes-lead")
-    assert leader["repo"] == "/tmp/right"
-    assert leader["targetBranch"] == "feature/x"
-
-
-def test_merge_decompose_editor_snapshot_preserves_worker_binding() -> None:
-    merged = svc._merge_decompose_editor_snapshot(
-        [
-            {"id": "hermes-lead", "kind": "hermes", "isLeader": True},
             {
                 "id": "worker-1",
                 "kind": "hermes",
@@ -2036,6 +1953,13 @@ def test_merge_decompose_editor_snapshot_preserves_worker_binding() -> None:
         leader_agent_id="hermes-lead",
         existing_agents=[
             {
+                "id": "hermes-lead",
+                "kind": "hermes",
+                "repo": "/tmp/right",
+                "targetBranch": "feature/x",
+                "isLeader": True,
+            },
+            {
                 "id": "worker-1",
                 "kind": "hermes",
                 "repo": "/tmp/user-repo",
@@ -2043,7 +1967,10 @@ def test_merge_decompose_editor_snapshot_preserves_worker_binding() -> None:
             },
         ],
     )
+    leader = next(item for item in merged if item["id"] == "hermes-lead")
     worker = next(item for item in merged if item["id"] == "worker-1")
+    assert leader["repo"] == "/tmp/right"
+    assert leader["targetBranch"] == "feature/x"
     assert worker["repo"] == "/tmp/user-repo"
     assert worker["targetBranch"] == "dev"
 

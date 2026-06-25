@@ -143,17 +143,19 @@ def build_worker_dispatch(ctx: DispatchContext) -> str:
       1. ``## ClawsomeFlow Dispatch Context``
       2. ``## Your Role``
       3. ``## Workspace Context`` (worktree path; OpenClaw extras)
-      4. ``## Direct Upstream Outputs`` (only when ``ctx.upstream_outputs`` is non-empty;
+      4. ``## Runtime inputs`` (user-defined Flow parameter values for this run)
+      5. ``## Direct Upstream Outputs`` (only when ``ctx.upstream_outputs`` is non-empty;
          **first-level depends_on only** — never transitively further upstream)
-      5. ``## Git Merge & Repo Lock Reference`` (generic, non-mandatory how-to —
+      6. ``## Git Merge & Repo Lock Reference`` (generic, non-mandatory how-to —
          only when ``ctx.merge_reference``; the *mandate* to merge stays in the
          checklist)
-      6. ``## Task #{id}: {subject}`` + description + ``## Completion Checklist``
+      7. ``## Task #{id}: {subject}`` + description + ``## Completion Checklist``
     """
     blocks = [
         _scheduling_context_block(ctx),
         _identity_block(ctx),
         _work_context_block(ctx),
+        _runtime_inputs_block(ctx),
         _upstream_outputs_block(ctx),
         _git_merge_reference_block(ctx),
         _task_block(ctx),
@@ -483,17 +485,36 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
     return "## Completion Checklist\n" + "\n".join(steps) + failure_section
 
 
+def _public_flow_inputs(flow_inputs: dict[str, object] | None) -> dict[str, object]:
+    """User-facing run inputs only — hide internal ``_csflow_*`` scheduler keys."""
+    if not flow_inputs:
+        return {}
+    out: dict[str, object] = {}
+    for key, value in flow_inputs.items():
+        k = str(key).strip()
+        if not k or k.startswith("_csflow_"):
+            continue
+        out[k] = value
+    return out
+
+
+def _runtime_inputs_lines(ctx: DispatchContext) -> str:
+    inputs_lines = [
+        f"  - **{k}**: `{v}`" for k, v in _public_flow_inputs(ctx.flow_inputs).items()
+    ]
+    return "\n".join(inputs_lines) if inputs_lines else "  _(none)_"
+
+
+def _runtime_inputs_block(ctx: DispatchContext) -> str:
+    return f"## Runtime inputs\n{_runtime_inputs_lines(ctx)}"
+
+
 def _flow_goal_block(ctx: DispatchContext) -> str:
     desc = ctx.flow_description.strip() or "_(Flow has no description)_"
-    inputs_lines = [
-        f"  - **{k}**: `{v}`" for k, v in (ctx.flow_inputs or {}).items()
-    ]
-    inputs_section = "\n".join(inputs_lines) if inputs_lines else "  _(none)_"
     return (
         "## Flow Goal\n"
         f"{desc}\n"
-        "Runtime inputs:\n"
-        f"{inputs_section}"
+        f"{_runtime_inputs_block(ctx)}"
     )
 
 

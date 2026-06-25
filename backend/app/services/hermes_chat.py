@@ -1,9 +1,9 @@
 """Tracked, killable Hermes chat turns with reconnectable elapsed progress.
 
-Wraps a single ``hermes -p <id> --yolo [-c] -z <msg>`` invocation per attempt
-(the same semantics as :func:`hermes_agents.chat_once`) without session-export
-polling. Progress exposed to the WebUI is **elapsed time only**; the client-side
-:class:`~frontend PendingReply` bubble handles the 10s+ "still thinking" hint.
+Wraps a single ``hermes -p <id> chat --yolo -Q [--resume <sid>|-c] -q <msg>``
+invocation per attempt. Progress exposed to the WebUI is **elapsed time only**;
+the client-side :class:`~frontend PendingReply` bubble handles the 10s+
+"still thinking" hint.
 
 Each turn is a :class:`ChatJob` in an in-memory registry keyed by
 ``session_key``, powering ``GET /hermes/agents/{id}/chat/status`` reconnect after
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -39,6 +40,8 @@ _CHAT_TIMEOUT_SEC = 28800.0
 FinalSource = Literal["stdout", "session_export", "none", "none_after_tools", ""]
 
 _NO_TEXT_REPLY_MARKER = "[[NO_TEXT_REPLY]]"
+_CHAT_SESSION_SOURCE = "csflow-web"
+_SESSION_ID_RE = re.compile(r"(?im)^\s*session_id:\s*(?P<sid>\S+)\s*$")
 
 
 @dataclass
@@ -116,8 +119,9 @@ def start_chat(
     workdir: str,
     resume: bool,
     session_key: str,
+    resume_session_id: str | None = None,
 ) -> ChatJob:
-    """Spawn a tracked chat turn (``chat_once`` semantics, no session polling)."""
+    """Spawn a tracked chat turn."""
     aid = ha._validate_agent_id(agent_id)
     # Normalise to an ABSOLUTE path before it reaches subprocess.Popen(cwd=...).
     # A raw tilde path like "~" is NOT expanded by Popen and makes it raise
@@ -138,7 +142,7 @@ def start_chat(
 
     threading.Thread(
         target=_run_turn,
-        args=(job, message, workdir, resume),
+        args=(job, message, workdir, resume, resume_session_id),
         name="hermes-chat-turn",
         daemon=True,
     ).start()
@@ -147,6 +151,7 @@ def start_chat(
         session_key=session_key,
         agent_id=aid,
         resume=resume,
+        resume_session_id=resume_session_id,
         workdir=workdir,
         message_chars=len(message),
     )
@@ -159,10 +164,31 @@ def _spawn_hermes(
     message: str,
     workdir: str,
     resume: bool,
+    resume_session_id: str | None = None,
 ) -> subprocess.Popen[str]:
     exe = ha.hermes_executable()
     assert exe is not None
-    argv = [exe, "-p", agent_id, "--yolo", *(["-c"] if resume else []), "-z", message]
+    # Prefer an explicit Hermes session id when we have one; otherwise fall back
+    # to ``-c`` (continue most-recent CLI session) for legacy chats that predate
+    # persisted session bindings.
+    resume_args: list[str] = []
+    if resume_session_id:
+        resume_args = ["--resume", resume_session_id]
+    elif resume:
+        resume_args = ["-c"]
+    argv = [
+        exe,
+        "-p",
+        agent_id,
+        "chat",
+        "--yolo",
+        "-Q",
+        *resume_args,
+        "--source",
+        _CHAT_SESSION_SOURCE,
+        "-q",
+        message,
+    ]
     return subprocess.Popen(  # noqa: S603 — args are constructed, not shell
         argv,
         cwd=str(workdir),
@@ -203,31 +229,59 @@ def _preview_text(text: str, *, limit: int = 240) -> str:
     return t if len(t) <= limit else t[:limit] + "…"
 
 
+def _parse_session_id_from_stderr(err: str) -> str | None:
+    """Extract the machine-readable session id emitted by ``hermes chat -Q``."""
+    match = _SESSION_ID_RE.search(ha._strip_ansi(err or ""))
+    return match.group("sid") if match else None
+
+
+def _ensure_job_session_id(job: ChatJob) -> None:
+    """Bind ``job.hermes_session_id`` after a successful turn when missing.
+
+    ``hermes chat -Q`` normally emits ``session_id: ...`` on stderr. The
+    one-shot ``sessions list`` probe is retained as a compatibility fallback for
+    older or unexpected Hermes output.
+    """
+    if job.hermes_session_id:
+        return
+    sid = _discover_session_id(job.agent_id)
+    if sid:
+        job.hermes_session_id = sid
+
+
 def _discover_session_id(agent_id: str) -> str | None:
-    """Newest ``cli`` session for this profile = our just-finished turn.
+    """Newest session for this profile = our just-finished turn.
 
     Safe because :func:`start_chat` supersedes concurrent turns and local mode is
-    single-user, so only our process writes ``cli`` sessions.
+    single-user, so only our process writes WebUI sessions. Query the new
+    ClawsomeFlow source first, then fall back to historical ``cli`` sessions for
+    upgrade compatibility.
     """
-    try:
-        rc, out, err = ha._run_hermes(
-            ["-p", agent_id, "sessions", "list", "--source", "cli", "--limit", "5"]
-        )
-    except ha.HermesAgentError as exc:
-        logger.warning("hermes_chat_session_list_failed", agent_id=agent_id, error=str(exc)[:240])
-        return None
-    if rc != 0:
-        return None
-    for raw in ha._strip_ansi(out).splitlines():
-        line = raw.strip()
-        if not line:
+    for source in (_CHAT_SESSION_SOURCE, "cli"):
+        try:
+            rc, out, err = ha._run_hermes(
+                ["-p", agent_id, "sessions", "list", "--source", source, "--limit", "5"]
+            )
+        except ha.HermesAgentError as exc:
+            logger.warning(
+                "hermes_chat_session_list_failed",
+                agent_id=agent_id,
+                source=source,
+                error=str(exc)[:240],
+            )
             continue
-        low = line.lower()
-        if low.startswith("preview") or set(line) <= set("─-—│| "):
-            continue  # header / separator
-        token = line.split()[-1]  # ID is the last column
-        if "_" in token:  # e.g. 20260617_185542_a98875
-            return token
+        if rc != 0:
+            continue
+        for raw in ha._strip_ansi(out).splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if low.startswith("preview") or set(line) <= set("─-—│| "):
+                continue  # header / separator
+            token = line.split()[-1]  # ID is the last column
+            if "_" in token:  # e.g. 20260617_185542_a98875
+                return token
     return None
 
 
@@ -294,13 +348,17 @@ def _extract_assistant_text(export_data: dict[str, Any] | None) -> str:
     return ""
 
 
-def _recover_empty_stdout(job: ChatJob) -> tuple[str, FinalSource]:
+def _recover_empty_stdout(
+    job: ChatJob,
+    *,
+    preferred_session_id: str | None = None,
+) -> tuple[str, FinalSource]:
     """``rc==0`` but empty stdout: hermes printed nothing to the pipe (common for
     ``-c`` resume / tool-heavy turns where the answer lives only in the session
     store). Do a ONE-SHOT (no polling) ``sessions export`` to recover the final
     assistant text. Returns ``(final_text, source)``; ``source==""`` when nothing
     usable was found (caller then falls through to the error/retry path)."""
-    sid = _discover_session_id(job.agent_id)
+    sid = preferred_session_id or _discover_session_id(job.agent_id)
     if not sid:
         return "", ""
     job.hermes_session_id = sid
@@ -317,19 +375,32 @@ def _recover_empty_stdout(job: ChatJob) -> tuple[str, FinalSource]:
     return "", ""
 
 
-def _resolve_done(job: ChatJob, rc: int, out: str) -> tuple[str, FinalSource] | None:
+def _resolve_done(
+    job: ChatJob,
+    rc: int,
+    out: str,
+    *,
+    preferred_session_id: str | None = None,
+) -> tuple[str, FinalSource] | None:
     """Decide whether this hermes exit is a successful turn. Returns
     ``(final_text, source)`` on success, else ``None`` (error/retry path)."""
     if rc != 0:
         return None
     stdout_text = (out or "").strip()
     if stdout_text:
+        job.hermes_session_id = preferred_session_id or _discover_session_id(job.agent_id)
         return stdout_text, "stdout"
-    text, source = _recover_empty_stdout(job)
+    text, source = _recover_empty_stdout(job, preferred_session_id=preferred_session_id)
     return (text, source) if source else None
 
 
-def _run_turn(job: ChatJob, message: str, workdir: str, resume: bool) -> None:
+def _run_turn(
+    job: ChatJob,
+    message: str,
+    workdir: str,
+    resume: bool,
+    resume_session_id: str | None = None,
+) -> None:
     """Run one turn, guaranteeing the job never wedges in ``running``.
 
     The actual work lives in :func:`_run_turn_impl`; this wrapper guarantees
@@ -338,7 +409,7 @@ def _run_turn(job: ChatJob, message: str, workdir: str, resume: bool) -> None:
     of silently killing the thread and leaving the WebUI spinning forever.
     """
     try:
-        _run_turn_impl(job, message, workdir, resume)
+        _run_turn_impl(job, message, workdir, resume, resume_session_id)
     except Exception as exc:  # noqa: BLE001 — last-resort guard for the thread
         if get_job(job.session_key) is not job:
             return
@@ -356,7 +427,13 @@ def _run_turn(job: ChatJob, message: str, workdir: str, resume: bool) -> None:
         )
 
 
-def _run_turn_impl(job: ChatJob, message: str, workdir: str, resume: bool) -> None:
+def _run_turn_impl(
+    job: ChatJob,
+    message: str,
+    workdir: str,
+    resume: bool,
+    resume_session_id: str | None = None,
+) -> None:
     """Execute one chat turn with connection-error retries."""
     use_resume = resume
     last_detail = ""
@@ -369,7 +446,11 @@ def _run_turn_impl(job: ChatJob, message: str, workdir: str, resume: bool) -> No
                 return
 
         proc = _spawn_hermes(
-            job.agent_id, message=message, workdir=workdir, resume=use_resume
+            job.agent_id,
+            message=message,
+            workdir=workdir,
+            resume=use_resume,
+            resume_session_id=resume_session_id if use_resume else None,
         )
         job.proc = proc
         _subproc_registry.register(proc)
@@ -380,9 +461,17 @@ def _run_turn_impl(job: ChatJob, message: str, workdir: str, resume: bool) -> No
         if get_job(job.session_key) is not job:
             return
 
-        done = _resolve_done(job, rc, out)
+        stderr_session_id = _parse_session_id_from_stderr(err)
+        done = _resolve_done(
+            job,
+            rc,
+            out,
+            preferred_session_id=stderr_session_id
+            or (resume_session_id if use_resume else None),
+        )
         if done is not None:
             final_text, source = done
+            _ensure_job_session_id(job)
             _finish_job(job, status="done", final_text=final_text)
             logger.info(
                 "hermes_chat_finished",
@@ -391,6 +480,7 @@ def _run_turn_impl(job: ChatJob, message: str, workdir: str, resume: bool) -> No
                 status="done",
                 final_source=source,
                 final_len=len(final_text),
+                hermes_session_id=job.hermes_session_id,
                 attempt=attempt + 1,
             )
             return
@@ -407,16 +497,22 @@ def _run_turn_impl(job: ChatJob, message: str, workdir: str, resume: bool) -> No
             )
             use_resume = False
             proc2 = _spawn_hermes(
-                job.agent_id, message=message, workdir=workdir, resume=False
+                job.agent_id,
+                message=message,
+                workdir=workdir,
+                resume=False,
+                resume_session_id=None,
             )
             job.proc = proc2
             _subproc_registry.register(proc2)
             rc, out, err = _communicate(proc2)
             _subproc_registry.unregister(proc2)
             job.proc = None
-            done = _resolve_done(job, rc, out)
+            stderr_session_id = _parse_session_id_from_stderr(err)
+            done = _resolve_done(job, rc, out, preferred_session_id=stderr_session_id)
             if done is not None:
                 final_text, source = done
+                _ensure_job_session_id(job)
                 _finish_job(job, status="done", final_text=final_text)
                 logger.info(
                     "hermes_chat_finished",
@@ -425,6 +521,7 @@ def _run_turn_impl(job: ChatJob, message: str, workdir: str, resume: bool) -> No
                     status="done",
                     final_source=source,
                     final_len=len(final_text),
+                    hermes_session_id=job.hermes_session_id,
                     attempt=attempt + 1,
                     resume_fallback=True,
                 )
@@ -448,6 +545,7 @@ def _run_turn_impl(job: ChatJob, message: str, workdir: str, resume: bool) -> No
                 error_preview=detail[:240],
             )
             time.sleep(delay)
+            use_resume = resume
             continue
         break
 

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Path, Query, status
@@ -78,6 +79,7 @@ from app.scheduler.naming import team_name_for_run
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
 from app.storage import StorageBackend, get_storage
+from app.worktree.lookup import get_worktree_lookup
 
 router = APIRouter(tags=["runs"])
 logger = get_logger("api.runs")
@@ -155,6 +157,7 @@ class RunTaskTerminalView(_CamelModel):
     owner_agent_id: str
     owner_kind: str | None = None
     tmux_target: str
+    work_dir: str = ""
     pane_text: str = ""
     available: bool = False
 
@@ -979,11 +982,40 @@ async def list_run_terminals(
         captures = await asyncio.gather(*(_capture(owner) for owner in owners))
         capture_map = {owner: text for owner, text in captures}
 
+    repo_by_agent: dict[str, str | None] = {}
+    for agent in spec.agents:
+        repo = str(agent.repo or "").strip()
+        repo_by_agent[agent.id] = str(Path(repo).expanduser()) if repo else None
+
+    lookup = get_worktree_lookup()
+    work_dir_by_agent: dict[str, str] = {}
+    repos_to_query: set[str | None] = {None}
+    repos_to_query.update(repo for repo in repo_by_agent.values() if repo)
+    for repo in repos_to_query:
+        try:
+            workspaces = await lookup.list_team(run.team_name, repo=repo)
+        except Exception:
+            workspaces = []
+        for workspace in workspaces:
+            work_dir_by_agent.setdefault(workspace.agent_name, workspace.worktree_path)
+
     kind_by_agent = {agent.id: agent.kind.value for agent in spec.agents}
     items: list[RunTaskTerminalView] = []
     for task in spec.tasks:
         owner_agent_id = str(task.owner_agent_id or "").strip()
         pane_text = capture_map.get(owner_agent_id, "")
+        work_dir = work_dir_by_agent.get(owner_agent_id, "")
+        if not work_dir:
+            repo = repo_by_agent.get(owner_agent_id)
+            if repo:
+                try:
+                    workspace = await lookup.get(
+                        run.team_name, owner_agent_id, repo=repo,
+                    )
+                except Exception:
+                    workspace = None
+                if workspace is not None:
+                    work_dir = workspace.worktree_path
         items.append(
             RunTaskTerminalView(
                 task_id=task.id,
@@ -991,6 +1023,7 @@ async def list_run_terminals(
                 owner_agent_id=owner_agent_id,
                 owner_kind=kind_by_agent.get(owner_agent_id),
                 tmux_target=f"clawteam-{run.team_name}:{owner_agent_id}",
+                work_dir=work_dir,
                 pane_text=pane_text,
                 available=bool(pane_text.strip()),
             )

@@ -2655,6 +2655,9 @@ async def test_hermes_headless_dispatch_injects_minimal_complaint_context(
     )
 
     argv = list(captured["argv"])
+    assert argv[:6] == ["hermes", "-p", "myh", "chat", "--yolo", "-Q"]
+    assert "--resume" not in argv
+    assert argv[-2] == "-q"
     msg = str(argv[-1])
     assert msg.startswith("## ClawsomeFlow Complaint Dispatch Context\n\nhello hermes")
     assert "verified_workdir" not in msg

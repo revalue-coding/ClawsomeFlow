@@ -2458,7 +2458,43 @@ async def delete_agent(
 
     row = storage.openclaw_get(aid)
     if row is None:
-        raise AgentNotFound(f"openclaw agent {aid!r} not found")
+        if mode != _DELETE_MODE_PURGE:
+            raise AgentNotFound(f"openclaw agent {aid!r} not found")
+        workspace = (paths.agent_dir(aid) / "workspace").resolve(strict=False)
+        if not workspace.exists() or not workspace.is_dir():
+            logger.info(
+                "openclaw_agent_delete_noop",
+                agent_id=aid,
+                mode=mode,
+                reason="workspace_orphan_missing",
+            )
+            return
+        blocked = _collect_blocking_flow_names(
+            storage=storage,
+            user=cfg.default_user,
+            agent_id=aid,
+        )
+        flow_names = blocked.get("flow_names", [])
+        if isinstance(flow_names, list) and flow_names:
+            raise AgentInUse(
+                f"agent {aid!r} is used by existing Flows and cannot be removed",
+                details=blocked,
+            )
+        if oj.has_managed_agent(aid, cfg):
+            try:
+                await oj.remove_managed_agent(aid, config=cfg)
+            except oj.OpenclawJsonError as exc:
+                raise AgentUnmanaged(str(exc)) from exc
+        await asyncio.to_thread(_safe_rmtree, workspace.parent)
+        logger.info(
+            "openclaw_agent_deleted",
+            agent_id=aid,
+            mode=mode,
+            purged=True,
+            removed_from_json=False,
+            workspace_orphan=True,
+        )
+        return
 
     blocked = _collect_blocking_flow_names(
         storage=storage,
@@ -2518,6 +2554,25 @@ async def delete_agent(
         cron_backup_entries=backup_entries_count,
         cron_backup_captured=backup_captured,
     )
+
+
+def user_may_purge_workspace_orphan(
+    agent_id: str,
+    *,
+    user: str,
+    storage: StorageBackend | None = None,
+    config: Config | None = None,
+) -> bool:
+    """True when *user* may purge/idempotently re-purge a DB-less managed workspace."""
+    cfg = config or load_config()
+    storage = storage or get_storage(cfg)
+    try:
+        aid = _validate_agent_id(agent_id)
+    except AgentIdInvalid:
+        return False
+    if storage.openclaw_get(aid) is not None:
+        return False
+    return user == cfg.default_user
 
 
 def get_agent(
@@ -3117,4 +3172,5 @@ __all__ = [
     "sync_common_cron_jobs_for_all",
     "update_agent",
     "update_team",
+    "user_may_purge_workspace_orphan",
 ]

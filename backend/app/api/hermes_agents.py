@@ -48,6 +48,7 @@ from app.scheduler.naming import hermes_user_chat_session_id
 from app.services import chat_attachments as attachment_svc
 from app.services import hermes_agents as svc
 from app.services import hermes_chat as chat_svc
+from app.services import hermes_chat_sessions as chat_sessions
 from app.services import hermes_dashboard as dash_svc
 from app.services import openclaw_agents as oc_svc
 from app.services import openclaw_chat_history as chat_history
@@ -1067,15 +1068,28 @@ async def _finalize_chat_history(job: chat_svc.ChatJob, session_key: str) -> Non
     while job.snapshot()["status"] == "running":
         await asyncio.sleep(0.5)
     snap = job.snapshot()
-    if snap["status"] == "done" and snap["final"]:
-        await chat_history.append_message(session_key, role="assistant", content=snap["final"])
-        logger.info(
-            "hermes_chat_history_appended",
-            session_key=session_key,
-            agent_id=job.agent_id,
-            final_len=len(snap["final"]),
-            tool_only=snap["final"] == chat_svc._NO_TEXT_REPLY_MARKER,
-        )
+    if snap["status"] == "done":
+        if job.hermes_session_id:
+            chat_sessions.set_session_id(session_key, job.hermes_session_id)
+        if snap["final"]:
+            await chat_history.append_message(
+                session_key, role="assistant", content=snap["final"],
+            )
+            logger.info(
+                "hermes_chat_history_appended",
+                session_key=session_key,
+                agent_id=job.agent_id,
+                final_len=len(snap["final"]),
+                tool_only=snap["final"] == chat_svc._NO_TEXT_REPLY_MARKER,
+                hermes_session_id=job.hermes_session_id,
+            )
+        elif job.hermes_session_id:
+            logger.info(
+                "hermes_chat_session_bound_without_reply",
+                session_key=session_key,
+                agent_id=job.agent_id,
+                hermes_session_id=job.hermes_session_id,
+            )
     else:
         logger.info(
             "hermes_chat_history_skipped",
@@ -1117,9 +1131,13 @@ async def chat_with_agent(
         runtime_message = injected
 
     session_key = _session_key(user, agent_id)
-    # Resume the existing session whenever this conversation already has turns.
-    # ``/reset`` clears history → next turn starts a fresh session.
-    resume = len(await chat_history.list_messages(session_key)) > 0
+    # Resume when we have a persisted Hermes session id, or when UI history shows
+    # prior turns (legacy path: no saved id yet → ``-c`` in hermes_chat).
+    # ``/reset`` clears both → next turn starts a fresh Hermes session.
+    saved_hermes_session_id = chat_sessions.get_session_id(session_key)
+    resume = saved_hermes_session_id is not None or (
+        len(await chat_history.list_messages(session_key)) > 0
+    )
     await chat_history.append_message(
         session_key,
         role="user",
@@ -1137,6 +1155,7 @@ async def chat_with_agent(
             workdir=workdir,
             resume=resume,
             session_key=session_key,
+            resume_session_id=saved_hermes_session_id,
         )
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
@@ -1211,6 +1230,11 @@ async def reset_chat(
     # Kill any in-flight turn FIRST so a "reset" can't leave a runaway hermes
     # process that later appends a ghost reply into the cleared history.
     chat_svc.kill_chat(session_key)
+    # Hermes' own /new reset starts a fresh session without deleting the old
+    # stored history. Mirror that: forget our binding so the next WebUI turn
+    # creates a new Hermes session, but leave Hermes' session DB/prunable history
+    # intact.
+    chat_sessions.clear_session_id(session_key)
     await chat_history.clear_messages(session_key)
 
 

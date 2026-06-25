@@ -322,6 +322,7 @@ export interface RunTaskTerminal {
   ownerAgentId: string;
   ownerKind: string | null;
   tmuxTarget: string;
+  workDir: string;
   paneText: string;
   available: boolean;
 }

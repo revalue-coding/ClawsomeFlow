@@ -474,6 +474,14 @@ def _import_one(
                     error_code="FORBIDDEN",
                     error_message="flow belongs to a different user",
                 )
+            if storage.run_count_active_for_flow(entry.id) > 0:
+                return FlowImportItemResult(
+                    id=entry.id,
+                    name=entry.name,
+                    action="error",
+                    error_code="RUNS_IN_PROGRESS",
+                    error_message=f"flow {entry.id!r} has active runs; cannot import update",
+                )
             # overwrite=True OR no version supplied → force using current
             # version (last-write-wins). Otherwise honour optimistic locking.
             if overwrite or entry.version is None:

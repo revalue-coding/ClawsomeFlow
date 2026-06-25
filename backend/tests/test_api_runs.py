@@ -797,6 +797,7 @@ def test_list_run_terminals_returns_tmux_snapshots(
     assert t1["ownerAgentId"] == "alice"
     assert t1["ownerKind"] == "claude"
     assert t1["tmuxTarget"] == "clawteam-csflow-termx:alice"
+    assert t1["workDir"] == ""
     assert t1["paneText"] == "clawteam-csflow-termx:alice#80"
     assert t1["available"] is True
     ts = by_task["ts"]

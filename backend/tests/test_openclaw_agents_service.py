@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -812,6 +813,51 @@ async def test_delete_purge_removes_workspace(fake_openclaw_home: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_purge_workspace_orphan_without_db_row(
+    fake_openclaw_home: Path,
+) -> None:
+    orphan_id = "orphan-purge-no-db"
+    workspace = paths.agent_dir(orphan_id) / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "marker.txt").write_text("x", encoding="utf-8")
+    await svc.delete_agent(orphan_id, mode="purge")
+    from app.storage import get_storage
+    assert get_storage().openclaw_get(orphan_id) is None
+    assert not paths.agent_dir(orphan_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_purge_workspace_orphan_is_idempotent(
+    fake_openclaw_home: Path,
+) -> None:
+    orphan_id = "orphan-purge-repeat"
+    workspace = paths.agent_dir(orphan_id) / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    await svc.delete_agent(orphan_id, mode="purge")
+    await svc.delete_agent(orphan_id, mode="purge")
+
+    assert not paths.agent_dir(orphan_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_purge_workspace_orphan_concurrent_requests(
+    fake_openclaw_home: Path,
+) -> None:
+    orphan_id = "orphan-purge-race"
+    workspace = paths.agent_dir(orphan_id) / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "marker.txt").write_text("x", encoding="utf-8")
+
+    await asyncio.gather(
+        svc.delete_agent(orphan_id, mode="purge"),
+        svc.delete_agent(orphan_id, mode="purge"),
+    )
+
+    assert not paths.agent_dir(orphan_id).exists()
+
+
+@pytest.mark.asyncio
 async def test_delete_refuses_when_agent_exists_in_flow_template(
     fake_openclaw_home: Path,
 ) -> None:
@@ -902,6 +948,23 @@ async def test_restore_agent_registration_re_registers_runtime(
     assert restored.id == "restore-one"
     assert restored.workspace_path == created.workspace_path
     assert oj.find_agent("restore-one") is not None
+
+
+@pytest.mark.asyncio
+async def test_restore_agent_registration_is_idempotent_once_registered(
+    fake_openclaw_home: Path,
+) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    created = await svc.commit_agent(svc.CommitInput(id="restore-repeat", name="Restore Twice"), user="u")
+    await svc.delete_agent("restore-repeat", mode="unregister")
+
+    first = await svc.restore_agent_registration("restore-repeat", user="u")
+    second = await svc.restore_agent_registration("restore-repeat", user="u")
+
+    assert first.id == second.id == "restore-repeat"
+    assert second.workspace_path == created.workspace_path
+    assert oj.find_agent("restore-repeat") is not None
 
 
 @pytest.mark.asyncio

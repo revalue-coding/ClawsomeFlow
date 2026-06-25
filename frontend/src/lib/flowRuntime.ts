@@ -108,3 +108,24 @@ export function setRunInputFields(spec: FlowSpec, fields: string[]): FlowSpec {
     variables: Object.keys(nextVariables).length > 0 ? nextVariables : {},
   };
 }
+
+/** Upstream dependency agent ids for the task editor collab hint (first-level depends_on only). */
+export function collectUpstreamAgentIds(
+  row: { dependsOn?: string[] },
+  tasks: Array<{ id: string; ownerId: string }>,
+): string[] {
+  const byId = new Map(
+    tasks.filter((r) => r.id.trim()).map((r) => [r.id.trim(), r] as const),
+  );
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const depId of row.dependsOn ?? []) {
+    const dep = byId.get(depId.trim());
+    if (!dep) continue;
+    const agentId = dep.ownerId.trim();
+    if (!agentId || seen.has(agentId)) continue;
+    seen.add(agentId);
+    out.push(agentId);
+  }
+  return out;
+}

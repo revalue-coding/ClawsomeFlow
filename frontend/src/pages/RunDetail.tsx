@@ -152,6 +152,8 @@ type ActiveCheckpoint = {
 
 type BoardTab = "list" | "terminal";
 
+const BOARD_PANEL_HEIGHT = "h-[480px]";
+
 const EMPTY_TASK_BOARD: TaskBoardModel = {
   visibleNodes: [],
   listNodes: [],
@@ -1015,72 +1017,107 @@ function RunTerminalBoard({
   onSelectTaskId: (taskId: string) => void;
 }) {
   const { t } = useTranslation();
+  const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const selected =
+    items.find((item) => item.taskId === selectedTaskId) ?? items[0] ?? null;
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const card = cardRefs.current.get(selectedTaskId);
+    card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [selectedTaskId]);
+
   if (loading && items.length === 0) {
     return (
-      <div className="bg-[#090f1f] text-ink-100 px-5 py-6 text-sm">
+      <div className={`bg-[#090f1f] text-ink-100 px-5 py-6 text-sm ${BOARD_PANEL_HEIGHT}`}>
         {t("runDetail.terminal.loading")}
       </div>
     );
   }
   if (items.length === 0) {
     return (
-      <div className="bg-[#090f1f] text-ink-100 px-5 py-6 text-sm">
+      <div className={`bg-[#090f1f] text-ink-100 px-5 py-6 text-sm ${BOARD_PANEL_HEIGHT}`}>
         {error || t("runDetail.terminal.empty")}
       </div>
     );
   }
-  const selected = items.find((item) => item.taskId === selectedTaskId) ?? items[0];
+
   return (
     <div className="bg-[#090f1f] text-ink-100 p-4">
-      <div className="grid min-w-0 gap-4 md:grid-cols-[20rem_minmax(0,1fr)]">
-        <div className="min-w-0 rounded-md border border-[#2a3558] bg-[#0d152b] p-3 min-h-[360px]">
-          <div className="text-xs text-[#90a4d8] mb-2">
+      <div
+        className={`grid min-w-0 gap-4 md:grid-cols-[20rem_minmax(0,1fr)] ${BOARD_PANEL_HEIGHT}`}
+      >
+        <div className="flex min-h-0 min-w-0 flex-col rounded-md border border-[#2a3558] bg-[#0d152b]">
+          <div className="shrink-0 px-3 pt-3 pb-2 text-xs text-[#90a4d8]">
             {t("runDetail.terminal.taskListTitle")}
           </div>
-          <div className="space-y-2">
-            {items.map((item) => (
-              <button
-                key={`terminal-task-${item.taskId}`}
-                type="button"
-                className={
-                  selected.taskId === item.taskId
-                    ? "w-full text-left rounded-md border border-[#4f79de] bg-[#15264f] px-3 py-2"
-                    : "w-full text-left rounded-md border border-[#2a3558] bg-[#111c39] px-3 py-2"
-                }
-                onClick={() => onSelectTaskId(item.taskId)}
-              >
-                <div className="truncate text-sm text-[#e8eeff]">
-                  {item.subject || "—"}
-                </div>
-                <div className="mt-1 text-[11px] text-[#9ab0df] font-mono">
-                  {item.taskId} · {item.ownerAgentId}
-                </div>
-              </button>
-            ))}
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+            <div className="space-y-2">
+              {items.map((item) => {
+                const isSelected = selected?.taskId === item.taskId;
+                return (
+                  <button
+                    key={`terminal-task-${item.taskId}`}
+                    type="button"
+                    className={
+                      isSelected
+                        ? "w-full text-left rounded-md border border-[#4f79de] bg-[#15264f] px-3 py-2"
+                        : "w-full text-left rounded-md border border-[#2a3558] bg-[#111c39] px-3 py-2"
+                    }
+                    onClick={() => onSelectTaskId(item.taskId)}
+                  >
+                    <div className="truncate text-sm text-[#e8eeff]">
+                      {item.subject || "—"}
+                    </div>
+                    <div className="mt-1 text-[11px] text-[#9ab0df] font-mono">
+                      {item.taskId} · {item.ownerAgentId}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
-        <div className="min-w-0 rounded-md border border-[#2a3558] bg-[#0d152b] overflow-hidden">
-          <div className="flex items-center justify-between border-b border-[#2a3558] px-3 py-2">
+        <div className="flex min-h-0 min-w-0 flex-col rounded-md border border-[#2a3558] bg-[#0d152b] overflow-hidden">
+          <div className="flex shrink-0 items-center justify-between border-b border-[#2a3558] px-3 py-2">
             <div className="text-xs text-[#90a4d8]">{t("runDetail.terminal.paneTitle")}</div>
             {error ? <div className="text-[11px] text-amber-300">{error}</div> : null}
           </div>
-          <div className="border-b border-[#2a3558] px-3 py-2 text-[11px] text-[#9ab0df]">
-            <div>
-              <span className="font-mono">{selected.taskId}</span> · {selected.subject || "—"}
-            </div>
-            <div className="mt-1">
-              {t("runDetail.terminal.ownerLabel")}:{" "}
-              <span className="font-mono">{selected.ownerAgentId}</span>
-            </div>
-            <div className="mt-1">
-              tmux: <span className="font-mono">{selected.tmuxTarget}</span>
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {items.map((item) => {
+                const isSelected = selected?.taskId === item.taskId;
+                return (
+                  <div
+                    key={`terminal-card-${item.taskId}`}
+                    ref={(node) => {
+                      if (node) cardRefs.current.set(item.taskId, node);
+                      else cardRefs.current.delete(item.taskId);
+                    }}
+                    className={
+                      isSelected
+                        ? "flex min-h-0 flex-col overflow-hidden rounded-md border border-[#4f79de] bg-[#111c39] ring-1 ring-[#4f79de]/40"
+                        : "flex min-h-0 flex-col overflow-hidden rounded-md border border-[#2a3558] bg-[#111c39]"
+                    }
+                  >
+                    <div className="shrink-0 border-b border-[#2a3558] px-3 py-2">
+                      <div className="truncate text-sm text-[#e8eeff]">
+                        {item.subject || "—"} · {item.ownerAgentId}
+                      </div>
+                      <div className="mt-1 break-all text-[11px] text-[#6b7fa8] font-mono">
+                        {item.workDir || "—"}
+                      </div>
+                    </div>
+                    <pre className="h-44 overflow-auto whitespace-pre-wrap break-words px-3 py-3 text-xs text-[#dce8ff]">
+                      {item.available
+                        ? (item.paneText || t("runDetail.terminal.unavailable"))
+                        : t("runDetail.terminal.unavailable")}
+                    </pre>
+                  </div>
+                );
+              })}
             </div>
           </div>
-          <pre className="h-[420px] overflow-auto whitespace-pre-wrap break-words px-3 py-3 text-xs text-[#dce8ff]">
-            {selected.available
-              ? (selected.paneText || t("runDetail.terminal.unavailable"))
-              : t("runDetail.terminal.unavailable")}
-          </pre>
         </div>
       </div>
     </div>

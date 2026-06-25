@@ -149,10 +149,27 @@ export function saveLastSeenCount(scope: string, n: number): void {
 }
 
 /** Index (in the non-system message list) for the "new messages" divider when a
- *  turn completes in-page — same semantics as re-entry after navigation. */
+ *  turn completes in-page — divider sits above the assistant reply, not the user
+ *  message that triggered it. */
 export function turnDividerIndex(msgs: PersistedMessage[], appendUser: boolean): number {
   const count = settledCount(msgs);
-  return appendUser ? count : Math.max(0, count - 1);
+  return appendUser ? count + 1 : count;
+}
+
+/** Index for the "new messages" divider on chat re-entry. When the newest settled
+ *  message is an assistant reply, anchor above that reply instead of above a
+ *  trailing user message the user has not read yet. */
+export function reentryDividerIndex(
+  msgs: PersistedMessage[],
+  seenAtEntry: number,
+): number {
+  const shown = settledCount(msgs);
+  if (seenAtEntry <= 0 || shown <= seenAtEntry) return -1;
+  const display = displayChatMessages(msgs);
+  const lastIdx = shown - 1;
+  const last = display[lastIdx];
+  if (last?.role === "assistant") return lastIdx;
+  return seenAtEntry;
 }
 
 /** Transcript rows shown in the chat panel (system messages hidden). */

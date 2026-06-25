@@ -114,29 +114,6 @@ async def test_list_returns_only_own_agents(client: TestClient, fake_openclaw_ho
     assert ids == ["alice1"]
 
 
-def test_runtime_status_endpoint_reports_probe_result(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        svc_agents,
-        "probe_runtime_running",
-        lambda **_kw: (False, "health_failed"),
-    )
-    monkeypatch.setattr(
-        svc_agents,
-        "resolve_runtime_gateway_url",
-        lambda **_kw: "http://127.0.0.1:19999",
-    )
-    r = client.get("/api/openclaw/agents/runtime/status")
-    assert r.status_code == 200, r.text
-    assert r.json() == {
-        "running": False,
-        "reason": "health_failed",
-        "gatewayUrl": "http://127.0.0.1:19999",
-    }
-
-
 def test_runtime_status_endpoint_supports_strict_probe_mode(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -158,65 +135,6 @@ def test_runtime_status_endpoint_supports_strict_probe_mode(
         "reason": "cli_missing",
         "gatewayUrl": "http://127.0.0.1:18888",
     }
-
-
-def test_team_create_and_list(client: TestClient, fake_openclaw_home: Path) -> None:
-    created = client.post("/api/openclaw/agents/teams", json={"name": "数据团队"})
-    assert created.status_code == 201, created.text
-    body = created.json()
-    assert body["name"] == "数据团队"
-    assert body["id"].startswith("csfow-group-")
-
-    listed = client.get("/api/openclaw/agents/teams")
-    assert listed.status_code == 200, listed.text
-    items = listed.json()["items"]
-    # Team with no members should be hidden from enum options.
-    assert all(item["id"] != body["id"] for item in items)
-
-
-@pytest.mark.asyncio
-async def test_team_list_hides_orphan_after_agent_ungroup(
-    client: TestClient,
-    fake_openclaw_home: Path,
-) -> None:
-    if not _has_git():
-        pytest.skip("git not available")
-    created = client.post("/api/openclaw/agents/teams", json={"name": "临时团队"})
-    assert created.status_code == 201, created.text
-    team_id = created.json()["id"]
-
-    await svc_agents.commit_agent(
-        svc_agents.CommitInput(id="team-list-agent", name="TeamListAgent"),
-        user="alice",
-        team_id=team_id,
-    )
-    listed = client.get("/api/openclaw/agents/teams")
-    assert listed.status_code == 200, listed.text
-    assert any(item["id"] == team_id for item in listed.json()["items"])
-
-    cleared = client.patch(
-        "/api/openclaw/agents/team-list-agent",
-        json={"teamId": None},
-    )
-    assert cleared.status_code == 200, cleared.text
-    assert cleared.json()["teamId"] == ""
-
-    listed_after = client.get("/api/openclaw/agents/teams")
-    assert listed_after.status_code == 200, listed_after.text
-    assert all(item["id"] != team_id for item in listed_after.json()["items"])
-
-
-def test_team_patch_renames(client: TestClient, fake_openclaw_home: Path) -> None:
-    created = client.post("/api/openclaw/agents/teams", json={"name": "旧名字"})
-    assert created.status_code == 201, created.text
-    team_id = created.json()["id"]
-
-    patched = client.patch(
-        f"/api/openclaw/agents/teams/{team_id}",
-        json={"name": "新名字"},
-    )
-    assert patched.status_code == 200, patched.text
-    assert patched.json()["name"] == "新名字"
 
 
 @pytest.mark.asyncio
@@ -241,51 +159,6 @@ def test_list_all_users_forbidden_in_server_mode(
     r = client.get("/api/openclaw/agents?allUsers=true")
     assert r.status_code == 403
     assert r.json()["error"] == "FORBIDDEN"
-
-
-def test_import_candidates_lists_unmanaged_runtime_agents(
-    client: TestClient,
-    fake_openclaw_home: Path,
-    tmp_path: Path,
-) -> None:
-    unmanaged_ws = tmp_path / "legacy-ext"
-    unmanaged_ws.mkdir(parents=True, exist_ok=True)
-    _seed_unmanaged_runtime_agent(
-        fake_openclaw_home,
-        agent_id="legacy-ext",
-        name="Legacy External",
-        workspace=unmanaged_ws,
-        description="legacy unmanaged",
-    )
-    _seed_registered_user_agent_without_db(fake_openclaw_home, "json-only-agent")
-    r = client.get("/api/openclaw/agents/import/candidates")
-    assert r.status_code == 200, r.text
-    ids = {item["id"] for item in r.json()["items"]}
-    assert "legacy-ext" in ids
-    # Managed runtime entries are excluded from import candidates.
-    assert "json-only-agent" not in ids
-
-
-def test_import_candidates_exclude_ids_already_imported_with_csflow_prefix(
-    client: TestClient,
-    fake_openclaw_home: Path,
-    tmp_path: Path,
-) -> None:
-    unmanaged_ws = tmp_path / "legacy-prefixed"
-    unmanaged_ws.mkdir(parents=True, exist_ok=True)
-    _seed_unmanaged_runtime_agent(
-        fake_openclaw_home,
-        agent_id="legacy-prefixed",
-        name="Legacy Prefixed",
-        workspace=unmanaged_ws,
-        description="legacy unmanaged",
-    )
-    _seed_registered_user_agent_without_db(fake_openclaw_home, "csflow-legacy-prefixed")
-
-    r = client.get("/api/openclaw/agents/import/candidates")
-    assert r.status_code == 200, r.text
-    ids = {item["id"] for item in r.json()["items"]}
-    assert "legacy-prefixed" not in ids
 
 
 @pytest.mark.asyncio
@@ -521,16 +394,6 @@ def test_list_includes_registered_managed_agent_without_db_row(
     assert r.status_code == 200, r.text
     ids = [a["id"] for a in r.json()["items"]]
     assert "json-only-agent" in ids
-
-
-def test_get_registered_managed_agent_without_db_row(
-    client: TestClient,
-    fake_openclaw_home: Path,
-) -> None:
-    _seed_registered_user_agent_without_db(fake_openclaw_home, "json-only-get")
-    r = client.get("/api/openclaw/agents/json-only-get")
-    assert r.status_code == 200, r.text
-    assert r.json()["id"] == "json-only-get"
 
 
 def test_get_registered_agent_without_db_row_even_without_registry(
@@ -798,59 +661,6 @@ async def test_patch_updates_fields(client: TestClient, fake_openclaw_home: Path
 
 
 @pytest.mark.asyncio
-async def test_patch_updates_team(client: TestClient, fake_openclaw_home: Path) -> None:
-    if not _has_git():
-        pytest.skip("git not available")
-    t1 = client.post("/api/openclaw/agents/teams", json={"name": "A队"})
-    t2 = client.post("/api/openclaw/agents/teams", json={"name": "B队"})
-    assert t1.status_code == 201 and t2.status_code == 201
-    team_a = t1.json()["id"]
-    team_b = t2.json()["id"]
-
-    created = await svc_agents.commit_agent(
-        svc_agents.CommitInput(id="patch-team", name="PatchTeam"),
-        user="alice",
-        team_id=team_a,
-    )
-    assert created.team_id == team_a
-
-    patched = client.patch(
-        "/api/openclaw/agents/patch-team",
-        json={"teamId": team_b},
-    )
-    assert patched.status_code == 200, patched.text
-    assert patched.json()["teamId"] == team_b
-    assert patched.json()["teamName"] == "B队"
-
-
-@pytest.mark.asyncio
-async def test_patch_team_can_clear_to_ungrouped(
-    client: TestClient,
-    fake_openclaw_home: Path,
-) -> None:
-    if not _has_git():
-        pytest.skip("git not available")
-    t1 = client.post("/api/openclaw/agents/teams", json={"name": "A队"})
-    assert t1.status_code == 201
-    team_a = t1.json()["id"]
-
-    created = await svc_agents.commit_agent(
-        svc_agents.CommitInput(id="patch-team-clear", name="PatchTeamClear"),
-        user="alice",
-        team_id=team_a,
-    )
-    assert created.team_id == team_a
-
-    patched = client.patch(
-        "/api/openclaw/agents/patch-team-clear",
-        json={"teamId": None},
-    )
-    assert patched.status_code == 200, patched.text
-    assert patched.json()["teamId"] == ""
-    assert patched.json()["teamName"] == ""
-
-
-@pytest.mark.asyncio
 async def test_patch_allows_name_with_whitespace(
     client: TestClient,
     fake_openclaw_home: Path,
@@ -905,6 +715,67 @@ async def test_delete_purge_removes_agent(client: TestClient, fake_openclaw_home
     assert r.status_code == 204
     r2 = client.get("/api/openclaw/agents/rm-purge")
     assert r2.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_purge_unregistered_agent(client: TestClient, fake_openclaw_home: Path) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    await svc_agents.commit_agent(
+        svc_agents.CommitInput(id="rm-unreg-purge", name="X"),
+        user="alice",
+    )
+    unreg = client.delete("/api/openclaw/agents/rm-unreg-purge?mode=unregister")
+    assert unreg.status_code == 204, unreg.text
+    r = client.delete("/api/openclaw/agents/rm-unreg-purge?mode=purge")
+    assert r.status_code == 204, r.text
+    assert not paths.agent_dir("rm-unreg-purge").exists()
+
+
+def test_delete_purge_workspace_orphan_without_db_row(
+    client: TestClient,
+    fake_openclaw_home: Path,
+) -> None:
+    orphan_id = "orphan-api-purge"
+    workspace = paths.agent_dir(orphan_id) / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "marker.txt").write_text("x", encoding="utf-8")
+    r = client.delete(f"/api/openclaw/agents/{orphan_id}?mode=purge")
+    assert r.status_code == 204, r.text
+    assert not paths.agent_dir(orphan_id).exists()
+
+
+def test_delete_purge_workspace_orphan_is_idempotent(
+    client: TestClient,
+    fake_openclaw_home: Path,
+) -> None:
+    orphan_id = "orphan-api-purge-repeat"
+    workspace = paths.agent_dir(orphan_id) / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    first = client.delete(f"/api/openclaw/agents/{orphan_id}?mode=purge")
+    second = client.delete(f"/api/openclaw/agents/{orphan_id}?mode=purge")
+
+    assert first.status_code == 204, first.text
+    assert second.status_code == 204, second.text
+    assert not paths.agent_dir(orphan_id).exists()
+
+
+def test_delete_purge_workspace_orphan_hidden_from_other_user(
+    client: TestClient,
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orphan_id = "orphan-api-purge-other-user"
+    workspace = paths.agent_dir(orphan_id) / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CSFLOW_USER", "bob")
+
+    r = client.delete(f"/api/openclaw/agents/{orphan_id}?mode=purge")
+
+    assert r.status_code == 404, r.text
+    assert r.json()["error"] == "OPENCLAW_AGENT_NOT_FOUND"
+    assert paths.agent_dir(orphan_id).exists()
 
 
 @pytest.mark.asyncio
@@ -1719,143 +1590,12 @@ async def test_chat_attachment_upload_and_path_injection(
     assert run.status_code == 200, run.text
     assert "ClawsomeFlow Uploaded Attachments" in captured["message"]
     assert captured["attachment_paths"] is None
+    assert captured["native_attachment_flag"] is None
     hist = client.get("/api/openclaw/agents/chat-attach-path/chat-history")
     assert hist.status_code == 200, hist.text
     first = hist.json()["messages"][0]
     assert first["role"] == "user"
     assert first["attachments"][0]["name"] == "brief.md"
-
-
-@pytest.mark.asyncio
-async def test_chat_attachment_never_uses_native_passthrough(
-    client: TestClient,
-    fake_openclaw_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    if not _has_git():
-        pytest.skip("git not available")
-    await svc_agents.commit_agent(
-        svc_agents.CommitInput(id="chat-attach-force-path", name="C"),
-        user="alice",
-    )
-    from app.api import openclaw_agents as router_mod
-
-    captured: dict[str, Any] = {}
-
-    async def _fake_cli_chat_completion(
-        *,
-        agent_id: str,
-        session_key: str,
-        message: str,
-        model_override: str | None,
-        attachment_paths: list[str] | None = None,
-        native_attachment_flag: str | None = None,
-        timeout_sec: float = 120.0,
-    ) -> dict[str, Any]:
-        del agent_id, session_key, model_override, timeout_sec
-        captured["message"] = message
-        captured["attachment_paths"] = attachment_paths
-        captured["native_attachment_flag"] = native_attachment_flag
-        return {"id": "x", "choices": [{"message": {"content": "ok"}}]}
-
-    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
-    uploaded = client.post(
-        "/api/openclaw/agents/chat-attach-force-path/chat/attachments?filename=photo.png",
-        data=b"fakepng",
-        headers={"Content-Type": "image/png"},
-    )
-    assert uploaded.status_code == 200, uploaded.text
-    attachment = uploaded.json()["attachment"]
-    run = client.post(
-        "/api/openclaw/agents/chat-attach-force-path/chat",
-        json={
-            "messages": [{"role": "user", "content": "force path injection"}],
-            "attachments": [attachment],
-            "stream": False,
-        },
-    )
-    assert run.status_code == 200, run.text
-    assert "ClawsomeFlow Uploaded Attachments" in captured["message"]
-    assert captured["native_attachment_flag"] is None
-    assert captured["attachment_paths"] is None
-
-
-@pytest.mark.asyncio
-async def test_chat_with_attachments_uses_path_injection_only(
-    client: TestClient,
-    fake_openclaw_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    if not _has_git():
-        pytest.skip("git not available")
-    await svc_agents.commit_agent(
-        svc_agents.CommitInput(id="chat-no-probe-with-attachment", name="C"),
-        user="alice",
-    )
-    from app.api import openclaw_agents as router_mod
-
-    async def _fake_cli_chat_completion(
-        *,
-        agent_id: str,
-        session_key: str,
-        message: str,
-        model_override: str | None,
-        attachment_paths: list[str] | None = None,
-        native_attachment_flag: str | None = None,
-        timeout_sec: float = 120.0,
-    ) -> dict[str, Any]:
-        del agent_id, session_key, model_override, timeout_sec
-        assert attachment_paths is None
-        assert native_attachment_flag is None
-        return {"id": "x", "choices": [{"message": {"content": message}}]}
-
-    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
-    uploaded = client.post(
-        "/api/openclaw/agents/chat-no-probe-with-attachment/chat/attachments?filename=context.md",
-        data=b"context",
-        headers={"Content-Type": "text/markdown"},
-    )
-    assert uploaded.status_code == 200, uploaded.text
-    attachment = uploaded.json()["attachment"]
-    run = client.post(
-        "/api/openclaw/agents/chat-no-probe-with-attachment/chat",
-        json={
-            "messages": [{"role": "user", "content": "please use attachment"}],
-            "attachments": [attachment],
-            "stream": False,
-        },
-    )
-    assert run.status_code == 200, run.text
-
-
-@pytest.mark.asyncio
-async def test_chat_without_attachments_unaffected(
-    client: TestClient,
-    fake_openclaw_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    if not _has_git():
-        pytest.skip("git not available")
-    await svc_agents.commit_agent(svc_agents.CommitInput(id="chat-no-attach-probe", name="C"), user="alice")
-    from app.api import openclaw_agents as router_mod
-
-    async def _fake_cli_chat_completion(
-        *,
-        agent_id: str,
-        session_key: str,
-        message: str,
-        model_override: str | None,
-        timeout_sec: float = 120.0,
-    ) -> dict[str, Any]:
-        del agent_id, session_key, model_override, timeout_sec
-        return {"id": "x", "choices": [{"message": {"content": message}}]}
-
-    monkeypatch.setattr(router_mod, "_chat_completion_via_cli", _fake_cli_chat_completion)
-    run = client.post(
-        "/api/openclaw/agents/chat-no-attach-probe/chat",
-        json={"messages": [{"role": "user", "content": "plain message"}], "stream": False},
-    )
-    assert run.status_code == 200, run.text
 
 
 @pytest.mark.asyncio

@@ -1431,10 +1431,19 @@ def test_api_chat_without_attachments_unaffected(
         workdir: str,
         resume: bool,
         session_key: str,
+        resume_session_id: str | None = None,
         attachment_paths: list[str] | None = None,
         native_attachment_flag: str | None = None,
     ):
-        del agent_id, workdir, resume, session_key, attachment_paths, native_attachment_flag
+        del (
+            agent_id,
+            workdir,
+            resume,
+            session_key,
+            resume_session_id,
+            attachment_paths,
+            native_attachment_flag,
+        )
         assert message == "plain message"
         return _DoneJob()
 
@@ -1480,6 +1489,7 @@ def test_api_chat_attachment_upload_and_path_injection(
         workdir: str,
         resume: bool,
         session_key: str,
+        resume_session_id: str | None = None,
         attachment_paths: list[str] | None = None,
         native_attachment_flag: str | None = None,
     ):
@@ -1490,6 +1500,7 @@ def test_api_chat_attachment_upload_and_path_injection(
                 "workdir": workdir,
                 "resume": resume,
                 "session_key": session_key,
+                "resume_session_id": resume_session_id,
                 "attachment_paths": attachment_paths,
                 "native_attachment_flag": native_attachment_flag,
             }
@@ -1554,6 +1565,7 @@ def test_api_chat_attachment_uses_path_injection_only(
         workdir: str,
         resume: bool,
         session_key: str,
+        resume_session_id: str | None = None,
         attachment_paths: list[str] | None = None,
         native_attachment_flag: str | None = None,
     ):
@@ -1564,6 +1576,7 @@ def test_api_chat_attachment_uses_path_injection_only(
                 "workdir": workdir,
                 "resume": resume,
                 "session_key": session_key,
+                "resume_session_id": resume_session_id,
                 "attachment_paths": attachment_paths,
                 "native_attachment_flag": native_attachment_flag,
             }
@@ -1627,10 +1640,19 @@ def test_api_chat_accepts_attachments_without_text_message(
         workdir: str,
         resume: bool,
         session_key: str,
+        resume_session_id: str | None = None,
         attachment_paths: list[str] | None = None,
         native_attachment_flag: str | None = None,
     ):
-        del agent_id, workdir, resume, session_key, attachment_paths, native_attachment_flag
+        del (
+            agent_id,
+            workdir,
+            resume,
+            session_key,
+            resume_session_id,
+            attachment_paths,
+            native_attachment_flag,
+        )
         captured["message"] = message
         return _DoneJob()
 

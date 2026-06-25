@@ -2153,10 +2153,19 @@ async def delete_agent(
     ] = None,
     purge: Annotated[bool, Query(description="deprecated; use mode=purge")] = False,
 ) -> None:
-    row = svc.get_agent(agent_id, storage=storage)
-    _ensure_owner(row, user)
     if mode is None:
         mode = "purge" if purge else "unregister"
+    try:
+        row = svc.get_agent(agent_id, storage=storage)
+    except svc.AgentNotFound:
+        if mode != "purge" or not svc.user_may_purge_workspace_orphan(
+            agent_id,
+            user=user,
+            storage=storage,
+        ):
+            raise
+    else:
+        _ensure_owner(row, user)
     await svc.delete_agent(agent_id, mode=mode, storage=storage)
 
 

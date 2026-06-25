@@ -75,6 +75,7 @@ import {
   saveLastSeenCount,
   scrollToNewMessagesDivider,
   settledCount,
+  reentryDividerIndex,
   turnDividerIndex,
   displayChatMessages,
 } from "@/lib/chatHistory";
@@ -278,6 +279,7 @@ type OpenclawPickerActions = {
     agent: OpenclawAgentSummary,
     options?: { defaultMode?: OpenclawAgentRemoveMode },
   ) => void;
+  openPurgeUnregisteredFor: (agent: OpenclawRestorableAgent) => void;
   openRestoreFor: (agent: Pick<OpenclawRestorableAgent, "id" | "name">) => void;
 };
 
@@ -314,6 +316,7 @@ function AgentQuickActions({
   const [removeSubmitting, setRemoveSubmitting] = useState(false);
   const [removeTargetId, setRemoveTargetId] = useState("");
   const [removeMode, setRemoveMode] = useState<OpenclawAgentRemoveMode>("unregister");
+  const [removePurgeOnly, setRemovePurgeOnly] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [restoreModalOpen, setRestoreModalOpen] = useSessionBackedModalFlag(
     "openclaw-chat:quick-actions:restore-modal-open",
@@ -1062,10 +1065,41 @@ function AgentQuickActions({
     }
   }
 
+  function closeRemoveModal() {
+    if (removeSubmitting) return;
+    setRemoveModalOpen(false);
+    setRemovePurgeOnly(false);
+    setRemoveError(null);
+    setRemoveTargetId("");
+    setRemoveTargets([]);
+  }
+
+  function openPurgeUnregisteredForAgent(agent: OpenclawRestorableAgent) {
+    setRemovePurgeOnly(true);
+    setRemoveModalOpen(true);
+    setRemoveError(null);
+    setRemoveMode("purge");
+    setRemoveTargetId(agent.id);
+    setRemoveTargets([
+      {
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        teamId: agent.teamId,
+        teamName: agent.teamName,
+        workspacePath: agent.workspacePath,
+        createdByUser: agent.createdByUser,
+        createdAt: "",
+      },
+    ]);
+    setRemoveLoading(false);
+  }
+
   async function openRemoveForAgent(
     agent: OpenclawAgentSummary,
     options?: { defaultMode?: OpenclawAgentRemoveMode },
   ) {
+    setRemovePurgeOnly(false);
     setRemoveModalOpen(true);
     setRemoveError(null);
     setRemoveMode(options?.defaultMode ?? "unregister");
@@ -1111,18 +1145,19 @@ function AgentQuickActions({
     if (!removeTargetId) return;
     const target = removeTargets.find((item) => item.id === removeTargetId);
     const targetText = target ? `${target.name} (${target.id})` : removeTargetId;
-    const confirmText =
-      removeMode === "purge"
-        ? t("assistant.removeModal.confirmPurge", { target: targetText })
-        : t("assistant.removeModal.confirmUnregister", { target: targetText });
-    if (!(await confirm(confirmText))) return;
+    const mode: OpenclawAgentRemoveMode = removePurgeOnly ? "purge" : removeMode;
+    if (!removePurgeOnly) {
+      const confirmText =
+        mode === "purge"
+          ? t("assistant.removeModal.confirmPurge", { target: targetText })
+          : t("assistant.removeModal.confirmUnregister", { target: targetText });
+      if (!(await confirm(confirmText))) return;
+    }
     setRemoveSubmitting(true);
     setRemoveError(null);
     try {
-      await api.deleteOpenclawAgent(removeTargetId, removeMode);
-      setRemoveModalOpen(false);
-      setRemoveTargets((prev) => prev.filter((item) => item.id !== removeTargetId));
-      setRemoveTargetId("");
+      await api.deleteOpenclawAgent(removeTargetId, mode);
+      closeRemoveModal();
       notifyOpenclawAgentsUpdated();
     } catch (e) {
       if (e instanceof ApiError) {
@@ -1202,6 +1237,7 @@ function AgentQuickActions({
     openRemoveFor: (agent, options) => {
       void openRemoveForAgent(agent, options);
     },
+    openPurgeUnregisteredFor: openPurgeUnregisteredForAgent,
     openRestoreFor: openRestoreForAgent,
   };
 
@@ -1325,44 +1361,31 @@ function AgentQuickActions({
 
       <Modal
         open={removeModalOpen}
-        onClose={() => {
-          // Once removal is in flight it cannot be cancelled — keep the modal up.
-          if (removeSubmitting) return;
-          setRemoveModalOpen(false);
-        }}
-        title={t("assistant.removeModal.title")}
+        onClose={closeRemoveModal}
+        title={
+          removePurgeOnly
+            ? t("assistant.purgeUnregisteredModal.title")
+            : t("assistant.removeModal.title")
+        }
         width="max-w-lg"
         dismissible={!removeSubmitting}
       >
         <div className="space-y-3">
-          <p className="text-sm text-ink-600">{t("assistant.removeModal.hint")}</p>
-          {removeLoading && <Loading />}
-          {removeError && <ErrorBox>{removeError}</ErrorBox>}
-          {!removeLoading && !removeError && (
+          {removePurgeOnly ? (
             <>
-              {removeTargets.length === 0 ? (
-                <div className="text-sm text-ink-500">{t("assistant.removeModal.empty")}</div>
-              ) : (
-                <>
-                  <div>
-                    <label className="label">{t("assistant.removeModal.modeLabel")}</label>
-                    <select
-                      className="select"
-                      value={removeMode}
-                      onChange={(e) => setRemoveMode(e.target.value as OpenclawAgentRemoveMode)}
-                      disabled={removeSubmitting}
-                    >
-                      <option value="unregister">{t("assistant.removeModal.modeUnregister")}</option>
-                      <option value="purge">{t("assistant.removeModal.modePurge")}</option>
-                    </select>
-                  </div>
-                </>
-              )}
+              <p className="text-sm text-ink-600">{t("assistant.purgeUnregisteredModal.hint")}</p>
+              {removeTargetId ? (
+                <div className="rounded-md border border-ink-200 bg-ink-50 px-3 py-2 text-sm text-ink-800 dark:border-ink-700 dark:bg-ink-900/40">
+                  {removeTargets.find((item) => item.id === removeTargetId)?.name ?? removeTargetId}{" "}
+                  ({removeTargetId})
+                </div>
+              ) : null}
+              {removeError && <ErrorBox>{removeError}</ErrorBox>}
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
                   className="btn-outline"
-                  onClick={() => setRemoveModalOpen(false)}
+                  onClick={closeRemoveModal}
                   disabled={removeSubmitting}
                 >
                   {t("common.cancel")}
@@ -1371,11 +1394,61 @@ function AgentQuickActions({
                   type="button"
                   className="btn-primary"
                   onClick={() => void onSubmitRemoveTarget()}
-                  disabled={removeSubmitting || !removeTargetId || removeTargets.length === 0}
+                  disabled={removeSubmitting || !removeTargetId}
                 >
-                  {removeSubmitting ? t("assistant.removeModal.removing") : t("assistant.removeModal.submit")}
+                  {removeSubmitting
+                    ? t("assistant.removeModal.removing")
+                    : t("assistant.purgeUnregisteredModal.submit")}
                 </button>
               </div>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-ink-600">{t("assistant.removeModal.hint")}</p>
+              {removeLoading && <Loading />}
+              {removeError && <ErrorBox>{removeError}</ErrorBox>}
+              {!removeLoading && !removeError && (
+                <>
+                  {removeTargets.length === 0 ? (
+                    <div className="text-sm text-ink-500">{t("assistant.removeModal.empty")}</div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="label">{t("assistant.removeModal.modeLabel")}</label>
+                        <select
+                          className="select"
+                          value={removeMode}
+                          onChange={(e) => setRemoveMode(e.target.value as OpenclawAgentRemoveMode)}
+                          disabled={removeSubmitting}
+                        >
+                          <option value="unregister">{t("assistant.removeModal.modeUnregister")}</option>
+                          <option value="purge">{t("assistant.removeModal.modePurge")}</option>
+                        </select>
+                      </div>
+                    </>
+                  )}
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      className="btn-outline"
+                      onClick={closeRemoveModal}
+                      disabled={removeSubmitting}
+                    >
+                      {t("common.cancel")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => void onSubmitRemoveTarget()}
+                      disabled={removeSubmitting || !removeTargetId || removeTargets.length === 0}
+                    >
+                      {removeSubmitting
+                        ? t("assistant.removeModal.removing")
+                        : t("assistant.removeModal.submit")}
+                    </button>
+                  </div>
+                </>
+              )}
             </>
           )}
         </div>
@@ -1913,7 +1986,7 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                             title={t("assistant.askRemove")}
                             aria-label={t("assistant.askRemove")}
                             onClick={() =>
-                              actions.openRemoveFor(restorableToSummary(a), { defaultMode: "purge" })
+                              actions.openPurgeUnregisteredFor(a)
                             }
                           >
                             <TrashIcon className="h-5 w-5" />
@@ -2000,10 +2073,9 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                         title={t("assistant.askRemove")}
                         aria-label={t("assistant.askRemove")}
                         onClick={() =>
-                          actions.openRemoveFor(
-                            a.registered ? a : restorableToSummary(a),
-                            a.registered ? undefined : { defaultMode: "purge" },
-                          )
+                          a.registered
+                            ? actions.openRemoveFor(a)
+                            : actions.openPurgeUnregisteredFor(a)
                         }
                       >
                         <TrashIcon className="h-5 w-5" />
@@ -2407,8 +2479,7 @@ function ChatRoom({
         if (merged.length > 0) saveChatHistory(agentId, merged);
         // Draw the "new messages" divider above anything that arrived while the
         // user was away (settled count grew beyond what they'd last seen).
-        const shown = settledCount(merged);
-        const dividerAt = seenAtEntry > 0 && shown > seenAtEntry ? seenAtEntry : -1;
+        const dividerAt = reentryDividerIndex(merged, seenAtEntry);
         setNewDividerAt(dividerAt);
         if (dividerAt >= 0) {
           didJumpToNewDividerRef.current = false;
@@ -2799,8 +2870,6 @@ function ChatRoom({
       setRecovering(false);
       setMessages([]);
       setNewDividerAt(-1);
-      setInput("");
-      setPendingFiles([]);
       clearChatHistory(agentId);
     } catch (e) {
       setActionError(e instanceof ApiError ? e.message : String(e));
