@@ -1003,6 +1003,25 @@ export function RunDetail() {
   );
 }
 
+function TerminalPaneOutput({ text }: { text: string }) {
+  const paneRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (!pane) return;
+    pane.scrollTop = pane.scrollHeight;
+  }, [text]);
+
+  return (
+    <pre
+      ref={paneRef}
+      className="h-44 overflow-auto whitespace-pre-wrap break-words px-3 py-3 text-xs text-[#dce8ff]"
+    >
+      {text}
+    </pre>
+  );
+}
+
 function RunTerminalBoard({
   items,
   loading,
@@ -1108,11 +1127,13 @@ function RunTerminalBoard({
                         {item.workDir || "—"}
                       </div>
                     </div>
-                    <pre className="h-44 overflow-auto whitespace-pre-wrap break-words px-3 py-3 text-xs text-[#dce8ff]">
-                      {item.available
-                        ? (item.paneText || t("runDetail.terminal.unavailable"))
-                        : t("runDetail.terminal.unavailable")}
-                    </pre>
+                    <TerminalPaneOutput
+                      text={
+                        item.available
+                          ? (item.paneText || t("runDetail.terminal.unavailable"))
+                          : t("runDetail.terminal.unavailable")
+                      }
+                    />
                   </div>
                 );
               })}

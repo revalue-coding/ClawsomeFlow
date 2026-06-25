@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path as FsPath
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Path, Query, status
@@ -985,7 +985,7 @@ async def list_run_terminals(
     repo_by_agent: dict[str, str | None] = {}
     for agent in spec.agents:
         repo = str(agent.repo or "").strip()
-        repo_by_agent[agent.id] = str(Path(repo).expanduser()) if repo else None
+        repo_by_agent[agent.id] = str(FsPath(repo).expanduser()) if repo else None
 
     lookup = get_worktree_lookup()
     work_dir_by_agent: dict[str, str] = {}
