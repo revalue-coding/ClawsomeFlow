@@ -79,7 +79,7 @@ from app.scheduler.naming import team_name_for_run
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
 from app.storage import StorageBackend, get_storage
-from app.worktree.lookup import get_worktree_lookup
+from app.worktree.lookup import WorktreeLookup, get_worktree_lookup
 
 router = APIRouter(tags=["runs"])
 logger = get_logger("api.runs")
@@ -164,6 +164,12 @@ class RunTaskTerminalView(_CamelModel):
 
 class RunTaskTerminalListResponse(_CamelModel):
     items: list[RunTaskTerminalView]
+
+
+class RunTaskTerminalPaneView(_CamelModel):
+    owner_agent_id: str
+    pane_text: str = ""
+    available: bool = False
 
 
 class RunListResponse(_CamelModel):
@@ -947,13 +953,102 @@ def get_run(
     return _to_detail(run, flow=flow, cfg=cfg)
 
 
-@router.get("/runs/{run_id}/terminals", response_model=RunTaskTerminalListResponse)
-async def list_run_terminals(
-    run_id: Annotated[str, Path()],
-    user: UserDep,
-    storage: StorageDep,
-    history_lines: Annotated[int, Query(alias="historyLines", ge=20, le=400)] = 120,
-) -> RunTaskTerminalListResponse:
+def _repo_by_agent_id(spec: FlowSpec) -> dict[str, str | None]:
+    repo_by_agent: dict[str, str | None] = {}
+    for agent in spec.agents:
+        repo = str(agent.repo or "").strip()
+        repo_by_agent[agent.id] = str(FsPath(repo).expanduser()) if repo else None
+    return repo_by_agent
+
+
+async def _work_dir_by_agent_id(
+    *,
+    lookup: WorktreeLookup,
+    team_name: str,
+    spec: FlowSpec,
+) -> dict[str, str]:
+    repo_by_agent = _repo_by_agent_id(spec)
+    work_dir_by_agent: dict[str, str] = {}
+    repos_to_query: set[str | None] = {None}
+    repos_to_query.update(repo for repo in repo_by_agent.values() if repo)
+    for repo in repos_to_query:
+        try:
+            workspaces = await lookup.list_team(team_name, repo=repo)
+        except Exception:
+            workspaces = []
+        for workspace in workspaces:
+            work_dir_by_agent.setdefault(workspace.agent_name, workspace.worktree_path)
+
+    for agent in spec.agents:
+        if work_dir_by_agent.get(agent.id):
+            continue
+        repo = repo_by_agent.get(agent.id)
+        if not repo:
+            continue
+        try:
+            workspace = await lookup.get(team_name, agent.id, repo=repo)
+        except Exception:
+            workspace = None
+        if workspace is not None:
+            work_dir_by_agent[agent.id] = workspace.worktree_path
+    return work_dir_by_agent
+
+
+async def _capture_owner_panes(
+    *,
+    team_name: str,
+    owners: list[str],
+    history_lines: int,
+) -> dict[str, str]:
+    async def _capture(owner_agent_id: str) -> tuple[str, str]:
+        tmux_target = f"clawteam-{team_name}:{owner_agent_id}"
+        try:
+            pane_text = await tmux_capture_pane(tmux_target, history_lines=history_lines)
+        except Exception:
+            pane_text = ""
+        return owner_agent_id, pane_text
+
+    if not owners:
+        return {}
+    captures = await asyncio.gather(*(_capture(owner) for owner in owners))
+    return {owner: text for owner, text in captures}
+
+
+async def _build_run_terminal_items(
+    *,
+    run: FlowRun,
+    spec: FlowSpec,
+    capture_map: dict[str, str],
+) -> list[RunTaskTerminalView]:
+    lookup = get_worktree_lookup()
+    work_dir_by_agent = await _work_dir_by_agent_id(
+        lookup=lookup, team_name=run.team_name, spec=spec,
+    )
+    kind_by_agent = {agent.id: agent.kind.value for agent in spec.agents}
+    items: list[RunTaskTerminalView] = []
+    for task in spec.tasks:
+        owner_agent_id = str(task.owner_agent_id or "").strip()
+        pane_text = capture_map.get(owner_agent_id, "")
+        items.append(
+            RunTaskTerminalView(
+                task_id=task.id,
+                subject=task.subject,
+                owner_agent_id=owner_agent_id,
+                owner_kind=kind_by_agent.get(owner_agent_id),
+                tmux_target=f"clawteam-{run.team_name}:{owner_agent_id}",
+                work_dir=work_dir_by_agent.get(owner_agent_id, ""),
+                pane_text=pane_text,
+                available=bool(pane_text.strip()),
+            )
+        )
+    return items
+
+
+async def _run_terminal_spec(
+    run_id: str,
+    storage: StorageBackend,
+    user: str,
+) -> tuple[FlowRun, FlowSpec]:
     run = storage.run_get(run_id)
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
@@ -962,6 +1057,17 @@ async def list_run_terminals(
     if flow is None:
         raise ApiError("NOT_FOUND", f"flow {run.flow_id!r} not found", status_code=404)
     spec = FlowSpec.model_validate(flow.spec)
+    return run, spec
+
+
+@router.get("/runs/{run_id}/terminals", response_model=RunTaskTerminalListResponse)
+async def list_run_terminals(
+    run_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+    history_lines: Annotated[int, Query(alias="historyLines", ge=20, le=400)] = 120,
+) -> RunTaskTerminalListResponse:
+    run, spec = await _run_terminal_spec(run_id, storage, user)
 
     owners: list[str] = []
     for task in spec.tasks:
@@ -969,66 +1075,57 @@ async def list_run_terminals(
         if owner and owner not in owners:
             owners.append(owner)
 
-    async def _capture(owner_agent_id: str) -> tuple[str, str]:
-        tmux_target = f"clawteam-{run.team_name}:{owner_agent_id}"
-        try:
-            pane_text = await tmux_capture_pane(tmux_target, history_lines=history_lines)
-        except Exception:
-            pane_text = ""
-        return owner_agent_id, pane_text
-
-    capture_map: dict[str, str] = {}
-    if owners:
-        captures = await asyncio.gather(*(_capture(owner) for owner in owners))
-        capture_map = {owner: text for owner, text in captures}
-
-    repo_by_agent: dict[str, str | None] = {}
-    for agent in spec.agents:
-        repo = str(agent.repo or "").strip()
-        repo_by_agent[agent.id] = str(FsPath(repo).expanduser()) if repo else None
-
-    lookup = get_worktree_lookup()
-    work_dir_by_agent: dict[str, str] = {}
-    repos_to_query: set[str | None] = {None}
-    repos_to_query.update(repo for repo in repo_by_agent.values() if repo)
-    for repo in repos_to_query:
-        try:
-            workspaces = await lookup.list_team(run.team_name, repo=repo)
-        except Exception:
-            workspaces = []
-        for workspace in workspaces:
-            work_dir_by_agent.setdefault(workspace.agent_name, workspace.worktree_path)
-
-    kind_by_agent = {agent.id: agent.kind.value for agent in spec.agents}
-    items: list[RunTaskTerminalView] = []
-    for task in spec.tasks:
-        owner_agent_id = str(task.owner_agent_id or "").strip()
-        pane_text = capture_map.get(owner_agent_id, "")
-        work_dir = work_dir_by_agent.get(owner_agent_id, "")
-        if not work_dir:
-            repo = repo_by_agent.get(owner_agent_id)
-            if repo:
-                try:
-                    workspace = await lookup.get(
-                        run.team_name, owner_agent_id, repo=repo,
-                    )
-                except Exception:
-                    workspace = None
-                if workspace is not None:
-                    work_dir = workspace.worktree_path
-        items.append(
-            RunTaskTerminalView(
-                task_id=task.id,
-                subject=task.subject,
-                owner_agent_id=owner_agent_id,
-                owner_kind=kind_by_agent.get(owner_agent_id),
-                tmux_target=f"clawteam-{run.team_name}:{owner_agent_id}",
-                work_dir=work_dir,
-                pane_text=pane_text,
-                available=bool(pane_text.strip()),
-            )
-        )
+    capture_map = await _capture_owner_panes(
+        team_name=run.team_name, owners=owners, history_lines=history_lines,
+    )
+    items = await _build_run_terminal_items(run=run, spec=spec, capture_map=capture_map)
     return RunTaskTerminalListResponse(items=items)
+
+
+@router.get("/runs/{run_id}/terminals/meta", response_model=RunTaskTerminalListResponse)
+async def list_run_terminals_meta(
+    run_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunTaskTerminalListResponse:
+    run, spec = await _run_terminal_spec(run_id, storage, user)
+    items = await _build_run_terminal_items(run=run, spec=spec, capture_map={})
+    return RunTaskTerminalListResponse(items=items)
+
+
+@router.get(
+    "/runs/{run_id}/terminals/panes/{owner_agent_id}",
+    response_model=RunTaskTerminalPaneView,
+)
+async def get_run_terminal_pane(
+    run_id: Annotated[str, Path()],
+    owner_agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+    history_lines: Annotated[int, Query(alias="historyLines", ge=20, le=400)] = 120,
+) -> RunTaskTerminalPaneView:
+    run, spec = await _run_terminal_spec(run_id, storage, user)
+    owner = owner_agent_id.strip()
+    known_owners = {
+        str(task.owner_agent_id or "").strip()
+        for task in spec.tasks
+        if str(task.owner_agent_id or "").strip()
+    }
+    if owner not in known_owners:
+        raise ApiError(
+            "NOT_FOUND",
+            f"terminal owner {owner!r} not found on run {run_id!r}",
+            status_code=404,
+        )
+    capture_map = await _capture_owner_panes(
+        team_name=run.team_name, owners=[owner], history_lines=history_lines,
+    )
+    pane_text = capture_map.get(owner, "")
+    return RunTaskTerminalPaneView(
+        owner_agent_id=owner,
+        pane_text=pane_text,
+        available=bool(pane_text.strip()),
+    )
 
 
 @router.get("/runs/{run_id}/checkpoint")

@@ -327,6 +327,12 @@ export interface RunTaskTerminal {
   available: boolean;
 }
 
+export interface RunTaskTerminalPane {
+  ownerAgentId: string;
+  paneText: string;
+  available: boolean;
+}
+
 export interface RunEventView {
   id: number;
   ts: string;
@@ -885,6 +891,19 @@ export const api = {
     return request<{ items: RunTaskTerminal[] }>(
       "GET",
       `/api/runs/${id}/terminals?${q.toString()}`,
+    );
+  },
+  listRunTerminalsMeta: (id: string) =>
+    request<{ items: RunTaskTerminal[] }>(
+      "GET",
+      `/api/runs/${id}/terminals/meta`,
+    ),
+  getRunTerminalPane: (id: string, ownerAgentId: string, historyLines = 120) => {
+    const q = new URLSearchParams();
+    q.set("historyLines", String(historyLines));
+    return request<RunTaskTerminalPane>(
+      "GET",
+      `/api/runs/${id}/terminals/panes/${encodeURIComponent(ownerAgentId)}?${q.toString()}`,
     );
   },
   listRunEvents: (id: string, sinceId?: number, limit = 200) => {

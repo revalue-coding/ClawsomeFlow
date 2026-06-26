@@ -152,6 +152,12 @@ type ActiveCheckpoint = {
 
 type BoardTab = "list" | "terminal";
 
+type TerminalListTask = {
+  taskId: string;
+  subject: string;
+  ownerAgentId: string;
+};
+
 const BOARD_PANEL_HEIGHT = "h-[480px]";
 
 const EMPTY_TASK_BOARD: TaskBoardModel = {
@@ -195,7 +201,8 @@ export function RunDetail() {
   const [rerunSubmitting, setRerunSubmitting] = useState(false);
   const [boardTab, setBoardTab] = useState<BoardTab>("list");
   const [terminalItems, setTerminalItems] = useState<RunTaskTerminal[]>([]);
-  const [terminalLoading, setTerminalLoading] = useState(false);
+  const [terminalPanesLoading, setTerminalPanesLoading] = useState(false);
+  const [terminalLoadedOwners, setTerminalLoadedOwners] = useState<string[]>([]);
   const [terminalError, setTerminalError] = useState<string | null>(null);
   const [selectedTerminalTaskId, setSelectedTerminalTaskId] = useState<string | null>(null);
 
@@ -298,7 +305,8 @@ export function RunDetail() {
     setRerunSubmitting(false);
     setBoardTab("list");
     setTerminalItems([]);
-    setTerminalLoading(false);
+    setTerminalPanesLoading(false);
+    setTerminalLoadedOwners([]);
     setTerminalError(null);
     setSelectedTerminalTaskId(null);
     alertedSessionStartFails.current.clear();
@@ -478,41 +486,110 @@ export function RunDetail() {
     }
   }
 
-  const loadRunTerminals = useCallback(async () => {
+  const loadRunTerminals = useCallback(async (mode: "initial" | "refresh") => {
     if (!id) return;
-    if (terminalItems.length === 0) setTerminalLoading(true);
+    if (mode === "initial") {
+      setTerminalPanesLoading(true);
+    }
     setTerminalError(null);
     try {
-      const out = await api.listRunTerminals(id, 120);
-      setTerminalItems(out.items);
+      if (mode === "refresh") {
+        const out = await api.listRunTerminals(id, 120);
+        setTerminalItems(out.items);
+        setTerminalLoadedOwners([
+          ...new Set(out.items.map((item) => item.ownerAgentId).filter(Boolean)),
+        ]);
+        return;
+      }
+
+      const meta = await api.listRunTerminalsMeta(id);
+      setTerminalItems(meta.items);
+      const owners = [
+        ...new Set(meta.items.map((item) => item.ownerAgentId).filter(Boolean)),
+      ];
+      setTerminalLoadedOwners([]);
+      await Promise.all(
+        owners.map(async (owner) => {
+          try {
+            const pane = await api.getRunTerminalPane(id, owner, 120);
+            setTerminalItems((prev) =>
+              prev.map((item) =>
+                item.ownerAgentId === owner
+                  ? {
+                      ...item,
+                      paneText: pane.paneText,
+                      available: pane.available,
+                    }
+                  : item,
+              ),
+            );
+          } catch {
+            /* per-owner pane fetch failure leaves pane empty */
+          } finally {
+            setTerminalLoadedOwners((prev) =>
+              prev.includes(owner) ? prev : [...prev, owner],
+            );
+          }
+        }),
+      );
     } catch (e) {
       setTerminalError(e instanceof ApiError ? e.message : String(e));
     } finally {
-      setTerminalLoading(false);
+      if (mode === "initial") {
+        setTerminalPanesLoading(false);
+      }
     }
-  }, [id, terminalItems.length]);
+  }, [id]);
 
   useEffect(() => {
     if (!id || boardTab !== "terminal") return;
-    void loadRunTerminals();
+    void loadRunTerminals("initial");
     const tid = setInterval(() => {
-      void loadRunTerminals();
+      void loadRunTerminals("refresh");
     }, 5000);
     return () => clearInterval(tid);
   }, [id, boardTab, loadRunTerminals]);
 
+  const terminalListTasks = useMemo<TerminalListTask[]>(() => {
+    const tasks = run?.specSnapshot?.tasks ?? [];
+    return tasks.map((task) => ({
+      taskId: task.id,
+      subject: task.subject,
+      ownerAgentId: task.ownerAgentId,
+    }));
+  }, [run?.specSnapshot?.tasks]);
+
   useEffect(() => {
-    if (terminalItems.length === 0) {
+    const tasks = (
+      terminalListTasks.length > 0
+        ? terminalListTasks
+        : terminalItems.map((item) => ({
+            taskId: item.taskId,
+            ownerAgentId: item.ownerAgentId,
+          }))
+    );
+    if (tasks.length === 0) {
       setSelectedTerminalTaskId(null);
+      return;
+    }
+    const loadedSet = new Set(terminalLoadedOwners);
+    const selectable = tasks.filter((task) => loadedSet.has(task.ownerAgentId));
+    if (selectable.length === 0) {
+      if (
+        selectedTerminalTaskId
+        && !tasks.some((task) => task.taskId === selectedTerminalTaskId)
+      ) {
+        setSelectedTerminalTaskId(null);
+      }
       return;
     }
     if (
       !selectedTerminalTaskId
-      || !terminalItems.some((item) => item.taskId === selectedTerminalTaskId)
+      || !selectable.some((task) => task.taskId === selectedTerminalTaskId)
     ) {
-      setSelectedTerminalTaskId(terminalItems[0].taskId);
+      setSelectedTerminalTaskId(selectable[0]?.taskId ?? null);
     }
-  }, [terminalItems, selectedTerminalTaskId]);
+  }, [terminalItems, terminalListTasks, terminalLoadedOwners, selectedTerminalTaskId]);
 
   const activeCheckpoint = useMemo(() => {
     const fromSnapshot = checkpointSnapshot ? parseCheckpointPayload(checkpointSnapshot) : null;
@@ -927,8 +1004,10 @@ export function RunDetail() {
           <TaskDependencyBoard board={board} />
         ) : (
           <RunTerminalBoard
+            listTasks={terminalListTasks}
             items={terminalItems}
-            loading={terminalLoading}
+            panesLoading={terminalPanesLoading}
+            loadedOwners={terminalLoadedOwners}
             error={terminalError}
             selectedTaskId={selectedTerminalTaskId}
             onSelectTaskId={setSelectedTerminalTaskId}
@@ -1023,22 +1102,40 @@ function TerminalPaneOutput({ text }: { text: string }) {
 }
 
 function RunTerminalBoard({
+  listTasks,
   items,
-  loading,
+  panesLoading,
+  loadedOwners,
   error,
   selectedTaskId,
   onSelectTaskId,
 }: {
+  listTasks: TerminalListTask[];
   items: RunTaskTerminal[];
-  loading: boolean;
+  panesLoading: boolean;
+  loadedOwners: string[];
   error: string | null;
   selectedTaskId: string | null;
   onSelectTaskId: (taskId: string) => void;
 }) {
   const { t } = useTranslation();
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const loadedOwnerSet = useMemo(() => new Set(loadedOwners), [loadedOwners]);
+  const itemByTaskId = useMemo(
+    () => new Map(items.map((item) => [item.taskId, item])),
+    [items],
+  );
+  const orderedTasks = listTasks.length > 0
+    ? listTasks
+    : items.map((item) => ({
+        taskId: item.taskId,
+        subject: item.subject,
+        ownerAgentId: item.ownerAgentId,
+      }));
   const selected =
-    items.find((item) => item.taskId === selectedTaskId) ?? items[0] ?? null;
+    orderedTasks.find((task) => task.taskId === selectedTaskId)
+    ?? orderedTasks[0]
+    ?? null;
 
   useEffect(() => {
     if (!selectedTaskId) return;
@@ -1046,17 +1143,12 @@ function RunTerminalBoard({
     card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [selectedTaskId]);
 
-  if (loading && items.length === 0) {
+  if (orderedTasks.length === 0) {
     return (
       <div className={`bg-[#090f1f] text-ink-100 px-5 py-6 text-sm ${BOARD_PANEL_HEIGHT}`}>
-        {t("runDetail.terminal.loading")}
-      </div>
-    );
-  }
-  if (items.length === 0) {
-    return (
-      <div className={`bg-[#090f1f] text-ink-100 px-5 py-6 text-sm ${BOARD_PANEL_HEIGHT}`}>
-        {error || t("runDetail.terminal.empty")}
+        {panesLoading
+          ? t("runDetail.terminal.loading")
+          : (error || t("runDetail.terminal.empty"))}
       </div>
     );
   }
@@ -1072,24 +1164,31 @@ function RunTerminalBoard({
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
             <div className="space-y-2">
-              {items.map((item) => {
-                const isSelected = selected?.taskId === item.taskId;
+              {orderedTasks.map((task) => {
+                const isSelected = selected?.taskId === task.taskId;
+                const ownerLoaded = loadedOwnerSet.has(task.ownerAgentId);
                 return (
                   <button
-                    key={`terminal-task-${item.taskId}`}
+                    key={`terminal-task-${task.taskId}`}
                     type="button"
+                    disabled={!ownerLoaded}
                     className={
-                      isSelected
-                        ? "w-full text-left rounded-md border border-[#4f79de] bg-[#15264f] px-3 py-2"
-                        : "w-full text-left rounded-md border border-[#2a3558] bg-[#111c39] px-3 py-2"
+                      !ownerLoaded
+                        ? "w-full cursor-not-allowed text-left rounded-md border border-[#2a3558] bg-[#111c39]/70 px-3 py-2 opacity-70"
+                        : isSelected
+                          ? "w-full text-left rounded-md border border-[#4f79de] bg-[#15264f] px-3 py-2"
+                          : "w-full text-left rounded-md border border-[#2a3558] bg-[#111c39] px-3 py-2"
                     }
-                    onClick={() => onSelectTaskId(item.taskId)}
+                    onClick={() => {
+                      if (!ownerLoaded) return;
+                      onSelectTaskId(task.taskId);
+                    }}
                   >
                     <div className="truncate text-sm text-[#e8eeff]">
-                      {item.subject || "—"}
+                      {task.subject || "—"}
                     </div>
                     <div className="mt-1 text-[11px] text-[#9ab0df] font-mono">
-                      {item.taskId} · {item.ownerAgentId}
+                      {task.taskId} · {task.ownerAgentId}
                     </div>
                   </button>
                 );
@@ -1104,14 +1203,22 @@ function RunTerminalBoard({
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              {items.map((item) => {
-                const isSelected = selected?.taskId === item.taskId;
+              {orderedTasks.map((task) => {
+                const item = itemByTaskId.get(task.taskId);
+                const isSelected = selected?.taskId === task.taskId;
+                const ownerLoaded = loadedOwnerSet.has(task.ownerAgentId);
+                const paneLoading = panesLoading && !ownerLoaded;
+                const paneText = paneLoading
+                  ? t("runDetail.terminal.paneLoading")
+                  : item?.available
+                    ? (item.paneText || t("runDetail.terminal.unavailable"))
+                    : t("runDetail.terminal.unavailable");
                 return (
                   <div
-                    key={`terminal-card-${item.taskId}`}
+                    key={`terminal-card-${task.taskId}`}
                     ref={(node) => {
-                      if (node) cardRefs.current.set(item.taskId, node);
-                      else cardRefs.current.delete(item.taskId);
+                      if (node) cardRefs.current.set(task.taskId, node);
+                      else cardRefs.current.delete(task.taskId);
                     }}
                     className={
                       isSelected
@@ -1121,19 +1228,19 @@ function RunTerminalBoard({
                   >
                     <div className="shrink-0 border-b border-[#2a3558] px-3 py-2">
                       <div className="truncate text-sm text-[#e8eeff]">
-                        {item.subject || "—"} · {item.ownerAgentId}
+                        {task.subject || "—"} · {task.ownerAgentId}
                       </div>
                       <div className="mt-1 break-all text-[11px] text-[#6b7fa8] font-mono">
-                        {item.workDir || "—"}
+                        {item?.workDir || "—"}
                       </div>
                     </div>
-                    <TerminalPaneOutput
-                      text={
-                        item.available
-                          ? (item.paneText || t("runDetail.terminal.unavailable"))
-                          : t("runDetail.terminal.unavailable")
-                      }
-                    />
+                    {paneLoading ? (
+                      <div className="flex h-44 items-center justify-center px-3 py-3 text-xs text-[#9ab0df]">
+                        {paneText}
+                      </div>
+                    ) : (
+                      <TerminalPaneOutput text={paneText} />
+                    )}
                   </div>
                 );
               })}

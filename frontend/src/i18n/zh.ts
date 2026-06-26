@@ -673,6 +673,7 @@ const zh = {
     boardCheckpointApproved: "已通过",
     terminal: {
       loading: "正在加载子任务终端输出…",
+      paneLoading: "正在加载终端输出…",
       empty: "暂无可展示的子任务终端。",
       taskListTitle: "子任务列表",
       paneTitle: "tmux 面板",

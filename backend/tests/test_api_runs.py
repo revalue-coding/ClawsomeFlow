@@ -816,6 +816,60 @@ def test_list_run_terminals_404_and_403(app_client: TestClient) -> None:
     assert r.status_code == 404
 
 
+def test_list_run_terminals_404_and_403(app_client: TestClient) -> None:
+    flow = _make_flow(owner="alice")
+    other = _make_run(flow_id=flow.id, user="bob")
+    r = app_client.get(f"/api/runs/{other.id}/terminals")
+    assert r.status_code == 403
+    r = app_client.get("/api/runs/nope/terminals")
+    assert r.status_code == 404
+
+
+def test_list_run_terminals_meta_skips_pane_capture(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+
+    async def fail_capture(*args, **kwargs) -> str:
+        raise AssertionError("meta endpoint must not capture tmux panes")
+
+    monkeypatch.setattr("app.api.runs.tmux_capture_pane", fail_capture)
+    r = app_client.get(f"/api/runs/{run.id}/terminals/meta")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["items"]) == 2
+    assert body["items"][0]["paneText"] == ""
+    assert body["items"][0]["available"] is False
+
+
+def test_get_run_terminal_pane_returns_owner_snapshot(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+
+    async def fake_capture(target: str, *, history_lines: int = 60) -> str:
+        return f"{target}#{history_lines}"
+
+    monkeypatch.setattr("app.api.runs.tmux_capture_pane", fake_capture)
+    r = app_client.get(f"/api/runs/{run.id}/terminals/panes/alice?historyLines=80")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ownerAgentId"] == "alice"
+    assert body["paneText"] == "clawteam-csflow-termx:alice#80"
+    assert body["available"] is True
+
+
+def test_get_run_terminal_pane_404_for_unknown_owner(app_client: TestClient) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+    r = app_client.get(f"/api/runs/{run.id}/terminals/panes/nobody")
+    assert r.status_code == 404
+
+
 def test_get_run_404_and_403(app_client: TestClient) -> None:
     flow = _make_flow(owner="alice")
     other = _make_run(flow_id=flow.id, user="bob")

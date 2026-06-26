@@ -684,6 +684,7 @@ const en = {
     boardCheckpointApproved: "Approved",
     terminal: {
       loading: "Loading subtask terminal output…",
+      paneLoading: "Loading terminal output…",
       empty: "No subtask terminals available.",
       taskListTitle: "Subtask list",
       paneTitle: "tmux pane",
