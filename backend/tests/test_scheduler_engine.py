@@ -381,6 +381,39 @@ async def test_drain_to_terminal_aborts_active_orphans_residual_keeps_preserved(
 
 
 @pytest.mark.asyncio
+async def test_drain_to_terminal_aborts_inflight_complaint_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _persist_run("run-complaint-active-01", RunStatus.complaint_processing)
+    storage = get_storage()
+    flow = storage.flow_get(run.flow_id)
+    assert flow is not None
+
+    entered = asyncio.Event()
+
+    async def _block_skip(self) -> None:
+        del self
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(engine.RunController, "skip_user_complaint_phase", _block_skip)
+
+    sched = engine.get_scheduler()
+    sched.start_run_skip_complaint_phase(run=run, flow=flow)
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    assert sched.complaint_in_progress(run.id) is True
+
+    result = await sched.drain_to_terminal(timeout=3.0)
+    assert result == {"aborted": 1, "orphaned": 0}
+
+    refreshed = storage.run_get(run.id)
+    assert refreshed is not None
+    assert refreshed.status == RunStatus.aborted
+    assert refreshed.finished_at is not None
+    assert sched.complaint_in_progress(run.id) is False
+
+
+@pytest.mark.asyncio
 async def test_drain_to_terminal_noop_when_no_active_runs() -> None:
     _persist_run("run-review-only", RunStatus.awaiting_user_review)
     sched = engine.get_scheduler()

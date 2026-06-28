@@ -816,15 +816,6 @@ def test_list_run_terminals_404_and_403(app_client: TestClient) -> None:
     assert r.status_code == 404
 
 
-def test_list_run_terminals_404_and_403(app_client: TestClient) -> None:
-    flow = _make_flow(owner="alice")
-    other = _make_run(flow_id=flow.id, user="bob")
-    r = app_client.get(f"/api/runs/{other.id}/terminals")
-    assert r.status_code == 403
-    r = app_client.get("/api/runs/nope/terminals")
-    assert r.status_code == 404
-
-
 def test_list_run_terminals_meta_skips_pane_capture(
     app_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

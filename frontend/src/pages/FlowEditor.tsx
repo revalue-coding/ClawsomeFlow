@@ -3362,7 +3362,6 @@ function TaskEditModal({
         isSummary={isSummary}
         devMode={devMode}
         runInputFields={runInputFields}
-        showCheckpointField={mode !== "edit"}
         tasks={tasks}
         ownerMode={ownerMode}
         openclawOptions={openclawOptions}
@@ -3419,7 +3418,6 @@ function TaskFormBody({
   isSummary,
   devMode,
   runInputFields,
-  showCheckpointField,
   tasks,
   ownerMode,
   openclawOptions,
@@ -3442,7 +3440,6 @@ function TaskFormBody({
   isSummary: boolean;
   devMode: boolean;
   runInputFields: string[];
-  showCheckpointField: boolean;
   tasks: TaskRow[];
   ownerMode: OwnerMode;
   openclawOptions: OpenclawAgentSummary[];
@@ -3539,6 +3536,39 @@ function TaskFormBody({
           readOnly={readOnly}
           onChange={(e) => onChange({ subject: e.target.value })}
         />
+      </div>
+      <div className="md:col-span-2">
+        <label
+          className={cn(
+            "label",
+            isSummary && row.dependsOn.length === 0 && "text-rose-700",
+          )}
+        >
+          {t("flowEditor.taskFields.dependsOn")}
+        </label>
+        <MultiSelect
+          options={dependableTasks}
+          selected={row.dependsOn}
+          disabled={readOnly}
+          onChange={(v) => onChange({ dependsOn: v })}
+          placeholder={t("common.none")}
+          renderLabel={(id) => {
+            const dep = tasks.find((r) => r.id === id);
+            return dep?.subject.trim() || dep?.id || id;
+          }}
+        />
+        <div
+          className={cn(
+            "text-xs mt-1",
+            isSummary && row.dependsOn.length === 0
+              ? "text-rose-700"
+              : "text-ink-500",
+          )}
+        >
+          {isSummary && row.dependsOn.length === 0
+            ? t("flowEditor.summaryNoDepsWarning")
+            : t("flowEditor.taskFields.dependsOnHint")}
+        </div>
       </div>
       <div className="md:col-span-2">
         <label className="label">{t("flowEditor.taskFields.description")}</label>
@@ -3914,57 +3944,6 @@ function TaskFormBody({
           </div>
         </div>
       )}
-
-      <div className="md:col-span-2">
-        {!isSummary && showCheckpointField && (
-          <>
-            <label className="inline-flex items-center gap-2 text-sm text-ink-700 mb-2">
-              <input
-                type="checkbox"
-                checked={row.requiresHumanCheckpoint}
-                disabled={readOnly}
-                onChange={(e) =>
-                  onChange({ requiresHumanCheckpoint: e.target.checked })}
-              />
-              <span>{t("flowEditor.taskFields.requiresHumanCheckpoint")}</span>
-            </label>
-            <div className="text-xs text-ink-500 mb-2">
-              {t("flowEditor.taskFields.requiresHumanCheckpointHint")}
-            </div>
-          </>
-        )}
-        <label
-          className={cn(
-            "label",
-            isSummary && row.dependsOn.length === 0 && "text-rose-700",
-          )}
-        >
-          {t("flowEditor.taskFields.dependsOn")}
-        </label>
-        <MultiSelect
-          options={dependableTasks}
-          selected={row.dependsOn}
-          disabled={readOnly}
-          onChange={(v) => onChange({ dependsOn: v })}
-          placeholder={t("common.none")}
-          renderLabel={(id) => {
-            const dep = tasks.find((r) => r.id === id);
-            return dep?.subject.trim() || dep?.id || id;
-          }}
-        />
-        <div
-          className={cn(
-            "text-xs mt-1",
-            isSummary && row.dependsOn.length === 0
-              ? "text-rose-700"
-              : "text-ink-500",
-          )}
-        >
-          {isSummary && row.dependsOn.length === 0
-            ? t("flowEditor.summaryNoDepsWarning")
-            : t("flowEditor.taskFields.dependsOnHint")}
-        </div>
-      </div>
     </div>
   );
 }
