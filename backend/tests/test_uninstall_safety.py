@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from typer.main import get_command
 
 from app import paths
 from app.cli import app
@@ -41,9 +42,11 @@ def runner() -> CliRunner:
 
 
 def test_uninstall_exposes_purge_flag_in_help(runner: CliRunner, tmp_home: Path) -> None:
-    result = runner.invoke(app, ["uninstall", "--help"], terminal_width=120)
+    result = runner.invoke(app, ["uninstall", "--help"])
     assert result.exit_code == 0
-    assert "--purge-data" in result.output
+    uninstall = get_command(app).commands["uninstall"]
+    option_names = {opt for param in uninstall.params for opt in getattr(param, "opts", [])}
+    assert "--purge-data" in option_names
     assert "--thorough" not in result.output
 
 
