@@ -466,7 +466,8 @@ def test_install_alias_delegates_to_unified_upgrade_pipeline(
         app, ["install", "--skip-openclaw", "--no-restart-service"]
     )
     assert second.exit_code == 0, second.stdout
-    assert "delegates to the unified upgrade pipeline" in second.stdout
+    normalized_stdout = " ".join(second.stdout.split())
+    assert "delegates to the unified upgrade pipeline" in normalized_stdout
     assert "Upgrade report" in second.stdout
 
 

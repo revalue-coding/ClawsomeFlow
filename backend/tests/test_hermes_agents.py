@@ -43,11 +43,22 @@ def _fake_run(records: list[list[str]], rc: int = 0, out: str = "", err: str = "
 
 
 @pytest.fixture(autouse=True)
-def _stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_hermes_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     """The bootstrap is a real (killable) subprocess; stub it out by default so
     `commit_agent` tests don't spawn `hermes`. Tests exercising bootstrap or
-    cancellation override ``svc._run_bootstrap`` themselves."""
+    cancellation override ``svc._run_bootstrap`` themselves.
+
+    Settings helpers first ask the Hermes CLI for profile-local config/env
+    paths; default that lookup to "unavailable" so tests use the filesystem
+    fallback under the isolated ``HERMES_HOME``.
+    """
+    def _profile_fallback(agent_id: str, args: list[str], **kw):  # noqa: ANN202
+        if args in (["config", "path"], ["config", "env-path"]):
+            return 1, "", ""
+        return svc._run_hermes(["-p", agent_id, *args], **kw)
+
     monkeypatch.setattr(svc, "_run_bootstrap", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(svc, "_hermes_profile", _profile_fallback)
 
 
 # ── id validation ────────────────────────────────────────────────────
@@ -403,6 +414,7 @@ def _git_repo(tmp_path: Path) -> str:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
     (repo / "f").write_text("x")
@@ -862,6 +874,44 @@ def test_upsert_mcp_server_preserves_env_when_none(hermes_home: Path) -> None:
         url="https://b.example/mcp", environment="",
     )
     assert svc.list_mcp_servers("mcpagent")[0]["env_keys"] == []
+
+
+def test_upsert_mcp_server_supports_local_stdio(hermes_home: Path) -> None:
+    profile = hermes_home / "profiles" / "mcpagent"
+    profile.mkdir(parents=True)
+    row = svc.upsert_mcp_server(
+        "mcpagent",
+        name="local-tools",
+        transport="local",
+        url="",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp/work"],
+        environment="ALLOW=1",
+    )
+    assert row["transport"] == "local"
+    assert row["url"] == ""
+    assert row["command"] == "npx"
+    assert row["args"] == ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/work"]
+    assert row["env_keys"] == ["ALLOW"]
+    cfg = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
+    entry = cfg["mcp_servers"]["local-tools"]
+    assert entry["command"] == "npx"
+    assert entry["args"] == ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/work"]
+    assert "url" not in entry
+    assert "transport" not in entry
+
+    svc.upsert_mcp_server(
+        "mcpagent",
+        name="local-tools",
+        transport="http_sse",
+        url="https://example.com/mcp",
+        environment=None,
+    )
+    cfg = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
+    entry = cfg["mcp_servers"]["local-tools"]
+    assert entry["url"] == "https://example.com/mcp"
+    assert "command" not in entry
+    assert "args" not in entry
 
 
 def test_list_profile_names_from_fs(hermes_home: Path) -> None:
@@ -1740,5 +1790,22 @@ def test_api_mcp_settings_crud(client: TestClient, hermes_home: Path) -> None:
     assert len(body) == 1
     assert body[0]["name"] == "remote-api"
     assert body[0]["envKeys"] == ["API_KEY"]
+    local_put = client.put(
+        "/api/hermes/agents/mcpagent/settings/mcp",
+        json={
+            "name": "local-tools",
+            "transport": "local",
+            "command": "python",
+            "args": ["-m", "my_mcp_server"],
+        },
+    )
+    assert local_put.status_code == 200, local_put.text
+    assert local_put.json()["transport"] == "local"
+    assert local_put.json()["command"] == "python"
+    listed = client.get("/api/hermes/agents/mcpagent/settings/mcp")
+    assert listed.status_code == 200
+    local = next(item for item in listed.json() if item["name"] == "local-tools")
+    assert local["url"] == ""
+    assert local["args"] == ["-m", "my_mcp_server"]
     rm = client.delete("/api/hermes/agents/mcpagent/settings/mcp/remote-api")
     assert rm.status_code == 204

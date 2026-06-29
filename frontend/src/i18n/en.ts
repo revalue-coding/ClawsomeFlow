@@ -1163,7 +1163,7 @@ const en = {
       },
       mcp: {
         hint:
-          "Official Hermes MCP flow: save servers under this profile's mcp_servers config block. Use URL transport for HTTP/SSE endpoints.",
+          "Official Hermes MCP flow: save servers under this profile's mcp_servers config block. Use URL transport for HTTP/SSE endpoints, or Local/stdio for command-based MCP servers.",
         empty: "No MCP servers configured yet.",
         add: "Save MCP server",
         nameLabel: "Name",
@@ -1171,8 +1171,13 @@ const en = {
         transportLabel: "Transport",
         transportHttp: "HTTP/Streamable",
         transportSse: "HTTP/SSE",
+        transportLocal: "Local/stdio",
         urlLabel: "URL",
         urlPlaceholder: "https://example.com/mcp",
+        commandLabel: "Local command",
+        commandPlaceholder: "e.g. npx",
+        argsLabel: "Local args (one per line)",
+        argsPlaceholder: "-y\n@modelcontextprotocol/server-filesystem\n/home/you/project",
         envLabel: "Environment (KEY=VALUE per line)",
         envPlaceholder: "API_KEY=secret\nDEBUG=1",
         envKeys: "Env keys: {{keys}}",
