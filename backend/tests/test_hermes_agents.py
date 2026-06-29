@@ -43,11 +43,22 @@ def _fake_run(records: list[list[str]], rc: int = 0, out: str = "", err: str = "
 
 
 @pytest.fixture(autouse=True)
-def _stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_hermes_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     """The bootstrap is a real (killable) subprocess; stub it out by default so
     `commit_agent` tests don't spawn `hermes`. Tests exercising bootstrap or
-    cancellation override ``svc._run_bootstrap`` themselves."""
+    cancellation override ``svc._run_bootstrap`` themselves.
+
+    Settings helpers first ask the Hermes CLI for profile-local config/env
+    paths; default that lookup to "unavailable" so tests use the filesystem
+    fallback under the isolated ``HERMES_HOME``.
+    """
+    def _profile_fallback(agent_id: str, args: list[str], **kw):  # noqa: ANN202
+        if args in (["config", "path"], ["config", "env-path"]):
+            return 1, "", ""
+        return svc._run_hermes(["-p", agent_id, *args], **kw)
+
     monkeypatch.setattr(svc, "_run_bootstrap", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(svc, "_hermes_profile", _profile_fallback)
 
 
 # ── id validation ────────────────────────────────────────────────────
@@ -403,6 +414,7 @@ def _git_repo(tmp_path: Path) -> str:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
     (repo / "f").write_text("x")

@@ -815,6 +815,7 @@ def test_create_rejected_while_cancel_pending(
 ) -> None:
     from app.api import openclaw_agents as oc_api
 
+    monkeypatch.setattr(oc_api, "_resolve_openclaw_executable", lambda: "/usr/bin/openclaw")
     oc_api._REQUESTED_AGENT_CREATE_CANCELLATIONS.add("pending-cancel")
     try:
         r = client.post(

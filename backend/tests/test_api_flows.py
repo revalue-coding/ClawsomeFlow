@@ -31,6 +31,7 @@ def repo(tmp_path: Path) -> str:
     r = tmp_path / "repo"
     r.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=r, check=True)
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=r, check=True)
     (r / "README.md").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=r, check=True)
     subprocess.run(

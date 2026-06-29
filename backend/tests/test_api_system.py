@@ -600,6 +600,7 @@ def test_ss_line_indicates_ssh_forward_ignores_non_ssh() -> None:
 
 
 def test_linux_ssh_process_detection_via_proc(monkeypatch) -> None:
+    monkeypatch.setattr(system.sys, "platform", "linux")
     monkeypatch.setattr(
         system,
         "_linux_socket_inodes_for_loopback_port",

@@ -41,7 +41,7 @@ def runner() -> CliRunner:
 
 
 def test_uninstall_exposes_purge_flag_in_help(runner: CliRunner, tmp_home: Path) -> None:
-    result = runner.invoke(app, ["uninstall", "--help"])
+    result = runner.invoke(app, ["uninstall", "--help"], terminal_width=120)
     assert result.exit_code == 0
     assert "--purge-data" in result.output
     assert "--thorough" not in result.output
