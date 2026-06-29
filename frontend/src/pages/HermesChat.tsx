@@ -2909,6 +2909,8 @@ function GatewayTab({ agentId }: { agentId: string }) {
   );
 }
 
+type McpTransport = "http_sse" | "sse" | "local";
+
 function McpTab({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const [servers, setServers] = useState<HermesMcpServer[]>([]);
@@ -2917,12 +2919,17 @@ function McpTab({ agentId }: { agentId: string }) {
   const [saving, setSaving] = useState(false);
   const [removingName, setRemovingName] = useState<string | null>(null);
   const [name, setName] = useState("");
-  const [transport, setTransport] = useState<"http_sse" | "sse">("http_sse");
+  const [transport, setTransport] = useState<McpTransport>("http_sse");
   const [url, setUrl] = useState("");
+  const [command, setCommand] = useState("");
+  const [argsText, setArgsText] = useState("");
   const [environment, setEnvironment] = useState("");
   // null = creating a new server; a name = editing that existing server.
   const [editingName, setEditingName] = useState<string | null>(null);
   const isEditing = editingName !== null;
+  const isLocal = transport === "local";
+  const args = argsText.split("\n").map((line) => line.trim()).filter(Boolean);
+  const canSave = Boolean(name.trim() && (isLocal ? command.trim() : url.trim()));
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -2944,6 +2951,8 @@ function McpTab({ agentId }: { agentId: string }) {
     setName("");
     setTransport("http_sse");
     setUrl("");
+    setCommand("");
+    setArgsText("");
     setEnvironment("");
   };
 
@@ -2953,18 +2962,22 @@ function McpTab({ agentId }: { agentId: string }) {
     setName(server.name);
     setTransport(server.transport);
     setUrl(server.url);
+    setCommand(server.command);
+    setArgsText(server.args.join("\n"));
     setEnvironment(""); // blank = keep existing env (values are masked)
   };
 
   const save = async () => {
-    if (!name.trim() || !url.trim()) return;
+    if (!canSave) return;
     setSaving(true);
     setError("");
     try {
       await api.putHermesMcpServer(agentId, {
         name: name.trim(),
         transport,
-        url: url.trim(),
+        url: isLocal ? "" : url.trim(),
+        command: isLocal ? command.trim() : "",
+        args: isLocal ? args : [],
         // On edit a blank env means "keep existing" → send null (preserve).
         environment: isEditing ? (environment.trim() ? environment : null) : environment,
       });
@@ -3007,12 +3020,18 @@ function McpTab({ agentId }: { agentId: string }) {
                 <div className="flex items-center gap-2">
                   <code>{server.name}</code>
                   <span className="rounded border border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[11px] text-ink-500">
-                    {server.transport === "sse"
-                      ? t("hermes.settingsModal.mcp.transportSse")
-                      : t("hermes.settingsModal.mcp.transportHttp")}
+                    {server.transport === "local"
+                      ? t("hermes.settingsModal.mcp.transportLocal")
+                      : server.transport === "sse"
+                        ? t("hermes.settingsModal.mcp.transportSse")
+                        : t("hermes.settingsModal.mcp.transportHttp")}
                   </span>
                 </div>
-                <p className="truncate font-mono text-xs text-ink-500">{server.url}</p>
+                <p className="truncate font-mono text-xs text-ink-500">
+                  {server.transport === "local"
+                    ? [server.command, ...server.args].filter(Boolean).join(" ")
+                    : server.url}
+                </p>
                 {server.envKeys.length > 0 && (
                   <p className="truncate text-xs text-ink-400">
                     {t("hermes.settingsModal.mcp.envKeys", { keys: server.envKeys.join(", ") })}
@@ -3065,19 +3084,41 @@ function McpTab({ agentId }: { agentId: string }) {
           <select
             className="mt-1 w-full rounded border border-ink-200 px-3 py-2 text-sm"
             value={transport}
-            onChange={(e) => setTransport(e.target.value as "http_sse" | "sse")}
+            onChange={(e) => setTransport(e.target.value as McpTransport)}
           >
             <option value="http_sse">{t("hermes.settingsModal.mcp.transportHttp")}</option>
             <option value="sse">{t("hermes.settingsModal.mcp.transportSse")}</option>
+            <option value="local">{t("hermes.settingsModal.mcp.transportLocal")}</option>
           </select>
         </label>
         <label className="block text-sm">
           <span className="text-ink-600">{t("hermes.settingsModal.mcp.urlLabel")}</span>
           <input
-            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 font-mono text-xs"
+            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 font-mono text-xs disabled:bg-ink-50 disabled:text-ink-400"
             value={url}
             placeholder={t("hermes.settingsModal.mcp.urlPlaceholder")}
             onChange={(e) => setUrl(e.target.value)}
+            disabled={isLocal}
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="text-ink-600">{t("hermes.settingsModal.mcp.commandLabel")}</span>
+          <input
+            className="mt-1 w-full rounded border border-ink-200 px-3 py-2 font-mono text-xs disabled:bg-ink-50 disabled:text-ink-400"
+            value={command}
+            placeholder={t("hermes.settingsModal.mcp.commandPlaceholder")}
+            onChange={(e) => setCommand(e.target.value)}
+            disabled={!isLocal}
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="text-ink-600">{t("hermes.settingsModal.mcp.argsLabel")}</span>
+          <textarea
+            className="mt-1 h-20 w-full rounded border border-ink-200 px-3 py-2 font-mono text-xs disabled:bg-ink-50 disabled:text-ink-400"
+            value={argsText}
+            placeholder={t("hermes.settingsModal.mcp.argsPlaceholder")}
+            onChange={(e) => setArgsText(e.target.value)}
+            disabled={!isLocal}
           />
         </label>
         <label className="block text-sm">
@@ -3099,7 +3140,7 @@ function McpTab({ agentId }: { agentId: string }) {
             type="button"
             className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
             onClick={() => void save()}
-            disabled={saving || !name.trim() || !url.trim()}
+            disabled={saving || !canSave}
           >
             {saving
               ? t("common.saving")

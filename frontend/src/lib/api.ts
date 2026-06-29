@@ -825,8 +825,10 @@ export interface HermesCronDeliveryTarget {
 
 export interface HermesMcpServer {
   name: string;
-  transport: "http_sse" | "sse";
+  transport: "http_sse" | "sse" | "local";
   url: string;
+  command: string;
+  args: string[];
   enabled: boolean;
   envKeys: string[];
 }
@@ -1339,8 +1341,10 @@ export const api = {
     // environment: omit (or null) to preserve existing env on edit; "" clears; text replaces.
     payload: {
       name: string;
-      transport: "http_sse" | "sse";
-      url: string;
+      transport: "http_sse" | "sse" | "local";
+      url?: string;
+      command?: string;
+      args?: string[];
       environment?: string | null;
     },
   ) => request<HermesMcpServer>("PUT", `/api/hermes/agents/${id}/settings/mcp`, payload),

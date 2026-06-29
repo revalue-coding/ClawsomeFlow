@@ -1307,17 +1307,25 @@ def list_mcp_servers(agent_id: str) -> list[dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
         endpoint = str(entry.get("url") or "").strip()
-        if not endpoint:
+        command = str(entry.get("command") or "").strip()
+        raw_args = entry.get("args")
+        args = [str(v) for v in raw_args] if isinstance(raw_args, list) else []
+        if not endpoint and not command:
             continue
         raw_env = entry.get("env")
         env_keys = sorted(str(k) for k in raw_env.keys()) if isinstance(raw_env, dict) else []
         raw_transport = str(entry.get("transport") or "").strip().lower()
-        transport = "sse" if raw_transport == "sse" else "http_sse"
+        if command and not endpoint:
+            transport = "local"
+        else:
+            transport = "sse" if raw_transport == "sse" else "http_sse"
         out.append(
             {
                 "name": str(name),
                 "transport": transport,
                 "url": endpoint,
+                "command": command,
+                "args": args,
                 "enabled": bool(entry.get("enabled", True) is not False),
                 "env_keys": env_keys,
             }
@@ -1331,6 +1339,8 @@ def upsert_mcp_server(
     name: str,
     transport: str,
     url: str,
+    command: str = "",
+    args: list[str] | None = None,
     environment: str | None = "",
 ) -> dict[str, Any]:
     """Create or update an MCP server entry.
@@ -1346,10 +1356,18 @@ def upsert_mcp_server(
     aid = _validate_agent_id(agent_id)
     server_name = _validate_mcp_server_name(name)
     mode = (transport or "http_sse").strip().lower()
-    if mode not in {"http_sse", "streamable_http", "sse"}:
-        raise AgentIdInvalid("unsupported MCP transport; expected 'http_sse' or 'sse'")
+    if mode == "stdio":
+        mode = "local"
+    if mode not in {"http_sse", "streamable_http", "sse", "local"}:
+        raise AgentIdInvalid(
+            "unsupported MCP transport; expected 'http_sse', 'sse' or 'local'"
+        )
     endpoint = (url or "").strip()
-    if not endpoint:
+    local_command = (command or "").strip()
+    local_args = [str(v).strip() for v in (args or []) if str(v).strip()]
+    if mode == "local" and not local_command:
+        raise AgentIdInvalid("MCP local server command is required")
+    if mode != "local" and not endpoint:
         raise AgentIdInvalid("MCP server URL is required")
 
     cfg = _read_profile_config_dict(aid)
@@ -1359,14 +1377,23 @@ def upsert_mcp_server(
     entry = mcp_servers.get(server_name)
     if not isinstance(entry, dict):
         entry = {}
-    entry["url"] = endpoint
-    # Enforce URL-based flow (official add modal's HTTP/SSE path).
-    entry.pop("command", None)
-    entry.pop("args", None)
-    if mode == "sse":
-        entry["transport"] = "sse"
-    else:
+    if mode == "local":
+        entry["command"] = local_command
+        if local_args:
+            entry["args"] = local_args
+        else:
+            entry.pop("args", None)
+        entry.pop("url", None)
         entry.pop("transport", None)
+    else:
+        entry["url"] = endpoint
+        # Enforce URL-based flow (official add modal's HTTP/SSE path).
+        entry.pop("command", None)
+        entry.pop("args", None)
+        if mode == "sse":
+            entry["transport"] = "sse"
+        else:
+            entry.pop("transport", None)
     if environment is not None:
         env = _parse_mcp_env_lines(environment)
         if env:
