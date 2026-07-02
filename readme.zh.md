@@ -30,7 +30,7 @@
   <a href="#-为什么是-clawsomeflow">为什么是 ClawsomeFlow</a> ·
   <a href="#-贡献者本地部署与测试">贡献者开发</a> ·
   <a href="#-路线图">路线图</a> ·
-  <a href="#-微信交流群">微信交流群</a>
+  <a href="#-交流社区">交流社区</a>
 </p>
 
 <p>
@@ -39,6 +39,7 @@
   <img alt="React" src="https://img.shields.io/badge/Frontend-React_18-61DAFB?style=for-the-badge&logo=react&logoColor=black">
   <img alt="Built on ClawTeam" src="https://img.shields.io/badge/Built_on-ClawTeam-FF6B6B?style=for-the-badge&logo=git&logoColor=white">
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-4ECDC4?style=for-the-badge">
+  <a href="https://discord.gg/hcpMwXnrkM"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
 
 </div>
@@ -297,14 +298,18 @@ bash scripts/stop-contributor.sh
 
 ---
 
-## 💬 微信交流群
+## 💬 交流社区
 
 如果 ClawsomeFlow 帮你协调好了 Agent 团队的工作，**请给我们一个 ⭐ Star** —— 这是支撑我们继续走下去的动力。
 
-对 ClawsomeFlow 的使用有疑问，或者对成立 **OPC（一人公司）** 感兴趣？欢迎来和我们一起交流 —— 扫描下方二维码加入微信讨论社群：
+对 ClawsomeFlow 的使用有疑问，或者对成立 **OPC（一人公司）** 感兴趣？欢迎来和我们一起交流 —— 加入 Discord 社区，或扫描下方二维码加入微信讨论社群：
 
 <p align="center">
-  <img src="./docs/assets/wechat-group-qr.png?v=2" alt="ClawsomeFlow 微信交流群" width="240" />
+  <a href="https://discord.gg/hcpMwXnrkM"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+</p>
+
+<p align="center">
+  <img src="./docs/assets/wechat-group-qr.png?v=3" alt="ClawsomeFlow 微信交流群" width="240" />
 </p>
 
 ---

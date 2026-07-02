@@ -30,7 +30,7 @@
   <a href="#-why-clawsomeflow">Why ClawsomeFlow</a> ·
   <a href="#-contributor-local-deploy-and-test">Contributor Local Deploy</a> ·
   <a href="#-roadmap">Roadmap</a> ·
-  <a href="#-wechat-community">WeChat Community</a>
+  <a href="#-community">Community</a>
 </p>
 
 <p>
@@ -39,6 +39,7 @@
   <img alt="React" src="https://img.shields.io/badge/Frontend-React_18-61DAFB?style=for-the-badge&logo=react&logoColor=black">
   <img alt="Built on ClawTeam" src="https://img.shields.io/badge/Built_on-ClawTeam-FF6B6B?style=for-the-badge&logo=git&logoColor=white">
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-4ECDC4?style=for-the-badge">
+  <a href="https://discord.gg/hcpMwXnrkM"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
 
 </div>
@@ -307,14 +308,18 @@ bash scripts/stop-contributor.sh
 
 ---
 
-## 💬 WeChat Community
+## 💬 Community
 
 If ClawsomeFlow helps you coordinate your Agent team, **please give us a ⭐ Star** — it genuinely keeps us going.
 
-Got questions about using ClawsomeFlow, or curious about building an **OPC (One-Person Company)**? Come hang out with us — scan the QR code below to join our WeChat discussion group:
+Got questions about using ClawsomeFlow, or curious about building an **OPC (One-Person Company)**? Come hang out with us — join our Discord server or scan the QR code below to join our WeChat discussion group:
 
 <p align="center">
-  <img src="./docs/assets/wechat-group-qr.png?v=2" alt="ClawsomeFlow WeChat Group" width="240" />
+  <a href="https://discord.gg/hcpMwXnrkM"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+</p>
+
+<p align="center">
+  <img src="./docs/assets/wechat-group-qr.png?v=3" alt="ClawsomeFlow WeChat Group" width="240" />
 </p>
 
 ---
