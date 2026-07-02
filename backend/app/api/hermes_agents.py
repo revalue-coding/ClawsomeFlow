@@ -190,6 +190,8 @@ class McpServerView(_CamelModel):
     name: str
     transport: str = "http_sse"
     url: str = ""
+    command: str = ""
+    args: list[str] = []
     enabled: bool = True
     env_keys: list[str] = []
 
@@ -197,7 +199,9 @@ class McpServerView(_CamelModel):
 class McpServerUpsertPayload(_CamelModel):
     name: str
     transport: str = "http_sse"
-    url: str
+    url: str = ""
+    command: str = ""
+    args: list[str] = []
     # Omitted/None → preserve existing env (edit path); "" → clear; text → replace.
     environment: str | None = None
 
@@ -817,6 +821,8 @@ def put_mcp_server(
             name=payload.name,
             transport=payload.transport,
             url=payload.url,
+            command=payload.command,
+            args=payload.args,
             environment=payload.environment,
         )
     except svc.HermesAgentError as exc:

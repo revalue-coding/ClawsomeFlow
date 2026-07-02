@@ -17,6 +17,7 @@ def _isolated_test_home(name: str) -> Path:
 def test_ensure_user_service_file_writes_unit(
     monkeypatch, tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("CSFLOW_SERVICE_MANAGER", "systemd")
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     def _fake_require(name: str) -> str:
@@ -43,6 +44,7 @@ def test_ensure_user_service_file_writes_unit(
 
 def test_restart_and_enable_runs_expected_systemctl_commands(monkeypatch) -> None:
     calls: list[list[str]] = []
+    monkeypatch.setenv("CSFLOW_SERVICE_MANAGER", "systemd")
     # This test verifies the default-name ("csflow") command sequence; _run is
     # mocked so nothing real is touched. Bypass the prod-namespace guard, which
     # only exists to block real operations against the live unit.
@@ -71,6 +73,7 @@ def test_restart_and_enable_runs_expected_systemctl_commands(monkeypatch) -> Non
 
 def test_stop_if_running_stops_active_service(monkeypatch) -> None:
     calls: list[list[str]] = []
+    monkeypatch.setenv("CSFLOW_SERVICE_MANAGER", "systemd")
     monkeypatch.setattr(svc, "_guard_service_namespace", lambda **_kw: None)
     monkeypatch.setattr(svc, "_require_command", lambda _name: "/usr/bin/systemctl")
 
@@ -91,6 +94,7 @@ def test_stop_if_running_stops_active_service(monkeypatch) -> None:
 def test_service_name_override_is_used_in_systemctl_commands(monkeypatch) -> None:
     calls: list[list[str]] = []
     test_home = _isolated_test_home("pytest-service-override-123")
+    monkeypatch.setenv("CSFLOW_SERVICE_MANAGER", "systemd")
     monkeypatch.setenv("CSFLOW_HOME", str(test_home))
     monkeypatch.setenv("CSFLOW_SERVICE_NAME", "csflow-test-123")
     monkeypatch.setattr(
@@ -267,6 +271,7 @@ def test_stop_if_running_rejects_prod_service_with_pytest_home(
     monkeypatch,
 ) -> None:
     """Backend pytest uses a tmp CSFLOW_HOME — must not stop the live ``csflow`` unit."""
+    monkeypatch.setenv("CSFLOW_SERVICE_MANAGER", "systemd")
     monkeypatch.setenv("CSFLOW_HOME", "/tmp/pytest-csflow-home")
     monkeypatch.delenv("CSFLOW_SERVICE_NAME", raising=False)
     try:
@@ -376,6 +381,7 @@ def test_restart_and_enable_retries_after_reclaiming_conflicted_port(
 ) -> None:
     calls: list[list[str]] = []
     cleanup_calls: list[int] = []
+    monkeypatch.setenv("CSFLOW_SERVICE_MANAGER", "systemd")
     monkeypatch.setattr(svc, "_guard_service_namespace", lambda **_kw: None)
     monkeypatch.setattr(
         svc, "ensure_user_service_file", lambda **_kw: Path("/tmp/csflow.service")
