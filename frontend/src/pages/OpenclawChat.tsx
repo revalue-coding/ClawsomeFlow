@@ -2466,10 +2466,12 @@ function ChatRoom({
               ? normalizeAssistantContent(m.content)
               : m.content,
           attachments: m.attachments ?? [],
+          ts: m.ts,
         }));
-        // Server history has no timestamps; backfill from the local cache (which
-        // persists ts) by matching position + content so times survive a refresh.
+        // Prefer the server-recorded timestamp; only fall back to the local cache
+        // (matched by position + content) for rows the server predates.
         const merged = reconcileTranscript(cached, server).map((m, i) => {
+          if (typeof m.ts === "number") return m;
           const c = cached[i];
           return c && c.role === m.role && c.content === m.content && c.ts
             ? { ...m, ts: c.ts }
@@ -2574,6 +2576,7 @@ function ChatRoom({
               ? normalizeAssistantContent(m.content)
               : m.content,
           attachments: m.attachments ?? [],
+          ts: m.ts,
         }));
         const last = server[server.length - 1];
         if (last && last.role === "assistant" && last.content.trim() !== "") {
@@ -2797,6 +2800,7 @@ function ChatRoom({
                 ? normalizeAssistantContent(m.content)
                 : m.content,
             attachments: m.attachments ?? [],
+            ts: m.ts,
           }));
           const last = server[server.length - 1];
           if (last && last.role === "assistant") {

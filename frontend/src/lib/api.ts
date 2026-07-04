@@ -593,6 +593,8 @@ export interface ChatHistoryMessage {
   role: "system" | "user" | "assistant";
   content: string;
   attachments?: ChatAttachmentMeta[];
+  /** Epoch ms the message was recorded server-side (authoritative timestamp). */
+  ts?: number;
 }
 
 export type ChatAttachmentRoute = "path_injection" | "native";
