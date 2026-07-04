@@ -1648,29 +1648,15 @@ def _status_platform_slug(display: str) -> str:
     return _STATUS_PLATFORM_SLUGS.get(key, key.replace(" ", "_"))
 
 
-def _delivery_target_label(value: str) -> str:
-    if ":" not in value:
-        return value
-    platform, target = value.split(":", 1)
-    return f"{platform} ({target})"
+def _parse_status_delivery_homes(text: str) -> dict[str, str]:
+    """Map configured messaging platform slug → home ``chat_id`` (``""`` if the
+    platform is configured but the status line reports no home).
 
-
-def _append_delivery_target(
-    targets: list[dict[str, str]],
-    seen: set[str],
-    value: str,
-) -> None:
-    val = value.strip()
-    if not val or val in seen:
-        return
-    seen.add(val)
-    targets.append({"value": val, "label": _delivery_target_label(val)})
-
-
-def _parse_status_delivery_targets(text: str) -> list[dict[str, str]]:
-    """Extract configured messaging platforms from ``hermes status --all``."""
-    targets: list[dict[str, str]] = []
-    seen: set[str] = set()
+    Only platforms shown as ``✓ configured`` in ``hermes status --all`` are
+    returned — an unconfigured platform can't deliver, so it must not become a
+    dropdown option.
+    """
+    homes: dict[str, str] = {}
     in_section = False
     for raw in text.splitlines():
         line = _strip_ansi(raw)
@@ -1684,57 +1670,90 @@ def _parse_status_delivery_targets(text: str) -> list[dict[str, str]]:
             if not m:
                 continue
             slug = _status_platform_slug(m.group(1))
-            home = (m.group(2) or "").strip()
-            _append_delivery_target(targets, seen, slug)
-            if home:
-                _append_delivery_target(targets, seen, f"{slug}:{home}")
-    return targets
+            homes.setdefault(slug, (m.group(2) or "").strip())
+    return homes
 
 
-def _parse_send_list_delivery_targets(text: str) -> list[dict[str, str]]:
-    """Extract channel targets from ``hermes send --list --json``."""
-    targets: list[dict[str, str]] = []
-    seen: set[str] = set()
+def _parse_send_list_channels(text: str) -> dict[str, dict[str, str]]:
+    """Map platform slug → ``{chat_id: display_name}`` from
+    ``hermes send --list --json``.
+
+    Hermes returns each channel as an **object** (``{"id","name","type",...}``),
+    not a bare string; older/other builds may still emit plain strings, so we
+    accept both. The ``id`` is the ``chat_id`` half of a ``platform:chat_id``
+    delivery target; the ``name`` is only used to build a friendly label.
+    """
+    channels: dict[str, dict[str, str]] = {}
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return targets
+        return channels
     platforms = data.get("platforms")
     if not isinstance(platforms, dict):
-        return targets
-    for platform, channels in sorted(platforms.items()):
-        if not isinstance(channels, list) or not channels:
+        return channels
+    for platform, chans in platforms.items():
+        slug = str(platform).strip()
+        if not slug or not isinstance(chans, list) or not chans:
             continue
-        for ch in channels:
-            ch_s = str(ch).strip()
-            if not ch_s:
+        by_id: dict[str, str] = {}
+        for ch in chans:
+            if isinstance(ch, dict):
+                cid = str(ch.get("id") or ch.get("chat_id") or "").strip()
+                name = str(ch.get("name") or "").strip()
+            else:
+                cid = str(ch).strip()
+                name = ""
+            if not cid:
                 continue
-            _append_delivery_target(targets, seen, f"{platform}:{ch_s}")
-    return targets
+            by_id.setdefault(cid, name)
+        if by_id:
+            channels[slug] = by_id
+    return channels
 
 
 def list_cron_delivery_targets(agent_id: str) -> list[dict[str, str]]:
     """Return cron ``--deliver`` options for the profile.
 
-    Always includes ``local``. Configured platforms come from
-    ``hermes -p <id> status --all`` (home channel) and
-    ``hermes -p <id> send --list --json`` (discovered channels — faster
-    structured lookup than parsing the full status table).
+    Always includes ``local``. Delivery targets are derived from two Hermes
+    sources:
+
+    - ``hermes -p <id> status --all`` — which platforms are ``✓ configured``
+      and their home ``chat_id``.
+    - ``hermes -p <id> send --list --json`` — discovered channels per platform.
+
+    A bare ``<platform>`` target means "deliver to the platform's home chat";
+    ``<platform>:<chat_id>`` targets a specific chat. Because a bare platform
+    and its home ``chat_id`` deliver to the *same* place, we emit only the bare
+    form for the home channel and reserve ``<platform>:<chat_id>`` for chats
+    that differ from home — so a single home-only channel yields exactly one
+    option instead of three near-duplicates.
     """
     aid = _validate_agent_id(agent_id)
-    targets: list[dict[str, str]] = []
-    seen: set[str] = set()
-    _append_delivery_target(targets, seen, "local")
+    targets: list[dict[str, str]] = [{"value": "local", "label": "local"}]
+    seen: set[str] = {"local"}
+
+    def _add(value: str, label: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
+            targets.append({"value": value, "label": label})
 
     rc, out, _err = _hermes_profile(aid, ["send", "--list", "--json"])
-    if rc == 0:
-        for item in _parse_send_list_delivery_targets(out):
-            _append_delivery_target(targets, seen, item["value"])
+    channels = _parse_send_list_channels(out) if rc == 0 else {}
 
     rc, out, _err = _hermes_profile(aid, ["status", "--all"])
-    if rc == 0:
-        for item in _parse_status_delivery_targets(out):
-            _append_delivery_target(targets, seen, item["value"])
+    homes = _parse_status_delivery_homes(out) if rc == 0 else {}
+
+    for platform in sorted(set(homes) | set(channels)):
+        home = homes.get(platform, "")
+        # Bare platform target (home chat) — only when Hermes reports the
+        # platform configured; an unconfigured platform can't deliver.
+        if platform in homes:
+            _add(platform, platform)
+        for cid, name in channels.get(platform, {}).items():
+            if home and cid == home:
+                continue  # same destination as the bare platform target
+            label = f"{platform} ({name})" if name else f"{platform} ({cid})"
+            _add(f"{platform}:{cid}", label)
 
     return targets
 

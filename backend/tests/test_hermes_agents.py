@@ -1391,10 +1391,88 @@ def test_list_cron_delivery_targets_parses_status_and_send_list(
     assert calls[1] == ["-p", "cron1", "status", "--all"]
     values = [t["value"] for t in targets]
     assert values[0] == "local"
-    assert "telegram:-100123" in values
+    # Bare platform = deliver to home chat; the extra send-list channel that
+    # differs from home is offered as an explicit platform:chat_id target.
     assert "telegram" in values
-    assert "telegram:8940342611" in values
+    assert "telegram:-100123" in values
+    # Home chat is represented by the bare slug, never duplicated as
+    # ``telegram:<home>``.
+    assert "telegram:8940342611" not in values
+    # Unconfigured platform never becomes an option.
     assert "discord" not in values
+    assert not any(v.startswith("discord") for v in values)
+
+
+def test_list_cron_delivery_targets_object_channels_dedup_home(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real Hermes emits channel *objects*; a single home-only channel must
+    collapse to one bare ``telegram`` option (regression for the garbage
+    ``telegram:{'id': ...}`` dropdown entry)."""
+
+    def _run(args, *, cwd=None, timeout=svc._CLI_TIMEOUT_SEC):  # noqa: ANN001
+        if args[-2:] == ["--list", "--json"] or args[-1:] == ["--json"]:
+            return 0, json.dumps({
+                "platforms": {
+                    "telegram": [
+                        {
+                            "id": "8940342611",
+                            "name": "Jingjing Chen",
+                            "type": "dm",
+                            "thread_id": None,
+                        }
+                    ],
+                    "discord": [],
+                }
+            }), ""
+        if args[-1:] == ["--all"]:
+            return 0, (
+                "◆ Messaging Platforms\n"
+                "  Telegram      ✓ configured (home: 8940342611)\n"
+                "◆ Gateway Service\n"
+            ), ""
+        return 1, "", ""
+
+    monkeypatch.setattr(svc, "_run_hermes", _run)
+    targets = svc.list_cron_delivery_targets("cron1")
+
+    values = [t["value"] for t in targets]
+    assert values == ["local", "telegram"]
+    # No stringified dict ever leaks into a target value or label.
+    assert not any("{" in t["value"] or "{" in t["label"] for t in targets)
+
+
+def test_list_cron_delivery_targets_object_channel_uses_name_label(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A discovered chat that differs from home surfaces as
+    ``platform:chat_id`` with a friendly name label."""
+
+    def _run(args, *, cwd=None, timeout=svc._CLI_TIMEOUT_SEC):  # noqa: ANN001
+        if args[-2:] == ["--list", "--json"] or args[-1:] == ["--json"]:
+            return 0, json.dumps({
+                "platforms": {
+                    "telegram": [
+                        {"id": "111", "name": "Alice", "type": "dm"},
+                        {"id": "222", "name": "Bob", "type": "dm"},
+                    ]
+                }
+            }), ""
+        if args[-1:] == ["--all"]:
+            return 0, (
+                "◆ Messaging Platforms\n"
+                "  Telegram      ✓ configured (home: 111)\n"
+                "◆ Gateway Service\n"
+            ), ""
+        return 1, "", ""
+
+    monkeypatch.setattr(svc, "_run_hermes", _run)
+    targets = svc.list_cron_delivery_targets("cron1")
+
+    values = [t["value"] for t in targets]
+    assert values == ["local", "telegram", "telegram:222"]
+    label_222 = next(t["label"] for t in targets if t["value"] == "telegram:222")
+    assert label_222 == "telegram (Bob)"
 
 
 def test_api_get_cron_includes_delivery_targets(
