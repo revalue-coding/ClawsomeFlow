@@ -298,6 +298,8 @@ class ChatMessage(_CamelModel):
     role: str
     content: str
     attachments: list[ChatAttachment] | None = None
+    # Epoch ms the message was recorded server-side (chat-history responses only).
+    ts: int | None = None
 
 
 class ChatHistoryResponse(_CamelModel):

@@ -113,3 +113,26 @@ def test_reset_kills_turn(client: TestClient, monkeypatch: pytest.MonkeyPatch) -
     r = client.post("/api/openclaw/agents/a1/reset")
     assert r.status_code == 204, r.text
     assert killed == [openclaw_user_chat_session_id("alice", "a1")]
+
+
+def test_history_records_server_timestamp() -> None:
+    """Every appended message carries a server ``ts`` (epoch ms) so the chat UI
+    can render an authoritative per-message time — including assistant replies,
+    whose streamed text differs from the persisted text and so cannot rely on
+    the client's content-matched cache backfill."""
+    import asyncio
+
+    from app.services import openclaw_chat_history as history
+
+    async def _run() -> list[dict]:
+        sk = "sk-ts-test"
+        await history.clear_messages(sk)
+        await history.append_message(sk, role="user", content="hi")
+        await history.append_message(sk, role="assistant", content="hello")
+        return await history.list_messages(sk)
+
+    rows = asyncio.run(_run())
+    assert len(rows) == 2
+    assert all(isinstance(row.get("ts"), int) and row["ts"] > 0 for row in rows)
+    # Recorded in order → non-decreasing timestamps.
+    assert rows[0]["ts"] <= rows[1]["ts"]

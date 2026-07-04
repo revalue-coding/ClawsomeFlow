@@ -2860,6 +2860,8 @@ class ChatMessage(_CamelModel):
     role: str = Field(..., pattern="^(system|user|assistant)$")
     content: str
     attachments: list[ChatAttachment] | None = None
+    # Epoch ms the message was recorded server-side (chat-history responses only).
+    ts: int | None = None
 
 
 class ChatAttachment(_CamelModel):

@@ -11,6 +11,7 @@ It is intentionally decoupled from OpenClaw runtime context:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TypedDict
 
 
@@ -28,6 +29,12 @@ class ChatHistoryMessage(TypedDict, total=False):
     role: str
     content: str
     attachments: list[ChatAttachmentMeta]
+    # Epoch milliseconds when the message was recorded. The UI renders this as a
+    # per-message timestamp; it is the authoritative source (the client can only
+    # guess a time for messages it streamed itself, and cannot for recovered
+    # ones). Absent on rows appended before this field existed → the UI falls
+    # back to its local cache / omits the time.
+    ts: int
 
 
 _MAX_MESSAGES_PER_SESSION = 400
@@ -42,6 +49,9 @@ async def list_messages(session_key: str) -> list[ChatHistoryMessage]:
         out: list[ChatHistoryMessage] = []
         for row in rows:
             item: ChatHistoryMessage = {"role": row["role"], "content": row["content"]}
+            ts = row.get("ts")
+            if isinstance(ts, int):
+                item["ts"] = ts
             attachments = row.get("attachments") or []
             if isinstance(attachments, list):
                 cleaned = [
@@ -76,7 +86,11 @@ async def append_message(
     cleaned_attachments = attachments or []
     async with _lock:
         rows = _history.setdefault(session_key, [])
-        item: ChatHistoryMessage = {"role": role, "content": content}
+        item: ChatHistoryMessage = {
+            "role": role,
+            "content": content,
+            "ts": int(time.time() * 1000),
+        }
         if cleaned_attachments:
             item["attachments"] = [
                 {
