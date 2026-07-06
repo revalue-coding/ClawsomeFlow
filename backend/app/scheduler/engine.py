@@ -27,17 +27,19 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from app.logging_setup import get_logger
-from app.models import Flow, FlowRun, FlowSpec, RunEvent, RunStatus, iso_utc
+from app.models import Flow, FlowRun, FlowSpec, RunStatus
 from app.scheduler.compiler import compile_flow_to_clawteam
 from app.scheduler.controller import RunController, RunOutcome
-from app.scheduler.finalize import (
-    _POST_COMPLAINT_STATUS_KEY,
-    _POST_REVIEW_TERMINAL_STATUS_KEY,
-    run_terminal_tail_cleanup,
-)
+from app.scheduler.finalize import run_terminal_tail_cleanup
 from app.scheduler.providers import (
     McpLeaderInboxProvider,
     McpSnapshotProvider,
+)
+from app.scheduler.run_metadata import (
+    POST_COMPLAINT_STATUS_KEY as _POST_COMPLAINT_STATUS_KEY,
+)
+from app.scheduler.run_metadata import (
+    POST_REVIEW_TERMINAL_STATUS_KEY as _POST_REVIEW_TERMINAL_STATUS_KEY,
 )
 from app.storage import StorageBackend, get_storage
 
@@ -458,23 +460,13 @@ class FlowScheduler:
         event_type: str,
         payload: dict[str, object],
     ) -> None:
-        row = store.event_append(RunEvent(
+        from app.events import publish_run_event
+        publish_run_event(
+            store,
             run_id=run_id,
-            type=event_type,
-            payload=payload,
-        ))
-        try:
-            from app.events import get_event_broadcaster
-            get_event_broadcaster().publish(run_id, {
-                "id": row.id,
-                "ts": iso_utc(row.ts),
-                "type": row.type,
-                "agentId": row.agent_id,
-                "taskId": row.task_id,
-                "payload": row.payload,
-            })
-        except Exception:
-            pass
+            event_type=event_type,
+            payload=dict(payload),
+        )
 
     async def _supervise(
         self, run_id: str, controller: RunController,
@@ -501,23 +493,13 @@ class FlowScheduler:
                     if controller.run.finished_at is None:
                         controller.run.finished_at = datetime.now(timezone.utc)
                     store.run_update(controller.run)
-                row = store.event_append(RunEvent(
+                from app.events import publish_run_event
+                publish_run_event(
+                    store,
                     run_id=controller.run.id,
-                    type="run_uncaught_exception",
+                    event_type="run_uncaught_exception",
                     payload={"error": str(exc)[:1000]},
-                ))
-                try:
-                    from app.events import get_event_broadcaster
-                    get_event_broadcaster().publish(controller.run.id, {
-                        "id": row.id,
-                        "ts": iso_utc(row.ts),
-                        "type": row.type,
-                        "agentId": row.agent_id,
-                        "taskId": row.task_id,
-                        "payload": row.payload,
-                    })
-                except Exception:
-                    pass
+                )
             except Exception as persist_exc:  # pragma: no cover — defensive
                 logger.warning(
                     "run_uncaught_exception_persist_failed",
@@ -626,23 +608,13 @@ class FlowScheduler:
                 if controller.run.finished_at is None:
                     controller.run.finished_at = datetime.now(timezone.utc)
                 store.run_update(controller.run)
-                row = store.event_append(RunEvent(
+                from app.events import publish_run_event
+                publish_run_event(
+                    store,
                     run_id=controller.run.id,
-                    type="run_complaint_phase_cancelled",
+                    event_type="run_complaint_phase_cancelled",
                     payload={"reason": "user_abort"},
-                ))
-                try:
-                    from app.events import get_event_broadcaster
-                    get_event_broadcaster().publish(controller.run.id, {
-                        "id": row.id,
-                        "ts": iso_utc(row.ts),
-                        "type": row.type,
-                        "agentId": row.agent_id,
-                        "taskId": row.task_id,
-                        "payload": row.payload,
-                    })
-                except Exception:
-                    pass
+                )
                 try:
                     await run_terminal_tail_cleanup(
                         run=controller.run,

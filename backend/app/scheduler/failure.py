@@ -30,8 +30,12 @@ from app.models import FlowAgent, FlowTask, OnFailure
 logger = get_logger("scheduler.failure")
 
 # Runtime safety floor: timeout less than 240 minutes (4h) is treated as too
-# aggressive for Flow-level scheduling.
-_MIN_TASK_TIMEOUT_SECONDS = 14400
+# aggressive for Flow-level scheduling. Public so other schedulers of real
+# task execution (e.g. headless complaint/merge dispatch) reuse the same
+# "never misjudge a long-but-healthy task" floor.
+MIN_TASK_TIMEOUT_SECONDS = 14400
+# Backwards-compat alias (older imports).
+_MIN_TASK_TIMEOUT_SECONDS = MIN_TASK_TIMEOUT_SECONDS
 
 
 class FailureReason(str, Enum):
@@ -247,6 +251,7 @@ __all__ = [
     "FailureDecision",
     "FailureReason",
     "FailureRecord",
+    "MIN_TASK_TIMEOUT_SECONDS",
     "TaskSnapshot",
     "apply_on_failure",
     "detect_failures",

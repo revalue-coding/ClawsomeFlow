@@ -27,10 +27,11 @@ import errno
 import hashlib
 import shlex
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import AsyncIterator, Iterator
+from typing import AsyncIterator, Callable, Iterator
 
 from app import logging_setup
 from app.paths import clawsomeflow_home_path, openclaw_agent_tools_dir
@@ -201,12 +202,27 @@ def build_flocked_baseline_merge_command(
     )
 
 
-def _acquire_file_lock(fh, *, timeout: float, poll: float, lock_path: Path) -> None:
+class FileLockAbortedError(Exception):
+    """The caller's task was cancelled while the lock thread was still polling."""
+
+
+def _acquire_file_lock(
+    fh,
+    *,
+    timeout: float,
+    poll: float,
+    lock_path: Path,
+    abort_check: Callable[[], bool] | None = None,
+) -> None:
     """Block until the exclusive lock is held, or raise ``TimeoutError`` at *timeout*.
 
     Polls a non-blocking lock instead of a bare blocking ``flock``/``msvcrt`` so the
     wait is bounded — a stuck or crashed-mid-merge holder cannot block a spawn/merge
     forever. The cap is logged so a real deadlock is visible in the JSON logs.
+
+    ``abort_check`` (optional) is polled between attempts so an async caller that
+    was cancelled can stop the worker thread promptly instead of letting it poll
+    for up to ``timeout`` (8h) in the background.
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -223,6 +239,10 @@ def _acquire_file_lock(fh, *, timeout: float, poll: float, lock_path: Path) -> N
             # EACCES/EAGAIN (POSIX) or EDEADLK/EACCES (msvcrt) → lock is held; retry.
             if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
                 raise
+            if abort_check is not None and abort_check():
+                raise FileLockAbortedError(
+                    f"aborted while waiting for repo file lock {lock_path}"
+                ) from exc
             if time.monotonic() >= deadline:
                 logging_setup.lock_timeout(
                     key=f"file:{lock_path}", waited_ms=timeout * 1000
@@ -235,7 +255,10 @@ def _acquire_file_lock(fh, *, timeout: float, poll: float, lock_path: Path) -> N
 
 @contextmanager
 def main_repo_file_lock(
-    repo: str, *, timeout: float = LOCK_WAIT_TIMEOUT_SECONDS
+    repo: str,
+    *,
+    timeout: float = LOCK_WAIT_TIMEOUT_SECONDS,
+    _abort_check: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
     """Exclusive advisory lock on :func:`main_repo_lock_path`, bounded by *timeout*."""
     lock_path = main_repo_lock_path(repo)
@@ -243,7 +266,11 @@ def main_repo_file_lock(
     started = time.monotonic()
     with lock_path.open("a+") as fh:
         _acquire_file_lock(
-            fh, timeout=timeout, poll=_LOCK_POLL_INTERVAL_SECONDS, lock_path=lock_path
+            fh,
+            timeout=timeout,
+            poll=_LOCK_POLL_INTERVAL_SECONDS,
+            lock_path=lock_path,
+            abort_check=_abort_check,
         )
         logging_setup.file_lock_acquired(
             path=str(lock_path), wait_ms=(time.monotonic() - started) * 1000
@@ -264,9 +291,48 @@ def main_repo_file_lock(
 async def async_main_repo_file_lock(
     repo: str, *, timeout: float = LOCK_WAIT_TIMEOUT_SECONDS
 ) -> AsyncIterator[None]:
-    """Async wrapper around :func:`main_repo_file_lock` (thread offload)."""
-    cm = main_repo_file_lock(repo, timeout=timeout)
-    await asyncio.to_thread(cm.__enter__)
+    """Async wrapper around :func:`main_repo_file_lock` (thread offload).
+
+    Cancellation-safe: if the awaiting task is cancelled while the worker
+    thread is still polling for the ``flock``, the thread is told to abort
+    (next poll iteration, ≤0.5s) instead of polling up to 8h in the
+    background — and if the thread happened to win the lock in the same
+    instant, it is released immediately so the fd/flock can never leak.
+    """
+    guard = threading.Lock()
+    state = {"cancelled": False, "acquired": False}
+    cm = main_repo_file_lock(
+        repo, timeout=timeout, _abort_check=lambda: state["cancelled"],
+    )
+
+    def _enter() -> None:
+        cm.__enter__()
+        with guard:
+            if state["cancelled"]:
+                must_release = True
+            else:
+                state["acquired"] = True
+                must_release = False
+        if must_release:
+            # Cancelled in the same instant the lock was won — undo now.
+            cm.__exit__(None, None, None)
+            raise FileLockAbortedError(f"cancelled while locking {repo}")
+
+    try:
+        await asyncio.to_thread(_enter)
+    except asyncio.CancelledError:
+        with guard:
+            state["cancelled"] = True
+            acquired_before_cancel = state["acquired"]
+            state["acquired"] = False
+        if acquired_before_cancel:
+            # The enter thread finished successfully but our await was
+            # cancelled before resuming — release from a helper thread
+            # (flock ops are cheap; daemon so shutdown is never blocked).
+            threading.Thread(
+                target=cm.__exit__, args=(None, None, None), daemon=True,
+            ).start()
+        raise
     try:
         yield
     finally:
@@ -274,6 +340,7 @@ async def async_main_repo_file_lock(
 
 
 __all__ = [
+    "FileLockAbortedError",
     "async_main_repo_file_lock",
     "build_flocked_baseline_merge_command",
     "build_generic_locked_merge_command",

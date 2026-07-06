@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,109 @@ def test_main_repo_file_lock_times_out_when_held(
     # Once released, the lock is acquirable again (no leaked/stale state).
     with main_repo_file_lock(repo, timeout=5.0):
         pass
+
+
+@pytest.mark.asyncio
+async def test_async_file_lock_cancellation_stops_polling_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Cancelling the async waiter must abort the flock polling thread
+    promptly (not leave it polling for up to 8h) and must not corrupt the
+    lock: the holder can release and a fresh acquire succeeds."""
+    import threading
+    import time as _time
+
+    from app.repo_merge_lock import async_main_repo_file_lock
+
+    monkeypatch.setenv("CSFLOW_HOME", str(tmp_path))
+    repo = "/tmp/repo-cancel"
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with main_repo_file_lock(repo, timeout=5.0):
+            held.set()
+            release.wait(10.0)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        assert held.wait(5.0)
+
+        async def waiter() -> None:
+            async with async_main_repo_file_lock(repo, timeout=60.0):
+                pass  # pragma: no cover — never acquires
+
+        task = asyncio.create_task(waiter())
+        await asyncio.sleep(0.2)  # let the polling thread start
+        started = _time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert _time.monotonic() - started < 2.0, "cancel did not return promptly"
+    finally:
+        release.set()
+        t.join(5.0)
+
+    # Lock still healthy after the cancelled waiter (its aborted polling
+    # thread must not have grabbed / corrupted the flock in the background).
+    await asyncio.sleep(0.6)  # > one poll interval: let the aborted thread exit
+    async with async_main_repo_file_lock(repo, timeout=5.0):
+        pass
+
+
+def test_acquire_file_lock_abort_check_stops_polling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The polling loop honours abort_check within one poll interval."""
+    import threading
+    import time as _time
+
+    from app.repo_merge_lock import (
+        FileLockAbortedError,
+        _acquire_file_lock,
+        main_repo_lock_path,
+    )
+
+    monkeypatch.setenv("CSFLOW_HOME", str(tmp_path))
+    repo = "/tmp/repo-abort"
+    held = threading.Event()
+    release = threading.Event()
+    aborted = threading.Event()
+
+    def holder() -> None:
+        with main_repo_file_lock(repo, timeout=5.0):
+            held.set()
+            release.wait(10.0)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        assert held.wait(5.0)
+        lock_path = main_repo_lock_path(repo)
+        outcome: dict[str, object] = {}
+
+        def polling_waiter() -> None:
+            started = _time.monotonic()
+            with lock_path.open("a+") as fh:
+                try:
+                    _acquire_file_lock(
+                        fh, timeout=60.0, poll=0.05, lock_path=lock_path,
+                        abort_check=aborted.is_set,
+                    )
+                except FileLockAbortedError:
+                    outcome["aborted_after"] = _time.monotonic() - started
+
+        w = threading.Thread(target=polling_waiter)
+        w.start()
+        _time.sleep(0.2)
+        aborted.set()
+        w.join(3.0)
+        assert not w.is_alive(), "polling thread did not stop on abort"
+        assert "aborted_after" in outcome
+    finally:
+        release.set()
+        t.join(5.0)
 
 
 def test_self_merge_instruction_is_concise() -> None:

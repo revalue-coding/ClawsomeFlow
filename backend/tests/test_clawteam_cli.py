@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -205,8 +206,8 @@ async def test_run_in_cwd_expands_tilde(monkeypatch: pytest.MonkeyPatch) -> None
         async def communicate(self) -> tuple[bytes, bytes]:
             return b"", b""
 
-    async def _fake_exec(*argv: str, cwd: str | None = None, env=None, stdout=None, stderr=None):
-        del argv, env, stdout, stderr
+    async def _fake_exec(*argv: str, cwd: str | None = None, env=None, stdout=None, stderr=None, **kwargs):
+        del argv, env, stdout, stderr, kwargs
         seen["cwd"] = cwd
         return _FakeProc()
 
@@ -905,3 +906,137 @@ def test_team_spawn_team_via_real_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     import json
     discovered = json.loads(r.stdout)
     assert any(t["name"] == team_name for t in discovered)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Control-plane subprocess ceiling (_exec_capture)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_exec_capture_times_out_and_kills_process() -> None:
+    """A hung CLI subprocess is killed at the ceiling and reported as exit
+    code 124 (stderr carries the reason) — the tick loop can then treat it
+    as a normal failed command instead of hanging forever.
+
+    NOTE: this ceiling applies ONLY to control-plane commands (spawn/inject/
+    peek…, seconds-scale); agent task execution runs inside tmux and is never
+    subject to it.
+    """
+    import time as _time
+
+    started = _time.monotonic()
+    code, out, err = await cli_mod._exec_capture(
+        ["sh", "-c", "sleep 30"], env={**os.environ}, timeout_sec=0.3,
+    )
+    elapsed = _time.monotonic() - started
+    assert code == cli_mod.CLI_TIMEOUT_EXIT_CODE
+    assert "timed out" in err
+    assert elapsed < 5.0, f"kill was not prompt: {elapsed:.1f}s"
+
+
+@pytest.mark.asyncio
+async def test_exec_capture_kills_whole_process_group_on_timeout() -> None:
+    """Grandchildren (sh -> sleep) must die with the group, not survive as
+    orphans that keep the pipe open."""
+    import tempfile as _tempfile
+    import time as _time
+
+    with _tempfile.NamedTemporaryFile(mode="r", suffix=".pid") as pidfile:
+        code, _out, _err = await cli_mod._exec_capture(
+            ["sh", "-c", f"sleep 30 & echo $! > {pidfile.name}; wait"],
+            env={**os.environ}, timeout_sec=0.5,
+        )
+        assert code == cli_mod.CLI_TIMEOUT_EXIT_CODE
+        pid_raw = pidfile.read().strip()
+    assert pid_raw, "child pid was not recorded"
+    child_pid = int(pid_raw)
+
+    def _alive(pid: int) -> bool:
+        """True only for a genuinely running process.
+
+        A killed orphan may linger as a zombie until PID 1 reaps it (common
+        inside the Docker test container) — ``os.kill(pid, 0)`` still succeeds
+        on zombies, so consult ``/proc/<pid>/stat`` state ``Z`` as "dead".
+        """
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            return stat.rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False
+
+    # After group-kill the grandchild must be gone (allow a beat for reaping).
+    deadline = _time.monotonic() + 3.0
+    while _time.monotonic() < deadline:
+        if not _alive(child_pid):
+            break
+        _time.sleep(0.1)
+    else:
+        os.kill(child_pid, 9)  # cleanup before failing
+        pytest.fail("grandchild survived the process-group kill")
+
+
+@pytest.mark.asyncio
+async def test_exec_capture_cancellation_kills_process() -> None:
+    """Cancelling the awaiting task (run abort) must kill the subprocess."""
+    import asyncio as _asyncio
+    import tempfile as _tempfile
+    import time as _time
+
+    with _tempfile.NamedTemporaryFile(mode="r", suffix=".pid") as pidfile:
+        task = _asyncio.create_task(cli_mod._exec_capture(
+            ["sh", "-c", f"echo $$ > {pidfile.name}; sleep 30"],
+            env={**os.environ},
+        ))
+        # Wait until the shell has written its pid (i.e. it is running).
+        deadline = _time.monotonic() + 5.0
+        while _time.monotonic() < deadline and not pidfile.read().strip():
+            pidfile.seek(0)
+            await _asyncio.sleep(0.05)
+        pidfile.seek(0)
+        shell_pid = int(pidfile.read().strip())
+        task.cancel()
+        with pytest.raises(_asyncio.CancelledError):
+            await task
+    deadline = _time.monotonic() + 3.0
+    while _time.monotonic() < deadline:
+        try:
+            os.kill(shell_pid, 0)
+        except ProcessLookupError:
+            break
+        _time.sleep(0.1)
+    else:
+        os.kill(shell_pid, 9)
+        pytest.fail("subprocess survived task cancellation")
+
+
+def test_cli_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CSFLOW_CLAWTEAM_CLI_TIMEOUT_SEC", "42.5")
+    assert cli_mod._cli_timeout_seconds() == 42.5
+    monkeypatch.setenv("CSFLOW_CLAWTEAM_CLI_TIMEOUT_SEC", "not-a-number")
+    assert cli_mod._cli_timeout_seconds() == cli_mod.DEFAULT_CLI_TIMEOUT_SECONDS
+    monkeypatch.delenv("CSFLOW_CLAWTEAM_CLI_TIMEOUT_SEC")
+    assert cli_mod._cli_timeout_seconds() == cli_mod.DEFAULT_CLI_TIMEOUT_SECONDS
+
+
+def test_default_cli_timeout_far_above_control_plane_latency() -> None:
+    """15min default: generous for control-plane calls (normally <10s), yet
+    bounded so one hung CLI can no longer freeze a run loop forever."""
+    assert cli_mod.DEFAULT_CLI_TIMEOUT_SECONDS == 15 * 60.0
+
+
+def test_resolve_argv_pins_clawteam_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import runtime_bins
+
+    monkeypatch.setattr(
+        runtime_bins, "resolve_binary", lambda name: f"/opt/bin/{name}",
+    )
+    assert cli_mod._resolve_argv(["clawteam", "team", "discover"]) == [
+        "/opt/bin/clawteam", "team", "discover",
+    ]
+    # Non-clawteam argv (git/tmux…) is left untouched.
+    assert cli_mod._resolve_argv(["git", "status"]) == ["git", "status"]

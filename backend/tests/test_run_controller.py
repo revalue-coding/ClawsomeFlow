@@ -4340,3 +4340,90 @@ def test_merge_requirement_agents_easy_dev_returns_empty(fake_lookup, mode_key: 
     spec.variables = {mode_key: "true"}
     rc = _merge_req_controller(spec, fake_lookup)
     assert rc._merge_requirement_agents() == []
+
+
+# ── tick-level leader inbox memoization ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_leader_inbox_peeked_at_most_once_per_tick(fake_lookup) -> None:
+    """Failure detection AND leader-summary dispatch both read the leader
+    inbox inside one tick; the MCP ``mailbox_peek`` must fire only once
+    (pure RPC dedup — peek is non-consuming so data is identical)."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    calls = {"n": 0}
+
+    async def inbox_provider() -> list[str]:
+        calls["n"] += 1
+        return ["task ct-t1 done: all good"]
+
+    snapshots = [
+        TaskSnapshot(
+            task_id="t1", owner_agent_id="alice", status="completed",
+            locked_by_agent="alice", metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="ts", owner_agent_id="leader", status="pending",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=inbox_provider,
+    )
+
+    await rc.tick()
+    assert calls["n"] == 1, (
+        f"leader inbox peeked {calls['n']}× in one tick — memo not applied"
+    )
+    # The memo must NOT leak across ticks: the next tick peeks fresh.
+    await rc.tick()
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_leader_inbox_not_cached_outside_tick(fake_lookup) -> None:
+    """Complaint phase / terminal flush run outside tick(); they must always
+    see a fresh peek (no stale memo)."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    calls = {"n": 0}
+
+    async def inbox_provider() -> list[str]:
+        calls["n"] += 1
+        return []
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots,
+        leader_inbox_provider=inbox_provider,
+    )
+
+    await rc._fetch_leader_inbox()
+    await rc._fetch_leader_inbox()
+    assert calls["n"] == 2
+
+
+def test_headless_dispatch_timeout_matches_task_floor() -> None:
+    """A legitimate long complaint-fix turn must never be killed before the
+    scheduler's own task-timeout floor (user invariant: running-normally
+    tasks are NEVER failed just for taking long)."""
+    from app.scheduler.controller import _OPENCLAW_HEADLESS_TIMEOUT_SEC
+    from app.scheduler.failure import MIN_TASK_TIMEOUT_SECONDS
+
+    assert _OPENCLAW_HEADLESS_TIMEOUT_SEC == MIN_TASK_TIMEOUT_SECONDS
+    assert _OPENCLAW_HEADLESS_TIMEOUT_SEC >= 14400

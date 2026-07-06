@@ -40,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from app.api._auth import current_user
-from app.api.errors import ApiError
+from app.api.errors import ApiError, map_hermes_agent_error
 from app.logging_setup import get_logger
 from app.models import HermesAgent, iso_utc
 from app.operations import get_op_registry
@@ -339,17 +339,9 @@ def _to_detail(a: HermesAgent, *, team_name: str) -> HermesAgentDetail:
 
 
 def _map_service_error(exc: svc.HermesAgentError) -> ApiError:
-    mapping: dict[type, tuple[str, int]] = {
-        svc.AgentIdInvalid: ("INVALID_PAYLOAD", 400),
-        svc.AgentAlreadyExists: ("AGENT_ALREADY_EXISTS", 409),
-        svc.AgentNotFound: ("AGENT_NOT_FOUND", 404),
-        svc.AgentInUse: ("AGENT_IN_USE", 409),
-        svc.HermesUnavailable: ("HERMES_UNAVAILABLE", 503),
-        svc.ProfileOpFailed: ("HERMES_CLI_FAILED", 502),
-        svc.AgentCreateCancelled: ("AGENT_CREATE_CANCELLED", 409),
-    }
-    code, status = mapping.get(type(exc), ("HERMES_ERROR", 500))
-    return ApiError(code, str(exc), status_code=status, details=exc.details)
+    # Mapping single-sourced in app.api.errors (also backs the global
+    # HermesAgentError exception handler registered there).
+    return map_hermes_agent_error(exc)
 
 
 def _get_owned(agent_id: str, user: str, storage: StorageBackend) -> HermesAgent:

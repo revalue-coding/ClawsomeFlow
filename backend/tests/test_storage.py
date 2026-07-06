@@ -391,3 +391,58 @@ class TestOpenclawAgentCRUD:
         assert s.openclaw_get("oc1").name == "Renamed"
         assert s.openclaw_delete("oc1") is True
         assert s.openclaw_get("oc1") is None
+
+
+class TestRunCountActiveForOpenclawAgent:
+    """Batched (non-N+1) active-run counting for OpenClaw agent deletion guard."""
+
+    @staticmethod
+    def _spec_with_openclaw(agent_id: str) -> FlowSpec:
+        return FlowSpec(
+            agents=[
+                FlowAgent(id="lead", kind=AgentKind.claude, repo="/r", is_leader=True),
+                FlowAgent(id=agent_id, kind=AgentKind.openclaw),
+            ],
+            tasks=[
+                FlowTask(id="t1", owner_agent_id=agent_id, subject="w"),
+                FlowTask(
+                    id="ts", owner_agent_id="lead", subject="s",
+                    depends_on=["t1"], is_leader_summary=True,
+                ),
+            ],
+        )
+
+    def _run(self, flow_id: str, run_id: str, status: RunStatus) -> FlowRun:
+        return FlowRun(
+            id=run_id, flow_id=flow_id, flow_version=1,
+            team_name=f"csflow-{run_id}", status=status, user="alice",
+        )
+
+    def test_counts_only_nonterminal_runs_of_matching_flows(self) -> None:
+        s = get_storage()
+        with_agent = s.flow_create(
+            Flow(name="with", owner_user="alice").with_spec(
+                self._spec_with_openclaw("oc-x"),
+            ),
+        )
+        without_agent = s.flow_create(_flow("without"))
+
+        # Two active runs + one terminal for the matching flow; one active
+        # run for a flow that does not reference the agent.
+        s.run_create(self._run(with_agent.id, "r-active-1", RunStatus.running))
+        s.run_create(self._run(with_agent.id, "r-active-2", RunStatus.pending))
+        s.run_create(self._run(with_agent.id, "r-done", RunStatus.completed))
+        s.run_create(self._run(without_agent.id, "r-other", RunStatus.running))
+
+        assert s.run_count_active_for_openclaw_agent("oc-x") == 2
+        assert s.run_count_active_for_openclaw_agent("oc-unknown") == 0
+
+    def test_zero_when_no_active_runs(self) -> None:
+        s = get_storage()
+        flow = s.flow_create(
+            Flow(name="w", owner_user="alice").with_spec(
+                self._spec_with_openclaw("oc-y"),
+            ),
+        )
+        s.run_create(self._run(flow.id, "r-done-2", RunStatus.failed))
+        assert s.run_count_active_for_openclaw_agent("oc-y") == 0

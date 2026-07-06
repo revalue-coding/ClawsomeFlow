@@ -1497,10 +1497,14 @@ async def test_chat_history_returns_cached_messages(
 
     hist = client.get("/api/openclaw/agents/chat-history-api/chat-history")
     assert hist.status_code == 200, hist.text
-    assert hist.json()["messages"] == [
+    messages = hist.json()["messages"]
+    # Server-recorded ts (epoch ms) rides along since 1e31d83; compare the
+    # role/content contract and only sanity-check ts.
+    assert [{"role": m["role"], "content": m["content"]} for m in messages] == [
         {"role": "user", "content": "cached-turn"},
         {"role": "assistant", "content": "cached-reply"},
     ]
+    assert all(isinstance(m.get("ts"), int) for m in messages)
 
 
 @pytest.mark.asyncio
@@ -1535,7 +1539,10 @@ async def test_chat_history_marks_no_text_reply(
 
     hist = client.get("/api/openclaw/agents/chat-empty-reply/chat-history")
     assert hist.status_code == 200, hist.text
-    assert hist.json()["messages"] == [
+    assert [
+        {"role": m["role"], "content": m["content"]}
+        for m in hist.json()["messages"]
+    ] == [
         {"role": "user", "content": "do-it"},
         {"role": "assistant", "content": "[[NO_TEXT_REPLY]]"},
     ]
@@ -1639,7 +1646,10 @@ async def test_reset_session_sends_plain_slash_reset_only(
     assert warmup.status_code == 200
     pre_hist = client.get("/api/openclaw/agents/chat-reset/chat-history")
     assert pre_hist.status_code == 200
-    assert pre_hist.json()["messages"] == [
+    assert [
+        {"role": m["role"], "content": m["content"]}
+        for m in pre_hist.json()["messages"]
+    ] == [
         {"role": "user", "content": "before-reset"},
         {"role": "assistant", "content": "ok"},
     ]

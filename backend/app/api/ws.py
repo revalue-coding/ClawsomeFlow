@@ -79,10 +79,15 @@ async def run_event_stream(
     bus = get_event_broadcaster()
     logger.info("ws_run_subscribed", run_id=run_id, user=user)
 
-    # If client supplied since_id, backfill missed events first.
+    # If client supplied since_id, backfill missed events first. The DB read
+    # is offloaded so a large backfill can't stall the event loop (and every
+    # other WS/HTTP request) on synchronous SQLite I/O.
     backfill_count = 0
     if since_id is not None:
-        for ev in storage.event_list(run_id=run_id, since_id=since_id, limit=500):
+        events = await asyncio.to_thread(
+            storage.event_list, run_id=run_id, since_id=since_id, limit=500,
+        )
+        for ev in events:
             await websocket.send_json({
                 "id": ev.id, "ts": iso_utc(ev.ts), "type": ev.type,
                 "agentId": ev.agent_id, "taskId": ev.task_id,

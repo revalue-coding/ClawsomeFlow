@@ -68,7 +68,6 @@ from app.models import (
     FlowTask,
     MergeStrategy,
     OnFailure,
-    RunEvent,
     RunStatus,
     iso_utc,
 )
@@ -82,6 +81,7 @@ from app.scheduler.prompts import (
     build_worker_dispatch,
 )
 from app.scheduler.failure import (
+    MIN_TASK_TIMEOUT_SECONDS,
     FailureRecord,
     TaskSnapshot,
     apply_on_failure,
@@ -92,9 +92,11 @@ from app.scheduler.finalize import (
     finalize_run,
     run_terminal_tail_cleanup,
 )
+from app.scheduler.run_metadata import POST_COMPLAINT_STATUS_KEY
 from app.scheduler.naming import openclaw_session_id_for_run, team_name_for_run
 from app.repo_merge_lock import self_merge_instruction
 from app.scheduler.providers import DispatchClock
+from app.services import subprocess_registry
 from app.scheduler.sessions.base import (
     DispatchOutcome,
     SessionState,
@@ -113,7 +115,7 @@ from app.worktree.lookup import WorktreeInfo, WorktreeLookup, get_worktree_looku
 
 logger = get_logger("scheduler.controller")
 
-_POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
+_POST_COMPLAINT_STATUS_KEY = POST_COMPLAINT_STATUS_KEY
 _TASK_PREFIX_RE = re.compile(
     r"^\s*task\s+([A-Za-z0-9._-]+)\s+done\s*:",
     re.IGNORECASE,
@@ -144,7 +146,11 @@ _RUNTIME_ERROR_PROMPT_RE = re.compile(
 
 _POLL_MIN_SEC = 0.5
 _POLL_MAX_SEC = 3.0
-_OPENCLAW_HEADLESS_TIMEOUT_SEC = 3600
+# Headless complaint/merge dispatch runs a REAL agent task to completion in a
+# foreground subprocess, so its ceiling must follow the scheduler's task
+# timeout floor (4h) — a shorter guard would kill a long-but-healthy task.
+# The previous 1h value could misjudge legitimate long fixes as failures.
+_OPENCLAW_HEADLESS_TIMEOUT_SEC = MIN_TASK_TIMEOUT_SECONDS
 _RUNTIME_SOCKET_CAPTURE_LINES = 140
 _RUNTIME_SOCKET_TAIL_CHARS = 1800
 _RUNTIME_SOCKET_RECOVERY_LIMIT = 2
@@ -321,6 +327,11 @@ class RunController:
         self._prewarm_task: asyncio.Task[None] | None = None
         self._first_dispatch_task_id: str | None = None
         self._first_dispatch_owner_id: str | None = None
+        # Per-tick leader mailbox_peek memo — populated by
+        # :meth:`_fetch_leader_inbox_raw`, valid only inside one ``tick()``
+        # (cleared on entry + exit so out-of-loop callers always peek fresh).
+        self._leader_inbox_tick_cache: list[Any] | None = None
+        self._in_tick = False
 
     # ── public surface ───────────────────────────────────────────────
 
@@ -903,7 +914,21 @@ class RunController:
         only **then** dispatch the resulting ready set. This collapses
         "completion → dispatch dependent" into a single tick which keeps the
         UI feeling responsive.
+
+        Within one tick the leader mailbox is peeked **at most once**
+        (failure detection / checkpoint refresh / dispatch context all share
+        the memoized result — peek is non-consuming so this is purely an RPC
+        dedup, not a semantic change).
         """
+        self._in_tick = True
+        self._leader_inbox_tick_cache = None
+        try:
+            return await self._tick_inner()
+        finally:
+            self._in_tick = False
+            self._leader_inbox_tick_cache = None
+
+    async def _tick_inner(self) -> bool:
         activity = False
 
         # 1. Apply latest snapshot — possibly flipping tasks to completed
@@ -1773,6 +1798,23 @@ class RunController:
         # until the controller is fully wired into FlowScheduler).
         return []
 
+    async def _fetch_leader_inbox_raw(self) -> list[Any]:
+        """Fetch the leader inbox payload, memoized for the current tick.
+
+        ``mailbox_peek`` is non-consuming, so multiple readers inside one
+        tick (failure detection → checkpoint refresh → dispatch context)
+        would see near-identical data anyway; the memo just removes the
+        duplicate RPCs. Outside a tick (complaint phase, terminal snapshot
+        flush) the cache is disabled and every call peeks fresh.
+        """
+        if self._in_tick and self._leader_inbox_tick_cache is not None:
+            return self._leader_inbox_tick_cache
+        assert self._leader_inbox_provider is not None
+        raw = list(await self._leader_inbox_provider())
+        if self._in_tick:
+            self._leader_inbox_tick_cache = raw
+        return raw
+
     async def _fetch_leader_inbox(self) -> list[str]:
         """Return the leader's inbox messages as raw strings.
 
@@ -1782,7 +1824,7 @@ class RunController:
         """
         if self._leader_inbox_provider is not None:
             try:
-                raw = await self._leader_inbox_provider()
+                raw = await self._fetch_leader_inbox_raw()
             except Exception as exc:
                 logger.warning("leader_inbox_provider_failed", error=str(exc))
                 self._emit_event(
@@ -1809,7 +1851,7 @@ class RunController:
         if self._leader_inbox_provider is None:
             return []
         try:
-            raw = await self._leader_inbox_provider()
+            raw = await self._fetch_leader_inbox_raw()
         except Exception as exc:
             logger.warning("leader_inbox_provider_failed_structured", error=str(exc))
             self._emit_event(
@@ -2610,18 +2652,27 @@ class RunController:
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=cwd, env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
+        subprocess_registry.register(proc)
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=_OPENCLAW_HEADLESS_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError as exc:
-            proc.kill()
+            subprocess_registry.kill_group(proc)
             await proc.communicate()
             raise RuntimeError(
                 f"hermes {dispatch_kind} dispatch timeout on {agent.id} "
                 f"({_OPENCLAW_HEADLESS_TIMEOUT_SEC}s)",
             ) from exc
+        except asyncio.CancelledError:
+            # Run abort / service drain: never leave a headless agent turn
+            # running detached (it would keep mutating the workspace).
+            subprocess_registry.kill_group(proc)
+            raise
+        finally:
+            subprocess_registry.unregister(proc)
         if (proc.returncode or 0) != 0:
             detail = (
                 stderr_b.decode("utf-8", errors="replace").strip()
@@ -2712,19 +2763,28 @@ class RunController:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
+            subprocess_registry.register(proc)
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
                     proc.communicate(),
                     timeout=_OPENCLAW_HEADLESS_TIMEOUT_SEC,
                 )
             except asyncio.TimeoutError as exc:
-                proc.kill()
+                subprocess_registry.kill_group(proc)
                 await proc.communicate()
                 raise RuntimeError(
                     f"openclaw {dispatch_kind} dispatch timeout on {agent.id} "
                     f"({_OPENCLAW_HEADLESS_TIMEOUT_SEC}s)",
                 ) from exc
+            except asyncio.CancelledError:
+                # Run abort / service drain: kill the in-flight headless
+                # turn's whole process group before propagating.
+                subprocess_registry.kill_group(proc)
+                raise
+            finally:
+                subprocess_registry.unregister(proc)
             stdout = stdout_b.decode("utf-8", errors="replace")
             stderr = stderr_b.decode("utf-8", errors="replace")
             if (proc.returncode or 0) == 0:
@@ -3595,33 +3655,17 @@ class RunController:
         task_id: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> None:
-        try:
-            row = self.storage.event_append(RunEvent(
-                run_id=self.run.id,
-                type=event_type,
-                agent_id=agent_id,
-                task_id=task_id,
-                payload=payload or {},
-            ))
-        except Exception as exc:
-            logger.warning("event_append_failed", error=str(exc))
-            return
-        # Fan out to WebSocket subscribers (Phase 7). Field names use
-        # camelCase to match the REST `/api/runs/{id}/events` payload
-        # (which serialises through `EventView` with `to_camel`). Keeps
-        # the front-end's event handler uniform regardless of channel.
-        try:
-            from app.events import get_event_broadcaster
-            get_event_broadcaster().publish(self.run.id, {
-                "id": row.id,
-                "ts": iso_utc(row.ts),
-                "type": row.type,
-                "agentId": row.agent_id,
-                "taskId": row.task_id,
-                "payload": row.payload,
-            })
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning("event_publish_failed", error=str(exc))
+        # Persist + WS fanout via the canonical helper (field names are
+        # camelCase to match the REST `/api/runs/{id}/events` payload).
+        from app.events import publish_run_event
+        publish_run_event(
+            self.storage,
+            run_id=self.run.id,
+            event_type=event_type,
+            agent_id=agent_id,
+            task_id=task_id,
+            payload=payload,
+        )
 
     async def _shutdown_remaining_sessions(self, *, reason: str) -> None:
         """Best-effort shutdown for all non-exited sessions."""

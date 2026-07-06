@@ -307,24 +307,30 @@ class SqliteStorage:
     def run_count_active_for_openclaw_agent(self, agent_id: str) -> int:
         """Active = the agent appears in any non-terminal Run's spec.
 
-        Cheap version: scan recent non-terminal runs and inspect spec.agents.
-        For the local mode this is fine; server mode P1 introduces a join table.
+        Scans non-terminal runs and inspects spec.agents, loading each
+        distinct Flow once (many runs share a flow — avoids the former
+        per-run ``s.get(Flow, ...)`` N+1). Server mode P1 introduces a
+        join table.
         """
         with self._session() as s:
             stmt = (
                 select(FlowRun)
-                .where(FlowRun.status.notin_([s.value for s in _TERMINAL_STATUSES]))
+                .where(FlowRun.status.notin_([st.value for st in _TERMINAL_STATUSES]))
             )
-            count = 0
-            for run in s.exec(stmt).all():
-                flow = s.get(Flow, run.flow_id)
-                if not flow:
-                    continue
-                for a in flow.spec.get("agents", []):
-                    if a.get("kind") == "openclaw" and a.get("id") == agent_id:
-                        count += 1
-                        break
-            return count
+            runs = list(s.exec(stmt).all())
+            if not runs:
+                return 0
+            flow_ids = {run.flow_id for run in runs}
+            flow_stmt = select(Flow).where(Flow.id.in_(flow_ids))
+            matching_flow_ids = {
+                flow.id
+                for flow in s.exec(flow_stmt).all()
+                if any(
+                    a.get("kind") == "openclaw" and a.get("id") == agent_id
+                    for a in flow.spec.get("agents", [])
+                )
+            }
+            return sum(1 for run in runs if run.flow_id in matching_flow_ids)
 
     def run_schedule_create(self, schedule: FlowRunSchedule) -> FlowRunSchedule:
         with self._session() as s:
