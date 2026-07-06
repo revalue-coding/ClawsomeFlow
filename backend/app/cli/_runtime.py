@@ -2,7 +2,7 @@
 
 Owns the PID-file convention so ``csflow stop`` knows which process to
 signal, plus a tiny HTTP poller used to wait for the backend to come up
-when ``csflow start`` boots uvicorn in-process.
+after the managed service (systemd/launchd) starts it.
 """
 
 from __future__ import annotations
@@ -70,6 +70,30 @@ def stop_process(pid: int, *, grace_seconds: float = 8.0) -> bool:
     return not is_alive(pid)
 
 
+def wait_for_health(*, host: str, port: int, timeout_seconds: float = 60.0) -> bool:
+    """Poll ``/health`` until it answers 200 or the timeout elapses.
+
+    "systemd unit active" only means the process launched; first boot after
+    an upgrade still runs init/migration before uvicorn listens. Poll HTTP so
+    callers can report *actual* readiness instead of guessing.
+    """
+    import urllib.error
+    import urllib.request
+
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    url = f"http://{probe_host}:{port}/health"
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if 200 <= resp.status < 300:
+                    return True
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+        time.sleep(1.0)
+    return False
+
+
 def active_driving_run_count() -> int:
     """Best-effort count of runs that need a live process. 0 on any error.
 
@@ -119,5 +143,6 @@ __all__ = [
     "read_pid",
     "remove_pid",
     "stop_process",
+    "wait_for_health",
     "write_pid",
 ]

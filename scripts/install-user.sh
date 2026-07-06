@@ -90,7 +90,10 @@ ensure_local_bin_in_path() {
 }
 
 probe_existing_deployment() {
-  if [[ -d "${CSFLOW_HOME}" ]]; then
+  # A bare (possibly empty / half-created) directory is NOT a deployment:
+  # routing it to upgrade-runtime would no-op (no config) and leave the
+  # service broken. Only treat homes with real init artifacts as existing.
+  if [[ -f "${CSFLOW_HOME}/config.json" || -f "${CSFLOW_HOME}/.csflow-version" ]]; then
     EXISTING_DEPLOYMENT=1
   else
     EXISTING_DEPLOYMENT=0
@@ -145,13 +148,13 @@ PY
 ensure_python311() {
   resolve_python_runtime_bin
   if [[ -n "${PYTHON_RUNTIME_BIN}" ]]; then
-    say "[1/10] Python 3.11 already present"
+    say "[1/11] Python 3.11 already present"
     return
   fi
   if [[ "${IS_MACOS}" == "1" ]]; then
     command -v brew >/dev/null 2>&1 \
       || fail "Python 3.11 is required on macOS. Please install Homebrew first: https://brew.sh"
-    say "[1/10] Installing Python 3.11 (Homebrew)"
+    say "[1/11] Installing Python 3.11 (Homebrew)"
     brew install python@3.11 || fail "Failed to install python@3.11 via Homebrew."
     resolve_python_runtime_bin
     [[ -n "${PYTHON_RUNTIME_BIN}" ]] || fail "python@3.11 installed but python3.11 still unavailable in PATH."
@@ -160,7 +163,7 @@ ensure_python311() {
   if ! command -v apt-get >/dev/null; then
     fail "Python 3.11 is required. This host is not apt-based; install Python 3.11 manually."
   fi
-  say "[1/10] Installing Python 3.11"
+  say "[1/11] Installing Python 3.11"
   sudo apt-get update
   sudo apt-get install -y python3.11 python3.11-venv
   resolve_python_runtime_bin
@@ -168,7 +171,7 @@ ensure_python311() {
 }
 
 ensure_os_packages() {
-  say "[2/10] Ensuring system packages (git, tmux)"
+  say "[2/11] Ensuring system packages (git, tmux)"
   if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
     say "  ✓ git and tmux already present"
     return
@@ -186,7 +189,7 @@ ensure_os_packages() {
 }
 
 ensure_runtime_venv() {
-  say "[3/10] Preparing isolated runtime venv"
+  say "[3/11] Preparing isolated runtime venv"
   mkdir -p "$(dirname "${VENV_DIR}")"
   if [[ ! -x "${VENV_BIN}/python" ]]; then
     [[ -n "${PYTHON_RUNTIME_BIN}" ]] || fail "Python runtime not resolved."
@@ -197,7 +200,7 @@ ensure_runtime_venv() {
 }
 
 install_clawsomeflow() {
-  say "[5/10] Installing clawsomeflow into runtime venv"
+  say "[5/11] Installing clawsomeflow into runtime venv"
   local channel_label="stable"
   if [[ "${USE_PRE}" == "1" ]]; then
     channel_label="pre-release"
@@ -394,13 +397,13 @@ ensure_clawteam_stack() {
 }
 
 ensure_clawteam_runtime() {
-  say "[4/10] Ensuring clawteam runtime capability (≥0.3, before clawsomeflow)"
+  say "[4/11] Ensuring clawteam runtime capability (≥0.3, before clawsomeflow)"
   ensure_clawteam_stack 0
   say "  ✓ clawteam runtime + clawteam-mcp available"
 }
 
 install_launchers() {
-  say "[6/10] Installing launcher shims into ~/.local/bin"
+  say "[6/11] Installing launcher shims into ~/.local/bin"
   ensure_local_bin_in_path
   ln -sf "${VENV_BIN}/csflow" "${HOME}/.local/bin/csflow"
   ln -sf "${VENV_BIN}/clawsomeflow" "${HOME}/.local/bin/clawsomeflow"
@@ -428,7 +431,7 @@ snapshot_existing_metadata() {
 }
 
 reconcile_installation() {
-  say "[7/10] Reconciling ClawsomeFlow data"
+  say "[7/11] Reconciling ClawsomeFlow data"
   if [[ "${EXISTING_DEPLOYMENT}" == "1" ]]; then
     say "  -> Existing deployment detected: in-place upgrade (no uninstall)"
     snapshot_existing_metadata
@@ -441,15 +444,20 @@ reconcile_installation() {
     else
       "${VENV_BIN}/csflow" install --no-restart-service || fail "csflow install failed"
     fi
+    # Converge with the upgrade pipeline: run_upgrade's unconditional step-0
+    # blocks (secrets, Hermes inference backfill, agent tools, ...) must apply
+    # to fresh deploys too (DEV.md §3.7 upgrade parity). Idempotent by design.
+    "${VENV_BIN}/csflow" upgrade-runtime --yes --no-restart-service \
+      || fail "csflow upgrade-runtime (fresh-install reconcile) failed"
   fi
   # upgrade-runtime / install may pip-touch the venv; re-verify clawteam stack.
   ensure_clawteam_stack 1
 }
 
 write_user_service() {
-  say "[8/10] Configuring managed service"
+  say "[8/11] Configuring managed service"
   if [[ "${IS_MACOS}" == "1" ]]; then
-    say "  -> macOS detected; launchd service file is managed by csflow CLI."
+    say "  -> macOS detected; launchd service file is managed by csflow CLI (written at start step)."
     return
   fi
   if ! command -v systemctl >/dev/null; then
@@ -483,7 +491,7 @@ EOF
 
 enable_linger_if_possible() {
   if [[ "${IS_MACOS}" == "1" ]]; then
-    say "[9/10] Skipping linger setup on macOS"
+    say "[9/11] Skipping linger setup on macOS"
     return
   fi
   if [[ "${SKIP_LINGER}" == "1" ]]; then
@@ -500,7 +508,7 @@ enable_linger_if_possible() {
     return
   fi
   if sudo true >/dev/null 2>&1; then
-    say "[9/10] Enabling user linger for boot auto-start"
+    say "[9/11] Enabling user linger for boot auto-start"
     sudo loginctl enable-linger "${USER}" || warn "enable-linger failed; continuing"
   else
     warn "sudo loginctl unavailable; skip linger setup."
@@ -509,7 +517,7 @@ enable_linger_if_possible() {
 }
 
 verify_runtime_stack() {
-  say "[9/10] Preflight: verifying required runtime stack"
+  say "[10/11] Preflight: verifying required runtime stack"
   command -v git >/dev/null 2>&1 || fail "git is required but not found in PATH."
   command -v tmux >/dev/null 2>&1 || fail "tmux is required but not found in PATH."
   ensure_clawteam_stack
@@ -517,7 +525,10 @@ verify_runtime_stack() {
     CSFLOW_HOME="${CSFLOW_HOME}" \
     CSFLOW_VENV_DIR="${VENV_DIR}" \
     "${VENV_BIN}/python" -c "import app.cli.deps" 2>/dev/null; then
-    say "  ✓ python, git, tmux, clawteam (+ MCP 1.x / clawteam-mcp)"
+    # Installed package predates the deps module; the shell-level checks above
+    # (git / tmux / clawteam stack) are all we can verify here.
+    warn "  ⚠ Detailed dependency preflight unavailable in this version; verified git, tmux and clawteam only."
+    warn "    Run '${VENV_BIN}/csflow doctor' after startup for a full health check."
     return
   fi
   if ! PATH="${VENV_BIN}:${HOME}/.local/bin:${PATH}" \
@@ -544,7 +555,7 @@ PY
 
 start_user_service() {
   if [[ "${IS_MACOS}" == "1" ]]; then
-    say "[10/10] Starting and enabling csflow service (launchd)"
+    say "[11/11] Starting and enabling csflow service (launchd)"
     ensure_port_reusable
     local start_args=("start")
     if [[ "${YES}" == "1" ]]; then
@@ -554,7 +565,7 @@ start_user_service() {
     return
   fi
 
-  say "[10/10] Starting and enabling csflow service (systemd)"
+  say "[11/11] Starting and enabling csflow service (systemd)"
   ensure_port_reusable
   systemctl --user daemon-reload
   systemctl --user enable --now csflow
@@ -574,7 +585,7 @@ health_check() {
       return
     fi
     if (( i == 10 )); then
-      say "… still starting (running upgrade/migration), waiting up to ${attempts}s …"
+      say "… still starting (running upgrade/migration); will keep waiting up to ${attempts}s total …"
     fi
     sleep 1
   done

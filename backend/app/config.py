@@ -78,6 +78,12 @@ class Config(BaseModel):
     # one-click upgrade. Disable to suppress the outbound version check.
     update_check_enabled: bool = True
 
+    # Optional webhook POSTed (best-effort, fire-and-forget) when a Run
+    # reaches a terminal state. None (the default) disables the feature
+    # entirely — zero-regression opt-in, same pattern as ``api_token``.
+    # See app.services.run_notify.
+    notify_webhook_url: str | None = None
+
     storage: StorageConfig = Field(default_factory=StorageConfig)
     broker: BrokerConfig | None = None
     auth: AuthConfig | None = None

@@ -68,6 +68,35 @@ def _build_fake_env(
         exec python3 "$@"
         """,
     )
+    _write_executable(
+        venv_bin / "clawteam",
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        if [[ "${1:-}" == "runtime" && "${2:-}" == "--help" ]]; then
+          exit 0
+        fi
+        exit 0
+        """,
+    )
+    _write_executable(
+        venv_bin / "clawteam-mcp",
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        exit 0
+        """,
+    )
+    # Fake `curl` ahead of PATH so the post-restart health check never hits a
+    # real local service.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    _write_executable(
+        fake_bin / "curl",
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$*" >> "${CSFLOW_TEST_LOG_DIR:?}/curl.commands"
+        exit 0
+        """,
+    )
 
     if stable_versions is not None:
         pypi_json_path = tmp_path / "pypi.json"
@@ -85,7 +114,9 @@ def _build_fake_env(
     env.update(
         {
             "HOME": str(home_dir),
+            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             "CSFLOW_HOME": str(home_dir / ".clawsomeflow"),
+            "CSFLOW_PORT": "17099",
             "CSFLOW_TEST_LOG_DIR": str(log_dir),
             "CSFLOW_TEST_PIP_FAIL": "0",
             "CSFLOW_TEST_PIP_FAIL_PINNED": "1" if pip_fail_pinned_only else "0",
@@ -140,6 +171,9 @@ def test_upgrade_user_defaults_to_stable_channel(tmp_path: Path) -> None:
     assert "--pre" not in install_cmd
     assert "clawsomeflow" in install_cmd
     assert "upgrade-runtime --restart-service" in csflow_commands
+    # Post-upgrade runtime-stack verification: MCP SDK must be re-pinned to 1.x
+    # (a --pre resolve can drag in mcp 2.x and break clawteam-mcp).
+    assert any("mcp>=1.0.0,<2.0.0" in cmd for cmd in pip_commands)
 
 
 def test_upgrade_user_pre_flag_uses_prerelease_channel(tmp_path: Path) -> None:

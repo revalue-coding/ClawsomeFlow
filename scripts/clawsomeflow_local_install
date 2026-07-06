@@ -49,7 +49,11 @@ if [[ ! -f "${BACKEND_DIR}/pyproject.toml" ]]; then
 fi
 
 mkdir -p "$(dirname "$VENV_DIR")"
-"$PYTHON_BIN" -m venv "$VENV_DIR"
+if [[ -x "$VENV_DIR/bin/python" ]]; then
+  echo "Reusing existing virtualenv: $VENV_DIR"
+else
+  "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
 
 if [[ "$WITH_DEV" == "1" ]]; then

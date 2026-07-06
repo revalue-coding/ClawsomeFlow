@@ -121,7 +121,7 @@ Developer mode offers **software-development collaboration projects** a more fle
 | **Codex** | `codex` | TUI | ✅ Full support |
 | **Cursor** | `cursor` | TUI | ✅ Full support |
 | **OpenCode** | `opencode` | TUI | Testing |
-| **Gemini CLI** | `gemini` | TUI | Testing|
+| **Gemini CLI** | `gemini` | TUI | Testing |
 | **Kimi CLI** | `kimi` | TUI | Testing |
 | **Qwen Code** | `qwen` | TUI | Testing |
 | **Qoder CLI** | `qoder` | TUI | Testing |
@@ -192,7 +192,11 @@ ClawsomeFlow is built on top of **ClawTeam**.
 Linux/macOS
 ```bash
 curl -fsSL https://clawsomeflow.com/install.sh | bash
+```
 
+Already installed? Upgrade in place — flows, runs and settings are preserved:
+```bash
+curl -fsSL https://clawsomeflow.com/upgrade.sh | bash
 ```
 
 ### Common Commands

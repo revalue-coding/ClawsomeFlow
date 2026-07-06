@@ -186,7 +186,10 @@ PY
 }
 
 probe_existing_deployment() {
-  if [[ -d "${CSFLOW_HOME}" ]]; then
+  # A bare (possibly empty / half-created) directory is NOT a deployment:
+  # routing it to upgrade-runtime would no-op (no config) and leave the
+  # data dir uninitialised. Only treat homes with real init artifacts as existing.
+  if [[ -f "${CSFLOW_HOME}/config.json" || -f "${CSFLOW_HOME}/.csflow-version" ]]; then
     EXISTING_DEPLOYMENT=1
   else
     EXISTING_DEPLOYMENT=0
@@ -201,6 +204,9 @@ reconcile_data_dir() {
     "$VENV_DIR/bin/csflow" upgrade-runtime --yes --no-restart-service
   else
     "$VENV_DIR/bin/csflow" install --yes --no-restart-service
+    # Upgrade parity (DEV.md §3.7): apply run_upgrade's unconditional
+    # step-0 blocks to fresh deploys too. Idempotent by design.
+    "$VENV_DIR/bin/csflow" upgrade-runtime --yes --no-restart-service
   fi
 }
 
@@ -431,5 +437,4 @@ if [[ "$INSTALL_SHIMS" == "1" ]]; then
 else
   echo "  $VENV_DIR/bin/csflow start"
 fi
-echo "Current deployed version: $INSTALLED_VERSION"
 print_agent_platform_summary

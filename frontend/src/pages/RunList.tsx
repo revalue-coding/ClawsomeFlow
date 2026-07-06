@@ -3,7 +3,7 @@ import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
 import { ApiError, RunSummary, api } from "@/lib/api";
-import { Card, EmptyState, ErrorBox, Loading, StatusPill } from "@/components/ui";
+import { Card, EmptyState, ErrorBox, Loading, Modal, StatusPill } from "@/components/ui";
 import { RunIcon } from "@/components/icons";
 import { useDialog } from "@/components/dialog";
 
@@ -159,6 +159,7 @@ export function RunList() {
           <h1 className="text-xl font-semibold text-ink-900">{t("runList.title")}</h1>
         </div>
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <NotifyWebhookButton />
           <input
             type="search"
             className="input w-full sm:w-72"
@@ -346,6 +347,133 @@ export function RunList() {
         </div>
       )}
     </div>
+  );
+}
+
+
+/**
+ * Small settings entry for the run-terminal webhook. The URL is stored in
+ * backend config (``notify_webhook_url``); an empty URL disables the
+ * feature. "Send test" posts a sample payload with the SAVED config, so it
+ * is disabled while the input differs from what's persisted.
+ */
+function NotifyWebhookButton() {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [savedUrl, setSavedUrl] = useState<string | null>(null);
+  const [url, setUrl] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function openModal() {
+    setOpen(true);
+    setNotice(null);
+    setError(null);
+    setLoading(true);
+    try {
+      const r = await api.getNotifyWebhook();
+      setSavedUrl(r.url);
+      setUrl(r.url ?? "");
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onSave() {
+    setSaving(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const r = await api.setNotifyWebhook(url.trim() || null);
+      setSavedUrl(r.url);
+      setUrl(r.url ?? "");
+      setNotice(r.url ? t("runList.notify.saved") : t("runList.notify.cleared"));
+    } catch (e) {
+      setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function onTest() {
+    setTesting(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const r = await api.testNotifyWebhook();
+      if (r.success) setNotice(t("runList.notify.testOk", { detail: r.message }));
+      else setError(t("runList.notify.testFail", { detail: r.message }));
+    } catch (e) {
+      setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  const dirty = url.trim() !== (savedUrl ?? "");
+
+  return (
+    <>
+      <button type="button" className="btn-outline shrink-0" onClick={() => void openModal()}>
+        {t("runList.notify.button")}
+      </button>
+      <Modal
+        open={open}
+        onClose={() => {
+          if (saving || testing) return;
+          setOpen(false);
+        }}
+        title={t("runList.notify.title")}
+        width="max-w-lg"
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-ink-600">{t("runList.notify.hint")}</p>
+          <div>
+            <label className="label">{t("runList.notify.urlLabel")}</label>
+            <input
+              className="input font-mono text-xs"
+              value={url}
+              placeholder="https://example.com/webhook"
+              onChange={(e) => setUrl(e.target.value)}
+              disabled={loading || saving || testing}
+            />
+            <div className="text-xs text-ink-500 mt-1">
+              {t("runList.notify.emptyHint")}
+            </div>
+          </div>
+          {notice && (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs text-emerald-800">
+              {notice}
+            </div>
+          )}
+          {error && <ErrorBox>{error}</ErrorBox>}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => void onTest()}
+              disabled={loading || saving || testing || dirty || !savedUrl}
+              title={dirty || !savedUrl ? t("runList.notify.testNeedsSave") : undefined}
+            >
+              {testing ? t("runList.notify.testing") : t("runList.notify.test")}
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void onSave()}
+              disabled={loading || saving || testing || !dirty}
+            >
+              {saving ? t("runList.notify.saving") : t("runList.notify.save")}
+            </button>
+          </div>
+        </div>
+      </Modal>
+    </>
   );
 }
 

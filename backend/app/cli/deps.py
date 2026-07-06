@@ -137,13 +137,12 @@ def _hint_for(tool: str) -> str:
     """Return a copy-paste install command appropriate to the OS."""
     macos = sys.platform == "darwin"
     debianish = shutil.which("apt-get") is not None
-    nvm = shutil.which("nvm") is not None or "NVM_DIR" in shutil.os.environ
 
     if tool == "python":
         return (
-            "Install Python 3.10+: pyenv / homebrew / your distro's package manager"
+            "Install Python 3.11+: pyenv / homebrew / your distro's package manager"
             if macos
-            else "Install Python 3.10+: `sudo apt install python3.10 python3.10-venv` "
+            else "Install Python 3.11+: `sudo apt install python3.11 python3.11-venv` "
                  "or pyenv (https://github.com/pyenv/pyenv)"
         )
     if tool == "git":
@@ -158,8 +157,6 @@ def _hint_for(tool: str) -> str:
         return (
             "Use nvm (recommended): "
             "`nvm install 22 && nvm use 22 && nvm alias default 22`"
-            if nvm or True
-            else "Install Node.js 22+ from https://nodejs.org/"
         )
     if tool == "clawteam":
         return (
@@ -314,12 +311,14 @@ def _probe_non_openclaw_agent_tool(
 
 def check_python() -> Status:
     v = sys.version_info
-    ok = (v.major, v.minor) >= (3, 10)
+    # Keep aligned with pyproject `requires-python = ">=3.11"` and the
+    # user installers (scripts/install-user.sh), which provision 3.11.
+    ok = (v.major, v.minor) >= (3, 11)
     return Status(
         name="python",
         ok=ok,
         found_version=f"{v.major}.{v.minor}.{v.micro}",
-        detail="" if ok else "ClawsomeFlow runtime baseline is Python 3.10+.",
+        detail="" if ok else "ClawsomeFlow runtime baseline is Python 3.11+.",
         install_hint=_hint_for("python"),
     )
 

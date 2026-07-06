@@ -288,31 +288,14 @@ export function FlowList() {
                 return (
                   <tr key={f.id} className="table-row align-top">
                     <td className="px-4 py-3 max-w-[220px] align-top">
-                      <div className="flex items-center gap-1.5">
-                        <SilentLink
-                          to={`/flows/${f.id}`}
-                          className="font-medium text-ink-900 hover:text-brand-600"
-                        >
-                          {f.name}
-                        </SilentLink>
-                        {f.easyMode && (
-                          <span
-                            className="h-2 w-2 shrink-0 rounded-full bg-emerald-500"
-                            title={t("flowEditor.easyModeSub")}
-                            aria-label={t("flowEditor.easyMode")}
-                          />
-                        )}
-                        {f.devMode && (
-                          <span
-                            className="h-2 w-2 shrink-0 rounded-full bg-purple-500"
-                            title={t("flowEditor.devModeSub")}
-                            aria-label={t("flowEditor.devMode")}
-                          />
-                        )}
-                      </div>
-                      <div className="text-[11px] text-ink-400 font-mono mt-0.5">
-                        {f.id}
-                      </div>
+                      <SilentLink
+                        to={`/flows/${f.id}`}
+                        className="font-medium text-ink-900 hover:text-brand-600"
+                        title={f.id}
+                      >
+                        {f.name}
+                      </SilentLink>
+                      <FlowBadgeRow flow={f} />
                     </td>
                     <td className="px-4 py-3 max-w-[360px] align-top text-ink-700">
                       {goal ? (
@@ -534,6 +517,56 @@ export function FlowList() {
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+
+/**
+ * Compact badge row under the Flow name: execution mode (省心 / 开发者)
+ * plus the distinct agent kinds in the spec. Replaces the old bare color
+ * dots + raw-id line (the id stays reachable via the name's tooltip), so
+ * the cell reads as labels instead of unexplained pixels.
+ */
+function FlowBadgeRow({ flow }: { flow: FlowSummary }) {
+  const { t } = useTranslation();
+  const kinds = (flow.agentKinds ?? []).slice(0, 4);
+  const extraKinds = Math.max(0, (flow.agentKinds ?? []).length - kinds.length);
+  const hasBadges = flow.easyMode || flow.devMode || kinds.length > 0;
+  if (!hasBadges) return null;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {flow.easyMode && (
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700"
+          title={t("flowEditor.easyModeSub")}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          {t("flowEditor.easyMode")}
+        </span>
+      )}
+      {flow.devMode && (
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-purple-50 border border-purple-200 px-1.5 py-0.5 text-[10px] font-medium text-purple-700"
+          title={t("flowEditor.devModeSub")}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />
+          {t("flowEditor.devMode")}
+        </span>
+      )}
+      {kinds.map((k) => (
+        <span
+          key={k}
+          className="inline-flex items-center rounded-full border border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-600"
+        >
+          {k}
+        </span>
+      ))}
+      {extraKinds > 0 && (
+        <span className="inline-flex items-center rounded-full border border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-500">
+          +{extraKinds}
+        </span>
+      )}
     </div>
   );
 }

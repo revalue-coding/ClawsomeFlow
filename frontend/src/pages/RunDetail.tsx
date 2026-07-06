@@ -200,6 +200,12 @@ export function RunDetail() {
   );
   const [rerunSubmitting, setRerunSubmitting] = useState(false);
   const [boardTab, setBoardTab] = useState<BoardTab>("list");
+  // Replay timeline (terminal runs only): scrub the board through event
+  // history. ``replayIndex`` is an index into the id-sorted event list;
+  // the board is rebuilt from the event prefix [0..replayIndex].
+  const [replayOpen, setReplayOpen] = useState(false);
+  const [replayIndex, setReplayIndex] = useState(0);
+  const [replayPlaying, setReplayPlaying] = useState(false);
   const [terminalItems, setTerminalItems] = useState<RunTaskTerminal[]>([]);
   const [terminalPanesLoading, setTerminalPanesLoading] = useState(false);
   const [terminalLoadedOwners, setTerminalLoadedOwners] = useState<string[]>([]);
@@ -304,6 +310,9 @@ export function RunDetail() {
     setCheckpointActingTaskIds([]);
     setRerunSubmitting(false);
     setBoardTab("list");
+    setReplayOpen(false);
+    setReplayIndex(0);
+    setReplayPlaying(false);
     setTerminalItems([]);
     setTerminalPanesLoading(false);
     setTerminalLoadedOwners([]);
@@ -595,10 +604,41 @@ export function RunDetail() {
     const fromSnapshot = checkpointSnapshot ? parseCheckpointPayload(checkpointSnapshot) : null;
     return fromSnapshot ?? extractActiveCheckpoint(events);
   }, [checkpointSnapshot, events]);
-  const board = useMemo(
-    () => (run ? buildTaskBoard(run, events, activeCheckpoint) : EMPTY_TASK_BOARD),
-    [run, events, activeCheckpoint],
+  const sortedEvents = useMemo(
+    () => [...events].sort((a, b) => a.id - b.id),
+    [events],
   );
+  const replayMaxIndex = Math.max(0, sortedEvents.length - 1);
+  const replayEvent =
+    replayOpen && sortedEvents.length > 0
+      ? sortedEvents[Math.min(replayIndex, replayMaxIndex)]
+      : null;
+  const boardEvents = useMemo(
+    () =>
+      replayOpen
+        ? sortedEvents.slice(0, Math.min(replayIndex, replayMaxIndex) + 1)
+        : events,
+    [replayOpen, sortedEvents, replayIndex, replayMaxIndex, events],
+  );
+  const board = useMemo(
+    () =>
+      run
+        ? buildTaskBoard(run, boardEvents, replayOpen ? null : activeCheckpoint)
+        : EMPTY_TASK_BOARD,
+    [run, boardEvents, replayOpen, activeCheckpoint],
+  );
+
+  // Auto-advance while the replay is playing; stop at the last event.
+  useEffect(() => {
+    if (!replayOpen || !replayPlaying) return;
+    const tid = setInterval(() => {
+      setReplayIndex((i) => Math.min(i + 1, replayMaxIndex));
+    }, 350);
+    return () => clearInterval(tid);
+  }, [replayOpen, replayPlaying, replayMaxIndex]);
+  useEffect(() => {
+    if (replayPlaying && replayIndex >= replayMaxIndex) setReplayPlaying(false);
+  }, [replayPlaying, replayIndex, replayMaxIndex]);
   const mergeFailures = useMemo(() => extractMergeFailures(events), [events]);
   const rerunTargetItem = useMemo(
     () =>
@@ -668,7 +708,17 @@ export function RunDetail() {
             }
             title={t("runDetail.eventsTitle")}
           >
-            ws · {wsStatus}
+            <span className="relative inline-flex h-1.5 w-1.5">
+              {wsStatus === "open" && (
+                <span className="absolute inline-flex h-full w-full rounded-full bg-current opacity-50 animate-ping" />
+              )}
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
+            </span>
+            {wsStatus === "open"
+              ? t("runDetail.wsLive")
+              : wsStatus === "connecting"
+              ? t("runDetail.wsConnecting")
+              : t("runDetail.wsOffline")}
           </span>
           {!TERMINAL.has(run.status) && (
             <button
@@ -969,37 +1019,110 @@ export function RunDetail() {
       {/* Task dependency board */}
       <Card className="p-0 overflow-hidden">
         <div className="px-5 py-3 border-b border-ink-100">
-          <h3 className="text-base font-semibold text-ink-900">
-            {t("runDetail.boardTitle")}
-          </h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-base font-semibold text-ink-900">
+              {t("runDetail.boardTitle")}
+            </h3>
+            <BoardProgressChips run={run} board={board} />
+          </div>
           {boardTab === "list" && boardHint ? (
             <div className="text-xs text-ink-500">{boardHint}</div>
           ) : null}
-          <div className="mt-2 inline-flex rounded-md border border-ink-200 bg-ink-50 p-0.5 text-xs">
-            <button
-              type="button"
-              className={
-                boardTab === "list"
-                  ? "rounded-sm bg-surface px-3 py-1 font-medium text-ink-900 shadow-sm"
-                  : "rounded-sm px-3 py-1 text-ink-600 hover:text-ink-900"
-              }
-              onClick={() => setBoardTab("list")}
-            >
-              {t("runDetail.boardTabList")}
-            </button>
-            <button
-              type="button"
-              className={
-                boardTab === "terminal"
-                  ? "rounded-sm bg-surface px-3 py-1 font-medium text-ink-900 shadow-sm"
-                  : "rounded-sm px-3 py-1 text-ink-600 hover:text-ink-900"
-              }
-              onClick={() => setBoardTab("terminal")}
-            >
-              {t("runDetail.boardTabTerminal")}
-            </button>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-md border border-ink-200 bg-ink-50 p-0.5 text-xs">
+              <button
+                type="button"
+                className={
+                  boardTab === "list"
+                    ? "rounded-sm bg-surface px-3 py-1 font-medium text-ink-900 shadow-sm"
+                    : "rounded-sm px-3 py-1 text-ink-600 hover:text-ink-900 transition-colors"
+                }
+                onClick={() => setBoardTab("list")}
+              >
+                {t("runDetail.boardTabList")}
+              </button>
+              <button
+                type="button"
+                className={
+                  boardTab === "terminal"
+                    ? "rounded-sm bg-surface px-3 py-1 font-medium text-ink-900 shadow-sm"
+                    : "rounded-sm px-3 py-1 text-ink-600 hover:text-ink-900 transition-colors"
+                }
+                onClick={() => {
+                  setBoardTab("terminal");
+                  setReplayOpen(false);
+                  setReplayPlaying(false);
+                }}
+              >
+                {t("runDetail.boardTabTerminal")}
+              </button>
+            </div>
+            {TERMINAL.has(run.status) && boardTab === "list" && sortedEvents.length > 0 && (
+              <button
+                type="button"
+                className={replayOpen ? "btn-primary text-xs" : "btn-outline text-xs"}
+                onClick={() => {
+                  if (replayOpen) {
+                    setReplayOpen(false);
+                    setReplayPlaying(false);
+                  } else {
+                    setReplayIndex(0);
+                    setReplayOpen(true);
+                    setReplayPlaying(true);
+                  }
+                }}
+                title={t("runDetail.replay.hint")}
+              >
+                {replayOpen ? t("runDetail.replay.exit") : t("runDetail.replay.button")}
+              </button>
+            )}
           </div>
         </div>
+        <BoardProgressBar run={run} board={board} />
+        {replayOpen && boardTab === "list" && (
+          <div className="flex flex-wrap items-center gap-3 border-b border-[#2a3558] bg-[#0d152b] px-5 py-2.5 text-xs text-[#9ab0df]">
+            <button
+              type="button"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[#4f79de] bg-[#15264f] text-[#dce8ff] hover:bg-[#1b2f5f] transition-colors"
+              onClick={() => {
+                if (replayPlaying) {
+                  setReplayPlaying(false);
+                } else {
+                  if (replayIndex >= replayMaxIndex) setReplayIndex(0);
+                  setReplayPlaying(true);
+                }
+              }}
+              aria-label={replayPlaying ? t("runDetail.replay.pause") : t("runDetail.replay.play")}
+            >
+              {replayPlaying ? "❚❚" : "▶"}
+            </button>
+            <input
+              type="range"
+              className="min-w-[160px] flex-1 accent-[#4f79de]"
+              min={0}
+              max={replayMaxIndex}
+              value={Math.min(replayIndex, replayMaxIndex)}
+              onChange={(e) => {
+                setReplayPlaying(false);
+                setReplayIndex(Number(e.target.value));
+              }}
+              aria-label={t("runDetail.replay.button")}
+            />
+            <span className="shrink-0 tabular-nums font-mono">
+              {Math.min(replayIndex, replayMaxIndex) + 1} / {sortedEvents.length}
+            </span>
+            {replayEvent && (
+              <span className="shrink-0 inline-flex items-center gap-2">
+                <span className="font-mono">
+                  {new Date(replayEvent.ts).toLocaleTimeString()}
+                </span>
+                <span className="inline-flex rounded-full bg-[#15264f] px-2 py-0.5 text-[10px] text-[#aebfe8]">
+                  {replayEvent.type}
+                </span>
+              </span>
+            )}
+          </div>
+        )}
         {boardTab === "list" ? (
           <TaskDependencyBoard board={board} />
         ) : (
@@ -1078,6 +1201,78 @@ export function RunDetail() {
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+/** Compact progress summary rendered in the board header: running / done /
+ *  waiting task counts, derived from the same board model as the graph so the
+ *  numbers always agree with what the canvas shows. */
+function BoardProgressChips({
+  run,
+  board,
+}: {
+  run: RunDetailT;
+  board: TaskBoardModel;
+}) {
+  const { t } = useTranslation();
+  const total = Array.isArray(run.specSnapshot?.tasks)
+    ? run.specSnapshot.tasks.length
+    : 0;
+  if (total === 0) return null;
+  const running = board.visibleNodes.filter((n) => n.state === "dispatched").length;
+  const done = board.visibleNodes.filter((n) => n.state === "completed").length;
+  const waiting = Math.max(0, total - running - done);
+  return (
+    <div className="flex items-center gap-1.5 text-[11px] font-medium">
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2 py-0.5 text-sky-700">
+        <span className="relative inline-flex h-1.5 w-1.5">
+          {running > 0 && (
+            <span className="absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-60 animate-ping" />
+          )}
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-sky-500" />
+        </span>
+        {t("runDetail.boardProgressRunning", { count: running })}
+      </span>
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">
+        <span className="inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+        {t("runDetail.boardProgressDone", { count: done })}
+      </span>
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-ink-100 px-2 py-0.5 text-ink-600">
+        <span className="inline-flex h-1.5 w-1.5 rounded-full bg-ink-400" />
+        {t("runDetail.boardProgressWaiting", { count: waiting })}
+      </span>
+    </div>
+  );
+}
+
+/** Hairline progress bar under the board header: completed (emerald) +
+ *  running (sky, shimmering) segments over a neutral track. */
+function BoardProgressBar({
+  run,
+  board,
+}: {
+  run: RunDetailT;
+  board: TaskBoardModel;
+}) {
+  const total = Array.isArray(run.specSnapshot?.tasks)
+    ? run.specSnapshot.tasks.length
+    : 0;
+  if (total === 0) return null;
+  const running = board.visibleNodes.filter((n) => n.state === "dispatched").length;
+  const done = board.visibleNodes.filter((n) => n.state === "completed").length;
+  const donePct = (done / total) * 100;
+  const runningPct = (running / total) * 100;
+  return (
+    <div className="flex h-1 w-full overflow-hidden bg-ink-100" aria-hidden>
+      <div
+        className="h-full bg-emerald-500 transition-[width] duration-700 ease-out"
+        style={{ width: `${donePct}%` }}
+      />
+      <div
+        className="h-full bg-sky-500 animate-pulse transition-[width] duration-700 ease-out"
+        style={{ width: `${runningPct}%` }}
+      />
     </div>
   );
 }
@@ -1252,6 +1447,35 @@ function RunTerminalBoard({
   );
 }
 
+/** Cubic path that leaves the source and enters the target with a gentle
+ *  horizontal bow — reads as "flow" much better than a straight segment. */
+function boardEdgePath(sx: number, sy: number, ex: number, ey: number): string {
+  const dx = ex - sx;
+  const bend = Math.max(18, Math.min(64, Math.abs(dx) * 0.42));
+  return `M ${sx} ${sy} C ${sx + bend} ${sy}, ${ex - bend} ${ey}, ${ex} ${ey}`;
+}
+
+/** Trim a node subject for the always-on SVG label under each dot. */
+function boardNodeLabel(subject: string): string {
+  const text = subject.trim();
+  if (!text) return "—";
+  // CJK glyphs are ~2x as wide as latin ones; budget by width, not length.
+  let width = 0;
+  let out = "";
+  for (const ch of text) {
+    width += /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(ch) ? 2 : 1;
+    if (width > 14) return `${out}…`;
+    out += ch;
+  }
+  return out;
+}
+
+const BOARD_SPLIT_STORAGE_KEY = "csflow-runboard-split";
+
+function clampBoardSplit(value: number): number {
+  return Math.min(72, Math.max(28, value));
+}
+
 function TaskDependencyBoard({
   board,
 }: {
@@ -1259,39 +1483,99 @@ function TaskDependencyBoard({
 }) {
   const { t } = useTranslation();
   const [hoverNodeId, setHoverNodeId] = useState<string | null>(null);
+  // Draggable split between the task list (left) and the graph (right) on
+  // md+ screens; the fraction persists across runs via localStorage. On
+  // narrow screens the panels stack and the handle is hidden.
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const splitDraggingRef = useRef(false);
+  const [splitPct, setSplitPct] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem(BOARD_SPLIT_STORAGE_KEY);
+      const v = raw == null ? NaN : Number(raw);
+      return Number.isFinite(v) ? clampBoardSplit(v) : 47;
+    } catch {
+      return 47;
+    }
+  });
+
+  function onSplitPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    splitDraggingRef.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onSplitPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!splitDraggingRef.current || !splitContainerRef.current) return;
+    const rect = splitContainerRef.current.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    setSplitPct(clampBoardSplit(((e.clientX - rect.left) / rect.width) * 100));
+  }
+  function onSplitPointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (!splitDraggingRef.current) return;
+    splitDraggingRef.current = false;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+    try {
+      window.localStorage.setItem(BOARD_SPLIT_STORAGE_KEY, String(Math.round(splitPct)));
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
   if (board.visibleNodes.length === 0) {
     return (
       <div className="bg-[#090f1f] text-ink-100 px-5 py-6 text-sm">
-        {t("runDetail.boardEmpty")}
+        <span className="inline-flex items-center gap-2">
+          <span className="inline-flex h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
+          {t("runDetail.boardEmpty")}
+        </span>
       </div>
     );
   }
   const hovered = board.visibleNodes.find((n) => n.id === hoverNodeId) ?? null;
+  // Direct neighbourhood of the hovered node — used to spotlight its edges
+  // and dim unrelated ones so dependency chains pop out on busy graphs.
+  const hoverLinked = new Set<string>();
+  if (hoverNodeId) {
+    hoverLinked.add(hoverNodeId);
+    for (const e of board.edges) {
+      if (e.from === hoverNodeId) hoverLinked.add(e.to);
+      if (e.to === hoverNodeId) hoverLinked.add(e.from);
+    }
+  }
   const nodeRadius = (n: TaskBoardNode): number =>
     n.isLeaderSummary ? TASK_NODE_RADIUS + 2 : n.state === "dispatched" ? TASK_NODE_RADIUS + 1 : TASK_NODE_RADIUS;
+  // Literal colors (not theme tokens): the board canvas is a fixed dark
+  // surface, so theme-inverting `emerald-*`/`amber-*` tokens would lose
+  // contrast in dark mode.
   const checkpointBadge = (n: TaskBoardNode): { label: string; className: string } | null => {
     if (!n.hasCheckpoint || n.checkpointState === "none") return null;
     if (n.checkpointState === "approved") {
       return {
         label: t("runDetail.boardCheckpointApproved"),
-        className: "inline-flex rounded-full bg-emerald-700/30 px-2 py-0.5 text-[10px] text-emerald-100",
+        className: "inline-flex rounded-full bg-[#047857]/30 px-2 py-0.5 text-[10px] text-[#d1fae5]",
       };
     }
     if (n.checkpointState === "rerun_requested") {
       return {
         label: t("runDetail.boardCheckpointRerun"),
-        className: "inline-flex rounded-full bg-amber-600/30 px-2 py-0.5 text-[10px] text-amber-100",
+        className: "inline-flex rounded-full bg-[#d97706]/30 px-2 py-0.5 text-[10px] text-[#fef3c7]",
       };
     }
     return {
       label: t("runDetail.boardCheckpointPending"),
-      className: "inline-flex rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] text-amber-100",
+      className: "inline-flex rounded-full bg-[#f59e0b]/20 px-2 py-0.5 text-[10px] text-[#fef3c7]",
     };
   };
 
   return (
     <div className="bg-[#090f1f] text-ink-100 p-4">
-      <div className="grid min-w-0 gap-4 md:grid-cols-2">
+      <div
+        ref={splitContainerRef}
+        className="flex min-w-0 flex-col gap-4 md:grid md:gap-0"
+        style={{ gridTemplateColumns: `minmax(220px, ${splitPct}%) 14px minmax(0, 1fr)` }}
+      >
         <div className="min-w-0 rounded-md border border-[#2a3558] bg-[#0d152b] p-3 min-h-[360px]">
           <div className="text-xs text-[#90a4d8] mb-2">
             {t("runDetail.boardTaskListTitle")}
@@ -1299,17 +1583,31 @@ function TaskDependencyBoard({
           <div className="space-y-2">
             {board.listNodes.map((n) => {
               const cpBadge = checkpointBadge(n);
+              const isHovered = hoverNodeId === n.id;
               return (
                 <div
                   key={`list-${n.id}`}
-                  className="w-full text-left rounded-md border border-[#2a3558] bg-[#111c39] px-3 py-2"
+                  onMouseEnter={() => setHoverNodeId(n.id)}
+                  onMouseLeave={() => setHoverNodeId((cur) => (cur === n.id ? null : cur))}
+                  className={
+                    isHovered
+                      ? "w-full text-left rounded-md border border-[#4f79de] bg-[#15264f] px-3 py-2 transition-colors duration-150 border-l-[3px]"
+                      : "w-full text-left rounded-md border border-[#2a3558] bg-[#111c39] px-3 py-2 transition-colors duration-150 border-l-[3px]"
+                  }
+                  style={{
+                    borderLeftColor: n.isLeaderSummary
+                      ? "#f5b942"
+                      : n.state === "dispatched"
+                      ? "#38bdf8"
+                      : "#10b981",
+                  }}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1 text-sm text-[#e8eeff] truncate">
                       {n.subject}
                     </div>
                     {n.state === "completed" && n.durationMinutes != null && (
-                      <span className="shrink-0 inline-flex rounded-full bg-[#1a3a2a] px-2 py-0.5 text-[10px] text-emerald-200">
+                      <span className="shrink-0 inline-flex rounded-full bg-[#1a3a2a] px-2 py-0.5 text-[10px] text-[#a7f3d0]">
                         {t("runDetail.boardTaskDurationMinutes", {
                           minutes: formatBoardDurationMinutes(n.durationMinutes),
                         })}
@@ -1323,7 +1621,7 @@ function TaskDependencyBoard({
                     <div className="flex items-center gap-1.5">
                       {cpBadge && (
                         <>
-                          <span className="inline-flex rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] text-amber-100">
+                          <span className="inline-flex rounded-full bg-[#f59e0b]/20 px-2 py-0.5 text-[10px] text-[#fef3c7]">
                             {t("runDetail.boardCheckpointBadge")}
                           </span>
                           <span className={cpBadge.className}>
@@ -1331,13 +1629,21 @@ function TaskDependencyBoard({
                           </span>
                         </>
                       )}
+                      {/* Literal colors: this board is a fixed dark canvas, so the
+                          theme-inverting sky/emerald tokens must not be used here. */}
                       <span
                         className={
                           n.state === "dispatched"
-                            ? "inline-flex rounded-full bg-[#2148a8] px-2 py-0.5 text-[10px] text-white"
-                            : "inline-flex rounded-full bg-[#1f3348] px-2 py-0.5 text-[10px] text-[#c4d6ff]"
+                            ? "inline-flex items-center gap-1 rounded-full bg-[#38bdf8]/20 px-2 py-0.5 text-[10px] text-[#7dd3fc]"
+                            : "inline-flex items-center gap-1 rounded-full bg-[#10b981]/20 px-2 py-0.5 text-[10px] text-[#6ee7b7]"
                         }
                       >
+                        {n.state === "dispatched" && (
+                          <span className="relative inline-flex h-1.5 w-1.5">
+                            <span className="absolute inline-flex h-full w-full rounded-full bg-[#38bdf8] opacity-60 animate-ping" />
+                            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[#38bdf8]" />
+                          </span>
+                        )}
                         {n.state === "dispatched"
                           ? t("runDetail.boardNodeRunning")
                           : t("runDetail.boardNodeDone")}
@@ -1349,10 +1655,32 @@ function TaskDependencyBoard({
             })}
           </div>
         </div>
-        <div className="min-w-0 w-full min-h-[360px] overflow-hidden rounded-md border border-[#2a3558] bg-[#0d152b]">
-          <div className="relative w-full">
+        <div
+          className="hidden md:flex items-stretch justify-center cursor-col-resize select-none group"
+          style={{ touchAction: "none" }}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("runDetail.boardSplitHandle")}
+          onPointerDown={onSplitPointerDown}
+          onPointerMove={onSplitPointerMove}
+          onPointerUp={onSplitPointerUp}
+          onPointerCancel={onSplitPointerUp}
+        >
+          <div className="my-auto h-16 w-1 rounded-full bg-[#2a3558] transition-colors group-hover:bg-[#4f79de] group-active:bg-[#4f79de]" />
+        </div>
+        <div className="flex min-w-0 w-full min-h-[360px] flex-col overflow-hidden rounded-md border border-[#2a3558] bg-[#0d152b]">
+          <div className="relative w-full flex-1">
+            {/* Faint dotted grid so the canvas reads as a "radar" surface. */}
+            <div
+              className="pointer-events-none absolute inset-0"
+              style={{
+                background:
+                  "radial-gradient(circle at 1px 1px, rgba(122,164,255,0.14) 1px, transparent 0) 0 0 / 20px 20px",
+              }}
+              aria-hidden
+            />
             <svg
-              className="w-full h-auto block"
+              className="relative w-full h-auto block"
               viewBox={`0 0 ${board.width} ${board.height}`}
               preserveAspectRatio="xMidYMid meet"
             >
@@ -1377,6 +1705,13 @@ function TaskDependencyBoard({
                 >
                   <path d="M1,1 L9,5 L1,9" fill="none" stroke="#f5b942" strokeWidth="1.8" />
                 </marker>
+                <filter id="run-node-glow" x="-80%" y="-80%" width="260%" height="260%">
+                  <feGaussianBlur stdDeviation="3.2" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
               </defs>
               {board.edges.map((e) => {
                 const from = board.nodeById.get(e.from);
@@ -1392,17 +1727,24 @@ function TaskDependencyBoard({
                 const endGap = nodeRadius(to) + 3;
                 const ex = tx - (dx / dist) * endGap;
                 const ey = ty - (dy / dist) * endGap;
+                const startGap = nodeRadius(from) + 2;
+                const bx = sx + (dx / dist) * startGap;
+                const by = sy + (dy / dist) * startGap;
                 const stroke = e.highlight ? "#f5b942" : "#4d679d";
                 const marker = e.highlight
                   ? "url(#arrow-open-highlight)"
                   : "url(#arrow-open-normal)";
+                const d = boardEdgePath(bx, by, ex, ey);
+                const dimmed = hoverNodeId !== null
+                  && !(hoverLinked.has(e.from) && hoverLinked.has(e.to));
                 return (
-                  <g key={`edge-${e.from}-${e.to}`}>
-                    <line
-                      x1={sx}
-                      y1={sy}
-                      x2={ex}
-                      y2={ey}
+                  <g
+                    key={`edge-${e.from}-${e.to}`}
+                    className="transition-opacity duration-200"
+                    opacity={dimmed ? 0.18 : 1}
+                  >
+                    <path
+                      d={d}
                       fill="none"
                       stroke={stroke}
                       strokeWidth={1.8}
@@ -1412,11 +1754,8 @@ function TaskDependencyBoard({
                       opacity={0.7}
                     />
                     {e.animate && (
-                      <line
-                        x1={sx}
-                        y1={sy}
-                        x2={ex}
-                        y2={ey}
+                      <path
+                        d={d}
                         fill="none"
                         stroke={stroke}
                         strokeWidth={2}
@@ -1430,25 +1769,30 @@ function TaskDependencyBoard({
                 );
               })}
               {board.visibleNodes.map((n) => {
+                // Status palette matches the header chips: sky = running,
+                // emerald = done, amber = leader summary.
                 const ringStroke = n.isLeaderSummary
                   ? "#f5b942"
                   : n.state === "dispatched"
-                  ? "#5e8bff"
-                  : "#6f87be";
+                  ? "#38bdf8"
+                  : "#34d399";
                 const fill = n.isLeaderSummary
                   ? "#f5b942"
                   : n.state === "dispatched"
-                  ? "#5e8bff"
-                  : "#8fa8de";
+                  ? "#38bdf8"
+                  : "#10b981";
                 const radius = nodeRadius(n);
                 const checkpointColor = n.checkpointState === "approved"
                   ? "#22c55e"
                   : n.checkpointState === "rerun_requested"
                   ? "#f59e0b"
                   : "#facc15";
+                const dimmed = hoverNodeId !== null && !hoverLinked.has(n.id);
                 return (
                   <g
                     key={`node-${n.id}`}
+                    className="transition-opacity duration-200"
+                    opacity={dimmed ? 0.25 : 1}
                     onMouseEnter={() => setHoverNodeId(n.id)}
                     onMouseLeave={() => setHoverNodeId((cur) => (cur === n.id ? null : cur))}
                     style={{ cursor: "default" }}
@@ -1470,9 +1814,48 @@ function TaskDependencyBoard({
                       fill={fill}
                       stroke={ringStroke}
                       strokeWidth={n.isLeaderSummary ? 2.2 : 1.6}
+                      filter={n.state === "dispatched" || n.isLeaderSummary
+                        ? "url(#run-node-glow)"
+                        : undefined}
                     >
                       <title>{`${n.subject} · ${n.ownerAgentId}`}</title>
                     </circle>
+                    {/* Completed nodes get a small check glyph for at-a-glance state. */}
+                    {n.state === "completed" && !n.isLeaderSummary && (
+                      <path
+                        d={`M ${n.x - 3.4} ${n.y + 0.2} l 2.4 2.6 l 4.4 -5.2`}
+                        fill="none"
+                        stroke="#052e1b"
+                        strokeWidth={1.8}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        pointerEvents="none"
+                      />
+                    )}
+                    {n.isLeaderSummary && (
+                      <text
+                        x={n.x}
+                        y={n.y + 3.4}
+                        textAnchor="middle"
+                        fontSize={9}
+                        fontWeight="700"
+                        fill="#3d2a05"
+                        pointerEvents="none"
+                      >
+                        ★
+                      </text>
+                    )}
+                    {/* Always-on subject label under the node. */}
+                    <text
+                      x={n.x}
+                      y={n.y + radius + 12}
+                      textAnchor="middle"
+                      fontSize={9}
+                      fill={dimmed ? "#5c6e94" : "#aebfe8"}
+                      pointerEvents="none"
+                    >
+                      {boardNodeLabel(n.subject)}
+                    </text>
                     {n.hasCheckpoint && n.checkpointState !== "none" && (
                       <g>
                         <circle
@@ -1501,15 +1884,39 @@ function TaskDependencyBoard({
             </svg>
             {hovered && (
               <div
-                className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded-md bg-[#020817] px-2 py-1 text-xs text-white shadow-md whitespace-nowrap"
+                className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded-md border border-[#2a3558] bg-[#020817]/95 px-2.5 py-1.5 text-xs text-white shadow-lg whitespace-nowrap"
                 style={{
                   left: `${(hovered.x / board.width) * 100}%`,
                   top: `${(hovered.y / board.height) * 100}%`,
                 }}
               >
-                {hovered.subject} · {hovered.ownerAgentId}
+                <span className="font-medium">{hovered.subject}</span>
+                <span className="ml-1.5 font-mono text-[10px] text-[#9ab0df]">
+                  {hovered.ownerAgentId}
+                </span>
               </div>
             )}
+          </div>
+          {/* Legend */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[#2a3558]/70 px-3 py-2 text-[10px] text-[#8aa0d0]">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#38bdf8]" />
+              {t("runDetail.boardNodeRunning")}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#10b981]" />
+              {t("runDetail.boardNodeDone")}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#f5b942]" />
+              {t("runDetail.boardLegendSummary")}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-flex h-2.5 w-2.5 items-center justify-center rounded-full bg-[#facc15] text-[7px] font-bold text-[#0b1220]">
+                !
+              </span>
+              {t("runDetail.boardLegendCheckpoint")}
+            </span>
           </div>
         </div>
       </div>
@@ -1764,6 +2171,24 @@ function PendingMergeCard({
 }
 
 
+/** Semantic pill class for an event type so failures / completions are
+ *  scannable in the live stream without reading every row. */
+function eventTypePillClass(type: string): string {
+  if (/(failed|failure|error|conflict|timeout|timed_out|aborted)/.test(type)) {
+    return "pill-danger";
+  }
+  if (/(completed|succeeded|merged|approved)/.test(type)) {
+    return "pill-success";
+  }
+  if (/(dispatched|started|spawn)/.test(type)) {
+    return "pill-info";
+  }
+  if (/(checkpoint|waiting|pending)/.test(type)) {
+    return "pill-warning";
+  }
+  return "pill-default";
+}
+
 function EventTable({ events }: { events: RunWsEvent[] }) {
   const { t } = useTranslation();
   const [page, setPage] = useState(1);
@@ -1804,7 +2229,7 @@ function EventTable({ events }: { events: RunWsEvent[] }) {
                 {new Date(e.ts).toLocaleTimeString()}
               </td>
               <td className="px-3 py-1.5">
-                <span className="pill-default">{e.type}</span>
+                <span className={eventTypePillClass(e.type)}>{e.type}</span>
               </td>
               <td className="px-3 py-1.5 text-ink-700 font-mono">{e.agentId ?? "—"}</td>
             </tr>

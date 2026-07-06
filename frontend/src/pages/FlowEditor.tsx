@@ -2845,8 +2845,8 @@ function TaskListRow({
   return (
     <div
       className={cn(
-        "px-4 py-3",
-        hasIssue && "bg-rose-50",
+        "px-4 py-3 transition-colors",
+        hasIssue ? "bg-rose-50" : "hover:bg-ink-50/60",
       )}
     >
       <div className="flex items-center gap-2">
@@ -4066,6 +4066,11 @@ interface GraphPalette {
   checkpointFill: string;
   checkpointStroke: string;
   checkpointGlyph: string;
+  /** Always-on node subject label under each dot. */
+  label: string;
+  labelDim: string;
+  /** Dot color of the faint canvas grid. */
+  grid: string;
 }
 
 const GRAPH_PALETTE_LIGHT: GraphPalette = {
@@ -4086,6 +4091,9 @@ const GRAPH_PALETTE_LIGHT: GraphPalette = {
   checkpointFill: "#fbbf24",
   checkpointStroke: "#92400e",
   checkpointGlyph: "#78350f",
+  label: "#475569",
+  labelDim: "#a8b3c4",
+  grid: "rgba(15, 23, 42, 0.10)",
 };
 
 const GRAPH_PALETTE_DARK: GraphPalette = {
@@ -4106,7 +4114,25 @@ const GRAPH_PALETTE_DARK: GraphPalette = {
   checkpointFill: "#fbbf24",
   checkpointStroke: "#78350f",
   checkpointGlyph: "#451a03",
+  label: "#94a3b8",
+  labelDim: "#4b5a6e",
+  grid: "rgba(148, 163, 184, 0.14)",
 };
+
+/** Trim a task subject for the always-on label under a graph node.
+ *  CJK glyphs count double so mixed-language labels stay near-equal width. */
+function graphNodeLabel(subject: string): string {
+  const text = subject.trim();
+  if (!text) return "";
+  let width = 0;
+  let out = "";
+  for (const ch of text) {
+    width += /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(ch) ? 2 : 1;
+    if (width > 14) return `${out}…`;
+    out += ch;
+  }
+  return out;
+}
 
 function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
   const { t } = useTranslation();
@@ -4143,8 +4169,17 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
       </div>
       <div className="min-w-0 w-full min-h-[320px] overflow-hidden rounded-md border border-ink-200 bg-gradient-to-br from-ink-50/40 to-surface">
         <div className="relative w-full">
+          {/* Faint dotted grid — matches the Run board canvas for a cohesive
+              "blueprint" feel across orchestration and execution views. */}
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background: `radial-gradient(circle at 1px 1px, ${C.grid} 1px, transparent 0) 0 0 / 20px 20px`,
+            }}
+            aria-hidden
+          />
           <svg
-            className="w-full h-auto block"
+            className="relative w-full h-auto block"
             viewBox={`0 0 ${width} ${height}`}
             preserveAspectRatio="xMidYMid meet"
           >
@@ -4234,6 +4269,15 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
             const root = n.isRoot;
             const checkpoint = !summary && n.requiresHumanCheckpoint;
             const isHover = hover === n.id;
+            // Dim nodes outside the hovered node's direct neighbourhood so a
+            // dependency chain pops out (edges already dim the same way).
+            const dimNode = hover !== null
+              && hover !== n.id
+              && !edges.some(
+                (e) =>
+                  (e.from === hover && e.to === n.id)
+                  || (e.to === hover && e.from === n.id),
+              );
             // Node radius scales gently with degree so hub tasks stand out
             // in busier networks without dwarfing the leaves.
             const r = nodeRadius(n, isHover);
@@ -4264,6 +4308,8 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                   setHover((cur) => (cur === n.id ? null : cur))
                 }
                 style={{ cursor: "default" }}
+                className="transition-opacity duration-200"
+                opacity={dimNode ? 0.3 : 1}
               >
                 {(isHover || summary) && (
                   <circle
@@ -4323,6 +4369,17 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                     </text>
                   </g>
                 )}
+                {/* Always-on subject snippet so the DAG is readable without
+                    hovering every node (full subject stays in the tooltip). */}
+                <text
+                  y={r + 12}
+                  textAnchor="middle"
+                  fontSize={9}
+                  fill={dimNode ? C.labelDim : C.label}
+                  pointerEvents="none"
+                >
+                  {graphNodeLabel(n.subject) || t("flowEditor.rowUntitled")}
+                </text>
               </g>
             );
           })}
@@ -4629,12 +4686,15 @@ function computeGraphLayout(tasks: TaskRow[]): {
 }
 
 /**
- * Straight edge from (x1,y1) to (x2,y2). Kept as a function (rather than
- * inlined) so swapping back to curves later is a one-spot change and the
- * arrow-marker math in ``DependencyGraph`` doesn't have to know about it.
+ * Gently bowed cubic edge from (x1,y1) to (x2,y2): leaves the source and
+ * enters the target horizontally so the DAG reads left→right as "flow".
+ * The bend scales with the horizontal span and is capped so short edges
+ * stay near-straight (arrow-marker orientation remains correct).
  */
 function cubicPath(x1: number, y1: number, x2: number, y2: number): string {
-  return `M ${x1} ${y1} L ${x2} ${y2}`;
+  const dx = x2 - x1;
+  const bend = Math.max(14, Math.min(60, Math.abs(dx) * 0.4));
+  return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
 }
 
 
