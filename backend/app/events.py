@@ -39,9 +39,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import defaultdict
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from app.logging_setup import get_logger
+
+if TYPE_CHECKING:  # pragma: no cover — typing only, avoids import cycles
+    from app.models import RunEvent
+    from app.storage import StorageBackend
 
 logger = get_logger("events")
 
@@ -121,6 +125,56 @@ class EventBroadcaster:
         return len(self._subs.get(run_id, ()))
 
 
+# ── persist + broadcast helper ─────────────────────────────────────
+
+
+def publish_run_event(
+    storage: StorageBackend,
+    *,
+    run_id: str,
+    event_type: str,
+    agent_id: str | None = None,
+    task_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> RunEvent | None:
+    """Persist one :class:`RunEvent` and fan it out to WS subscribers.
+
+    Canonical helper shared by the controller / finalize / engine emitters
+    (they used to carry near-identical copies of this block). Semantics:
+
+    * Persist first (DB is the durable record); a persist failure is logged
+      and returns ``None`` — nothing is broadcast for an unpersisted event.
+    * Broadcast is best-effort: a failure is logged but never raised, so
+      event emission can never crash a scheduling loop.
+    * Frame field names are camelCase to match ``GET /api/runs/{id}/events``.
+    """
+    from app.models import RunEvent, iso_utc
+
+    try:
+        row = storage.event_append(RunEvent(
+            run_id=run_id,
+            type=event_type,
+            agent_id=agent_id,
+            task_id=task_id,
+            payload=payload or {},
+        ))
+    except Exception as exc:
+        logger.warning("event_append_failed", run_id=run_id, error=str(exc))
+        return None
+    try:
+        get_event_broadcaster().publish(run_id, {
+            "id": row.id,
+            "ts": iso_utc(row.ts),
+            "type": row.type,
+            "agentId": row.agent_id,
+            "taskId": row.task_id,
+            "payload": row.payload,
+        })
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("event_publish_failed", run_id=run_id, error=str(exc))
+    return row
+
+
 # ── singleton ──────────────────────────────────────────────────────
 
 _singleton: EventBroadcaster | None = None
@@ -143,5 +197,6 @@ def reset_event_broadcaster() -> None:
 __all__ = [
     "EventBroadcaster",
     "get_event_broadcaster",
+    "publish_run_event",
     "reset_event_broadcaster",
 ]

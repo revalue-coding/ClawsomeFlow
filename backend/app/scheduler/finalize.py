@@ -59,9 +59,12 @@ from app.models import (
     FlowSpec,
     MergeStrategy,
     PendingMerge,
-    RunEvent,
     RunStatus,
-    iso_utc,
+)
+from app.scheduler.run_metadata import (
+    POST_COMPLAINT_STATUS_KEY,
+    POST_REVIEW_TERMINAL_STATUS_KEY,
+    PRESERVE_WORKTREE_AGENT_IDS_KEY,
 )
 from app.storage import StorageBackend
 from app.user_context import get_request_user, set_request_user
@@ -74,9 +77,11 @@ logger = get_logger("scheduler.finalize")
 # Single source of truth lives in app.models (TERMINAL_RUN_STATUSES).
 _TERMINAL_STATUSES: frozenset[RunStatus] = TERMINAL_RUN_STATUSES
 _CSFLOW_TEAM_PREFIX = "csflow-"
-_POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
-_POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"
-_PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
+# Single-sourced in app.scheduler.run_metadata; the private aliases are kept
+# because engine/tests historically imported them from this module.
+_POST_COMPLAINT_STATUS_KEY = POST_COMPLAINT_STATUS_KEY
+_POST_REVIEW_TERMINAL_STATUS_KEY = POST_REVIEW_TERMINAL_STATUS_KEY
+_PRESERVE_WORKTREE_AGENT_IDS_KEY = PRESERVE_WORKTREE_AGENT_IDS_KEY
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -852,23 +857,15 @@ def _emit(
     task_id: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> None:
-    try:
-        row = storage.event_append(RunEvent(
-            run_id=run_id, type=event_type, agent_id=agent_id,
-            task_id=task_id, payload=payload or {},
-        ))
-    except Exception as exc:  # pragma: no cover — defensive
-        logger.warning("finalize_event_persist_failed", error=str(exc))
-        return
-    try:
-        from app.events import get_event_broadcaster
-        get_event_broadcaster().publish(run_id, {
-            "id": row.id, "ts": iso_utc(row.ts), "type": row.type,
-            "agentId": row.agent_id, "taskId": row.task_id,
-            "payload": row.payload,
-        })
-    except Exception:  # pragma: no cover — defensive
-        pass
+    from app.events import publish_run_event
+    publish_run_event(
+        storage,
+        run_id=run_id,
+        event_type=event_type,
+        agent_id=agent_id,
+        task_id=task_id,
+        payload=payload,
+    )
 
 
 async def _maybe_cleanup_team_after_terminal(

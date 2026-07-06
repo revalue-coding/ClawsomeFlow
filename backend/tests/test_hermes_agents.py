@@ -1809,3 +1809,51 @@ def test_api_mcp_settings_crud(client: TestClient, hermes_home: Path) -> None:
     assert local["args"] == ["-m", "my_mcp_server"]
     rm = client.delete("/api/hermes/agents/mcpagent/settings/mcp/remote-api")
     assert rm.status_code == 204
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Global HermesAgentError exception handler (app.api.errors)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_hermes_error_escaping_route_returns_canonical_json() -> None:
+    """A HermesAgentError that escapes a route WITHOUT a local try/except must
+    still surface as the canonical error JSON (same codes as _map_service_error),
+    not a bare 500 — the mapping is single-sourced in app.api.errors."""
+    from fastapi import FastAPI
+
+    from app.api.errors import register_exception_handlers
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    async def _boom() -> None:
+        raise svc.AgentNotFound("no such agent", details={"agentId": "ghost"})
+
+    app.add_api_route("/api/_test/hermes-boom", _boom, methods=["GET"])
+    with TestClient(app, raise_server_exceptions=False) as c:
+        resp = c.get("/api/_test/hermes-boom")
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"] == "AGENT_NOT_FOUND"
+    assert body["message"] == "no such agent"
+    assert body["details"] == {"agentId": "ghost"}
+
+
+def test_hermes_error_mapping_single_source_matches_route_mapper() -> None:
+    from app.api.errors import map_hermes_agent_error
+    from app.api.hermes_agents import _map_service_error
+
+    for exc_cls, (code, status) in {
+        svc.AgentIdInvalid: ("INVALID_PAYLOAD", 400),
+        svc.AgentAlreadyExists: ("AGENT_ALREADY_EXISTS", 409),
+        svc.AgentNotFound: ("AGENT_NOT_FOUND", 404),
+        svc.AgentInUse: ("AGENT_IN_USE", 409),
+        svc.HermesUnavailable: ("HERMES_UNAVAILABLE", 503),
+        svc.ProfileOpFailed: ("HERMES_CLI_FAILED", 502),
+        svc.AgentCreateCancelled: ("AGENT_CREATE_CANCELLED", 409),
+        svc.HermesAgentError: ("HERMES_ERROR", 500),
+    }.items():
+        exc = exc_cls("msg")
+        for mapped in (map_hermes_agent_error(exc), _map_service_error(exc)):
+            assert (mapped.code, mapped.status_code) == (code, status)

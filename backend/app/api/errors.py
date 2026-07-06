@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.services import hermes_agents as hermes_svc
 from app.services.agent_store import AgentStoreError
 from app.services.openclaw_agents import OpenclawAgentError
 from app.storage import StorageVersionConflict
@@ -48,6 +49,28 @@ class ApiError(Exception):
                 "details": self.details,
             },
         )
+
+
+# Single source of truth for HermesAgentError → API error-code mapping.
+# Used both by the per-route ``raise _map_service_error(exc)`` pattern in
+# ``api/hermes_agents.py`` and by the global fallback handler below (which
+# catches any HermesAgentError that escapes a route without a local catch,
+# so clients always get the canonical JSON shape instead of a bare 500).
+_HERMES_ERROR_MAPPING: dict[type, tuple[str, int]] = {
+    hermes_svc.AgentIdInvalid: ("INVALID_PAYLOAD", 400),
+    hermes_svc.AgentAlreadyExists: ("AGENT_ALREADY_EXISTS", 409),
+    hermes_svc.AgentNotFound: ("AGENT_NOT_FOUND", 404),
+    hermes_svc.AgentInUse: ("AGENT_IN_USE", 409),
+    hermes_svc.HermesUnavailable: ("HERMES_UNAVAILABLE", 503),
+    hermes_svc.ProfileOpFailed: ("HERMES_CLI_FAILED", 502),
+    hermes_svc.AgentCreateCancelled: ("AGENT_CREATE_CANCELLED", 409),
+}
+
+
+def map_hermes_agent_error(exc: hermes_svc.HermesAgentError) -> ApiError:
+    """Translate a service-layer Hermes error into the canonical ApiError."""
+    code, status = _HERMES_ERROR_MAPPING.get(type(exc), ("HERMES_ERROR", 500))
+    return ApiError(code, str(exc), status_code=status, details=exc.details)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -102,5 +125,11 @@ def register_exception_handlers(app: FastAPI) -> None:
             details=exc.details,
         ).to_response()
 
+    @app.exception_handler(hermes_svc.HermesAgentError)
+    async def _hermes_agent_error_handler(
+        _request: Request, exc: hermes_svc.HermesAgentError
+    ) -> JSONResponse:
+        return map_hermes_agent_error(exc).to_response()
 
-__all__ = ["ApiError", "register_exception_handlers"]
+
+__all__ = ["ApiError", "map_hermes_agent_error", "register_exception_handlers"]

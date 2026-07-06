@@ -79,3 +79,61 @@ def test_get_event_broadcaster_singleton() -> None:
     a = get_event_broadcaster()
     b = get_event_broadcaster()
     assert a is b
+
+
+# ──────────────────────────────────────────────────────────────────────
+# publish_run_event — canonical persist + WS fanout helper
+# ──────────────────────────────────────────────────────────────────────
+
+
+class _FakeStorage:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.appended: list = []
+
+    def event_append(self, event):
+        if self.fail:
+            raise RuntimeError("db down")
+        event.id = len(self.appended) + 1
+        self.appended.append(event)
+        return event
+
+
+@pytest.mark.asyncio
+async def test_publish_run_event_persists_and_broadcasts() -> None:
+    from app.events import publish_run_event
+
+    storage = _FakeStorage()
+    bus = get_event_broadcaster()
+    async with bus.subscribe("run-e2e") as q:
+        row = publish_run_event(
+            storage,
+            run_id="run-e2e",
+            event_type="task_dispatched",
+            agent_id="dev-a",
+            task_id="t1",
+            payload={"k": "v"},
+        )
+        frame = await asyncio.wait_for(q.get(), timeout=0.5)
+    assert row is not None and storage.appended == [row]
+    # camelCase frame matching GET /api/runs/{id}/events serialisation.
+    assert frame["type"] == "task_dispatched"
+    assert frame["agentId"] == "dev-a"
+    assert frame["taskId"] == "t1"
+    assert frame["payload"] == {"k": "v"}
+    assert frame["id"] == row.id
+
+
+@pytest.mark.asyncio
+async def test_publish_run_event_persist_failure_is_swallowed() -> None:
+    """A DB failure must not raise into the scheduler loop, and nothing may
+    be broadcast for an unpersisted event."""
+    from app.events import publish_run_event
+
+    storage = _FakeStorage(fail=True)
+    bus = get_event_broadcaster()
+    async with bus.subscribe("run-fail") as q:
+        row = publish_run_event(storage, run_id="run-fail", event_type="x")
+        assert row is None
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(q.get(), timeout=0.05)

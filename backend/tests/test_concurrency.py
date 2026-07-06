@@ -57,3 +57,127 @@ async def test_timeout_raises() -> None:
         with pytest.raises(asyncio.TimeoutError):
             async with mgr.lock("hot", timeout=0.05):
                 pass  # pragma: no cover - should not reach
+
+
+@pytest.mark.asyncio
+async def test_lock_key_evicted_after_release() -> None:
+    """Keys are per-run/per-repo; entries must not accumulate forever."""
+    backend = _AsyncioBackend()
+    mgr = LockManager(backend)
+
+    for i in range(100):
+        async with mgr.lock(f"team_spawn:csflow-run-{i}"):
+            pass
+
+    assert backend._locks == {}
+    assert dict(backend._refs) == {}
+
+
+@pytest.mark.asyncio
+async def test_lock_key_not_evicted_while_waiter_queued() -> None:
+    backend = _AsyncioBackend()
+    mgr = LockManager(backend)
+    order: list[str] = []
+
+    async def second() -> None:
+        async with mgr.lock("k"):
+            order.append("second")
+
+    async with mgr.lock("k"):
+        task = asyncio.create_task(second())
+        await asyncio.sleep(0.05)  # let the waiter queue up
+        assert "k" in backend._locks
+        order.append("first")
+    await task
+    assert order == ["first", "second"]
+    assert backend._locks == {}
+
+
+@pytest.mark.asyncio
+async def test_lock_usable_after_timeout_failure() -> None:
+    """A timed-out waiter must never leave the key stuck/locked."""
+    mgr = LockManager(_AsyncioBackend())
+
+    async with mgr.lock("hot"):
+        with pytest.raises(asyncio.TimeoutError):
+            async with mgr.lock("hot", timeout=0.05):
+                pass  # pragma: no cover
+
+    # Holder released; the key must be immediately acquirable again.
+    async with mgr.lock("hot", timeout=0.5):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_acquire_race_with_timeout_releases_lock() -> None:
+    """If acquire succeeds in the same instant the timeout cancels it, the
+    lock must be released (not orphaned in a locked state)."""
+    backend = _AsyncioBackend()
+    lock = asyncio.Lock()
+    await lock.acquire()
+
+    async def _release_after(delay: float) -> None:
+        await asyncio.sleep(delay)
+        lock.release()
+
+    releaser = asyncio.create_task(_release_after(0.05))
+    # Whichever way the race resolves, the invariant is: after the call
+    # returns/raises, the lock is either held by us (success) or free.
+    try:
+        await backend._acquire_with_timeout(lock, timeout=0.05)
+        acquired = True
+    except asyncio.TimeoutError:
+        acquired = False
+    await releaser
+    if acquired:
+        lock.release()
+    assert not lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_waiter_cancellation_does_not_orphan_lock() -> None:
+    """Cancelling a queued waiter must not block later acquires."""
+    mgr = LockManager(_AsyncioBackend())
+    entered = asyncio.Event()
+
+    async def holder() -> None:
+        async with mgr.lock("k", timeout=5):
+            entered.set()
+            await asyncio.sleep(0.2)
+
+    async def waiter() -> None:
+        async with mgr.lock("k", timeout=5):
+            pass  # pragma: no cover — cancelled while queued
+
+    hold_task = asyncio.create_task(holder())
+    await entered.wait()
+    wait_task = asyncio.create_task(waiter())
+    await asyncio.sleep(0.05)
+    wait_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait_task
+    await hold_task
+    # Lock must be free again for a fresh acquire.
+    async with mgr.lock("k", timeout=0.5):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_lock_stress_many_keys_and_waiters() -> None:
+    """Concurrency smoke: 20 keys × 10 workers, exclusive counters intact."""
+    backend = _AsyncioBackend()
+    mgr = LockManager(backend)
+    counters = {f"key-{k}": 0 for k in range(20)}
+
+    async def worker(key: str) -> None:
+        for _ in range(10):
+            async with mgr.lock(key, timeout=10):
+                cur = counters[key]
+                await asyncio.sleep(0)
+                counters[key] = cur + 1
+
+    await asyncio.gather(*[
+        worker(f"key-{k}") for k in range(20) for _ in range(10)
+    ])
+    assert all(v == 100 for v in counters.values())
+    assert backend._locks == {}

@@ -19,9 +19,11 @@ Why this lives in one place (DEV.md §4 / §5):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shlex
+import signal
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +49,20 @@ BANNED_SKILLS: frozenset[str] = frozenset({"clawteam"})
 # timeout would spuriously fail a spawn/merge that was merely queued, not stuck.
 # Pairs with the 8h cross-process file lock in ``repo_merge_lock``.
 CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS = 12 * 3600
+
+# Ceiling for every *control-plane* CLI subprocess this module spawns
+# (``clawteam spawn/inject/list/...``, git branch prep, tmux window ops).
+# IMPORTANT: these commands NEVER execute agent tasks — tasks run
+# asynchronously inside tmux / agent processes and are judged only by the
+# scheduler's task timeout (``max(timeout_seconds, 14400)``). This guard
+# exists solely so a hung CLI/git process cannot hold the repo/spawn locks
+# forever (which would queue peers behind it for up to the 12h lock wait).
+# Generous by design; override via ``CSFLOW_CLAWTEAM_CLI_TIMEOUT_SEC``.
+DEFAULT_CLI_TIMEOUT_SECONDS = 15 * 60.0
+
+# GNU-timeout style sentinel exit code returned by ``_run``/``_run_in_cwd``
+# when the guard fires; call sites treat it like any other non-zero exit.
+CLI_TIMEOUT_EXIT_CODE = 124
 
 
 class CliInvocationError(Exception):
@@ -988,16 +1004,101 @@ def _enforce_anti_loop(args: _SpawnArgs) -> None:
     # Gate ③ enforced by to_argv() unconditionally; nothing to check here.
 
 
-async def _run(argv: list[str], *, env: dict[str, str]) -> tuple[int, str, str]:
-    """Spawn *argv* and capture stdout / stderr / exit code."""
+def _cli_timeout_seconds() -> float:
+    """Resolve the control-plane subprocess ceiling (env-overridable)."""
+    raw = os.environ.get("CSFLOW_CLAWTEAM_CLI_TIMEOUT_SEC", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return DEFAULT_CLI_TIMEOUT_SECONDS
+
+
+def _resolve_argv(argv: list[str]) -> list[str]:
+    """Pin ``clawteam`` to the same binary doctor/startup probes resolve.
+
+    Prevents PATH drift between the dep-check binary and the one the
+    scheduler actually invokes (e.g. systemd vs login-shell PATH). All other
+    argv[0] values (git / tmux) go through normal PATH lookup unchanged.
+    """
+    if argv and argv[0] == "clawteam":
+        from app.runtime_bins import resolve_binary
+        pinned = resolve_binary("clawteam")
+        if pinned:
+            return [pinned, *argv[1:]]
+    return argv
+
+
+def _kill_proc_group(proc: asyncio.subprocess.Process) -> None:
+    """Best-effort SIGKILL of the subprocess' own process group."""
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+
+
+async def _exec_capture(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    cwd: str | None = None,
+    timeout_sec: float | None = None,
+) -> tuple[int, str, str]:
+    """Spawn *argv*, capture output, and never leave a child behind.
+
+    * **Timeout guard** (default :data:`DEFAULT_CLI_TIMEOUT_SECONDS`): a hung
+      control-plane command is killed (whole process group) and reported as
+      exit code :data:`CLI_TIMEOUT_EXIT_CODE`. This never applies to agent
+      task execution — see the constant's docstring.
+    * **Cancellation-safe**: if the awaiting task is cancelled (run abort /
+      service drain), the subprocess group is killed before the cancellation
+      propagates, so no orphan ``git``/``clawteam`` processes survive.
+    """
+    effective_timeout = timeout_sec if timeout_sec is not None else _cli_timeout_seconds()
     proc = await asyncio.create_subprocess_exec(
-        *argv,
+        *_resolve_argv(argv),
         env=env,
+        cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
-    stdout_b, stderr_b = await proc.communicate()
-    return proc.returncode or 0, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(), timeout=effective_timeout,
+        )
+    except asyncio.TimeoutError:
+        _kill_proc_group(proc)
+        with contextlib.suppress(Exception):
+            await proc.communicate()
+        detail = (
+            f"command timed out after {effective_timeout:.0f}s "
+            "(control-plane CLI guard; see CSFLOW_CLAWTEAM_CLI_TIMEOUT_SEC)"
+        )
+        return CLI_TIMEOUT_EXIT_CODE, "", detail
+    except asyncio.CancelledError:
+        _kill_proc_group(proc)
+        with contextlib.suppress(Exception):
+            await proc.communicate()
+        raise
+    return (
+        proc.returncode or 0,
+        stdout_b.decode(errors="replace"),
+        stderr_b.decode(errors="replace"),
+    )
+
+
+async def _run(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    timeout_sec: float | None = None,
+) -> tuple[int, str, str]:
+    """Spawn *argv* and capture stdout / stderr / exit code."""
+    return await _exec_capture(argv, env=env, timeout_sec=timeout_sec)
 
 
 async def _run_in_cwd(
@@ -1005,20 +1106,14 @@ async def _run_in_cwd(
     *,
     cwd: str,
     env: dict[str, str],
+    timeout_sec: float | None = None,
 ) -> tuple[int, str, str]:
     # Defensive: expand ``~`` so a tilde cwd never reaches the (shell-less)
     # subprocess as a literal path. Covers git ops in _ensure_repo_on_target_branch
     # plus workspace merge / uncommitted-check cwds. See _expand_repo.
-    cwd = _expand_repo(cwd)
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=cwd,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    return await _exec_capture(
+        argv, env=env, cwd=_expand_repo(cwd), timeout_sec=timeout_sec,
     )
-    stdout_b, stderr_b = await proc.communicate()
-    return proc.returncode or 0, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
 
 
 _AUTO_COMMIT_MESSAGE = "csflow auto commit"
@@ -1201,8 +1296,10 @@ def reset_clawteam_cli() -> None:
 __all__ = [
     "AntiLoopViolation",
     "BANNED_SKILLS",
+    "CLI_TIMEOUT_EXIT_CODE",
     "ClawTeamCli",
     "CliInvocationError",
+    "DEFAULT_CLI_TIMEOUT_SECONDS",
     "SpawnResult",
     "WorkspaceCleanupAttempt",
     "WorkspaceCleanupResult",

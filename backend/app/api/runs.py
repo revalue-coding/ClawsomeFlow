@@ -76,6 +76,11 @@ from app.scheduler.finalize import (
     run_terminal_tail_cleanup,
 )
 from app.scheduler.naming import team_name_for_run
+from app.scheduler.run_metadata import (
+    POST_COMPLAINT_STATUS_KEY,
+    POST_REVIEW_TERMINAL_STATUS_KEY,
+    PRESERVE_WORKTREE_AGENT_IDS_KEY,
+)
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
 from app.storage import StorageBackend, get_storage
@@ -114,9 +119,10 @@ _MERGE_DECISION_ALLOWED = {
     RunStatus.aborted,
 }
 
-_POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
-_POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"
-_PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
+# Single-sourced scheduler-internal run.inputs markers (see run_metadata.py).
+_POST_COMPLAINT_STATUS_KEY = POST_COMPLAINT_STATUS_KEY
+_POST_REVIEW_TERMINAL_STATUS_KEY = POST_REVIEW_TERMINAL_STATUS_KEY
+_PRESERVE_WORKTREE_AGENT_IDS_KEY = PRESERVE_WORKTREE_AGENT_IDS_KEY
 
 
 # ──────────────────────────────────────────────────────────────────────

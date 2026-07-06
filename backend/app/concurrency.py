@@ -36,23 +36,91 @@ class LockBackend(Protocol):
 
 
 class _AsyncioBackend:
-    """In-process backend using :class:`asyncio.Lock`."""
+    """In-process backend using :class:`asyncio.Lock`.
+
+    Two robustness properties (both verified by ``test_concurrency.py``):
+
+    * **No unbounded key growth** — lock keys are per-run/per-repo
+      (``team_spawn:csflow-<run>`` …), so a long-lived service would leak one
+      ``asyncio.Lock`` per historical run if entries were never dropped. A
+      waiter refcount removes a key's lock as soon as nobody holds or awaits
+      it. Removal only happens at refcount 0 with the lock unlocked, so two
+      coroutines can never end up "holding" the same key via different Lock
+      objects.
+    * **Timeout/acquire race safety** — a plain ``wait_for(lock.acquire())``
+      can, in a narrow race, cancel the acquire *after* it succeeded, leaving
+      the lock held forever (every later acquire of that key then times out).
+      :meth:`_acquire_with_timeout` detects the "acquired despite cancel"
+      outcome and releases before reporting the timeout.
+    """
 
     def __init__(self) -> None:
-        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._locks: dict[str, asyncio.Lock] = {}
+        # holders + waiters per key; a key is evicted when this hits 0.
+        self._refs: dict[str, int] = defaultdict(int)
 
     async def acquire(self, key: str, timeout: float) -> None:
-        lock = self._locks[key]
-        if timeout > 0:
-            await asyncio.wait_for(lock.acquire(), timeout=timeout)
-        else:
-            await lock.acquire()
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = self._locks[key] = asyncio.Lock()
+        self._refs[key] += 1
+        try:
+            if timeout > 0:
+                await self._acquire_with_timeout(lock, timeout)
+            else:
+                await lock.acquire()
+        except BaseException:
+            self._decref(key)
+            raise
+
+    @staticmethod
+    async def _acquire_with_timeout(lock: asyncio.Lock, timeout: float) -> None:
+        fut = asyncio.ensure_future(lock.acquire())
+        try:
+            done, _pending = await asyncio.wait({fut}, timeout=timeout)
+        except BaseException:
+            # Outer cancellation (run abort / loop teardown): retract our
+            # waiter without awaiting (the current task already has a
+            # cancellation pending). If the acquire nevertheless completed,
+            # the done-callback releases so the lock is never orphaned.
+            fut.cancel()
+            fut.add_done_callback(
+                lambda f: lock.release()
+                if (not f.cancelled() and f.exception() is None and f.result())
+                else None
+            )
+            raise
+        if fut in done:
+            fut.result()
+            return
+        fut.cancel()
+        acquired = False
+        try:
+            acquired = bool(await fut)
+        except asyncio.CancelledError:
+            acquired = False
+        if acquired:
+            # Lost race: the acquire completed in the same moment we
+            # cancelled it. Release immediately so the key is not leaked
+            # in a locked state, then report the timeout as usual.
+            lock.release()
+        raise asyncio.TimeoutError
 
     async def release(self, key: str) -> None:
-        # Defensive: defaultdict guarantees the lock exists.
         lock = self._locks.get(key)
         if lock and lock.locked():
             lock.release()
+        self._decref(key)
+
+    def _decref(self, key: str) -> None:
+        remaining = self._refs[key] - 1
+        if remaining > 0:
+            self._refs[key] = remaining
+            return
+        self._refs.pop(key, None)
+        lock = self._locks.get(key)
+        if lock is not None and not lock.locked():
+            self._locks.pop(key, None)
 
 
 class _RedisBackend:  # pragma: no cover — server mode, exercised in integration tests

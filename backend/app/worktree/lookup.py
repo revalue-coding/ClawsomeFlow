@@ -115,7 +115,19 @@ class WorktreeLookup:
             workspaces = self._read_registry_fallback(team)
 
         self._cache[key] = _CacheEntry(fetched_at=now, workspaces=workspaces)
+        self._evict_expired(now)
         return workspaces
+
+    def _evict_expired(self, now: float) -> None:
+        """Drop long-expired entries so the process-wide singleton's cache
+        cannot grow one (team, repo) key per historical run forever."""
+        horizon = self._ttl * 30
+        stale = [
+            key for key, entry in self._cache.items()
+            if (now - entry.fetched_at) > horizon
+        ]
+        for key in stale:
+            self._cache.pop(key, None)
 
     async def get(
         self,
