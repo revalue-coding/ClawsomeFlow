@@ -372,6 +372,9 @@ def test_install_user_first_time_uses_install_pipeline(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "install --yes --no-restart-service" in csflow_commands
     assert not any(cmd.startswith("upgrade ") for cmd in csflow_commands)
+    # Upgrade parity (DEV.md §3.7): fresh deploys must also run run_upgrade's
+    # unconditional step-0 blocks via upgrade-runtime after init.
+    assert "upgrade-runtime --yes --no-restart-service" in csflow_commands
 
 
 def test_install_user_existing_deployment_uses_upgrade_without_force(

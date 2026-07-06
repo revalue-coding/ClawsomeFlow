@@ -67,7 +67,7 @@ def _run_internal_upgrade_pipeline(
     needs, marker = upgrade.needs_upgrade()
 
     console.print(
-        f"[bold]🦞 csflow upgrade[/bold]   "
+        f"[bold]🦞 csflow upgrade-runtime[/bold]   "
         f"package=[cyan]{__version__}[/cyan]   "
         f"marker=[cyan]{marker or '(none)'}[/cyan]"
     )
@@ -118,7 +118,7 @@ def _run_internal_upgrade_pipeline(
         console.print(
             f"[yellow][dry-run][/yellow] Would {action}"
         )
-        console.print(
+        steps = (
             "  Steps:\n"
             "    1. Rebuild frontend/dist when running from editable source tree\n"
             "    2. Apply DB migrations (if any in registry for this range)\n"
@@ -127,9 +127,11 @@ def _run_internal_upgrade_pipeline(
             "    5. Re-deploy OpenClaw common/tools payloads (optional)\n"
             "    6. Re-deploy per-user agent runtime materials (skills + built-in cron jobs only)\n"
             "       (will NOT auto-restore removed OpenClaw registrations)\n"
-            "    7. Write marker → " + __version__ + "\n"
-            "    8. Restart managed background service"
+            "    7. Write marker → " + __version__
         )
+        if restart_service:
+            steps += "\n    8. Restart managed background service"
+        console.print(steps)
         raise typer.Exit(code=0)
 
     if not yes:
@@ -274,7 +276,14 @@ def _render_report(report: upgrade.UpgradeReport) -> None:
         console.print("\n[red]Errors:[/red]")
         for e in report.errors:
             console.print(f"  • {e}")
-    else:
+    elif report.marker_written:
         console.print(
             f"\n[bold green]✓ Upgraded to {report.to_version}.[/bold green]"
+        )
+    else:
+        # Safe redeploy / no-op: nothing was version-bumped, so don't claim
+        # an "upgrade" happened.
+        console.print(
+            f"\n[bold green]✓ Runtime reconciled at {report.to_version} "
+            f"(no version change).[/bold green]"
         )

@@ -502,6 +502,7 @@ def test_start_first_boot_forces_local_mode(
 
     monkeypatch.setattr(start_mod, "do_init", _fake_init)
     monkeypatch.setattr(start_mod, "restart_and_enable", lambda **_kw: None)
+    monkeypatch.setattr(start_mod, "wait_for_health", lambda **_kw: True)
     monkeypatch.setattr(
         start_mod.cfg_mod,
         "load_config",
@@ -529,6 +530,7 @@ def test_start_existing_config_always_runs_safe_redeploy(
         lambda: SimpleNamespace(csflow_port=17017),
     )
     monkeypatch.setattr(start_mod, "restart_and_enable", lambda **_kw: None)
+    monkeypatch.setattr(start_mod, "wait_for_health", lambda **_kw: True)
     monkeypatch.setattr(start_mod, "do_init", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "needs_upgrade", lambda: (False, "1.0.0"))
 
@@ -597,6 +599,7 @@ def test_start_auto_installs_missing_required_deps_in_yes_mode(
     monkeypatch.setattr(start_mod, "install_tool", _fake_install)
     monkeypatch.setattr(start_mod, "do_init", lambda **_kw: None)
     monkeypatch.setattr(start_mod, "restart_and_enable", lambda **_kw: None)
+    monkeypatch.setattr(start_mod, "wait_for_health", lambda **_kw: True)
     monkeypatch.setattr(
         start_mod.cfg_mod,
         "load_config",
@@ -643,6 +646,7 @@ def test_start_yes_mode_exits_when_required_deps_still_missing(
     )
     monkeypatch.setattr(start_mod, "do_init", lambda **_kw: None)
     monkeypatch.setattr(start_mod, "restart_and_enable", lambda **_kw: None)
+    monkeypatch.setattr(start_mod, "wait_for_health", lambda **_kw: True)
     monkeypatch.setattr(
         start_mod.cfg_mod,
         "load_config",
@@ -662,6 +666,7 @@ def test_start_prints_openclaw_hint_and_non_openclaw_tool_summary(
 
     monkeypatch.setattr(start_mod, "do_init", lambda **_kw: None)
     monkeypatch.setattr(start_mod, "restart_and_enable", lambda **_kw: None)
+    monkeypatch.setattr(start_mod, "wait_for_health", lambda **_kw: True)
     monkeypatch.setattr(
         start_mod,
         "service_status_hint",
@@ -733,6 +738,7 @@ def test_start_platform_summary_puts_openclaw_first_when_available(
 
     monkeypatch.setattr(start_mod, "do_init", lambda **_kw: None)
     monkeypatch.setattr(start_mod, "restart_and_enable", lambda **_kw: None)
+    monkeypatch.setattr(start_mod, "wait_for_health", lambda **_kw: True)
     monkeypatch.setattr(
         start_mod,
         "service_status_hint",
@@ -805,6 +811,7 @@ def test_start_hides_structured_upgrade_logs_from_terminal(
 
     monkeypatch.setattr(start_mod, "do_init", lambda **_kw: None)
     monkeypatch.setattr(start_mod, "restart_and_enable", lambda **_kw: None)
+    monkeypatch.setattr(start_mod, "wait_for_health", lambda **_kw: True)
     monkeypatch.setattr(
         start_mod,
         "service_status_hint",

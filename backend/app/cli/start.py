@@ -19,7 +19,7 @@ from rich.table import Table
 from app import __version__
 from app import config as cfg_mod
 from app.cli import app
-from app.cli._runtime import confirm_no_active_runs_or_exit
+from app.cli._runtime import confirm_no_active_runs_or_exit, wait_for_health
 from app.cli._user_service import ServiceError, restart_and_enable, service_status_hint
 from app.cli.deps import (
     check_non_openclaw_agent_tools,
@@ -113,12 +113,17 @@ def start(
     ),
 ) -> None:
     """Run dependency check → init/upgrade → restart managed background service."""
-    console.print("[bold]🦞 ClawsomeFlow first-time setup[/bold]\n")
+    config_path = cfg_mod.paths.clawsomeflow_home_path() / "config.json"
+    # First run (no config yet) really is setup; afterwards this is a routine
+    # service (re)start — don't keep calling it "first-time setup".
+    if config_path.exists():
+        console.print("[bold]🦞 ClawsomeFlow service start[/bold]\n")
+    else:
+        console.print("[bold]🦞 ClawsomeFlow first-time setup[/bold]\n")
     # `start` restarts the running service; confirm before aborting in-flight runs.
     confirm_no_active_runs_or_exit(
         non_interactive=yes, action="restart the service", console=console,
     )
-    config_path = cfg_mod.paths.clawsomeflow_home_path() / "config.json"
 
     if not skip_deps:
         results = run_all()
@@ -185,8 +190,16 @@ def start(
         )
     else:
         console.print(
-            "[dim]Config exists — using current settings; pass --force-init "
-            "(via `csflow init`) to reset.[/dim]"
+            "[dim]Config exists — using current settings; run "
+            "`csflow init --force` to reset.[/dim]"
+        )
+        # Same OpenClaw minimum-version gate as `csflow upgrade-runtime`:
+        # `start` runs the identical run_upgrade() pipeline, so it must not
+        # bypass the compatibility check (no-op when OpenClaw is absent).
+        from app.cli._openclaw_runtime import ensure_openclaw_version_compatible_or_exit
+        ensure_openclaw_version_compatible_or_exit(
+            action_label="start (runtime reconcile)",
+            console=console,
         )
         from app import upgrade as upgrade_mod
         needs, marker = upgrade_mod.needs_upgrade()
@@ -235,7 +248,14 @@ def start(
     except ServiceError as exc:
         console.print(f"[red]✗ Failed to start managed service:[/red] {exc}")
         raise typer.Exit(code=1)
-    console.print("[bold green]✓ ClawsomeFlow is running in background.[/bold green]")
+    if wait_for_health(host=host, port=actual_port):
+        console.print("[bold green]✓ ClawsomeFlow is running in background.[/bold green]")
+    else:
+        console.print(
+            "[yellow]⚠ Service started but /health did not answer within 60s.[/yellow] "
+            "It may still be finishing init/migration; check with "
+            "[bold]csflow doctor[/bold] or [bold]csflow logs tail -f[/bold]."
+        )
     console.print("")
     _render_agent_runtime_summary()
     console.print(

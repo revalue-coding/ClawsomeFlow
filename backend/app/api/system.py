@@ -1015,6 +1015,83 @@ async def trigger_upgrade(
     )
 
 
+class NotifyWebhookView(_CamelModel):
+    url: str | None = None
+
+
+class NotifyWebhookPayload(_CamelModel):
+    url: str | None = Field(
+        default=None,
+        description="Webhook URL to POST run-terminal events to; empty/null clears.",
+    )
+
+
+class NotifyWebhookTestResponse(_CamelModel):
+    success: bool
+    message: str = ""
+
+
+def _validated_webhook_url(raw: str | None) -> str | None:
+    url = (raw or "").strip()
+    if not url:
+        return None
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ApiError(
+            "INVALID_WEBHOOK_URL",
+            "Webhook URL must start with http:// or https://",
+            status_code=422,
+        )
+    return url
+
+
+@router.get("/notify-webhook", response_model=NotifyWebhookView)
+def get_notify_webhook(_user: UserDep = "") -> NotifyWebhookView:
+    """Return the run-terminal webhook URL (null when disabled)."""
+    return NotifyWebhookView(url=load_config().notify_webhook_url)
+
+
+@router.put("/notify-webhook", response_model=NotifyWebhookView)
+def set_notify_webhook(
+    payload: Annotated[NotifyWebhookPayload, Body()],
+    _user: UserDep = "",
+) -> NotifyWebhookView:
+    """Set (or clear, with an empty url) the run-terminal webhook URL."""
+    from app import config as cfg_mod
+
+    url = _validated_webhook_url(payload.url)
+    cfg = cfg_mod.load_config().model_copy(update={"notify_webhook_url": url})
+    cfg_mod.save_config(cfg)
+    logger.info("notify_webhook_updated", enabled=bool(url))
+    return NotifyWebhookView(url=url)
+
+
+@router.post("/notify-webhook/test", response_model=NotifyWebhookTestResponse)
+async def test_notify_webhook(_user: UserDep = "") -> NotifyWebhookTestResponse:
+    """Synchronously POST a sample payload to the configured webhook."""
+    from app.services.run_notify import post_webhook
+
+    url = (load_config().notify_webhook_url or "").strip()
+    if not url:
+        raise ApiError(
+            "WEBHOOK_NOT_CONFIGURED",
+            "No webhook URL configured.",
+            status_code=409,
+        )
+    payload = {
+        "event": "run_terminal_test",
+        "runId": "run_test",
+        "flowId": "flow_test",
+        "flowName": "Webhook test",
+        "teamName": "csflow-test",
+        "status": "completed",
+        "isScheduled": False,
+        "startedAt": None,
+        "finishedAt": None,
+    }
+    ok, detail = await asyncio.to_thread(post_webhook, url, payload)
+    return NotifyWebhookTestResponse(success=ok, message=detail)
+
+
 def _use_systemd_run() -> bool:
     """True when we can launch a transient user-scoped systemd unit.
 

@@ -82,7 +82,12 @@ def doctor() -> None:
             "See install hints above.[/red]"
         )
         raise typer.Exit(code=1)
-    console.print("\n[green]✓ All required dependencies present.[/green]")
+    # Scope the verdict: the ✓ covers the REQUIRED toolchain only — the
+    # optional OpenClaw gateway probe above may still be red.
+    console.print(
+        "\n[green]✓ Required toolchain OK.[/green] "
+        "[dim](OpenClaw integration status is reported separately above.)[/dim]"
+    )
 
 
 def _config_table(cfg) -> Table:

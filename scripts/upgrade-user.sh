@@ -155,20 +155,58 @@ Run the installer instead:
 fi
 
 if [[ "${USE_PRE}" == "1" ]]; then
-  say "[1/3] Upgrading clawsomeflow package (pre-release channel)"
+  say "[1/4] Upgrading clawsomeflow package (pre-release channel)"
   "${VENV_BIN}/pip" install --upgrade --index-url "${PYPI_INDEX_URL}" --pre clawsomeflow \
     || fail "Failed to upgrade clawsomeflow from PyPI (--pre)."
 else
-  say "[1/3] Upgrading clawsomeflow package (stable channel)"
+  say "[1/4] Upgrading clawsomeflow package (stable channel)"
   install_latest_stable_clawsomeflow \
     || fail "Failed to upgrade clawsomeflow from PyPI."
 fi
 
 installed_version="$("${VENV_BIN}/csflow" version 2>/dev/null || true)"
 [[ -n "${installed_version}" ]] || fail "Failed to detect installed clawsomeflow version."
-say "  ✓ Installed clawsomeflow version: ${installed_version}"
+say "  ✓ Upgraded clawsomeflow package to: ${installed_version}"
 
-say "[2/3] Syncing data directory and restarting service"
+# The pip upgrade may re-resolve dependencies (notably `mcp` with --pre) or
+# disturb the clawteam stack; re-verify like the installer does.
+say "[2/4] Verifying runtime stack (MCP pin + clawteam)"
+"${VENV_BIN}/pip" install --upgrade 'mcp>=1.0.0,<2.0.0' >/dev/null \
+  || fail "Failed to pin MCP Python SDK to 1.x (clawteam-mcp compatibility)."
+if ! { [[ -x "${VENV_BIN}/clawteam" ]] \
+    && "${VENV_BIN}/clawteam" runtime --help >/dev/null 2>&1 \
+    && [[ -x "${VENV_BIN}/clawteam-mcp" ]]; }; then
+  fail "clawteam stack is broken after the package upgrade.
+Repair it by re-running the installer (safe: existing data is upgraded in place):
+  curl -fsSL https://clawsomeflow.com/install.sh | bash"
+fi
+say "  ✓ mcp 1.x + clawteam runtime + clawteam-mcp verified"
+
+say "[3/4] Syncing data directory and restarting service"
 "${VENV_BIN}/csflow" upgrade-runtime --restart-service || fail "csflow upgrade-runtime failed"
 
-say "[3/3] Upgrade complete → ${installed_version}"
+say "[4/4] Verifying service health"
+csflow_port="${CSFLOW_PORT:-}"
+if [[ -z "${csflow_port}" ]]; then
+  csflow_port="$("${VENV_BIN}/python" - <<'PY' 2>/dev/null || echo 17017
+from app import config
+print(config.load_config().csflow_port)
+PY
+)"
+fi
+csflow_port="${csflow_port:-17017}"
+health_url="http://127.0.0.1:${csflow_port}/health"
+health_ok=0
+for ((i = 1; i <= 60; i++)); do
+  if curl -fsS "${health_url}" >/dev/null 2>&1; then
+    health_ok=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${health_ok}" == "1" ]]; then
+  say "✅ Upgrade complete → ${installed_version} (service healthy: ${health_url})"
+else
+  warn "Upgrade finished (${installed_version}) but the health check did not pass within 60s: ${health_url}"
+  warn "Inspect with: ${VENV_BIN}/csflow doctor   /   journalctl --user -u csflow -n 50 --no-pager"
+fi

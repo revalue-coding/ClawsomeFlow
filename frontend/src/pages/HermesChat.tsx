@@ -2670,7 +2670,7 @@ function SoulTab({ agentId }: { agentId: string }) {
       <div className="flex items-center gap-2">
         <button
           type="button"
-          className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className="btn-primary"
           onClick={() => void save()}
           disabled={busy}
         >
@@ -2790,7 +2790,7 @@ function ModelTab({ agentId }: { agentId: string }) {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="btn-primary"
                 onClick={() => void applyModelFromSource()}
                 disabled={busy}
               >
@@ -2901,7 +2901,7 @@ function GatewayTab({ agentId }: { agentId: string }) {
       <div className="flex items-center gap-2">
         <button
           type="button"
-          className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className="btn-primary"
           onClick={() => void save()}
           disabled={busy || !cwd.trim()}
         >
@@ -3142,7 +3142,7 @@ function McpTab({ agentId }: { agentId: string }) {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="btn-primary"
             onClick={() => void save()}
             disabled={saving || !canSave}
           >
@@ -3361,7 +3361,7 @@ function SkillsTab({ agentId }: { agentId: string }) {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                      className="btn-primary"
                       onClick={() => void saveEdit()}
                       disabled={editSaving || !editBody.trim()}
                     >
@@ -3406,7 +3406,7 @@ function SkillsTab({ agentId }: { agentId: string }) {
         />
         <button
           type="button"
-          className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className="btn-primary"
           onClick={() => void create()}
           disabled={creating || !newName.trim() || !newContent.trim()}
         >
@@ -3707,7 +3707,7 @@ function CronTab({ agentId }: { agentId: string }) {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                      className="btn-primary"
                       onClick={() => void saveEdit()}
                       disabled={editSaving || !editSchedule.trim()}
                     >
@@ -3781,7 +3781,7 @@ function CronTab({ agentId }: { agentId: string }) {
         </div>
         <button
           type="button"
-          className="rounded bg-brand-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className="btn-primary"
           onClick={() => void add()}
           disabled={!schedule.trim() || adding || editSaving || actionBusyId !== null}
         >

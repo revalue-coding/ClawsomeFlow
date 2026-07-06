@@ -75,7 +75,7 @@ def api_token(
     if new_cfg is not cfg or rotate:
         cfg_mod.save_config(new_cfg)
         if rotate:
-            typer.echo("✓ Rotated api_token (run `csflow restart` to apply).", err=True)
+            typer.echo("✓ Rotated api_token (run `csflow start` to apply).", err=True)
     typer.echo(new_cfg.api_token)
 
 

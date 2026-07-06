@@ -419,12 +419,29 @@ const CRUMB_LABELS: Record<string, string> = {
   chat: "Openclaw",
 };
 
+/** URL segments that map onto existing sidebar i18n labels (localized breadcrumbs). */
+const CRUMB_I18N_KEYS: Record<string, string> = {
+  flows: "nav.flows",
+  runs: "nav.runs",
+  "scheduled-flows": "nav.scheduledFlows",
+  hermes: "nav.hermes",
+  store: "nav.agentStore",
+  profiles: "nav.profiles",
+};
+
 function TopBar({
   location,
 }: {
   location: string;
 }) {
+  const { t } = useTranslation();
   const crumbs = location.split("/").filter(Boolean);
+  const crumbLabel = (segment: string): string => {
+    if (CRUMB_LABELS[segment]) return CRUMB_LABELS[segment];
+    const key = CRUMB_I18N_KEYS[segment];
+    if (key) return t(key);
+    return segment.replace(/-/g, " ");
+  };
   return (
     <div className="border-b border-ink-200 bg-surface/80 backdrop-blur supports-[backdrop-filter]:bg-surface/60">
       <div className="mx-auto max-w-7xl px-6 h-12 flex items-center justify-between">
@@ -434,7 +451,7 @@ function TopBar({
             <span key={`${c}-${i}`} className="flex items-center gap-2">
               <span className="text-ink-300">›</span>
               <span className="text-ink-600 capitalize">
-                {CRUMB_LABELS[c] ?? c.replace(/-/g, " ")}
+                {crumbLabel(c)}
               </span>
             </span>
           ))}

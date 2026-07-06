@@ -1,8 +1,9 @@
 """``csflow serve`` — boot uvicorn (skip dep-check / init).
 
-This is what ``csflow start`` calls under the hood after dependency check
-+ init. Exposed standalone so users who manage their own setup (systemd
-unit, supervisor, foreman, ...) can skip the friendlier preamble.
+This is the process the managed service unit (systemd/launchd) runs;
+``csflow start`` reaches it indirectly via that unit. Exposed standalone
+so users who manage their own setup (systemd unit, supervisor, foreman,
+...) can skip the friendlier preamble.
 """
 
 from __future__ import annotations

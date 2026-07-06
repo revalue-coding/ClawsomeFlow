@@ -1609,4 +1609,15 @@ export const api = {
     }),
   getActiveRuns: () =>
     request<ActiveRunsResult>("GET", "/api/system/active-runs"),
+
+  // Run-terminal webhook notification (opt-in; null url = disabled)
+  getNotifyWebhook: () =>
+    request<{ url: string | null }>("GET", "/api/system/notify-webhook"),
+  setNotifyWebhook: (url: string | null) =>
+    request<{ url: string | null }>("PUT", "/api/system/notify-webhook", { url }),
+  testNotifyWebhook: () =>
+    request<{ success: boolean; message: string }>(
+      "POST",
+      "/api/system/notify-webhook/test",
+    ),
 };
