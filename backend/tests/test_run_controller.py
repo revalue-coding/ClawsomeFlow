@@ -2655,8 +2655,13 @@ async def test_hermes_headless_dispatch_injects_minimal_complaint_context(
     )
 
     argv = list(captured["argv"])
+    # Always a FRESH quiet chat turn: no ``--resume`` (TUI session id is not
+    # accepted) and no ``-c`` (most-recent CLI session is not guaranteed to be
+    # this run's tmux subtask session — same profile may serve concurrent runs
+    # or the operator's own terminal chats).
     assert argv[:6] == ["hermes", "-p", "myh", "chat", "--yolo", "-Q"]
     assert "--resume" not in argv
+    assert "-c" not in argv
     assert argv[-2] == "-q"
     msg = str(argv[-1])
     assert msg.startswith("## ClawsomeFlow Complaint Dispatch Context\n\nhello hermes")

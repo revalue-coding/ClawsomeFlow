@@ -513,14 +513,14 @@ const en = {
     clearHistoryDone: "Cleared {{count}} run history record(s).",
     notify: {
       button: "Notifications",
-      title: "Run completion webhook",
+      title: "Run webhook notifications",
       hint:
-        "When a run finishes (completed / failed / aborted), ClawsomeFlow POSTs a JSON payload to this URL — plug in Slack, Feishu, or your own service.",
+        "When a run finishes (completed / failed / aborted) or pauses for you (manual checkpoint / merge review / complaint window), ClawsomeFlow POSTs a JSON payload to this URL — plug in Slack, Feishu, or your own service.",
       urlLabel: "Webhook URL",
       emptyHint: "Leave empty and save to disable notifications.",
       save: "Save",
       saving: "Saving…",
-      saved: "Webhook saved. Terminal runs will now be notified.",
+      saved: "Webhook saved. Run completions and manual checkpoints will now be notified.",
       cleared: "Webhook cleared. Notifications are disabled.",
       test: "Send test",
       testing: "Sending…",

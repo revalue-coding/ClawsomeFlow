@@ -1118,7 +1118,7 @@ def _validated_webhook_url(raw: str | None) -> str | None:
 
 @router.get("/notify-webhook", response_model=NotifyWebhookView)
 def get_notify_webhook(_user: UserDep = "") -> NotifyWebhookView:
-    """Return the run-terminal webhook URL (null when disabled)."""
+    """Return the run webhook URL (terminal + manual checkpoint; null=off)."""
     return NotifyWebhookView(url=load_config().notify_webhook_url)
 
 
@@ -1127,7 +1127,7 @@ def set_notify_webhook(
     payload: Annotated[NotifyWebhookPayload, Body()],
     _user: UserDep = "",
 ) -> NotifyWebhookView:
-    """Set (or clear, with an empty url) the run-terminal webhook URL."""
+    """Set (or clear, with an empty url) the run webhook URL."""
     from app import config as cfg_mod
 
     url = _validated_webhook_url(payload.url)

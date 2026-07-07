@@ -1,8 +1,9 @@
-"""Tests for the run-terminal webhook (app.services.run_notify).
+"""Tests for the run webhook (app.services.run_notify).
 
-Covers: opt-in no-op default, dedupe marker semantics, the storage
+Covers: opt-in no-op default, terminal dedupe marker semantics, the manual
+checkpoint (waiting-for-user) transition notifications, the storage
 ``run_update`` choke-point wiring, the sync POST helper, upgrade
-compatibility of the new config field, and the /api/system/notify-webhook
+compatibility of the config field, and the /api/system/notify-webhook
 endpoints.
 """
 
@@ -23,6 +24,7 @@ from app.services import run_notify
 from app.services.run_notify import (
     NOTIFIED_MARKER_KEY,
     post_webhook,
+    prepare_checkpoint_notification,
     prepare_terminal_notification,
 )
 from app.storage import get_storage
@@ -76,6 +78,40 @@ def test_prepare_stamps_marker_and_builds_payload() -> None:
     assert prepare_terminal_notification(run) is None
 
 
+# ── prepare_checkpoint_notification ──────────────────────────────────
+
+
+def test_prepare_checkpoint_noop_when_unconfigured() -> None:
+    run = _make_run(RunStatus.awaiting_user_review)
+    assert prepare_checkpoint_notification(run, old_status=RunStatus.running) is None
+
+
+def test_prepare_checkpoint_fires_only_on_transition() -> None:
+    _set_webhook_url("http://127.0.0.1:9/hook")
+    for status in (RunStatus.awaiting_user_checkpoint,
+                   RunStatus.awaiting_user_review,
+                   RunStatus.awaiting_user_complaint):
+        run = _make_run(status)
+        prepared = prepare_checkpoint_notification(run, old_status=RunStatus.running)
+        assert prepared is not None, status
+        payload = prepared["payload"]
+        assert payload["event"] == "run_checkpoint"
+        assert payload["status"] == status.value
+        assert payload["runId"] == run.id
+        # Same-status re-persist (pending merge updates etc.) stays silent.
+        assert prepare_checkpoint_notification(run, old_status=status) is None
+
+
+def test_prepare_checkpoint_noop_for_non_waiting_states() -> None:
+    _set_webhook_url("http://127.0.0.1:9/hook")
+    for status in (RunStatus.running, RunStatus.complaint_processing,
+                   RunStatus.completed, RunStatus.failed):
+        run = _make_run(status)
+        assert prepare_checkpoint_notification(
+            run, old_status=RunStatus.running,
+        ) is None, status
+
+
 # ── storage run_update wiring ────────────────────────────────────────
 
 
@@ -83,7 +119,7 @@ def test_run_update_fires_once_and_persists_marker(monkeypatch) -> None:
     _set_webhook_url("http://127.0.0.1:9/hook")
     sent: list[dict] = []
     monkeypatch.setattr(
-        run_notify, "send_terminal_notification", lambda prepared: sent.append(prepared),
+        run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
     )
     storage = get_storage()
     flow = storage.flow_create(Flow(name="notify-flow", description="", owner_user="alice"))
@@ -107,10 +143,56 @@ def test_run_update_fires_once_and_persists_marker(monkeypatch) -> None:
     assert len(sent) == 1
 
 
+def test_run_update_checkpoint_transitions(monkeypatch) -> None:
+    """run_update fires run_checkpoint on entry into each waiting state,
+    stays silent on same-state re-persists, and re-fires on re-entry."""
+    _set_webhook_url("http://127.0.0.1:9/hook")
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
+    )
+    storage = get_storage()
+    flow = storage.flow_create(Flow(name="cp-flow", description="", owner_user="alice"))
+    run = storage.run_create(FlowRun(
+        flow_id=flow.id, flow_version=1, team_name="csflow-cp",
+        status=RunStatus.running, inputs={}, user="alice",
+    ))
+
+    # running → awaiting_user_checkpoint: fires.
+    run.status = RunStatus.awaiting_user_checkpoint
+    storage.run_update(run)
+    assert [p["payload"]["status"] for p in sent] == ["awaiting_user_checkpoint"]
+    assert sent[0]["payload"]["event"] == "run_checkpoint"
+
+    # Re-persist while still waiting: silent.
+    storage.run_update(run)
+    assert len(sent) == 1
+
+    # Checkpoint cleared, then a review pause: fires again.
+    run.status = RunStatus.running
+    storage.run_update(run)
+    run.status = RunStatus.awaiting_user_review
+    storage.run_update(run)
+    assert [p["payload"]["status"] for p in sent] == [
+        "awaiting_user_checkpoint", "awaiting_user_review",
+    ]
+
+    # review → complaint window: a distinct pause, fires again.
+    run.status = RunStatus.awaiting_user_complaint
+    storage.run_update(run)
+    assert len(sent) == 3
+
+    # Terminal flip still uses the run_terminal event (not run_checkpoint).
+    run.status = RunStatus.completed
+    storage.run_update(run)
+    assert len(sent) == 4
+    assert sent[3]["payload"]["event"] == "run_terminal"
+
+
 def test_run_update_noop_without_config(monkeypatch) -> None:
     sent: list[dict] = []
     monkeypatch.setattr(
-        run_notify, "send_terminal_notification", lambda prepared: sent.append(prepared),
+        run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
     )
     storage = get_storage()
     flow = storage.flow_create(Flow(name="quiet-flow", description="", owner_user="alice"))
@@ -177,7 +259,7 @@ def test_post_webhook_connect_error() -> None:
     assert detail
 
 
-def test_send_terminal_notification_enriches_flow_name(webhook_server) -> None:
+def test_send_run_notification_enriches_flow_name(webhook_server) -> None:
     url, handler = webhook_server
     storage = get_storage()
     flow = storage.flow_create(Flow(name="Enriched Flow", description="", owner_user="alice"))
@@ -186,7 +268,7 @@ def test_send_terminal_notification_enriches_flow_name(webhook_server) -> None:
     _set_webhook_url(url)
     prepared = prepare_terminal_notification(run)
     assert prepared is not None
-    thread = run_notify.send_terminal_notification(prepared)
+    thread = run_notify.send_run_notification(prepared)
     thread.join(timeout=10)
     assert len(handler.received) == 1
     assert handler.received[0]["flowName"] == "Enriched Flow"
