@@ -2629,9 +2629,17 @@ class RunController:
             platform="hermes",
         )
         # Bind the executor to its managed Hermes profile (-p) for persistent
-        # agents. Hermes TUI's displayed "Session:" id is not accepted by
-        # ``hermes chat --resume`` (verified against v0.16.0), so complaint
-        # headless dispatch uses a fresh quiet chat turn.
+        # agents. Complaint headless dispatch always starts a FRESH quiet chat
+        # turn — deliberately no session continuation:
+        # * ``--resume <id>``: Hermes TUI's displayed "Session:" id is not
+        #   accepted (verified against v0.16.0), and we never learn the tmux
+        #   REPL's real session id.
+        # * ``-c``: resolves the profile's *most recent* CLI-source session,
+        #   which is NOT guaranteed to be this run's tmux subtask session (the
+        #   same persistent profile may serve concurrent runs, or the operator
+        #   may have chatted via ``hermes -p <id>`` in a terminal meanwhile) —
+        #   no deterministic way to verify, so resuming risks the wrong
+        #   conversation. The complaint prompt is self-contained instead.
         argv = [executable, "chat", "--yolo", "-Q", "-q", message]
         if not agent.is_temporary:
             argv = [

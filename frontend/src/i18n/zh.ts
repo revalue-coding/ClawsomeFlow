@@ -502,14 +502,14 @@ const zh = {
     clearHistoryDone: "已清空 {{count}} 条历史运行记录。",
     notify: {
       button: "通知设置",
-      title: "运行完成 Webhook 通知",
+      title: "运行 Webhook 通知",
       hint:
-        "Run 结束（完成 / 失败 / 中止）时，ClawsomeFlow 会向该 URL POST 一段 JSON——可接入飞书、Slack 或自建服务。",
+        "Run 结束（完成 / 失败 / 中止）或停下等待人工处理（人工检查点 / 合并审查 / 投诉窗口）时，ClawsomeFlow 会向该 URL POST 一段 JSON——可接入飞书、Slack 或自建服务。",
       urlLabel: "Webhook URL",
       emptyHint: "留空并保存即可关闭通知。",
       save: "保存",
       saving: "保存中…",
-      saved: "已保存，Run 结束时将发送通知。",
+      saved: "已保存，Run 结束与人工检查点时将发送通知。",
       cleared: "已清除，通知功能已关闭。",
       test: "发送测试",
       testing: "发送中…",

@@ -248,14 +248,17 @@ class SqliteStorage:
             return items, int(total)
 
     def run_update(self, run: FlowRun) -> FlowRun:
-        # Terminal-webhook hook (app.services.run_notify): run_update is the
-        # single choke point every terminal status flip goes through, so the
-        # notify decision + dedupe marker are made here — inside the same
-        # commit — and the actual POST fires on a daemon thread afterwards.
+        # Webhook hook (app.services.run_notify): run_update is the single
+        # choke point every status flip goes through, so the notify decisions
+        # (terminal: dedupe marker stamped into run.inputs in the same commit;
+        # checkpoint: fires only on the transition into a waiting-for-user
+        # state, detected against the previously persisted status) are made
+        # here — and the actual POST fires on a daemon thread afterwards.
         # Full no-op unless Config.notify_webhook_url is set.
         from app.services.run_notify import (
+            prepare_checkpoint_notification,
             prepare_terminal_notification,
-            send_terminal_notification,
+            send_run_notification,
         )
 
         notification = prepare_terminal_notification(run)
@@ -263,6 +266,10 @@ class SqliteStorage:
             current = s.get(FlowRun, run.id)
             if current is None:
                 raise KeyError(run.id)
+            if notification is None:
+                notification = prepare_checkpoint_notification(
+                    run, old_status=current.status,
+                )
             for field in (
                 "status", "inputs", "finished_at", "pending_merges",
             ):
@@ -271,7 +278,7 @@ class SqliteStorage:
             s.commit()
             s.refresh(current)
         if notification is not None:
-            send_terminal_notification(notification)
+            send_run_notification(notification)
         return current
 
     def run_count_active_for_flow(self, flow_id: str) -> int:
