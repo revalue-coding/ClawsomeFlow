@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
-import { ApiError, RunSummary, api } from "@/lib/api";
+import { ApiError, NOTIFY_WEBHOOK_FORMATS, RunSummary, api } from "@/lib/api";
 import { Card, EmptyState, ErrorBox, Loading, Modal, StatusPill } from "@/components/ui";
 import { RunIcon } from "@/components/icons";
 import { useDialog } from "@/components/dialog";
@@ -352,17 +352,22 @@ export function RunList() {
 
 
 /**
- * Small settings entry for the run-terminal webhook. The URL is stored in
- * backend config (``notify_webhook_url``); an empty URL disables the
- * feature. "Send test" posts a sample payload with the SAVED config, so it
- * is disabled while the input differs from what's persisted.
+ * Small settings entry for the run webhook. URL + message format are stored
+ * in backend config (``notify_webhook_url`` / ``notify_webhook_format``); an
+ * empty URL disables the feature. Format "auto" (the default) lets the
+ * backend recognize chat platforms (Feishu, DingTalk, Slack, …) by URL host.
+ * "Send test" posts a sample payload with the SAVED config, so it is
+ * disabled while the inputs differ from what's persisted.
  */
 function NotifyWebhookButton() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [savedUrl, setSavedUrl] = useState<string | null>(null);
+  const [savedFormat, setSavedFormat] = useState<string | null>(null);
+  const [effectiveFormat, setEffectiveFormat] = useState<string | null>(null);
   const [url, setUrl] = useState("");
+  const [format, setFormat] = useState("auto");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -376,7 +381,10 @@ function NotifyWebhookButton() {
     try {
       const r = await api.getNotifyWebhook();
       setSavedUrl(r.url);
+      setSavedFormat(r.format);
+      setEffectiveFormat(r.effectiveFormat);
       setUrl(r.url ?? "");
+      setFormat(r.format ?? "auto");
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -389,9 +397,15 @@ function NotifyWebhookButton() {
     setNotice(null);
     setError(null);
     try {
-      const r = await api.setNotifyWebhook(url.trim() || null);
+      const r = await api.setNotifyWebhook(
+        url.trim() || null,
+        format === "auto" ? null : format,
+      );
       setSavedUrl(r.url);
+      setSavedFormat(r.format);
+      setEffectiveFormat(r.effectiveFormat);
       setUrl(r.url ?? "");
+      setFormat(r.format ?? "auto");
       setNotice(r.url ? t("runList.notify.saved") : t("runList.notify.cleared"));
     } catch (e) {
       setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
@@ -415,7 +429,8 @@ function NotifyWebhookButton() {
     }
   }
 
-  const dirty = url.trim() !== (savedUrl ?? "");
+  const dirty =
+    url.trim() !== (savedUrl ?? "") || format !== (savedFormat ?? "auto");
 
   return (
     <>
@@ -437,17 +452,42 @@ function NotifyWebhookButton() {
       >
         <div className="space-y-3">
           <p className="text-sm text-ink-600">{t("runList.notify.hint")}</p>
+          <p className="rounded-md bg-ink-50 px-3 py-2 text-xs leading-relaxed text-ink-600">
+            {t("runList.notify.steps")}
+          </p>
           <div>
             <label className="label">{t("runList.notify.urlLabel")}</label>
             <input
               className="input font-mono text-xs"
               value={url}
-              placeholder="https://example.com/webhook"
+              placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"
               onChange={(e) => setUrl(e.target.value)}
               disabled={loading || saving || testing}
             />
             <div className="text-xs text-ink-500 mt-1">
-              {t("runList.notify.emptyHint")}
+              {t("runList.notify.urlHint")} {t("runList.notify.emptyHint")}
+            </div>
+          </div>
+          <div>
+            <label className="label">{t("runList.notify.formatLabel")}</label>
+            <select
+              className="input text-xs"
+              value={format}
+              onChange={(e) => setFormat(e.target.value)}
+              disabled={loading || saving || testing}
+            >
+              {NOTIFY_WEBHOOK_FORMATS.map((f) => (
+                <option key={f} value={f}>
+                  {t(`runList.notify.formats.${f}`)}
+                </option>
+              ))}
+            </select>
+            <div className="text-xs text-ink-500 mt-1">
+              {!dirty && savedUrl && effectiveFormat
+                ? t("runList.notify.effectiveFormat", {
+                    format: t(`runList.notify.formats.${effectiveFormat}`),
+                  })
+                : t("runList.notify.formatHint")}
             </div>
           </div>
           {notice && (

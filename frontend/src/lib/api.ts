@@ -762,6 +762,32 @@ export interface ActiveRunsResult {
   runs: ActiveRunView[];
 }
 
+export interface NotifyWebhookView {
+  url: string | null;
+  /** Configured format; null = auto-detect by URL host. */
+  format: string | null;
+  /** Resolved format the next notification will use (null when no URL). */
+  effectiveFormat: string | null;
+}
+
+/** Webhook format ids accepted by the backend ("auto" = detect by URL). */
+export const NOTIFY_WEBHOOK_FORMATS = [
+  "auto",
+  "generic",
+  "feishu",
+  "dingtalk",
+  "wecom",
+  "slack",
+  "discord",
+  "teams",
+  "googlechat",
+  "telegram",
+  "ntfy",
+  "bark",
+  "serverchan",
+  "gotify",
+] as const;
+
 // ── Hermes agents ───────────────────────────────────────────────────────
 export interface HermesAgentSummary {
   id: string;
@@ -1610,11 +1636,16 @@ export const api = {
   getActiveRuns: () =>
     request<ActiveRunsResult>("GET", "/api/system/active-runs"),
 
-  // Run-terminal webhook notification (opt-in; null url = disabled)
+  // Run webhook notification (opt-in; null url = disabled). `format` null =
+  // auto-detect the chat platform by URL host; `effectiveFormat` is the
+  // resolved format the next notification will use.
   getNotifyWebhook: () =>
-    request<{ url: string | null }>("GET", "/api/system/notify-webhook"),
-  setNotifyWebhook: (url: string | null) =>
-    request<{ url: string | null }>("PUT", "/api/system/notify-webhook", { url }),
+    request<NotifyWebhookView>("GET", "/api/system/notify-webhook"),
+  setNotifyWebhook: (url: string | null, format: string | null = null) =>
+    request<NotifyWebhookView>("PUT", "/api/system/notify-webhook", {
+      url,
+      format,
+    }),
   testNotifyWebhook: () =>
     request<{ success: boolean; message: string }>(
       "POST",

@@ -21,6 +21,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, delete, func, select
 
 from app import paths
+from app.logging_setup import get_logger
 from app.models import (
     ACTIVE_DRIVING_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -41,6 +42,8 @@ from app.models import (
     TaskDecomposeStatus,
 )
 from app.storage import StorageVersionConflict
+
+logger = get_logger("storage.sqlite")
 
 
 def _enable_wal(engine: Engine) -> None:
@@ -261,15 +264,28 @@ class SqliteStorage:
             send_run_notification,
         )
 
-        notification = prepare_terminal_notification(run)
+        # The webhook must NEVER affect the run itself: every notify step is
+        # guarded so a failure can't abort the commit or raise into the
+        # scheduler, and the actual POST fires on a daemon thread (below) so
+        # it can never block task execution. prepare_* already swallow their
+        # own errors; the outer guards are belt-and-suspenders.
+        try:
+            notification = prepare_terminal_notification(run)
+        except Exception as exc:  # pragma: no cover — defensive
+            self._log_notify_guard(exc)
+            notification = None
         with self._session() as s:
             current = s.get(FlowRun, run.id)
             if current is None:
                 raise KeyError(run.id)
             if notification is None:
-                notification = prepare_checkpoint_notification(
-                    run, old_status=current.status,
-                )
+                try:
+                    notification = prepare_checkpoint_notification(
+                        run, old_status=current.status,
+                    )
+                except Exception as exc:  # pragma: no cover — defensive
+                    self._log_notify_guard(exc)
+                    notification = None
             for field in (
                 "status", "inputs", "finished_at", "pending_merges",
             ):
@@ -278,8 +294,16 @@ class SqliteStorage:
             s.commit()
             s.refresh(current)
         if notification is not None:
-            send_run_notification(notification)
+            try:
+                send_run_notification(notification)
+            except Exception as exc:  # pragma: no cover — defensive
+                self._log_notify_guard(exc)
         return current
+
+    @staticmethod
+    def _log_notify_guard(exc: Exception) -> None:
+        """The webhook path must never affect the run — swallow + log."""
+        logger.warning("run_notify_guard_swallowed", error=str(exc))
 
     def run_count_active_for_flow(self, flow_id: str) -> int:
         with self._session() as s:

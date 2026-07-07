@@ -79,10 +79,16 @@ class Config(BaseModel):
     update_check_enabled: bool = True
 
     # Optional webhook POSTed (best-effort, fire-and-forget) when a Run
-    # reaches a terminal state. None (the default) disables the feature
-    # entirely — zero-regression opt-in, same pattern as ``api_token``.
-    # See app.services.run_notify.
+    # reaches a terminal state or pauses at a manual checkpoint. None (the
+    # default) disables the feature entirely — zero-regression opt-in, same
+    # pattern as ``api_token``. See app.services.run_notify.
     notify_webhook_url: str | None = None
+    # Outgoing message format for the webhook. None (default) = auto-detect
+    # the platform by URL host (Feishu/DingTalk/WeCom/Slack/Discord/Teams/…);
+    # unknown hosts fall back to the raw "generic" JSON, so upgraded users
+    # with a custom receiver see byte-identical behavior. Explicit values:
+    # app.services.run_notify.WEBHOOK_FORMATS.
+    notify_webhook_format: str | None = None
 
     storage: StorageConfig = Field(default_factory=StorageConfig)
     broker: BrokerConfig | None = None
