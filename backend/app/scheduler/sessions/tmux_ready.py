@@ -199,12 +199,19 @@ def _looks_like_cursor_composer(pane_text: str) -> bool:
     lower = pane_text.lower()
     if not lower.strip():
         return False
+    has_cursor_ready_actions = (
+        "run everything" in lower
+        and "plan, search, build anything" in lower
+    )
     return (
-        "cursor agent" in lower
-        and "composer" in lower
+        has_cursor_ready_actions
         and (
-            "run everything" in lower
-            or "plan, search, build anything" in lower
+            "cursor agent" in lower
+            or "composer" in lower
+            # Some Cursor Agent builds render only the model line + action row
+            # in the visible tail. This is still the ready composer, not a
+            # startup gate (checked before this predicate).
+            or "gpt-" in lower
         )
     )
 

@@ -419,7 +419,11 @@ function NotifyWebhookButton() {
 
   return (
     <>
-      <button type="button" className="btn-outline shrink-0" onClick={() => void openModal()}>
+      <button
+        type="button"
+        className="btn-primary shrink-0 shadow-md shadow-brand-500/20 ring-2 ring-brand-100"
+        onClick={() => void openModal()}
+      >
         {t("runList.notify.button")}
       </button>
       <Modal

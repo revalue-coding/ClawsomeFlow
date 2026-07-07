@@ -212,7 +212,9 @@ def test_ui_capabilities_client_not_colocated_same_platform_ssh(monkeypatch) -> 
         lambda: SimpleNamespace(deployment_mode="local"),
     )
     monkeypatch.setattr("app.api.system.native_directory_ui_available", lambda: True)
-    monkeypatch.setattr("app.api.system._loopback_client_is_ssh_forward", lambda _h, _p: True)
+    monkeypatch.setattr(
+        "app.api.system.native_directory_client_colocated", lambda _request: False,
+    )
     with TestClient(create_app()) as client:
         r = client.get(
             "/api/system/ui-capabilities",
@@ -234,7 +236,6 @@ def test_ui_capabilities_same_platform_without_ssh_forward(monkeypatch) -> None:
         "app.api.system.load_config",
         lambda: SimpleNamespace(deployment_mode="local"),
     )
-    monkeypatch.setattr("app.api.system._loopback_client_is_ssh_forward", lambda _h, _p: False)
     with TestClient(create_app()) as client:
         r = client.get(
             "/api/system/ui-capabilities",
@@ -255,7 +256,9 @@ def test_ui_capabilities_client_not_colocated_ssh_forward(monkeypatch) -> None:
         lambda: SimpleNamespace(deployment_mode="local"),
     )
     monkeypatch.setattr("app.api.system.native_directory_ui_available", lambda: True)
-    monkeypatch.setattr("app.api.system._loopback_client_is_ssh_forward", lambda _h, _p: True)
+    monkeypatch.setattr(
+        "app.api.system.native_directory_client_colocated", lambda _request: False,
+    )
     with TestClient(create_app()) as client:
         r = client.get("/api/system/ui-capabilities")
     assert r.status_code == 200, r.text
@@ -610,4 +613,83 @@ def test_linux_ssh_process_detection_via_proc(monkeypatch) -> None:
     monkeypatch.setattr(system, "_linux_comm_for_pid", lambda _pid: "sshd")
     assert system._linux_ssh_processes_for_loopback_port(54321) == {"sshd"}
     assert system._loopback_client_is_ssh_forward("127.0.0.1", 54321) is True
+
+
+def test_proc_tcp_port_hex_is_big_endian() -> None:
+    """/proc/net/tcp prints ports as plain %04X (17017 -> "4279", NOT byte-swapped)."""
+    assert system._proc_tcp_port_hex(17017) == "4279"
+    assert system._proc_tcp_port_hex(80) == "0050"
+
+
+def _patch_linux_peer(
+    monkeypatch,
+    *,
+    inodes: list[str],
+    pids: list[int],
+    comm: str | None,
+    has_gui: bool | None,
+) -> None:
+    monkeypatch.setattr(system, "_linux_socket_inodes_for_loopback_port", lambda _p: inodes)
+    monkeypatch.setattr(system, "_linux_pids_holding_socket_inode", lambda _i: pids)
+    monkeypatch.setattr(system, "_linux_comm_for_pid", lambda _pid: comm)
+    monkeypatch.setattr(system, "_linux_environ_has_gui_display", lambda _pid: has_gui)
+
+
+def test_linux_colocated_gui_peer_allowed(monkeypatch) -> None:
+    """A local desktop browser (peer has DISPLAY) is colocated."""
+    _patch_linux_peer(monkeypatch, inodes=["1"], pids=[100], comm="chrome", has_gui=True)
+    assert system._linux_loopback_client_colocated("127.0.0.1", 54321) is True
+
+
+def test_linux_colocated_non_gui_forwarder_blocked(monkeypatch) -> None:
+    """A Cursor/VS Code Remote forward (node process, no DISPLAY) is remote."""
+    _patch_linux_peer(monkeypatch, inodes=["1"], pids=[100], comm="node", has_gui=False)
+    assert system._linux_loopback_client_colocated("127.0.0.1", 54321) is False
+
+
+def test_linux_colocated_uninspectable_peer_blocked(monkeypatch) -> None:
+    """sshd runs undumpable: its socket inode resolves to no readable pid -> remote."""
+    _patch_linux_peer(monkeypatch, inodes=["1"], pids=[], comm=None, has_gui=None)
+    assert system._linux_loopback_client_colocated("127.0.0.1", 54321) is False
+
+
+def test_linux_colocated_ssh_named_peer_blocked_even_with_display(monkeypatch) -> None:
+    """ssh -L launched from the server's own desktop terminal still counts as remote."""
+    _patch_linux_peer(monkeypatch, inodes=["1"], pids=[100], comm="ssh", has_gui=True)
+    assert system._linux_loopback_client_colocated("127.0.0.1", 54321) is False
+
+
+def test_linux_colocated_no_inode_falls_back_to_ssh_blocklist(monkeypatch) -> None:
+    _patch_linux_peer(monkeypatch, inodes=[], pids=[], comm=None, has_gui=None)
+    monkeypatch.setattr(system, "_loopback_client_is_ssh_forward", lambda _h, _p: False)
+    assert system._linux_loopback_client_colocated("127.0.0.1", 54321) is True
+    monkeypatch.setattr(system, "_loopback_client_is_ssh_forward", lambda _h, _p: True)
+    assert system._linux_loopback_client_colocated("127.0.0.1", 54321) is False
+
+
+@pytest.mark.skipif(system.sys.platform != "linux", reason="/proc scan is Linux-only")
+def test_linux_socket_inode_scan_finds_real_client_socket() -> None:
+    """Regression for the /proc/net/tcp port byte-order bug: a real loopback
+    connection's client socket must be found and resolve to this process."""
+    import os
+    import socket
+
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    cli = socket.create_connection(("127.0.0.1", srv.getsockname()[1]))
+    conn, addr = srv.accept()
+    try:
+        client_port = addr[1]
+        inodes = system._linux_socket_inodes_for_loopback_port(client_port)
+        assert inodes, "client socket not found in /proc/net/tcp{,6}"
+        pids: set[int] = set()
+        for inode in inodes:
+            pids.update(system._linux_pids_holding_socket_inode(inode))
+        assert os.getpid() in pids
+    finally:
+        conn.close()
+        cli.close()
+        srv.close()
 
