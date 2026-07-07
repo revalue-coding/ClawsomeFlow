@@ -78,16 +78,12 @@ class Config(BaseModel):
     # one-click upgrade. Disable to suppress the outbound version check.
     update_check_enabled: bool = True
 
-    # Optional webhook POSTed (best-effort, fire-and-forget) when a Run
-    # reaches a terminal state or pauses at a manual checkpoint. None (the
-    # default) disables the feature entirely — zero-regression opt-in, same
-    # pattern as ``api_token``. See app.services.run_notify.
+    # DEPRECATED (kept only so old config.json still loads): the run webhook
+    # is now configured per-Flow in spec.variables[csflow.notify_webhooks],
+    # which also supports multiple channels. These global fields are no longer
+    # read by app.services.run_notify. Safe to leave set; they are simply
+    # ignored. See app/api/flows.py notify-webhooks endpoints.
     notify_webhook_url: str | None = None
-    # Outgoing message format for the webhook. None (default) = auto-detect
-    # the platform by URL host (Feishu/DingTalk/WeCom/Slack/Discord/Teams/…);
-    # unknown hosts fall back to the raw "generic" JSON, so upgraded users
-    # with a custom receiver see byte-identical behavior. Explicit values:
-    # app.services.run_notify.WEBHOOK_FORMATS.
     notify_webhook_format: str | None = None
 
     storage: StorageConfig = Field(default_factory=StorageConfig)

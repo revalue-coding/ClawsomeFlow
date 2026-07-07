@@ -257,8 +257,10 @@ class SqliteStorage:
         # checkpoint: fires only on the transition into a waiting-for-user
         # state, detected against the previously persisted status) are made
         # here — and the actual POST fires on a daemon thread afterwards.
-        # Full no-op unless Config.notify_webhook_url is set.
+        # Full no-op unless the Flow has webhook channels configured
+        # (spec.variables[csflow.notify_webhooks]).
         from app.services.run_notify import (
+            flow_channels_for_run,
             prepare_checkpoint_notification,
             prepare_terminal_notification,
             send_run_notification,
@@ -268,9 +270,19 @@ class SqliteStorage:
         # guarded so a failure can't abort the commit or raise into the
         # scheduler, and the actual POST fires on a daemon thread (below) so
         # it can never block task execution. prepare_* already swallow their
-        # own errors; the outer guards are belt-and-suspenders.
+        # own errors; the outer guards are belt-and-suspenders. Channels are
+        # loaded ONCE here (own session, before ours opens) from the CURRENT
+        # Flow so live config edits + scheduled runs both take effect.
         try:
-            notification = prepare_terminal_notification(run)
+            channels = flow_channels_for_run(run)
+        except Exception as exc:  # pragma: no cover — defensive
+            self._log_notify_guard(exc)
+            channels = []
+        try:
+            notification = (
+                prepare_terminal_notification(run, channels=channels)
+                if channels else None
+            )
         except Exception as exc:  # pragma: no cover — defensive
             self._log_notify_guard(exc)
             notification = None
@@ -278,10 +290,10 @@ class SqliteStorage:
             current = s.get(FlowRun, run.id)
             if current is None:
                 raise KeyError(run.id)
-            if notification is None:
+            if notification is None and channels:
                 try:
                     notification = prepare_checkpoint_notification(
-                        run, old_status=current.status,
+                        run, old_status=current.status, channels=channels,
                     )
                 except Exception as exc:  # pragma: no cover — defensive
                     self._log_notify_guard(exc)

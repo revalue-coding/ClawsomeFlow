@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
-import { ApiError, NOTIFY_WEBHOOK_FORMATS, RunSummary, api } from "@/lib/api";
-import { Card, EmptyState, ErrorBox, Loading, Modal, StatusPill } from "@/components/ui";
+import { ApiError, RunSummary, api } from "@/lib/api";
+import { Card, EmptyState, ErrorBox, Loading, StatusPill } from "@/components/ui";
 import { RunIcon } from "@/components/icons";
 import { useDialog } from "@/components/dialog";
 
@@ -159,7 +159,6 @@ export function RunList() {
           <h1 className="text-xl font-semibold text-ink-900">{t("runList.title")}</h1>
         </div>
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-          <NotifyWebhookButton />
           <input
             type="search"
             className="input w-full sm:w-72"
@@ -347,177 +346,6 @@ export function RunList() {
         </div>
       )}
     </div>
-  );
-}
-
-
-/**
- * Small settings entry for the run webhook. URL + message format are stored
- * in backend config (``notify_webhook_url`` / ``notify_webhook_format``); an
- * empty URL disables the feature. Format "auto" (the default) lets the
- * backend recognize chat platforms (Feishu, DingTalk, Slack, …) by URL host.
- * "Send test" posts a sample payload with the SAVED config, so it is
- * disabled while the inputs differ from what's persisted.
- */
-function NotifyWebhookButton() {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [savedUrl, setSavedUrl] = useState<string | null>(null);
-  const [savedFormat, setSavedFormat] = useState<string | null>(null);
-  const [effectiveFormat, setEffectiveFormat] = useState<string | null>(null);
-  const [url, setUrl] = useState("");
-  const [format, setFormat] = useState("auto");
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function openModal() {
-    setOpen(true);
-    setNotice(null);
-    setError(null);
-    setLoading(true);
-    try {
-      const r = await api.getNotifyWebhook();
-      setSavedUrl(r.url);
-      setSavedFormat(r.format);
-      setEffectiveFormat(r.effectiveFormat);
-      setUrl(r.url ?? "");
-      setFormat(r.format ?? "auto");
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onSave() {
-    setSaving(true);
-    setNotice(null);
-    setError(null);
-    try {
-      const r = await api.setNotifyWebhook(
-        url.trim() || null,
-        format === "auto" ? null : format,
-      );
-      setSavedUrl(r.url);
-      setSavedFormat(r.format);
-      setEffectiveFormat(r.effectiveFormat);
-      setUrl(r.url ?? "");
-      setFormat(r.format ?? "auto");
-      setNotice(r.url ? t("runList.notify.saved") : t("runList.notify.cleared"));
-    } catch (e) {
-      setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function onTest() {
-    setTesting(true);
-    setNotice(null);
-    setError(null);
-    try {
-      const r = await api.testNotifyWebhook();
-      if (r.success) setNotice(t("runList.notify.testOk", { detail: r.message }));
-      else setError(t("runList.notify.testFail", { detail: r.message }));
-    } catch (e) {
-      setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-    } finally {
-      setTesting(false);
-    }
-  }
-
-  const dirty =
-    url.trim() !== (savedUrl ?? "") || format !== (savedFormat ?? "auto");
-
-  return (
-    <>
-      <button
-        type="button"
-        className="btn-primary shrink-0 shadow-md shadow-brand-500/20 ring-2 ring-brand-100"
-        onClick={() => void openModal()}
-      >
-        {t("runList.notify.button")}
-      </button>
-      <Modal
-        open={open}
-        onClose={() => {
-          if (saving || testing) return;
-          setOpen(false);
-        }}
-        title={t("runList.notify.title")}
-        width="max-w-lg"
-      >
-        <div className="space-y-3">
-          <p className="text-sm text-ink-600">{t("runList.notify.hint")}</p>
-          <p className="rounded-md bg-ink-50 px-3 py-2 text-xs leading-relaxed text-ink-600">
-            {t("runList.notify.steps")}
-          </p>
-          <div>
-            <label className="label">{t("runList.notify.urlLabel")}</label>
-            <input
-              className="input font-mono text-xs"
-              value={url}
-              placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"
-              onChange={(e) => setUrl(e.target.value)}
-              disabled={loading || saving || testing}
-            />
-            <div className="text-xs text-ink-500 mt-1">
-              {t("runList.notify.urlHint")} {t("runList.notify.emptyHint")}
-            </div>
-          </div>
-          <div>
-            <label className="label">{t("runList.notify.formatLabel")}</label>
-            <select
-              className="input text-xs"
-              value={format}
-              onChange={(e) => setFormat(e.target.value)}
-              disabled={loading || saving || testing}
-            >
-              {NOTIFY_WEBHOOK_FORMATS.map((f) => (
-                <option key={f} value={f}>
-                  {t(`runList.notify.formats.${f}`)}
-                </option>
-              ))}
-            </select>
-            <div className="text-xs text-ink-500 mt-1">
-              {!dirty && savedUrl && effectiveFormat
-                ? t("runList.notify.effectiveFormat", {
-                    format: t(`runList.notify.formats.${effectiveFormat}`),
-                  })
-                : t("runList.notify.formatHint")}
-            </div>
-          </div>
-          {notice && (
-            <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs text-emerald-800">
-              {notice}
-            </div>
-          )}
-          {error && <ErrorBox>{error}</ErrorBox>}
-          <div className="flex items-center justify-end gap-2">
-            <button
-              type="button"
-              className="btn-outline"
-              onClick={() => void onTest()}
-              disabled={loading || saving || testing || dirty || !savedUrl}
-              title={dirty || !savedUrl ? t("runList.notify.testNeedsSave") : undefined}
-            >
-              {testing ? t("runList.notify.testing") : t("runList.notify.test")}
-            </button>
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => void onSave()}
-              disabled={loading || saving || testing || !dirty}
-            >
-              {saving ? t("runList.notify.saving") : t("runList.notify.save")}
-            </button>
-          </div>
-        </div>
-      </Modal>
-    </>
   );
 }
 

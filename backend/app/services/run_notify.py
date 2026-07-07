@@ -1,20 +1,25 @@
 """Best-effort webhook notification when a Run reaches a terminal state or
 pauses at a manual checkpoint.
 
-Opt-in via ``Config.notify_webhook_url`` (default ``None`` → the whole module
-is a no-op, so tests and existing deployments are unaffected — same
-zero-regression pattern as the ``api_token`` guard).
+**Per-Flow configuration.** Each Flow carries its own list of webhook channels
+in ``spec.variables[FLOW_NOTIFY_WEBHOOKS_VAR]`` (a JSON string, same round-trip-
+safe ``variables`` pattern as ``csflow.easy_mode`` / run-input fields). A Flow
+with no channels is a full no-op — zero-regression opt-in. Scheduled runs read
+the Flow's channels at notify time just like manual runs, so a timed trigger
+honours whatever the Flow's owner configured.
 
 Wiring: the storage layer's ``run_update`` (the single choke point every
 status flip goes through — finalize, complaint end, abort, review merge,
-uncaught-exception fallback, …) calls :func:`prepare_terminal_notification`
+uncaught-exception fallback, …) loads the Flow's channels once (via
+:func:`flow_channels_for_run`) and calls :func:`prepare_terminal_notification`
 and :func:`prepare_checkpoint_notification` *inside* its DB transaction. The
 helpers decide whether to notify (terminal: dedupe marker stamped into
 ``run.inputs`` in the same commit; checkpoint: keyed on the status
 *transition*, so re-entering a waiting state after leaving it notifies
 again while repeated persists in the same state stay silent); after the
 commit the storage layer fires :func:`send_run_notification` on a daemon
-thread so no scheduler/API path ever blocks on the webhook.
+thread so no scheduler/API path ever blocks on the webhook. One prepared
+notification fans out to **every** configured channel.
 
 Terminal statuses (``event: "run_terminal"``): completed /
 completed_with_conflicts / complaint_failed / failed / aborted. ``orphaned``
@@ -28,15 +33,15 @@ awaiting_user_review (merge review) / awaiting_user_complaint (complaint
 feedback window).
 
 Message formats: users can paste a chat-platform bot webhook URL directly —
-no relay service needed. ``Config.notify_webhook_format`` picks the outgoing
-body shape (``None``/"auto" = detect by URL host, unknown hosts fall back to
-the raw ``generic`` JSON, which keeps every pre-existing deployment
-byte-identical). See :data:`WEBHOOK_FORMATS` / :func:`detect_webhook_format` /
+no relay service needed. Each channel carries its own ``format`` (``None``/
+"auto" = detect by URL host, unknown hosts fall back to the raw ``generic``
+JSON). See :data:`WEBHOOK_FORMATS` / :func:`detect_webhook_format` /
 :func:`build_webhook_request`.
 """
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -49,6 +54,11 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
     from app.models import FlowRun
 
 logger = get_logger("run_notify")
+
+#: ``spec.variables`` key holding the Flow's webhook channels (JSON array of
+#: ``{"url": str, "format": str|null}``). Round-trip-safe like the other
+#: ``csflow.*`` variables. Absent/empty → the Flow sends no notifications.
+FLOW_NOTIFY_WEBHOOKS_VAR = "csflow.notify_webhooks"
 
 #: ``run.inputs`` key stamping when (ISO-8601) the terminal webhook fired.
 #: Doubles as the dedupe marker: a run is notified at most once.
@@ -140,6 +150,68 @@ def resolve_webhook_format(url: str, configured: str | None) -> str:
     if fmt in WEBHOOK_FORMATS:
         return fmt
     return detect_webhook_format(url)
+
+
+# ── per-Flow channel storage (spec.variables) ───────────────────────
+
+
+def parse_flow_channels(variables: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Parse the Flow's webhook channels out of ``spec.variables``.
+
+    Returns a list of ``{"url": str, "format": str|None}`` (``format`` None =
+    auto-detect). Malformed / missing → ``[]`` (never raises). Duplicate URLs
+    collapse to the first occurrence so a copy-paste slip can't double-send.
+    """
+    raw = (variables or {}).get(FLOW_NOTIFY_WEBHOOKS_VAR)
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        fmt = str(item.get("format") or "").strip().lower()
+        out.append({"url": url, "format": fmt or None})
+    return out
+
+
+def serialize_flow_channels(channels: list[dict[str, Any]]) -> str:
+    """Serialize *channels* to the compact JSON string stored in variables."""
+    payload = [
+        {"url": c["url"], "format": (c.get("format") or None)}
+        for c in channels
+        if str(c.get("url") or "").strip()
+    ]
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def flow_channels_for_run(run: FlowRun) -> list[dict[str, Any]]:
+    """Load *run*'s Flow and return its configured webhook channels.
+
+    Best-effort: any lookup/parse failure yields ``[]`` (no notification), so
+    the webhook can never break ``run_update``. Reads the CURRENT Flow (not the
+    run's start-time snapshot) so live edits to the config take effect.
+    """
+    try:
+        from app.storage import get_storage
+
+        flow = get_storage().flow_get(run.flow_id)
+        if flow is None:
+            return []
+        return parse_flow_channels((flow.spec or {}).get("variables"))
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("run_notify_channels_load_failed", error=str(exc))
+        return []
 
 
 def _headline(payload: dict[str, Any]) -> str:
@@ -300,31 +372,27 @@ def _platform_error(fmt: str, resp: Any) -> str | None:
     return None
 
 
-def prepare_terminal_notification(run: FlowRun) -> dict[str, Any] | None:
+def prepare_terminal_notification(
+    run: FlowRun, *, channels: list[dict[str, Any]],
+) -> dict[str, Any] | None:
     """Decide whether *run* (about to be persisted) should fire the webhook.
 
-    Returns ``{"url": ..., "payload": ...}`` when a notification is due and
-    stamps :data:`NOTIFIED_MARKER_KEY` into ``run.inputs`` (a **new** dict so
-    SQLAlchemy JSON change detection sees it); returns ``None`` otherwise.
-    Never raises — a config/load failure just skips the notification.
+    Returns ``{"channels": [...], "payload": ...}`` when a notification is due
+    (stamping :data:`NOTIFIED_MARKER_KEY` into ``run.inputs`` as a **new** dict
+    so SQLAlchemy JSON change detection sees it) or ``None`` otherwise. The
+    single marker means "this run's terminal notification fired" for ALL
+    channels at once. Never raises — a failure just skips the notification.
     """
     try:
-        if run.status not in _NOTIFY_STATUSES:
+        if run.status not in _NOTIFY_STATUSES or not channels:
             return None
         inputs = dict(run.inputs or {})
         if NOTIFIED_MARKER_KEY in inputs:
             return None
-        from app.config import load_config
-
-        cfg = load_config()
-        url = (cfg.notify_webhook_url or "").strip()
-        if not url:
-            return None
         inputs[NOTIFIED_MARKER_KEY] = iso_utc(datetime.now(timezone.utc))
         run.inputs = inputs
         return {
-            "url": url,
-            "format": cfg.notify_webhook_format,
+            "channels": channels,
             "payload": build_run_terminal_payload(run),
         }
     except Exception as exc:  # pragma: no cover — defensive
@@ -333,7 +401,7 @@ def prepare_terminal_notification(run: FlowRun) -> dict[str, Any] | None:
 
 
 def prepare_checkpoint_notification(
-    run: FlowRun, *, old_status: RunStatus | None,
+    run: FlowRun, *, old_status: RunStatus | None, channels: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Decide whether *run* just ENTERED a waiting-for-user state.
 
@@ -347,15 +415,10 @@ def prepare_checkpoint_notification(
     try:
         if run.status not in CHECKPOINT_NOTIFY_STATUSES or old_status == run.status:
             return None
-        from app.config import load_config
-
-        cfg = load_config()
-        url = (cfg.notify_webhook_url or "").strip()
-        if not url:
+        if not channels:
             return None
         return {
-            "url": url,
-            "format": cfg.notify_webhook_format,
+            "channels": channels,
             "payload": _build_run_payload(run, event="run_checkpoint"),
         }
     except Exception as exc:  # pragma: no cover — defensive
@@ -504,7 +567,9 @@ def enrich_run_content(payload: dict[str, Any]) -> None:
 def send_run_notification(prepared: dict[str, Any]) -> threading.Thread:
     """Fire a prepared webhook (terminal or checkpoint) on a daemon thread.
 
-    Returns the thread so tests can join it deterministically.
+    The payload is enriched ONCE (flow name + leader report / checkpoint
+    output), then POSTed to every configured channel in turn using each
+    channel's own format. Returns the thread so tests can join it.
     """
 
     def _send() -> None:
@@ -521,17 +586,19 @@ def send_run_notification(prepared: dict[str, Any]) -> threading.Thread:
                 pass
         # Best-effort content enrichment (leader report / checkpoint output).
         enrich_run_content(payload)
-        ok, detail = post_webhook(
-            prepared["url"], payload, fmt=prepared.get("format"),
-        )
         event = payload.get("event") or "run_terminal"
-        log = logger.info if ok else logger.warning
-        log(
-            f"{event}_webhook_sent" if ok else f"{event}_webhook_failed",
-            run_id=payload.get("runId"),
-            status=payload.get("status"),
-            detail=detail,
-        )
+        for channel in prepared.get("channels") or []:
+            url = str(channel.get("url") or "").strip()
+            if not url:
+                continue
+            ok, detail = post_webhook(url, payload, fmt=channel.get("format"))
+            log = logger.info if ok else logger.warning
+            log(
+                f"{event}_webhook_sent" if ok else f"{event}_webhook_failed",
+                run_id=payload.get("runId"),
+                status=payload.get("status"),
+                detail=detail,
+            )
 
     thread = threading.Thread(target=_send, name="csflow-run-notify", daemon=True)
     thread.start()
@@ -540,16 +607,20 @@ def send_run_notification(prepared: dict[str, Any]) -> threading.Thread:
 
 __all__ = [
     "CHECKPOINT_NOTIFY_STATUSES",
+    "FLOW_NOTIFY_WEBHOOKS_VAR",
     "NOTIFIED_MARKER_KEY",
     "WEBHOOK_FORMATS",
     "build_run_terminal_payload",
     "build_webhook_request",
     "detect_webhook_format",
     "enrich_run_content",
+    "flow_channels_for_run",
+    "parse_flow_channels",
     "post_webhook",
     "prepare_checkpoint_notification",
     "prepare_terminal_notification",
     "render_message_text",
     "resolve_webhook_format",
+    "serialize_flow_channels",
     "send_run_notification",
 ]

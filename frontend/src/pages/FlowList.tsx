@@ -3,7 +3,13 @@ import { useNavigate } from "react-router-dom";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
-import { ApiError, FlowSummary, api } from "@/lib/api";
+import {
+  ApiError,
+  FlowSummary,
+  FlowWebhookChannel,
+  NOTIFY_WEBHOOK_FORMATS,
+  api,
+} from "@/lib/api";
 import { Card, EmptyState, ErrorBox, Loading, Modal } from "@/components/ui";
 import { FlowIcon, RunIcon } from "@/components/icons";
 import { getRunInputFields } from "@/lib/flowRuntime";
@@ -319,6 +325,7 @@ export function FlowList() {
                     </td>
                     <td className="px-4 py-3 align-top">
                       <div className="flex items-center justify-end gap-2 whitespace-nowrap">
+                        <FlowNotifyButton flow={f} onSaved={load} />
                         <button
                           className="btn-primary"
                           disabled={inflight}
@@ -518,6 +525,229 @@ export function FlowList() {
         </div>
       </Modal>
     </div>
+  );
+}
+
+
+/**
+ * Per-Flow webhook notification button + modal. Lives in the Flow list
+ * "actions" column next to Run. Highlighted (brand) when the Flow has ≥1
+ * channel configured, plain outline otherwise. The modal manages a list of
+ * channels (URL + message format) and can test each row before saving.
+ * ``onSaved`` reloads the list so the highlight/count refresh.
+ */
+type NotifyRow = { url: string; format: string; effectiveFormat?: string | null };
+
+function FlowNotifyButton({ flow, onSaved }: { flow: FlowSummary; onSaved: () => void }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [rows, setRows] = useState<NotifyRow[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [testingIdx, setTestingIdx] = useState<number | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const configured = (flow.notifyChannelCount ?? 0) > 0;
+
+  function toRows(channels: FlowWebhookChannel[]): NotifyRow[] {
+    return channels.map((c) => ({
+      url: c.url,
+      format: c.format ?? "auto",
+      effectiveFormat: c.effectiveFormat,
+    }));
+  }
+
+  async function openModal() {
+    setOpen(true);
+    setNotice(null);
+    setError(null);
+    setLoading(true);
+    try {
+      const r = await api.getFlowNotifyWebhooks(flow.id);
+      setRows(toRows(r.channels));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function addRow() {
+    setRows((prev) => [...prev, { url: "", format: "auto" }]);
+  }
+  function removeRow(i: number) {
+    setRows((prev) => prev.filter((_, idx) => idx !== i));
+  }
+  function updateRow(i: number, patch: Partial<NotifyRow>) {
+    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+
+  const toChannels = (): FlowWebhookChannel[] =>
+    rows
+      .map((r) => ({ url: r.url.trim(), format: r.format === "auto" ? null : r.format }))
+      .filter((r) => r.url);
+
+  async function onSave() {
+    setSaving(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const cleaned = toChannels();
+      const r = await api.setFlowNotifyWebhooks(flow.id, cleaned);
+      setRows(toRows(r.channels));
+      setNotice(cleaned.length ? t("flowNotify.saved") : t("flowNotify.cleared"));
+      onSaved();
+    } catch (e) {
+      setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function onTest(i: number) {
+    const row = rows[i];
+    if (!row.url.trim()) return;
+    setTestingIdx(i);
+    setNotice(null);
+    setError(null);
+    try {
+      const r = await api.testFlowNotifyWebhooks(flow.id, {
+        url: row.url.trim(),
+        format: row.format === "auto" ? null : row.format,
+      });
+      if (r.success) setNotice(t("flowNotify.testOk", { detail: r.message }));
+      else setError(t("flowNotify.testFail", { detail: r.message }));
+    } catch (e) {
+      setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setTestingIdx(null);
+    }
+  }
+
+  const busy = loading || saving || testingIdx !== null;
+
+  return (
+    <>
+      <button
+        type="button"
+        className={
+          configured
+            ? "btn-primary shadow-sm shadow-brand-500/20 ring-2 ring-brand-100"
+            : "btn-outline"
+        }
+        onClick={() => void openModal()}
+        title={configured ? t("flowNotify.configuredTitle", { count: flow.notifyChannelCount }) : t("flowNotify.button")}
+      >
+        {t("flowNotify.button")}
+        {configured ? ` (${flow.notifyChannelCount})` : ""}
+      </button>
+      <Modal
+        open={open}
+        onClose={() => {
+          if (saving || testingIdx !== null) return;
+          setOpen(false);
+        }}
+        title={t("flowNotify.title", { name: flow.name })}
+        width="max-w-2xl"
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-ink-600">{t("flowNotify.hint")}</p>
+          <p className="rounded-md bg-ink-50 px-3 py-2 text-xs leading-relaxed text-ink-600">
+            {t("flowNotify.steps")}
+          </p>
+
+          {loading ? (
+            <Loading label={t("common.loading")} />
+          ) : (
+            <div className="space-y-3">
+              {rows.length === 0 && (
+                <div className="rounded-md border border-dashed border-ink-200 px-3 py-4 text-center text-xs text-ink-500">
+                  {t("flowNotify.channelsEmpty")}
+                </div>
+              )}
+              {rows.map((row, i) => (
+                <div key={i} className="rounded-md border border-ink-200 p-3 space-y-2">
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 space-y-2">
+                      <input
+                        className="input font-mono text-xs"
+                        value={row.url}
+                        placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"
+                        onChange={(e) => updateRow(i, { url: e.target.value })}
+                        disabled={busy}
+                      />
+                      <div className="flex items-center gap-2">
+                        <select
+                          className="input text-xs w-auto"
+                          value={row.format}
+                          onChange={(e) => updateRow(i, { format: e.target.value })}
+                          disabled={busy}
+                        >
+                          {NOTIFY_WEBHOOK_FORMATS.map((f) => (
+                            <option key={f} value={f}>
+                              {t(`flowNotify.formats.${f}`)}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="btn-outline text-xs"
+                          onClick={() => void onTest(i)}
+                          disabled={busy || !row.url.trim()}
+                        >
+                          {testingIdx === i ? t("flowNotify.testing") : t("flowNotify.test")}
+                        </button>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-danger text-xs shrink-0"
+                      onClick={() => removeRow(i)}
+                      disabled={busy}
+                    >
+                      {t("flowNotify.removeChannel")}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="btn-outline text-xs"
+                onClick={addRow}
+                disabled={busy}
+              >
+                + {t("flowNotify.addChannel")}
+              </button>
+            </div>
+          )}
+
+          {notice && (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs text-emerald-800">
+              {notice}
+            </div>
+          )}
+          {error && <ErrorBox>{error}</ErrorBox>}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => setOpen(false)}
+              disabled={saving || testingIdx !== null}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void onSave()}
+              disabled={busy}
+            >
+              {saving ? t("flowNotify.saving") : t("flowNotify.save")}
+            </button>
+          </div>
+        </div>
+      </Modal>
+    </>
   );
 }
 

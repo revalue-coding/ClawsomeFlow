@@ -269,6 +269,10 @@ export interface FlowSummary {
   easyMode?: boolean;
   /** True when spec.variables csflow.dev_mode is enabled (开发者模式). */
   devMode?: boolean;
+  /** Number of webhook notification channels configured on this Flow
+   *  (spec.variables csflow.notify_webhooks). >0 → highlight the notify
+   *  button in the list. Older backends may omit this (treated as 0). */
+  notifyChannelCount?: number;
 }
 
 export interface FlowDetail extends FlowSummary {
@@ -762,12 +766,16 @@ export interface ActiveRunsResult {
   runs: ActiveRunView[];
 }
 
-export interface NotifyWebhookView {
-  url: string | null;
-  /** Configured format; null = auto-detect by URL host. */
+/** One per-Flow webhook channel. `format` null/"auto" = detect by URL host;
+ *  `effectiveFormat` is the resolved format the next notification will use. */
+export interface FlowWebhookChannel {
+  url: string;
   format: string | null;
-  /** Resolved format the next notification will use (null when no URL). */
-  effectiveFormat: string | null;
+  effectiveFormat?: string | null;
+}
+
+export interface FlowWebhookConfig {
+  channels: FlowWebhookChannel[];
 }
 
 /** Webhook format ids accepted by the backend ("auto" = detect by URL). */
@@ -1636,19 +1644,22 @@ export const api = {
   getActiveRuns: () =>
     request<ActiveRunsResult>("GET", "/api/system/active-runs"),
 
-  // Run webhook notification (opt-in; null url = disabled). `format` null =
-  // auto-detect the chat platform by URL host; `effectiveFormat` is the
-  // resolved format the next notification will use.
-  getNotifyWebhook: () =>
-    request<NotifyWebhookView>("GET", "/api/system/notify-webhook"),
-  setNotifyWebhook: (url: string | null, format: string | null = null) =>
-    request<NotifyWebhookView>("PUT", "/api/system/notify-webhook", {
-      url,
-      format,
+  // Per-Flow webhook notifications (opt-in; empty channel list = disabled).
+  // Each channel's `format` null = auto-detect the chat platform by URL host.
+  getFlowNotifyWebhooks: (flowId: string) =>
+    request<FlowWebhookConfig>("GET", `/api/flows/${flowId}/notify-webhooks`),
+  setFlowNotifyWebhooks: (flowId: string, channels: FlowWebhookChannel[]) =>
+    request<FlowWebhookConfig>("PUT", `/api/flows/${flowId}/notify-webhooks`, {
+      channels: channels.map((c) => ({ url: c.url, format: c.format })),
     }),
-  testNotifyWebhook: () =>
+  // Test a single ad-hoc channel (url provided) or every saved channel.
+  testFlowNotifyWebhooks: (
+    flowId: string,
+    channel?: { url: string; format: string | null },
+  ) =>
     request<{ success: boolean; message: string }>(
       "POST",
-      "/api/system/notify-webhook/test",
+      `/api/flows/${flowId}/notify-webhooks/test`,
+      channel ? { url: channel.url, format: channel.format } : {},
     ),
 };

@@ -1,9 +1,10 @@
-"""Tests for the run webhook (app.services.run_notify).
+"""Tests for the per-Flow run webhook (app.services.run_notify).
 
-Covers: opt-in no-op default, terminal dedupe marker semantics, the manual
-checkpoint (waiting-for-user) transition notifications, the storage
-``run_update`` choke-point wiring, the sync POST helper, upgrade
-compatibility of the config field, and the /api/system/notify-webhook
+Covers: per-Flow channel parsing/serialization, opt-in no-op default, terminal
+dedupe marker semantics, the manual checkpoint (waiting-for-user) transition
+notifications, the storage ``run_update`` choke-point wiring (channels read
+from the Flow's spec.variables), multi-channel fan-out, the sync POST helper +
+message formats, content enrichment, and the /api/flows/{id}/notify-webhooks
 endpoints.
 """
 
@@ -22,24 +23,29 @@ from app.main import create_app
 from app.models import Flow, FlowRun, RunEvent, RunStatus
 from app.services import run_notify
 from app.services.run_notify import (
+    FLOW_NOTIFY_WEBHOOKS_VAR,
     NOTIFIED_MARKER_KEY,
     WEBHOOK_FORMATS,
     build_webhook_request,
     detect_webhook_format,
     enrich_run_content,
+    flow_channels_for_run,
+    parse_flow_channels,
     post_webhook,
     prepare_checkpoint_notification,
     prepare_terminal_notification,
     render_message_text,
     resolve_webhook_format,
+    serialize_flow_channels,
 )
 from app.storage import get_storage
 
+_HOOK = "http://127.0.0.1:9/hook"
 
-def _set_webhook_url(url: str | None, fmt: str | None = None) -> None:
-    save_config(load_config().model_copy(
-        update={"notify_webhook_url": url, "notify_webhook_format": fmt},
-    ))
+
+def _ch(url: str = _HOOK, fmt: str | None = None) -> list[dict]:
+    """One-channel list convenience for prepare_* unit tests."""
+    return [{"url": url, "format": fmt}]
 
 
 def _make_run(status: RunStatus = RunStatus.completed, **kwargs) -> FlowRun:
@@ -49,30 +55,86 @@ def _make_run(status: RunStatus = RunStatus.completed, **kwargs) -> FlowRun:
     )
 
 
+def _make_flow(
+    *,
+    name: str = "notify-flow",
+    owner: str | None = None,
+    channels: list[dict] | None = None,
+) -> Flow:
+    """Create + persist a Flow, optionally with webhook channels in variables."""
+    storage = get_storage()
+    variables: dict[str, str] = {}
+    if channels:
+        variables[FLOW_NOTIFY_WEBHOOKS_VAR] = serialize_flow_channels(channels)
+    flow = Flow(
+        name=name,
+        description="",
+        owner_user=owner or load_config().default_user,
+        spec={"agents": [], "tasks": [], "variables": variables},
+    )
+    return storage.flow_create(flow)
+
+
+# ── channel parsing / serialization ──────────────────────────────────
+
+
+def test_parse_flow_channels_roundtrip_and_dedupe() -> None:
+    channels = [
+        {"url": "https://a.example/hook", "format": "feishu"},
+        {"url": "https://b.example/hook", "format": None},
+        {"url": "https://a.example/hook", "format": "slack"},  # dup url dropped
+    ]
+    variables = {FLOW_NOTIFY_WEBHOOKS_VAR: serialize_flow_channels(channels)}
+    parsed = parse_flow_channels(variables)
+    assert parsed == [
+        {"url": "https://a.example/hook", "format": "feishu"},
+        {"url": "https://b.example/hook", "format": None},
+    ]
+
+
+def test_parse_flow_channels_handles_missing_and_malformed() -> None:
+    assert parse_flow_channels(None) == []
+    assert parse_flow_channels({}) == []
+    assert parse_flow_channels({FLOW_NOTIFY_WEBHOOKS_VAR: "not json"}) == []
+    assert parse_flow_channels({FLOW_NOTIFY_WEBHOOKS_VAR: '{"url":"x"}'}) == []  # not a list
+    # Entries without a url are skipped; blank format normalizes to None.
+    v = {FLOW_NOTIFY_WEBHOOKS_VAR: json.dumps([{"format": "feishu"}, {"url": "https://x/h", "format": ""}])}
+    assert parse_flow_channels(v) == [{"url": "https://x/h", "format": None}]
+
+
+def test_flow_channels_for_run_reads_current_flow() -> None:
+    flow = _make_flow(channels=_ch("https://live.example/hook", "feishu"))
+    run = _make_run(RunStatus.completed)
+    run.flow_id = flow.id
+    assert flow_channels_for_run(run) == [
+        {"url": "https://live.example/hook", "format": "feishu"},
+    ]
+    # Unknown flow → empty (never raises).
+    run.flow_id = "flow_missing"
+    assert flow_channels_for_run(run) == []
+
+
 # ── prepare_terminal_notification ────────────────────────────────────
 
 
-def test_prepare_noop_when_unconfigured() -> None:
+def test_prepare_noop_without_channels() -> None:
     run = _make_run(RunStatus.completed)
-    assert prepare_terminal_notification(run) is None
-    # No marker stamped when the feature is off — a later config change may
-    # still notify this run if it gets persisted again (documented behavior).
+    assert prepare_terminal_notification(run, channels=[]) is None
+    # No marker stamped when there are no channels.
     assert NOTIFIED_MARKER_KEY not in (run.inputs or {})
 
 
 def test_prepare_noop_for_non_terminal_and_orphaned() -> None:
-    _set_webhook_url("http://127.0.0.1:9/hook")
     for status in (RunStatus.running, RunStatus.awaiting_user_review,
                    RunStatus.awaiting_user_complaint, RunStatus.orphaned):
-        assert prepare_terminal_notification(_make_run(status)) is None
+        assert prepare_terminal_notification(_make_run(status), channels=_ch()) is None
 
 
 def test_prepare_stamps_marker_and_builds_payload() -> None:
-    _set_webhook_url("http://127.0.0.1:9/hook")
     run = _make_run(RunStatus.completed_with_conflicts, inputs={"goal": "x"})
-    prepared = prepare_terminal_notification(run)
+    prepared = prepare_terminal_notification(run, channels=_ch())
     assert prepared is not None
-    assert prepared["url"] == "http://127.0.0.1:9/hook"
+    assert prepared["channels"] == _ch()
     payload = prepared["payload"]
     assert payload["event"] == "run_terminal"
     assert payload["runId"] == run.id
@@ -83,40 +145,50 @@ def test_prepare_stamps_marker_and_builds_payload() -> None:
     assert run.inputs["goal"] == "x"
     assert NOTIFIED_MARKER_KEY in run.inputs
     # Dedupe: a second call is a no-op.
-    assert prepare_terminal_notification(run) is None
+    assert prepare_terminal_notification(run, channels=_ch()) is None
+
+
+def test_prepare_carries_all_channels() -> None:
+    channels = [
+        {"url": "https://a/h", "format": "feishu"},
+        {"url": "https://b/h", "format": None},
+    ]
+    prepared = prepare_terminal_notification(_make_run(RunStatus.completed), channels=channels)
+    assert prepared is not None
+    assert prepared["channels"] == channels
 
 
 # ── prepare_checkpoint_notification ──────────────────────────────────
 
 
-def test_prepare_checkpoint_noop_when_unconfigured() -> None:
+def test_prepare_checkpoint_noop_without_channels() -> None:
     run = _make_run(RunStatus.awaiting_user_review)
-    assert prepare_checkpoint_notification(run, old_status=RunStatus.running) is None
+    assert prepare_checkpoint_notification(run, old_status=RunStatus.running, channels=[]) is None
 
 
 def test_prepare_checkpoint_fires_only_on_transition() -> None:
-    _set_webhook_url("http://127.0.0.1:9/hook")
     for status in (RunStatus.awaiting_user_checkpoint,
                    RunStatus.awaiting_user_review,
                    RunStatus.awaiting_user_complaint):
         run = _make_run(status)
-        prepared = prepare_checkpoint_notification(run, old_status=RunStatus.running)
+        prepared = prepare_checkpoint_notification(
+            run, old_status=RunStatus.running, channels=_ch(),
+        )
         assert prepared is not None, status
         payload = prepared["payload"]
         assert payload["event"] == "run_checkpoint"
         assert payload["status"] == status.value
         assert payload["runId"] == run.id
         # Same-status re-persist (pending merge updates etc.) stays silent.
-        assert prepare_checkpoint_notification(run, old_status=status) is None
+        assert prepare_checkpoint_notification(run, old_status=status, channels=_ch()) is None
 
 
 def test_prepare_checkpoint_noop_for_non_waiting_states() -> None:
-    _set_webhook_url("http://127.0.0.1:9/hook")
     for status in (RunStatus.running, RunStatus.complaint_processing,
                    RunStatus.completed, RunStatus.failed):
         run = _make_run(status)
         assert prepare_checkpoint_notification(
-            run, old_status=RunStatus.running,
+            run, old_status=RunStatus.running, channels=_ch(),
         ) is None, status
 
 
@@ -124,13 +196,12 @@ def test_prepare_checkpoint_noop_for_non_waiting_states() -> None:
 
 
 def test_run_update_fires_once_and_persists_marker(monkeypatch) -> None:
-    _set_webhook_url("http://127.0.0.1:9/hook")
     sent: list[dict] = []
     monkeypatch.setattr(
         run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
     )
+    flow = _make_flow(channels=_ch())
     storage = get_storage()
-    flow = storage.flow_create(Flow(name="notify-flow", description="", owner_user="alice"))
     run = storage.run_create(FlowRun(
         flow_id=flow.id, flow_version=1, team_name="csflow-notify",
         status=RunStatus.running, inputs={}, user="alice",
@@ -144,6 +215,7 @@ def test_run_update_fires_once_and_persists_marker(monkeypatch) -> None:
     updated = storage.run_update(run)
     assert len(sent) == 1
     assert sent[0]["payload"]["status"] == "completed"
+    assert sent[0]["channels"] == _ch()
     assert NOTIFIED_MARKER_KEY in updated.inputs
 
     # A later update of the already-notified terminal run does NOT re-fire.
@@ -154,20 +226,17 @@ def test_run_update_fires_once_and_persists_marker(monkeypatch) -> None:
 def test_scheduled_run_fires_terminal_webhook(monkeypatch) -> None:
     """Scheduled runs skip the review + complaint phases and go straight to
     ``completed`` — the terminal webhook must still fire (no is_scheduled gate),
-    with ``isScheduled: true`` in the payload."""
-    _set_webhook_url("http://127.0.0.1:9/hook")
+    reading the Flow's channels, with ``isScheduled: true`` in the payload."""
     sent: list[dict] = []
     monkeypatch.setattr(
         run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
     )
+    flow = _make_flow(name="sched-flow", channels=_ch())
     storage = get_storage()
-    flow = storage.flow_create(Flow(name="sched-flow", description="", owner_user="alice"))
     run = storage.run_create(FlowRun(
         flow_id=flow.id, flow_version=1, team_name="csflow-sched",
         status=RunStatus.running, inputs={}, user="alice", is_scheduled=True,
     ))
-    # finalize for a scheduled run flips straight to completed (no review /
-    # complaint), then the controller persists it via run_update.
     run.status = RunStatus.completed
     storage.run_update(run)
     assert len(sent) == 1
@@ -177,17 +246,14 @@ def test_scheduled_run_fires_terminal_webhook(monkeypatch) -> None:
 
 
 def test_scheduled_run_fires_checkpoint_webhook(monkeypatch) -> None:
-    """A scheduled (unattended) run still PAUSES at a mid-DAG manual checkpoint
-    (``requires_human_checkpoint`` is honoured regardless of is_scheduled), so
-    the ``run_checkpoint`` webhook must fire to alert the user it needs input.
-    Only review/complaint are skipped for scheduled runs — not checkpoints."""
-    _set_webhook_url("http://127.0.0.1:9/hook")
+    """A scheduled (unattended) run still PAUSES at a mid-DAG manual checkpoint,
+    so the ``run_checkpoint`` webhook must fire per the Flow's channels."""
     sent: list[dict] = []
     monkeypatch.setattr(
         run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
     )
+    flow = _make_flow(name="sched-cp", channels=_ch())
     storage = get_storage()
-    flow = storage.flow_create(Flow(name="sched-cp", description="", owner_user="alice"))
     run = storage.run_create(FlowRun(
         flow_id=flow.id, flow_version=1, team_name="csflow-schedcp",
         status=RunStatus.running, inputs={}, user="alice", is_scheduled=True,
@@ -203,19 +269,17 @@ def test_scheduled_run_fires_checkpoint_webhook(monkeypatch) -> None:
 def test_run_update_checkpoint_transitions(monkeypatch) -> None:
     """run_update fires run_checkpoint on entry into each waiting state,
     stays silent on same-state re-persists, and re-fires on re-entry."""
-    _set_webhook_url("http://127.0.0.1:9/hook")
     sent: list[dict] = []
     monkeypatch.setattr(
         run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
     )
+    flow = _make_flow(name="cp-flow", channels=_ch())
     storage = get_storage()
-    flow = storage.flow_create(Flow(name="cp-flow", description="", owner_user="alice"))
     run = storage.run_create(FlowRun(
         flow_id=flow.id, flow_version=1, team_name="csflow-cp",
         status=RunStatus.running, inputs={}, user="alice",
     ))
 
-    # running → awaiting_user_checkpoint: fires.
     run.status = RunStatus.awaiting_user_checkpoint
     storage.run_update(run)
     assert [p["payload"]["status"] for p in sent] == ["awaiting_user_checkpoint"]
@@ -249,14 +313,12 @@ def test_run_update_checkpoint_transitions(monkeypatch) -> None:
 def test_run_update_never_broken_by_webhook_failure(monkeypatch) -> None:
     """Requirement: a webhook-path exception must NEVER abort the run update
     or raise into the caller (scheduler). The run row must still persist."""
-    _set_webhook_url("http://127.0.0.1:9/hook")
-
     def _boom(_prepared):
         raise RuntimeError("webhook subsystem exploded")
 
     monkeypatch.setattr(run_notify, "send_run_notification", _boom)
+    flow = _make_flow(name="robust-flow", channels=_ch())
     storage = get_storage()
-    flow = storage.flow_create(Flow(name="robust-flow", description="", owner_user="alice"))
     run = storage.run_create(FlowRun(
         flow_id=flow.id, flow_version=1, team_name="csflow-robust",
         status=RunStatus.running, inputs={}, user="alice",
@@ -269,13 +331,13 @@ def test_run_update_never_broken_by_webhook_failure(monkeypatch) -> None:
     assert storage.run_get(run.id).status == RunStatus.completed
 
 
-def test_run_update_noop_without_config(monkeypatch) -> None:
+def test_run_update_noop_without_channels(monkeypatch) -> None:
     sent: list[dict] = []
     monkeypatch.setattr(
         run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
     )
+    flow = _make_flow(name="quiet-flow", channels=None)
     storage = get_storage()
-    flow = storage.flow_create(Flow(name="quiet-flow", description="", owner_user="alice"))
     run = storage.run_create(FlowRun(
         flow_id=flow.id, flow_version=1, team_name="csflow-quiet",
         status=RunStatus.running, inputs={}, user="alice",
@@ -357,17 +419,31 @@ def test_post_webhook_connect_error() -> None:
 
 def test_send_run_notification_enriches_flow_name(webhook_server) -> None:
     url, handler = webhook_server
-    storage = get_storage()
-    flow = storage.flow_create(Flow(name="Enriched Flow", description="", owner_user="alice"))
+    flow = _make_flow(name="Enriched Flow", channels=_ch(url))
     run = _make_run(RunStatus.completed)
     run.flow_id = flow.id
-    _set_webhook_url(url)
-    prepared = prepare_terminal_notification(run)
+    prepared = prepare_terminal_notification(run, channels=_ch(url))
     assert prepared is not None
     thread = run_notify.send_run_notification(prepared)
     thread.join(timeout=10)
     assert len(handler.received) == 1
     assert handler.received[0]["flowName"] == "Enriched Flow"
+
+
+def test_send_run_notification_fans_out_to_all_channels(webhook_server) -> None:
+    """Multiple channels → one enrichment, one POST per channel."""
+    url, handler = webhook_server
+    prepared = {
+        "channels": [
+            {"url": url, "format": "generic"},
+            {"url": url, "format": "generic"},
+        ],
+        "payload": {"event": "run_terminal", "runId": "run_fan",
+                    "flowId": "flow_fan", "status": "completed"},
+    }
+    run_notify.send_run_notification(prepared).join(timeout=10)
+    assert len(handler.received) == 2
+    assert all(m["runId"] == "run_fan" for m in handler.received)
 
 
 # ── message formats: detection + rendering ───────────────────────────
@@ -537,19 +613,6 @@ def test_post_webhook_detects_feishu_error_in_http_200(webhook_server) -> None:
     assert ok2
 
 
-def test_prepare_includes_configured_format() -> None:
-    _set_webhook_url("https://open.feishu.cn/open-apis/bot/v2/hook/x", "feishu")
-    prepared = prepare_terminal_notification(_make_run(RunStatus.completed))
-    assert prepared is not None
-    assert prepared["format"] == "feishu"
-    _set_webhook_url("http://127.0.0.1:9/hook", None)
-    prepared2 = prepare_checkpoint_notification(
-        _make_run(RunStatus.awaiting_user_review), old_status=RunStatus.running,
-    )
-    assert prepared2 is not None
-    assert prepared2["format"] is None  # auto
-
-
 # ── content enrichment: leader report / checkpoint output ────────────
 
 
@@ -662,10 +725,8 @@ def test_send_run_notification_includes_content(webhook_server) -> None:
             {"from_agent": "leader", "summary": "leader final reply: done and dusted"},
         ]}),
     ])
-    _set_webhook_url(url, "feishu")
     prepared = {
-        "url": url,
-        "format": "feishu",
+        "channels": [{"url": url, "format": "feishu"}],
         "payload": {"event": "run_terminal", "runId": run.id,
                     "flowId": run.flow_id, "status": "completed"},
     }
@@ -677,7 +738,8 @@ def test_send_run_notification_includes_content(webhook_server) -> None:
 
 
 def test_legacy_config_without_field_loads_with_none() -> None:
-    """An upgrade-only user's old config.json (no notify field) must load."""
+    """An upgrade-only user's old config.json (no notify field) must load; the
+    now-deprecated global fields default to None and are dropped on save."""
     path = paths.config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"deployment_mode": "local"}), encoding="utf-8")
@@ -687,112 +749,121 @@ def test_legacy_config_without_field_loads_with_none() -> None:
     cfg = load_config()
     assert cfg.notify_webhook_url is None
     assert cfg.notify_webhook_format is None
-    # And saving with the fields unset keeps the file parseable by old code
-    # (exclude_none drops them entirely).
     save_config(cfg)
     data = json.loads(path.read_text(encoding="utf-8"))
     assert "notify_webhook_url" not in data
     assert "notify_webhook_format" not in data
 
 
-# ── API endpoints ────────────────────────────────────────────────────
+# ── API endpoints (per-Flow) ─────────────────────────────────────────
 
 
-def test_api_get_put_and_clear_webhook() -> None:
+def test_api_get_put_and_clear_flow_webhooks() -> None:
+    flow = _make_flow(name="api-flow")
     with TestClient(create_app()) as client:
-        r = client.get("/api/system/notify-webhook")
-        assert r.status_code == 200
-        assert r.json()["url"] is None
-        assert r.json()["format"] is None
-        assert r.json()["effectiveFormat"] is None
-
-        r = client.put(
-            "/api/system/notify-webhook", json={"url": "https://example.com/hook"},
-        )
-        assert r.status_code == 200
-        assert r.json()["url"] == "https://example.com/hook"
-        assert r.json()["effectiveFormat"] == "generic"  # unknown host
-        assert load_config().notify_webhook_url == "https://example.com/hook"
-
-        r = client.get("/api/system/notify-webhook")
-        assert r.json()["url"] == "https://example.com/hook"
-
-        r = client.put("/api/system/notify-webhook", json={"url": ""})
-        assert r.status_code == 200
-        assert r.json()["url"] is None
-        assert load_config().notify_webhook_url is None
-        assert load_config().notify_webhook_format is None
-
-
-def test_api_put_format_auto_detect_and_override() -> None:
-    feishu = "https://open.feishu.cn/open-apis/bot/v2/hook/abc"
-    with TestClient(create_app()) as client:
-        # No explicit format → auto-detect reports feishu.
-        r = client.put("/api/system/notify-webhook", json={"url": feishu})
+        r = client.get(f"/api/flows/{flow.id}/notify-webhooks")
         assert r.status_code == 200, r.text
-        assert r.json()["format"] is None
-        assert r.json()["effectiveFormat"] == "feishu"
+        assert r.json()["channels"] == []
 
-        # Explicit override sticks and wins over detection.
         r = client.put(
-            "/api/system/notify-webhook",
-            json={"url": feishu, "format": "generic"},
+            f"/api/flows/{flow.id}/notify-webhooks",
+            json={"channels": [
+                {"url": "https://open.feishu.cn/open-apis/bot/v2/hook/abc"},
+                {"url": "https://example.com/hook", "format": "generic"},
+            ]},
+        )
+        assert r.status_code == 200, r.text
+        chans = r.json()["channels"]
+        assert [c["url"] for c in chans] == [
+            "https://open.feishu.cn/open-apis/bot/v2/hook/abc",
+            "https://example.com/hook",
+        ]
+        assert chans[0]["effectiveFormat"] == "feishu"  # auto-detected
+        assert chans[1]["format"] == "generic"
+
+        # Persisted + surfaced on the summary count.
+        r = client.get(f"/api/flows/{flow.id}/notify-webhooks")
+        assert len(r.json()["channels"]) == 2
+        items = {f["id"]: f for f in client.get("/api/flows").json()["items"]}
+        assert items[flow.id]["notifyChannelCount"] == 2
+
+        # Clearing (empty list) disables notifications.
+        r = client.put(f"/api/flows/{flow.id}/notify-webhooks", json={"channels": []})
+        assert r.status_code == 200
+        assert r.json()["channels"] == []
+        items = {f["id"]: f for f in client.get("/api/flows").json()["items"]}
+        assert items[flow.id]["notifyChannelCount"] == 0
+
+
+def test_api_put_dedupes_urls() -> None:
+    flow = _make_flow(name="dedupe-flow")
+    with TestClient(create_app()) as client:
+        r = client.put(
+            f"/api/flows/{flow.id}/notify-webhooks",
+            json={"channels": [
+                {"url": "https://example.com/hook", "format": "generic"},
+                {"url": "https://example.com/hook", "format": "slack"},
+            ]},
         )
         assert r.status_code == 200
-        assert r.json()["format"] == "generic"
-        assert r.json()["effectiveFormat"] == "generic"
-        assert load_config().notify_webhook_format == "generic"
-
-        # "auto" normalizes back to null (= detect).
-        r = client.put(
-            "/api/system/notify-webhook", json={"url": feishu, "format": "auto"},
-        )
-        assert r.json()["format"] is None
-        assert r.json()["effectiveFormat"] == "feishu"
+        assert len(r.json()["channels"]) == 1
 
 
 def test_api_put_rejects_unknown_format() -> None:
+    flow = _make_flow(name="badfmt-flow")
     with TestClient(create_app()) as client:
         r = client.put(
-            "/api/system/notify-webhook",
-            json={"url": "https://example.com/hook", "format": "carrier-pigeon"},
+            f"/api/flows/{flow.id}/notify-webhooks",
+            json={"channels": [{"url": "https://example.com/hook", "format": "carrier-pigeon"}]},
         )
     assert r.status_code == 422
     assert r.json()["error"] == "INVALID_WEBHOOK_FORMAT"
 
 
 def test_api_put_rejects_non_http_url() -> None:
+    flow = _make_flow(name="badurl-flow")
     with TestClient(create_app()) as client:
-        r = client.put("/api/system/notify-webhook", json={"url": "ftp://x"})
+        r = client.put(
+            f"/api/flows/{flow.id}/notify-webhooks",
+            json={"channels": [{"url": "ftp://x"}]},
+        )
     assert r.status_code == 422
     assert r.json()["error"] == "INVALID_WEBHOOK_URL"
 
 
 def test_api_test_endpoint_requires_config() -> None:
+    flow = _make_flow(name="notest-flow")
     with TestClient(create_app()) as client:
-        r = client.post("/api/system/notify-webhook/test")
+        r = client.post(f"/api/flows/{flow.id}/notify-webhooks/test")
     assert r.status_code == 409
     assert r.json()["error"] == "WEBHOOK_NOT_CONFIGURED"
 
 
-def test_api_test_endpoint_posts_sample(webhook_server) -> None:
+def test_api_test_endpoint_posts_to_adhoc_channel(webhook_server) -> None:
     url, handler = webhook_server
-    _set_webhook_url(url)
+    flow = _make_flow(name="adhoc-test-flow")
     with TestClient(create_app()) as client:
-        r = client.post("/api/system/notify-webhook/test")
-    assert r.status_code == 200, r.text
-    assert r.json()["success"] is True
-    assert handler.received[0]["event"] == "run_terminal_test"
-
-
-def test_api_test_endpoint_honours_configured_format(webhook_server) -> None:
-    """With format=feishu saved, the test button posts a Feishu-shaped body."""
-    url, handler = webhook_server
-    _set_webhook_url(url, "feishu")
-    with TestClient(create_app()) as client:
-        r = client.post("/api/system/notify-webhook/test")
+        r = client.post(
+            f"/api/flows/{flow.id}/notify-webhooks/test",
+            json={"url": url, "format": "feishu"},
+        )
     assert r.status_code == 200, r.text
     assert r.json()["success"] is True
     body = handler.received[0]
     assert body["msg_type"] == "text"
     assert "webhook test" in body["content"]["text"]
+
+
+def test_api_test_endpoint_posts_to_all_saved_channels(webhook_server) -> None:
+    url, handler = webhook_server
+    # Distinct URLs (same loopback server) so channel de-dup keeps both.
+    flow = _make_flow(name="saved-test-flow", channels=[
+        {"url": url, "format": "generic"},
+        {"url": f"{url}-b", "format": "generic"},
+    ])
+    with TestClient(create_app()) as client:
+        r = client.post(f"/api/flows/{flow.id}/notify-webhooks/test")
+    assert r.status_code == 200, r.text
+    assert r.json()["success"] is True
+    assert len(handler.received) == 2
+    assert handler.received[0]["event"] == "run_terminal_test"

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Body, Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from sqlalchemy.exc import IntegrityError
@@ -67,6 +67,10 @@ class FlowSummary(_CamelModel):
     easy_mode: bool = False
     # True when spec.variables["csflow.dev_mode"] is "true" (开发者模式).
     dev_mode: bool = False
+    # Number of webhook notification channels configured on this Flow
+    # (spec.variables[csflow.notify_webhooks]). >0 → the list UI highlights
+    # the notification button. 0 → no notifications for this Flow.
+    notify_channel_count: int = 0
 
 
 class FlowDetail(_CamelModel):
@@ -208,6 +212,18 @@ def _spec_dev_mode(flow: Flow) -> bool:
         return False
 
 
+def _spec_notify_channel_count(flow: Flow) -> int:
+    try:
+        from app.services.run_notify import parse_flow_channels
+
+        variables = (flow.spec or {}).get("variables") or {}
+        if not isinstance(variables, dict):
+            return 0
+        return len(parse_flow_channels(variables))
+    except Exception:
+        return 0
+
+
 def _to_summary(flow: Flow) -> FlowSummary:
     # Cheapest path: read agent kinds + leader straight out of the JSON-
     # stored spec without re-validating through the strict FlowSpec model
@@ -249,6 +265,7 @@ def _to_summary(flow: Flow) -> FlowSummary:
         leader_kind=leader_kind,
         easy_mode=_spec_easy_mode(flow),
         dev_mode=_spec_dev_mode(flow),
+        notify_channel_count=_spec_notify_channel_count(flow),
     )
 
 
@@ -659,3 +676,192 @@ def delete_flow(
             f"flow {flow_id!r} has active runs; cannot delete",
             status_code=409,
         ) from exc
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Per-Flow webhook notifications
+#
+# Channels live in ``spec.variables[csflow.notify_webhooks]`` (JSON array),
+# so they round-trip through import/export and un-upgraded backends like the
+# other ``csflow.*`` variables. These endpoints read-modify-write ONLY that
+# variable (bumping the Flow version) and are intentionally allowed even
+# while runs are active — notification config never affects execution.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class FlowWebhookChannel(_CamelModel):
+    url: str
+    # None / "" / "auto" → auto-detect the platform by URL host.
+    format: str | None = None
+    # Resolved format the next notification will use (response-only).
+    effective_format: str | None = None
+
+
+class FlowWebhookConfig(_CamelModel):
+    channels: list[FlowWebhookChannel] = Field(default_factory=list)
+
+
+class FlowWebhookTestPayload(_CamelModel):
+    # When provided, test just this ad-hoc channel (lets the UI test a row
+    # before saving). When omitted, test every SAVED channel.
+    url: str | None = None
+    format: str | None = None
+
+
+class FlowWebhookTestResult(_CamelModel):
+    success: bool
+    message: str = ""
+
+
+def _validate_webhook_url(raw: str | None) -> str:
+    url = (raw or "").strip()
+    if not url:
+        raise ApiError("INVALID_WEBHOOK_URL", "Webhook URL must not be empty", status_code=422)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ApiError(
+            "INVALID_WEBHOOK_URL",
+            "Webhook URL must start with http:// or https://",
+            status_code=422,
+        )
+    return url
+
+
+def _validate_webhook_format(raw: str | None) -> str | None:
+    from app.services.run_notify import WEBHOOK_FORMATS
+
+    fmt = (raw or "").strip().lower()
+    if not fmt or fmt == "auto":
+        return None
+    if fmt not in WEBHOOK_FORMATS:
+        raise ApiError(
+            "INVALID_WEBHOOK_FORMAT",
+            f"Unknown webhook format {fmt!r}; allowed: auto, " + ", ".join(WEBHOOK_FORMATS),
+            status_code=422,
+        )
+    return fmt
+
+
+def _webhook_config_response(channels: list[dict[str, Any]]) -> FlowWebhookConfig:
+    from app.services.run_notify import resolve_webhook_format
+
+    return FlowWebhookConfig(channels=[
+        FlowWebhookChannel(
+            url=c["url"],
+            format=c.get("format"),
+            effective_format=resolve_webhook_format(c["url"], c.get("format")),
+        )
+        for c in channels
+    ])
+
+
+def _get_owned_flow(flow_id: str, user: str, storage: StorageBackend) -> Flow:
+    flow = storage.flow_get(flow_id)
+    if flow is None:
+        raise ApiError("NOT_FOUND", f"flow {flow_id!r} not found", status_code=404)
+    _ensure_owner(flow, user)
+    return flow
+
+
+@router.get("/{flow_id}/notify-webhooks", response_model=FlowWebhookConfig)
+def get_flow_notify_webhooks(
+    flow_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> FlowWebhookConfig:
+    """List the Flow's webhook channels (with resolved effective formats)."""
+    from app.services.run_notify import parse_flow_channels
+
+    flow = _get_owned_flow(flow_id, user, storage)
+    channels = parse_flow_channels((flow.spec or {}).get("variables"))
+    return _webhook_config_response(channels)
+
+
+@router.put("/{flow_id}/notify-webhooks", response_model=FlowWebhookConfig)
+def set_flow_notify_webhooks(
+    flow_id: Annotated[str, Path()],
+    payload: Annotated[FlowWebhookConfig, Body()],
+    user: UserDep,
+    storage: StorageDep,
+) -> FlowWebhookConfig:
+    """Replace the Flow's webhook channels (read-modify-write on variables)."""
+    from app.services.run_notify import (
+        FLOW_NOTIFY_WEBHOOKS_VAR,
+        serialize_flow_channels,
+    )
+
+    flow = _get_owned_flow(flow_id, user, storage)
+    validated: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ch in payload.channels:
+        url = _validate_webhook_url(ch.url)
+        if url in seen:
+            continue
+        seen.add(url)
+        validated.append({"url": url, "format": _validate_webhook_format(ch.format)})
+
+    spec = FlowSpec.model_validate(flow.spec)
+    variables = dict(spec.variables or {})
+    if validated:
+        variables[FLOW_NOTIFY_WEBHOOKS_VAR] = serialize_flow_channels(validated)
+    else:
+        variables.pop(FLOW_NOTIFY_WEBHOOKS_VAR, None)
+    spec.variables = variables
+    flow.with_spec(spec)
+    storage.flow_update(flow, expected_version=flow.version)
+    logger.info("flow_notify_webhooks_updated", flow_id=flow_id, channels=len(validated))
+    return _webhook_config_response(validated)
+
+
+@router.post("/{flow_id}/notify-webhooks/test", response_model=FlowWebhookTestResult)
+async def test_flow_notify_webhooks(
+    flow_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+    payload: Annotated[FlowWebhookTestPayload, Body()] = FlowWebhookTestPayload(),
+) -> FlowWebhookTestResult:
+    """Send a sample payload — to the ad-hoc channel in the body if given,
+    else to every saved channel — and report the aggregate result."""
+    import asyncio
+
+    from app.services.run_notify import parse_flow_channels, post_webhook
+
+    flow = _get_owned_flow(flow_id, user, storage)
+
+    if payload.url is not None:
+        targets = [{
+            "url": _validate_webhook_url(payload.url),
+            "format": _validate_webhook_format(payload.format),
+        }]
+    else:
+        targets = parse_flow_channels((flow.spec or {}).get("variables"))
+    if not targets:
+        raise ApiError(
+            "WEBHOOK_NOT_CONFIGURED",
+            "No webhook channel configured for this flow.",
+            status_code=409,
+        )
+
+    sample = {
+        "event": "run_terminal_test",
+        "runId": "run_test",
+        "flowId": flow.id,
+        "flowName": flow.name,
+        "teamName": "csflow-test",
+        "status": "completed",
+        "isScheduled": False,
+        "startedAt": None,
+        "finishedAt": None,
+        "content": "This is a sample leader report / checkpoint output line.",
+    }
+
+    def _run_all() -> tuple[bool, str]:
+        results: list[str] = []
+        all_ok = True
+        for ch in targets:
+            ok, detail = post_webhook(ch["url"], sample, fmt=ch.get("format"))
+            all_ok = all_ok and ok
+            results.append(f"{'ok' if ok else 'fail'}: {detail}")
+        return all_ok, "; ".join(results)
+
+    ok, message = await asyncio.to_thread(_run_all)
+    return FlowWebhookTestResult(success=ok, message=message)
