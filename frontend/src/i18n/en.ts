@@ -74,7 +74,7 @@ const en = {
           "No folder picker can be shown here. Paste the absolute path on that server manually (e.g. /home/you/project).",
         serverMode: "The native folder picker is disabled in server deployment mode. Paste the path manually.",
         clientNotColocated:
-          "You are viewing ClawsomeFlow through SSH port forwarding (the browser address shows localhost, but the browser runs on another machine). " +
+          "You are viewing ClawsomeFlow through remote port forwarding, e.g. SSH -L or VS Code/Cursor Remote (the browser address shows localhost, but the browser runs on another machine). " +
           "The folder picker would open on the server's desktop, not yours. Paste the absolute path on the server manually (e.g. /home/you/project).",
       },
       open: {
@@ -88,7 +88,7 @@ const en = {
         serverMode:
           "Opening folders in the file manager is disabled in server deployment mode.",
         clientNotColocated:
-          "You are viewing ClawsomeFlow through SSH port forwarding (the browser address shows localhost, but the browser runs on another machine). " +
+          "You are viewing ClawsomeFlow through remote port forwarding, e.g. SSH -L or VS Code/Cursor Remote (the browser address shows localhost, but the browser runs on another machine). " +
           "The file manager would open on the server's desktop, not yours. Use SSH on the server, or paste paths manually.",
       },
     },

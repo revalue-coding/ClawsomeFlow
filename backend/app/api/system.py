@@ -567,14 +567,26 @@ def _is_ssh_process_name(name: str) -> bool:
 
 
 def _proc_tcp_port_hex(port: int) -> str:
-    return f"{port & 0xFF:02X}{(port >> 8) & 0xFF:02X}"
+    """Port column format in /proc/net/tcp{,6}.
+
+    The kernel prints the port as plain big-endian hex (``%04X`` of the host
+    value, e.g. 17017 -> ``4279``); only the *address* bytes are little-endian.
+    """
+    return f"{port:04X}"
 
 
 def _linux_socket_inodes_for_loopback_port(port: int) -> list[str]:
+    """Inodes of ESTABLISHED sockets whose *local* side is loopback:<port>.
+
+    Matching the local side only selects the HTTP client's own socket and
+    never the server-side socket held by this csflow process.
+    """
     port_hex = _proc_tcp_port_hex(port)
     inodes: list[str] = []
-    loopback_v4 = f"0100007F:{port_hex}"
-    loopback_v6 = f"00000000000000000000000001000000:{port_hex}"
+    local_markers = {
+        f"0100007F:{port_hex}".upper(),
+        f"00000000000000000000000001000000:{port_hex}".upper(),
+    }
 
     for proc_path in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
         try:
@@ -585,12 +597,8 @@ def _linux_socket_inodes_for_loopback_port(port: int) -> list[str]:
             parts = line.split()
             if len(parts) < 10 or parts[3] != "01":
                 continue
-            local_addr, rem_addr, inode = parts[1], parts[2], parts[9]
-            if any(
-                addr.upper() == marker
-                for addr in (local_addr, rem_addr)
-                for marker in (loopback_v4.upper(), loopback_v6.upper())
-            ):
+            local_addr, inode = parts[1], parts[9]
+            if local_addr.upper() in local_markers:
                 inodes.append(inode)
     return inodes
 
@@ -627,6 +635,58 @@ def _linux_comm_for_pid(pid: int) -> str | None:
         return Path(f"/proc/{pid}/comm").read_text().strip().lower()
     except OSError:
         return None
+
+
+def _linux_environ_has_gui_display(pid: int) -> bool | None:
+    """Whether *pid* carries DISPLAY/WAYLAND_DISPLAY; ``None`` when unreadable."""
+    try:
+        blob = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return None
+    for item in blob.split(b"\0"):
+        key, sep, value = item.partition(b"=")
+        if sep and key in (b"DISPLAY", b"WAYLAND_DISPLAY") and value.strip():
+            return True
+    return False
+
+
+def _linux_loopback_client_colocated(client_host: str, client_port: int) -> bool:
+    """Allowlist verdict: colocated only when the loopback HTTP peer is provably
+    a process of this host's desktop session (DISPLAY/WAYLAND_DISPLAY in env).
+
+    A blocklist of forwarder names cannot work here: ``sshd`` runs undumpable
+    (its /proc/<pid>/fd is unreadable to a non-root csflow), and VS Code/Cursor
+    Remote forwards traffic through a generic ``node`` process. A local desktop
+    browser (and anything launched from the desktop session, e.g. a vite dev
+    proxy) inherits the display env vars, so requiring them positively
+    identifies "same desktop" for every forwarding technology at once.
+    """
+    try:
+        inodes = _linux_socket_inodes_for_loopback_port(client_port)
+    except Exception:
+        logger.debug("loopback peer inode scan failed", exc_info=True)
+        inodes = []
+    if not inodes:
+        # Could not even locate the client socket (unusual /proc layout);
+        # fall back to the legacy ssh blocklist instead of hard-blocking.
+        return not _loopback_client_is_ssh_forward(client_host, client_port)
+
+    pids: list[int] = []
+    for inode in inodes:
+        pids.extend(_linux_pids_holding_socket_inode(inode))
+    if not pids:
+        # Peer process not inspectable (undumpable sshd, other-uid forwarder):
+        # cannot prove it belongs to this desktop -> treat as remote.
+        return False
+
+    saw_gui = False
+    for pid in pids:
+        comm = _linux_comm_for_pid(pid)
+        if comm and _is_ssh_process_name(comm):
+            return False
+        if _linux_environ_has_gui_display(pid):
+            saw_gui = True
+    return saw_gui
 
 
 def _linux_ssh_processes_for_loopback_port(port: int) -> set[str]:
@@ -703,13 +763,24 @@ def _loopback_client_is_ssh_forward(client_host: str, client_port: int) -> bool:
 
 
 def native_directory_client_colocated(request: Request) -> bool:
-    """Whether this HTTP client shares the server desktop (not SSH port-forwarded)."""
+    """Whether this HTTP client shares the server desktop (not port-forwarded).
+
+    On Linux this is an allowlist: the loopback peer process must belong to the
+    server's own desktop session (see :func:`_linux_loopback_client_colocated`),
+    which rejects SSH ``-L`` and VS Code/Cursor Remote forwards alike. On other
+    platforms we keep the legacy ssh-process blocklist.
+    """
     client = request.client
     if client is None or not _is_loopback_client_host(client.host):
         return False
-    if _loopback_client_is_ssh_forward(client.host, client.port or 0):
-        return False
-    return True
+    if client.host == "testclient":
+        return True
+    port = client.port or 0
+    if port <= 0:
+        return True
+    if sys.platform == "linux":
+        return _linux_loopback_client_colocated(client.host, port)
+    return not _loopback_client_is_ssh_forward(client.host, port)
 
 
 def _ensure_native_directory_client_colocated(request: Request, *, action: Literal["pick", "open"]) -> None:
@@ -719,7 +790,8 @@ def _ensure_native_directory_client_colocated(request: Request, *, action: Liter
     raise ApiError(
         code,
         "Native directory UI is unavailable from this browser session "
-        "(remote SSH port-forward). Paste the absolute path manually.",
+        "(remote port-forward, e.g. SSH -L or VS Code/Cursor Remote). "
+        "Paste the absolute path manually.",
         status_code=409,
     )
 

@@ -523,10 +523,8 @@ export function FlowList() {
 
 
 /**
- * Compact badge row under the Flow name: execution mode (省心 / 开发者)
- * plus the distinct agent kinds in the spec. Replaces the old bare color
- * dots + raw-id line (the id stays reachable via the name's tooltip), so
- * the cell reads as labels instead of unexplained pixels.
+ * Compact metadata row under the Flow name: mode dots plus the distinct agent
+ * kinds in the spec. The raw id stays reachable via the name's tooltip.
  */
 function FlowBadgeRow({ flow }: { flow: FlowSummary }) {
   const { t } = useTranslation();
@@ -538,21 +536,17 @@ function FlowBadgeRow({ flow }: { flow: FlowSummary }) {
     <div className="mt-1 flex flex-wrap items-center gap-1">
       {flow.easyMode && (
         <span
-          className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700"
+          className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-100"
           title={t("flowEditor.easyModeSub")}
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-          {t("flowEditor.easyMode")}
-        </span>
+          aria-label={t("flowEditor.easyMode")}
+        />
       )}
       {flow.devMode && (
         <span
-          className="inline-flex items-center gap-1 rounded-full bg-purple-50 border border-purple-200 px-1.5 py-0.5 text-[10px] font-medium text-purple-700"
+          className="inline-block h-2.5 w-2.5 rounded-full bg-purple-500 ring-2 ring-purple-100"
           title={t("flowEditor.devModeSub")}
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />
-          {t("flowEditor.devMode")}
-        </span>
+          aria-label={t("flowEditor.devMode")}
+        />
       )}
       {kinds.map((k) => (
         <span

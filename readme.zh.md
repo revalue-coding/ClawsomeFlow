@@ -185,16 +185,12 @@ ClawsomeFlow 构建在 **ClawTeam** 之上。
 > ClawsomeFlow 会自动写入二者的目录信任配置（`trustAll` / `trustDirectories`），
 > 使无人值守运行不会卡在「是否信任此文件夹」提示——这部分无需手动处理。
 
+
 ### 安装
 
 Linux/macOS
 ```bash
 curl -fsSL https://clawsomeflow.com/install.sh | bash
-```
-
-已经安装过？一行命令原地升级——Flow、运行记录与设置完整保留：
-```bash
-curl -fsSL https://clawsomeflow.com/upgrade.sh | bash
 ```
 
 ### 常用命令

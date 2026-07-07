@@ -107,6 +107,31 @@ async def test_wait_tui_ready_dismisses_cursor_workspace_trust_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_tui_ready_accepts_cursor_model_action_tail() -> None:
+    pane = (
+        "\n"
+        "  \u2192 Plan, search, build anything\n"
+        "\n"
+        "\n"
+        "  GPT-5.5 1M High                                               Run Everything\n"
+        "  ~/.clawteam/workspaces/csflow-2d4168f9/tester \u00b7\n"
+        "  clawteam/csflow-2d4168f9/tester\n"
+        "\n"
+    )
+    capture = lambda target: _async_return(pane)
+    result = await tmux_ready.wait_tui_ready(
+        "team:cursor",
+        trust_platform="cursor",
+        timeout_sec=1.0,
+        poll_interval=0.01,
+        capture=capture,
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "composer_ready"
+
+
+@pytest.mark.asyncio
 async def test_wait_tui_ready_ignores_stale_cursor_trust_text_in_scrollback() -> None:
     pane = (
         "Workspace Trust Required\n"

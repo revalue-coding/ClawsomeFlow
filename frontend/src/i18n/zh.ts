@@ -77,7 +77,7 @@ const zh = {
           "此处无法弹出目录选择框。请手动粘贴该服务器上的绝对路径（例如 /home/you/project）。",
         serverMode: "当前为 server 部署模式，原生目录选择器已禁用。请手动粘贴路径。",
         clientNotColocated:
-          "当前通过 SSH 端口转发访问（浏览器地址为 localhost，但浏览器实际运行在另一台机器上）。" +
+          "当前通过远程端口转发访问，例如 SSH -L 或 VS Code/Cursor Remote（浏览器地址为 localhost，但浏览器实际运行在另一台机器上）。" +
           "目录选择框会弹在服务器本机桌面上，您看不到。请手动粘贴服务器上的绝对路径（例如 /home/you/project）。",
       },
       open: {
@@ -89,7 +89,7 @@ const zh = {
           "请 SSH 登录服务器操作，或手动粘贴路径。",
         serverMode: "当前为 server 部署模式，无法在文件管理器中打开文件夹。",
         clientNotColocated:
-          "当前通过 SSH 端口转发访问（浏览器地址为 localhost，但浏览器实际运行在另一台机器上）。" +
+          "当前通过远程端口转发访问，例如 SSH -L 或 VS Code/Cursor Remote（浏览器地址为 localhost，但浏览器实际运行在另一台机器上）。" +
           "文件管理器会在服务器本机打开，您看不到。请 SSH 登录服务器操作，或手动粘贴路径。",
       },
     },

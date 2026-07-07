@@ -187,6 +187,7 @@ ClawsomeFlow is built on top of **ClawTeam**.
 > (`trustAll` / `trustDirectories`) so unattended runs don't stall on the
 > "trust this folder?" prompt — no action needed there.
 
+
 ### Install
 
 Linux/macOS
@@ -194,10 +195,6 @@ Linux/macOS
 curl -fsSL https://clawsomeflow.com/install.sh | bash
 ```
 
-Already installed? Upgrade in place — flows, runs and settings are preserved:
-```bash
-curl -fsSL https://clawsomeflow.com/upgrade.sh | bash
-```
 
 ### Common Commands
 

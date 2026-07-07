@@ -208,5 +208,5 @@ if [[ "${health_ok}" == "1" ]]; then
   say "✅ Upgrade complete → ${installed_version} (service healthy: ${health_url})"
 else
   warn "Upgrade finished (${installed_version}) but the health check did not pass within 60s: ${health_url}"
-  warn "Inspect with: ${VENV_BIN}/csflow doctor   /   journalctl --user -u csflow -n 50 --no-pager"
+  warn "Inspect with: ${VENV_BIN}/csflow doctor   /   ${VENV_BIN}/csflow logs tail -f"
 fi
