@@ -309,7 +309,7 @@ bash scripts/stop-contributor.sh
 </p>
 
 <p align="center">
-  <img src="./docs/assets/wechat-group-qr.png?v=3" alt="ClawsomeFlow 微信交流群" width="240" />
+  <img src="./docs/assets/wechat-group-qr.png?v=4" alt="ClawsomeFlow 微信交流群" width="240" />
 </p>
 
 ---

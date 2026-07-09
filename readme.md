@@ -320,7 +320,7 @@ Got questions about using ClawsomeFlow, or curious about building an **OPC (One-
 </p>
 
 <p align="center">
-  <img src="./docs/assets/wechat-group-qr.png?v=3" alt="ClawsomeFlow WeChat Group" width="240" />
+  <img src="./docs/assets/wechat-group-qr.png?v=4" alt="ClawsomeFlow WeChat Group" width="240" />
 </p>
 
 ---
