@@ -547,9 +547,19 @@ function Picker() {
       // Recovered mid-create: re-derive whether cancel is safe yet.
       void armCancelWhenSafe(p.agentId);
     },
-    onSucceeded: (p) => {
+    onSucceeded: (p, result) => {
       if (createCancelRequestedRef.current) return;
-      finishWorkPopup(true, t("hermes.create.workPopup.created", { id: p.agentId }));
+      const bootstrapWarning =
+        typeof result?.bootstrapWarning === "string" ? result.bootstrapWarning : "";
+      finishWorkPopup(
+        true,
+        bootstrapWarning
+          ? t("hermes.create.workPopup.createdBootstrapIncomplete", {
+              id: p.agentId,
+              error: bootstrapWarning,
+            })
+          : t("hermes.create.workPopup.created", { id: p.agentId }),
+      );
       resetCreateForm();
       void reload();
     },
@@ -752,7 +762,15 @@ function Picker() {
         );
         if (createCancelRequestedRef.current) return;
         clearOp();
-        finishWorkPopup(true, t("hermes.create.workPopup.created", { id: created.id }));
+        finishWorkPopup(
+          true,
+          created.bootstrapWarning
+            ? t("hermes.create.workPopup.createdBootstrapIncomplete", {
+                id: created.id,
+                error: created.bootstrapWarning,
+              })
+            : t("hermes.create.workPopup.created", { id: created.id }),
+        );
         resetCreateForm();
         await reload();
       } catch (e) {

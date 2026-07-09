@@ -1138,6 +1138,11 @@ const en = {
         running:
           "Request received! We are building a Hermes agent with its own persona and memory for you. This usually takes a couple of minutes — please wait patiently…",
         created: "Your Hermes agent is ready: {{id}}. Start putting it to work.",
+        createdBootstrapIncomplete:
+          "Agent {{id}} was created, but its self-definition did not complete " +
+          "(reason: {{error}}). Its SOUL.md is likely empty. Configure a model / " +
+          "credential in the agent's Settings, then run a chat turn to have it " +
+          "define itself.",
         failed: "Creation finished with issues. Please check the result details.",
         cancelPreparing: "Creating…",
         cancelRunning: "Cancelling creation and rolling back residual files…",

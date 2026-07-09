@@ -109,6 +109,49 @@ def test_commit_agent_creates_profile_and_row(
     assert any(a[:3] == ["-p", "helper", "--yolo"] for a in boots)
 
 
+def test_commit_agent_reports_bootstrap_failure_but_still_creates(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed self-definition bootstrap is NON-fatal (the agent is still
+    created + persisted) but must be reported via the ``outcome`` so the create
+    response can warn instead of silently claiming a fully-ready agent."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+
+    def _failing_bootstrap(aid, _args, *, outcome=None, **_k):  # noqa: ANN001, ANN202
+        if outcome is not None:
+            outcome.ok = False
+            outcome.error = "No inference provider configured"
+        return 1
+
+    monkeypatch.setattr(svc, "_run_bootstrap", _failing_bootstrap)
+
+    outcome = svc.BootstrapOutcome()
+    row = svc.commit_agent(
+        svc.CommitInput(id="halfbaked", name="Half"), user="alice", outcome=outcome
+    )
+    # Agent still created + persisted (best-effort bootstrap never fails create).
+    assert row.id == "halfbaked"
+    assert get_storage().hermes_get("halfbaked") is not None
+    # …but the failure is visible.
+    assert outcome.ran is True
+    assert outcome.ok is False
+    assert "No inference provider" in outcome.error
+
+
+def test_commit_agent_outcome_ok_on_success(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default autouse stub returns 0 → outcome stays ok."""
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run([]))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    outcome = svc.BootstrapOutcome()
+    svc.commit_agent(svc.CommitInput(id="okagent", name="OK"), user="alice", outcome=outcome)
+    assert outcome.ok is True
+    assert outcome.ran is True
+
+
 def test_commit_agent_light_clone_from_other_profile(
     hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -700,6 +743,58 @@ def test_seed_profile_inherits_config_copies_model_and_keys(hermes_home: Path) -
     assert not (profile / "SOUL.md").exists()  # never leak operator identity
 
 
+def test_seed_profile_inherits_auth_json_credential(hermes_home: Path) -> None:
+    """A fresh profile must also inherit ``auth.json`` — when the operator logs
+    in via ``hermes model`` / OAuth the live credential lives there (NOT as an
+    API key in .env), and Hermes reads ONLY the profile-local auth.json. Omitting
+    it left a keyless profile whose first ``hermes -z`` bootstrap failed with
+    "No inference provider configured" (the market-strategist regression)."""
+    (hermes_home / "config.yaml").write_text("model:\n  provider: auto\n")
+    (hermes_home / ".env").write_text("PLACEHOLDER=\n")
+    (hermes_home / "auth.json").write_text('{"token": "secret-oauth"}')
+
+    profile = hermes_home / "profiles" / "agt"
+    profile.mkdir(parents=True)
+
+    svc._seed_profile_inference_config("agt")
+
+    assert (profile / "auth.json").read_text() == '{"token": "secret-oauth"}'
+    # credential file must stay private
+    assert (profile / "auth.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_backfill_copies_missing_auth_json_into_existing_profile(
+    hermes_home: Path,
+) -> None:
+    """Upgrade parity: a managed profile created before ``auth.json`` was seeded
+    (has config.yaml but no credential) must gain auth.json on the upgrade path.
+    ``upgrade.py`` calls this backfill, so this proves the upgrade-only repair
+    for the market-strategist regression."""
+    (hermes_home / "config.yaml").write_text("model:\n  provider: auto\n")
+    (hermes_home / ".env").write_text("PLACEHOLDER=\n")
+    (hermes_home / "auth.json").write_text('{"token": "root-cred"}')
+
+    prof = hermes_home / "profiles" / "legacy"
+    prof.mkdir(parents=True)
+    (prof / "config.yaml").write_text("model:\n  provider: auto\n")  # already seeded
+
+    storage = get_storage()
+    storage.hermes_create(
+        HermesAgent(
+            id="legacy",
+            name="Legacy",
+            profile_root=str(prof),
+            created_by_user="alice",
+        )
+    )
+    assert not (prof / "auth.json").exists()
+
+    svc.backfill_hermes_inference_config(storage=storage)
+
+    assert (prof / "auth.json").read_text() == '{"token": "root-cred"}'
+    assert (prof / "auth.json").stat().st_mode & 0o777 == 0o600
+
+
 def test_seed_profile_inference_config_is_idempotent(hermes_home: Path) -> None:
     """Re-seeding must never clobber a profile's own config/keys."""
     (hermes_home / "config.yaml").write_text("model:\n  provider: root\n")
@@ -1026,6 +1121,42 @@ def test_api_create_keeps_name_and_profile_id_distinct(
     assert body["name"] == "Backend Helper"
 
 
+def test_api_create_surfaces_bootstrap_warning(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the self-definition bootstrap fails, the create still returns 201 but
+    the response carries a non-empty ``bootstrapWarning`` so the WebUI can warn
+    the user (regression: market-strategist reported success with empty SOUL)."""
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run([]))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (True, ["mp"]))
+
+    def _failing_bootstrap(aid, _args, *, outcome=None, **_k):  # noqa: ANN001, ANN202
+        if outcome is not None:
+            outcome.ok = False
+            outcome.error = "No inference provider configured"
+        return 1
+
+    monkeypatch.setattr(svc, "_run_bootstrap", _failing_bootstrap)
+    r = client.post("/api/hermes/agents", json={"id": "mp", "name": "MP"})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["id"] == "mp"
+    assert "No inference provider" in body["bootstrapWarning"]
+
+
+def test_api_create_no_bootstrap_warning_on_success(
+    client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean bootstrap yields an empty ``bootstrapWarning``."""
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run([]))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    monkeypatch.setattr(svc, "list_profile_names_checked", lambda: (True, ["ok"]))
+    r = client.post("/api/hermes/agents", json={"id": "ok", "name": "OK"})
+    assert r.status_code == 201, r.text
+    assert r.json()["bootstrapWarning"] == ""
+
+
 def test_api_create_requires_name(
     client: TestClient, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1040,7 +1171,7 @@ def test_api_create_passes_model_inherit_from(
 ) -> None:
     seen: dict[str, str] = {}
 
-    def _fake_commit(cmd, *, user, storage=None, config=None):  # noqa: ANN001, ANN202
+    def _fake_commit(cmd, *, user, storage=None, config=None, outcome=None):  # noqa: ANN001, ANN202
         seen["model_inherit_from"] = cmd.model_inherit_from
         return HermesAgent(
             id=cmd.id,
@@ -1071,7 +1202,7 @@ def test_api_create_passes_clone_params(
 ) -> None:
     seen: dict[str, object] = {}
 
-    def _fake_commit(cmd, *, user, storage=None, config=None):  # noqa: ANN001, ANN202
+    def _fake_commit(cmd, *, user, storage=None, config=None, outcome=None):  # noqa: ANN001, ANN202
         seen["clone_from"] = cmd.clone_from
         seen["clone_all"] = cmd.clone_all
         seen["model_inherit_from"] = cmd.model_inherit_from

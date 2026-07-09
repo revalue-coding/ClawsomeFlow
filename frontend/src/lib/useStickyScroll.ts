@@ -31,6 +31,15 @@ export function useStickyScroll<T extends HTMLElement = HTMLDivElement>() {
     el.scrollTo({ top: el.scrollHeight });
     atBottomRef.current = true;
     setAtBottom(true);
+    // The caller often invokes this right after a state update (e.g. appending
+    // the user's just-sent message), before React has committed the new nodes to
+    // the DOM. At that point `scrollHeight` is still the old value, so the jump
+    // above lands short of the real bottom. Re-run after the next paint to catch
+    // the freshly rendered content and truly pin to the latest.
+    window.requestAnimationFrame(() => {
+      const node = ref.current;
+      if (node) node.scrollTo({ top: node.scrollHeight });
+    });
   }, []);
 
   const suppressStickyRef = useRef(false);

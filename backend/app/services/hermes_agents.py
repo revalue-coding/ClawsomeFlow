@@ -376,14 +376,43 @@ class CommitInput:
     clone_all: bool = False
 
 
+@dataclass
+class BootstrapOutcome:
+    """Result of the (best-effort) self-definition bootstrap run during create.
+
+    The bootstrap ``hermes -z`` turn is intentionally non-fatal — a failed
+    self-definition never fails the create — but silently reporting such an
+    agent as fully ready is misleading (empty SOUL.md, no identity). Callers may
+    pass an instance to :func:`commit_agent`; it is populated so the create
+    response can surface a **non-fatal warning** ("agent created, but its
+    self-definition did not complete; configure a model/credential and retry").
+
+    * ``ok`` — False when the bootstrap turn did not run to completion.
+    * ``error`` — short diagnostic (e.g. "No inference provider configured").
+    * ``ran`` — False when bootstrap was skipped entirely (``skip_bootstrap``).
+    """
+
+    ok: bool = True
+    error: str = ""
+    ran: bool = True
+
+
 # Inference config files a fresh profile needs to be usable. A brand-new
 # `hermes profile create` leaves these absent, so the profile has NO model /
-# API keys — every `hermes -p <id> …` call (bootstrap, chat, task dispatch)
-# then dies with "No inference provider configured" and SOUL.md is never
-# written. We seed them from a source profile (default: the user's active/root
-# profile) so managed agents inherit a usable model + keys (config.yaml + .env
-# only — never SOUL.md or memories, to avoid leaking private identity/memory).
-_INFERENCE_CONFIG_FILES = ("config.yaml", ".env")
+# API keys / login credential — every `hermes -p <id> …` call (bootstrap, chat,
+# task dispatch) then dies with "No inference provider configured" and SOUL.md
+# is never written. We seed them from a source profile (default: the user's
+# active/root profile) so managed agents inherit a usable model + keys.
+# ``auth.json`` is REQUIRED here: when the operator authenticates via
+# ``hermes model`` / OAuth, the live credential lives in the profile-local
+# ``auth.json`` (NOT in ``.env`` as an API key), and Hermes reads ONLY the
+# profile's own ``auth.json`` (no inheritance from the root) — so omitting it
+# leaves a keyless profile whose very first ``hermes -z`` self-definition turn
+# fails. We copy config.yaml + .env + auth.json only — never SOUL.md or
+# memories, to avoid leaking private identity/memory.
+_INFERENCE_CONFIG_FILES = ("config.yaml", ".env", "auth.json")
+# Credential files copied above that must stay private (chmod 0600 on copy).
+_INFERENCE_SECRET_FILES = frozenset({".env", "auth.json"})
 
 
 def _active_profile_root() -> Path:
@@ -434,7 +463,7 @@ def _seed_profile_inference_config(
             continue
         try:
             shutil.copy2(src, dst)
-            if name == ".env":  # keys file — keep it private
+            if name in _INFERENCE_SECRET_FILES:  # keys/credential — keep private
                 dst.chmod(0o600)
         except OSError as exc:
             logger.warning(
@@ -519,10 +548,19 @@ def is_create_in_flight(aid: str) -> bool:
         return aid in _CREATES_IN_FLIGHT
 
 
-def _run_bootstrap(aid: str, args: list[str], *, cwd: str, timeout: float) -> int:
+def _run_bootstrap(
+    aid: str,
+    args: list[str],
+    *,
+    cwd: str,
+    timeout: float,
+    outcome: BootstrapOutcome | None = None,
+) -> int:
     """Run the bootstrap ``hermes`` call as a killable subprocess registered
     under *aid* so :func:`cancel_create_agent` can terminate it mid-flight.
-    Returns the exit code (non-zero if killed/cancelled)."""
+    Returns the exit code (non-zero if killed/cancelled). When *outcome* is
+    given, its ``ok``/``error`` are set on a non-zero exit so the caller can
+    surface a non-fatal "self-definition incomplete" warning."""
     exe = hermes_executable()
     if exe is None:
         raise HermesUnavailable("`hermes` CLI not found on PATH")
@@ -553,10 +591,13 @@ def _run_bootstrap(aid: str, args: list[str], *, cwd: str, timeout: float) -> in
         with _CREATE_LOCK:
             if _BOOTSTRAP_PROCS.get(aid) is proc:
                 _BOOTSTRAP_PROCS.pop(aid, None)
-    if proc.returncode != 0 and err:
-        logger.warning(
-            "hermes_bootstrap_failed", agent_id=aid, error=_strip_ansi(err).strip()[:500]
-        )
+    if proc.returncode != 0:
+        detail = _strip_ansi(err).strip()[:500]
+        if detail:
+            logger.warning("hermes_bootstrap_failed", agent_id=aid, error=detail)
+        if outcome is not None:
+            outcome.ok = False
+            outcome.error = detail or f"bootstrap exited with code {proc.returncode}"
     return proc.returncode
 
 
@@ -616,6 +657,7 @@ def commit_agent(
     user: str,
     storage: StorageBackend | None = None,
     config: Config | None = None,
+    outcome: BootstrapOutcome | None = None,
 ) -> HermesAgent:
     """Create a Hermes profile + bootstrap self-definition + persist the row.
 
@@ -625,6 +667,10 @@ def commit_agent(
     IntegrityError rollback would then delete the WINNER's freshly-built
     profile. We acquire the lock non-blocking so the loser fails fast with
     AgentAlreadyExists instead of tying up a worker for the whole bootstrap.
+
+    Pass *outcome* to learn whether the (non-fatal) self-definition bootstrap
+    actually completed — it is populated in place so the caller can surface a
+    warning without the create itself failing.
     """
     cfg = config or load_config()
     storage = storage or get_storage(cfg)
@@ -634,13 +680,20 @@ def commit_agent(
     if not lock.acquire(blocking=False):
         raise AgentAlreadyExists(f"a create for {aid!r} is already in progress")
     try:
-        return _commit_agent_locked(cmd, aid, user=user, storage=storage)
+        return _commit_agent_locked(
+            cmd, aid, user=user, storage=storage, outcome=outcome
+        )
     finally:
         lock.release()
 
 
 def _commit_agent_locked(
-    cmd: CommitInput, aid: str, *, user: str, storage: StorageBackend
+    cmd: CommitInput,
+    aid: str,
+    *,
+    user: str,
+    storage: StorageBackend,
+    outcome: BootstrapOutcome | None = None,
 ) -> HermesAgent:
     if storage.hermes_get(aid) is not None:
         raise AgentAlreadyExists(f"hermes agent {aid!r} already exists")
@@ -720,16 +773,32 @@ def _commit_agent_locked(
 
         # Bootstrap self-definition (best-effort: keep the agent even if it fails,
         # but honour a cancel that lands while the up-to-10-min `hermes -z` runs).
-        if not cmd.skip_bootstrap:
+        # A failure here does NOT fail the create; we record it in *outcome* so
+        # the caller can surface a non-fatal "self-definition incomplete" warning
+        # instead of silently reporting a half-built agent as fully ready.
+        if cmd.skip_bootstrap:
+            if outcome is not None:
+                outcome.ran = False
+        else:
             try:
-                _run_bootstrap(
+                rc = _run_bootstrap(
                     aid,
                     ["-p", aid, "--yolo", "-z", _bootstrap_prompt(cmd.name, description)],
                     cwd=profile_root,
                     timeout=_BOOTSTRAP_TIMEOUT_SEC,
+                    outcome=outcome,
                 )
+                if rc != 0 and outcome is not None and outcome.ok:
+                    # Non-zero exit that produced no stderr detail for _run_bootstrap.
+                    outcome.ok = False
+                    outcome.error = outcome.error or (
+                        f"bootstrap exited with code {rc}"
+                    )
             except HermesAgentError as exc:
                 logger.warning("hermes_bootstrap_error", agent_id=aid, error=str(exc))
+                if outcome is not None:
+                    outcome.ok = False
+                    outcome.error = str(exc)
 
         _abort_if_cancelled()  # cancelled during bootstrap → roll back, don't persist
 
@@ -2004,6 +2073,7 @@ def chat_once(agent_id: str, *, message: str, workdir: str, resume: bool = False
 
 __all__ = [
     "CommitInput",
+    "BootstrapOutcome",
     "UpdateInput",
     "HermesAgentError",
     "HermesUnavailable",
