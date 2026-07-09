@@ -1911,7 +1911,7 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
           {groupedByTeam.map((group) => (
             <div key={group.teamId} className="space-y-3">
               <div className="inline-flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700">
-                <span>{t("chat.teamSectionTitle", { team: group.teamName })}</span>
+                <span>{group.teamName}</span>
                 {group.teamId !== "__ungrouped__" && (
                   <button
                     type="button"
@@ -2985,7 +2985,6 @@ function ChatRoom({
             </button>
           </h1>
           <div className="mt-2 inline-flex items-center gap-2 text-xs text-ink-600">
-            <span>{t("chat.teamLabel")}:</span>
             <span className="rounded-full border border-ink-200 bg-ink-50 px-2 py-0.5">
               {agent.teamName || t("chat.ungroupedTeam")}
             </span>

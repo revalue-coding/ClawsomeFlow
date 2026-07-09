@@ -846,6 +846,43 @@ def test_import_model_from_profile_preserves_non_model_settings(hermes_home: Pat
     assert "KEEP=2" in env
 
 
+def test_import_model_from_profile_carries_auth_json_credential(
+    hermes_home: Path,
+) -> None:
+    """Model import must ALSO carry the OAuth login credential (auth.json), not
+    only .env API keys — so both credential styles stay compatible across the
+    import path (overwrite: the user explicitly chose to inherit this source)."""
+    src = hermes_home / "profiles" / "src_auth"
+    src.mkdir(parents=True)
+    (src / "config.yaml").write_text("model:\n  provider: auto\n")
+    (src / "auth.json").write_text('{"token": "src-oauth"}')
+
+    dest = hermes_home / "profiles" / "dest_auth"
+    dest.mkdir(parents=True)
+    (dest / "auth.json").write_text('{"token": "stale-dest"}')  # will be replaced
+
+    svc.import_model_from_profile("dest_auth", source_profile="src_auth")
+
+    assert (dest / "auth.json").read_text() == '{"token": "src-oauth"}'
+    assert (dest / "auth.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_import_model_from_profile_still_imports_env_keys(hermes_home: Path) -> None:
+    """Regression guard: the legacy API-key-in-.env copy path is NOT removed by
+    the auth.json addition — both credential styles coexist."""
+    src = hermes_home / "profiles" / "src_env"
+    src.mkdir(parents=True)
+    (src / "config.yaml").write_text("model:\n  provider: openai\n")
+    (src / ".env").write_text("OPENAI_API_KEY=sk-legacy\n")
+
+    dest = hermes_home / "profiles" / "dest_env"
+    dest.mkdir(parents=True)
+
+    svc.import_model_from_profile("dest_env", source_profile="src_env")
+
+    assert "OPENAI_API_KEY=sk-legacy" in (dest / ".env").read_text()
+
+
 # ── create cancellation + rollback ───────────────────────────────────
 
 

@@ -899,7 +899,7 @@ function Picker() {
           {grouped.map(({ key, label, list }) => (
             <div key={key} className="space-y-3">
               <div className="inline-flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700">
-                {t("hermes.team")}: {label}
+                {label}
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {list.map((a) => (
@@ -2213,7 +2213,6 @@ function ChatRoom({ agentId }: { agentId: string }) {
             </button>
           </h1>
           <div className="mt-2 inline-flex items-center gap-2 text-xs text-ink-600">
-            <span>{t("chat.teamLabel")}:</span>
             <span className="rounded-full border border-ink-200 bg-ink-50 px-2 py-0.5">
               {teamName || t("chat.ungroupedTeam")}
             </span>

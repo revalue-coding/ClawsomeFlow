@@ -136,7 +136,7 @@ def test_hermes_create_endpoint_records_op_succeeded(
     client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Stub the (slow) service create so the endpoint just exercises op wiring.
-    def _fake_commit(cmd, *, user, storage):  # noqa: ANN001, ANN202
+    def _fake_commit(cmd, *, user, storage, outcome=None):  # noqa: ANN001, ANN202
         row = HermesAgent(id=cmd.id, name=cmd.name, profile_root="/x", created_by_user=user)
         return storage.hermes_create(row)
 
@@ -152,7 +152,7 @@ def test_hermes_create_endpoint_records_op_succeeded(
 def test_hermes_create_endpoint_records_op_failed_on_cancel(
     client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _boom(cmd, *, user, storage):  # noqa: ANN001, ANN202
+    def _boom(cmd, *, user, storage, outcome=None):  # noqa: ANN001, ANN202
         raise hermes_svc.AgentCreateCancelled("cancelled by user")
 
     monkeypatch.setattr(hermes_svc, "commit_agent", _boom)

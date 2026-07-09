@@ -444,6 +444,36 @@ def _resolve_inference_seed_source(*, source_profile: str | None, dest_agent_id:
     raise AgentIdInvalid(f"model inherit source profile {source_id!r} not found")
 
 
+def _copy_auth_credential(
+    source_root: Path, dest_root: Path, *, overwrite: bool
+) -> None:
+    """Copy the Hermes login credential (``auth.json``) source → dest (0600).
+
+    This is the OAuth ``hermes model`` login credential style — complementary to
+    the API-key-in-``.env`` style. Best-effort. ``overwrite=False`` keeps the
+    create-time seed's never-clobber semantics; ``overwrite=True`` is for the
+    explicit model-import action, where the user chose to inherit this source's
+    model + credentials. No-op when source has none, or src == dst.
+    """
+    src = source_root / "auth.json"
+    dst = dest_root / "auth.json"
+    if not src.is_file():
+        return
+    try:
+        if src.resolve() == dst.resolve():
+            return
+    except OSError:
+        pass
+    if dst.exists() and not overwrite:
+        return
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        dst.chmod(0o600)  # credential — keep private
+    except OSError as exc:
+        logger.warning("hermes_auth_copy_failed", dest=str(dest_root), error=str(exc))
+
+
 def _seed_profile_inference_config(
     agent_id: str, *, source_profile: str | None = None
 ) -> None:
@@ -1310,9 +1340,18 @@ def import_model_from_profile(
     _write_profile_config_dict(aid, dest_cfg)
 
     # Import source env keys so model/provider switches remain usable without
-    # requiring manual re-entry of secrets in the settings UI.
+    # requiring manual re-entry of secrets in the settings UI. This is the
+    # API-key-in-.env credential style.
     for key, value in _read_env_pairs(source_root / ".env").items():
         set_secret(aid, key, value)
+    # Also carry the source login credential (``auth.json``) — the OAuth
+    # ``hermes model`` login style, whose credential lives in auth.json rather
+    # than as an API key in .env. Keeping BOTH keeps the two credential styles
+    # compatible across every copy path (create-seed, clone, and this explicit
+    # import). Overwrite is intentional here: the user deliberately chose to
+    # inherit this source's model + credentials (unlike the absent-only
+    # create-time seed).
+    _copy_auth_credential(source_root, hermes_profile_root(aid), overwrite=True)
     return read_model(aid)
 
 
