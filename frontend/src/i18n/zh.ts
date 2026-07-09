@@ -1119,6 +1119,10 @@ const zh = {
         running:
           "请求已收到！正在为你创建一个拥有独立人格与记忆的 Hermes Agent，通常需要几分钟，请耐心等待…",
         created: "你的 Hermes Agent 已就绪：{{id}}，开始让它工作吧。",
+        createdBootstrapIncomplete:
+          "Agent {{id}} 已创建，但其自我定义对话未完成（原因：{{error}}），" +
+          "SOUL.md 很可能为空。请在该 Agent 的「设置」中配置模型/凭证，" +
+          "然后发起一次对话让它完成自我定义。",
         failed: "创建已结束，但存在问题，请查看结果详情。",
         cancelPreparing: "正在创建…",
         cancelRunning: "正在取消创建并回滚残留文件…",

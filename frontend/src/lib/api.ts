@@ -812,6 +812,12 @@ export interface HermesAgentDetail extends HermesAgentSummary {
   nlPrompt: string;
 }
 
+export interface HermesAgentCreateResult extends HermesAgentDetail {
+  // Non-empty ⇒ the agent was created but its self-definition bootstrap
+  // (`hermes -z`) did not complete (e.g. no inference provider configured).
+  bootstrapWarning?: string;
+}
+
 export interface HermesClaimableAgent {
   id: string;
   description: string;
@@ -1332,7 +1338,13 @@ export const api = {
       cloneAll?: boolean;
     },
     init?: RequestInit,
-  ) => request<HermesAgentDetail>("POST", "/api/hermes/agents", payload, init),
+  ) =>
+    request<HermesAgentCreateResult>(
+      "POST",
+      "/api/hermes/agents",
+      payload,
+      init,
+    ),
   cancelHermesAgentCreate: (id: string) =>
     request<void>("POST", `/api/hermes/agents/${id}/cancel-create`),
   getOperationStatus: (opId: string) =>

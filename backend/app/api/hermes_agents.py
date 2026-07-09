@@ -112,6 +112,14 @@ class HermesAgentDetail(HermesAgentSummary):
     nl_prompt: str = ""
 
 
+class HermesAgentCreateResponse(HermesAgentDetail):
+    # Non-fatal: the agent WAS created, but its self-definition bootstrap
+    # (``hermes -z``) did not complete (e.g. no inference provider configured).
+    # Empty string ⇒ bootstrap completed normally. The WebUI surfaces this so a
+    # half-defined agent (empty SOUL.md) isn't reported as fully ready.
+    bootstrap_warning: str = ""
+
+
 class HermesAgentListResponse(_CamelModel):
     items: list[HermesAgentSummary]
 
@@ -573,10 +581,10 @@ def claim_agent(
     return _to_detail(row, team_name=team_names.get(row.team_id, ""))
 
 
-@router.post("", response_model=HermesAgentDetail, status_code=201)
+@router.post("", response_model=HermesAgentCreateResponse, status_code=201)
 async def create_agent(
     payload: Annotated[CreatePayload, Body()], user: UserDep, storage: StorageDep,
-) -> HermesAgentDetail:
+) -> HermesAgentCreateResponse:
     display_name = (payload.name or "").strip()
     if not display_name:
         raise ApiError("INVALID_PAYLOAD", "name is required", status_code=400)
@@ -603,6 +611,9 @@ async def create_agent(
     reg = get_op_registry()
     reg.start(op_id=op_id, user=user, kind="hermes_create")
     loop = asyncio.get_running_loop()
+    # Populated in place by the service so we can report a non-fatal warning when
+    # the self-definition bootstrap failed but the agent was still created.
+    outcome = svc.BootstrapOutcome()
 
     async def _commit():
         # Records the op's terminal state on the event loop. Detached from the
@@ -611,7 +622,9 @@ async def create_agent(
         try:
             row = await loop.run_in_executor(
                 _CHAT_EXECUTOR,
-                lambda: svc.commit_agent(cmd, user=user, storage=storage),
+                lambda: svc.commit_agent(
+                    cmd, user=user, storage=storage, outcome=outcome
+                ),
             )
         except svc.HermesAgentError as exc:
             # AgentCreateCancelled is a HermesAgentError subclass, so cancel flows here.
@@ -622,7 +635,12 @@ async def create_agent(
             )
             reg.fail(op_id, detail=detail)
             raise
-        reg.succeed(op_id, result={"agentId": row.id})
+        # Surface a bootstrap failure in the op result too, so the recovery UI
+        # (which reads the op registry after a disconnect) can show it as well.
+        result = {"agentId": row.id}
+        if outcome.ran and not outcome.ok:
+            result["bootstrapWarning"] = outcome.error or "self-definition incomplete"
+        reg.succeed(op_id, result=result)
         return row
 
     try:
@@ -630,7 +648,22 @@ async def create_agent(
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
     team_names = _team_name_map(storage=storage, user=user)
-    return _to_detail(row, team_name=team_names.get(row.team_id, ""))
+    detail = _to_detail(row, team_name=team_names.get(row.team_id, ""))
+    bootstrap_warning = (
+        (outcome.error or "self-definition incomplete")
+        if (outcome.ran and not outcome.ok)
+        else ""
+    )
+    if bootstrap_warning:
+        logger.warning(
+            "hermes_agent_created_bootstrap_incomplete",
+            agent_id=row.id,
+            error=bootstrap_warning,
+        )
+    return HermesAgentCreateResponse(
+        **detail.model_dump(by_alias=False),
+        bootstrap_warning=bootstrap_warning,
+    )
 
 
 @router.post("/{agent_id}/cancel-create", status_code=202)
