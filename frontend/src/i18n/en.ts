@@ -1244,7 +1244,8 @@ const en = {
         remove: "Remove",
       },
       skills: {
-        empty: "No skills yet.",
+        hint: "Only user-defined (local) skills are listed here; bundled and hub skills are managed by Hermes.",
+        empty: "No user-defined skills yet.",
         view: "View",
         hide: "Hide",
         edit: "Edit",

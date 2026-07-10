@@ -1164,6 +1164,10 @@ async def chat_with_agent(
         runtime_message = injected
 
     session_key = _session_key(user, agent_id)
+    # Previous turn may have persisted the user row then failed before an
+    # assistant reply — drop that orphan before resume/history decisions so a
+    # failed-only transcript cannot force Hermes ``-c`` / resume.
+    await chat_history.drop_trailing_unanswered_user(session_key)
     # Resume when we have a persisted Hermes session id, or when UI history shows
     # prior turns (legacy path: no saved id yet → ``-c`` in hermes_chat).
     # ``/reset`` clears both → next turn starts a fresh Hermes session.

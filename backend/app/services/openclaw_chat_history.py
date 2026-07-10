@@ -115,10 +115,31 @@ async def clear_messages(session_key: str) -> None:
         _history.pop(session_key, None)
 
 
+async def drop_trailing_unanswered_user(session_key: str) -> bool:
+    """Drop a trailing user row that never got an assistant reply.
+
+    Chat handlers append the user message *before* the agent runs; on delivery
+    failure the assistant is never written. The next send must remove that
+    orphan so it cannot resurface via ``chat-history`` reconcile or bias
+    Hermes ``resume`` (which keys off non-empty UI history).
+    """
+    async with _lock:
+        rows = _history.get(session_key)
+        if not rows:
+            return False
+        if rows[-1].get("role") != "user":
+            return False
+        rows.pop()
+        if not rows:
+            _history.pop(session_key, None)
+        return True
+
+
 __all__ = [
     "ChatAttachmentMeta",
     "ChatHistoryMessage",
     "append_message",
     "clear_messages",
+    "drop_trailing_unanswered_user",
     "list_messages",
 ]

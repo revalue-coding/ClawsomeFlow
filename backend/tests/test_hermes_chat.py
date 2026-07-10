@@ -62,6 +62,7 @@ def test_snapshot_shape() -> None:
 
 
 def test_run_turn_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No session id → fall back to clean stdout as the final reply."""
     job = _mk_job("sk-run")
     calls: list[bool] = []
 
@@ -174,7 +175,8 @@ def test_run_turn_legacy_continue_discovers_session_id(
 
 
 def test_run_turn_binds_session_id_from_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``chat -Q`` emits final text on stdout and session id on stderr."""
+    """``chat -Q`` emits session id on stderr; stdout is the fallback reply source
+    when session export is unavailable."""
     job = _mk_job("sk-stderr")
     monkeypatch.setattr(chat_svc, "_spawn_hermes", lambda *a, **k: _FakePopen())
     monkeypatch.setattr(
@@ -186,6 +188,8 @@ def test_run_turn_binds_session_id_from_stderr(monkeypatch: pytest.MonkeyPatch) 
             "warning: something non-fatal\n\nsession_id: 20260101_000000_webui\n",
         ),
     )
+    # Export unavailable → fall back to stdout, but still bind the stderr sid.
+    monkeypatch.setattr(chat_svc, "_export_session", lambda aid, sid: None)
     chat_svc._JOBS["sk-stderr"] = job
 
     chat_svc._run_turn(job, "hi", "/tmp/wd", resume=False)
@@ -193,6 +197,85 @@ def test_run_turn_binds_session_id_from_stderr(monkeypatch: pytest.MonkeyPatch) 
     assert job.status == "done"
     assert job.final_text == "reply"
     assert job.hermes_session_id == "20260101_000000_webui"
+
+
+def test_extract_assistant_text_scopes_to_current_turn() -> None:
+    """Multi-turn resume: only the reply after the last user message counts."""
+    data = {
+        "messages": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "old reply"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+            {"role": "tool", "content": "ok"},
+            {"role": "assistant", "content": "new reply"},
+        ]
+    }
+    assert chat_svc._extract_assistant_text(data) == "new reply"
+
+
+def test_extract_assistant_text_empty_when_current_turn_has_no_text() -> None:
+    """A tool-only follow-up must NOT reuse the previous turn's assistant text."""
+    data = {
+        "messages": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "old reply"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+            {"role": "tool", "content": "ok"},
+        ]
+    }
+    assert chat_svc._extract_assistant_text(data) == ""
+
+
+def test_run_turn_prefers_session_export_over_noisy_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (market-strategist chat): ``chat -Q`` dumps truncated tool
+    previews (e.g. ``┊ review diff``) onto stdout while the real final reply
+    lives only in the session store. Prefer session export."""
+    job = _mk_job("sk-noisy")
+    noisy = (
+        "┊ review diff\n"
+        "a/01-strategy-intelligence/README.md → b/01-strategy-intelligence/README.md\n"
+        "@@ -1,19 +1,29 @@\n"
+        " ## OPC 原则\n"
+        " - 先找到具体社区，再验证需求\n"
+        " - 先手工交付，再自动化"  # truncated mid-document — what the UI showed
+    )
+    monkeypatch.setattr(chat_svc, "_spawn_hermes", lambda *a, **k: _FakePopen())
+    monkeypatch.setattr(
+        chat_svc,
+        "_communicate",
+        lambda proc: (0, noisy, "session_id: 20260101_000000_noisy\n"),
+    )
+    monkeypatch.setattr(
+        chat_svc,
+        "_export_session",
+        lambda aid, sid: {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "1", "function": {"name": "write_file"}}],
+                },
+                {"role": "tool", "content": "wrote files"},
+                {
+                    "role": "assistant",
+                    "content": "完成。我已深入研究项目并写入结构化文档。",
+                },
+            ]
+        },
+    )
+    chat_svc._JOBS["sk-noisy"] = job
+
+    chat_svc._run_turn(job, "hi", "/tmp/wd", resume=False)
+
+    assert job.status == "done"
+    assert job.final_text == "完成。我已深入研究项目并写入结构化文档。"
+    assert "review diff" not in job.final_text
+    assert job.hermes_session_id == "20260101_000000_noisy"
 
 
 def test_finalize_persists_discovered_session_id_after_legacy_continue() -> None:
@@ -517,6 +600,65 @@ def test_chat_endpoint_legacy_resume_without_persisted_session_id(
     assert r.status_code == 200, r.text
     assert seen["resume"] is True
     assert seen["resume_session_id"] is None
+
+
+def test_chat_endpoint_drops_failed_orphan_user_before_resume(
+    client: TestClient,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior failed turn left only a user row — next send must not treat that
+    as successful history (would force Hermes resume / ``-c``)."""
+    monkeypatch.setenv("CSFLOW_USER", "alice")
+    get_storage().hermes_create(
+        HermesAgent(id="math", name="Math", profile_root="x", created_by_user="alice")
+    )
+    sk = hermes_user_chat_session_id("alice", "math")
+    seen: dict[str, object] = {}
+
+    async def _seed_orphan():
+        from app.services import openclaw_chat_history as chat_history
+
+        await chat_history.clear_messages(sk)
+        await chat_history.append_message(sk, role="user", content="failed-q")
+
+    import asyncio
+
+    asyncio.run(_seed_orphan())
+
+    def _fake_start_chat(agent_id, **kwargs):  # noqa: ANN001
+        seen.update(kwargs)
+        job = _mk_job(kwargs["session_key"], agent_id=agent_id)
+        job.status = "done"
+        job.final_text = "ok"
+        return job
+
+    monkeypatch.setattr(chat_svc, "start_chat", _fake_start_chat)
+
+    r = client.post(
+        "/api/hermes/agents/math/chat",
+        json={"message": "retry", "workdir": str(tmp_path)},
+    )
+
+    assert r.status_code == 200, r.text
+    assert seen["resume"] is False
+    assert seen["resume_session_id"] is None
+
+    async def _history():
+        from app.services import openclaw_chat_history as chat_history
+
+        # Detached finalize may still be appending the assistant reply.
+        for _ in range(20):
+            rows = await chat_history.list_messages(sk)
+            if any(row.get("role") == "user" and row.get("content") == "retry" for row in rows):
+                return rows
+            await asyncio.sleep(0.05)
+        return await chat_history.list_messages(sk)
+
+    rows = asyncio.run(_history())
+    contents = [(row["role"], row["content"]) for row in rows]
+    assert ("user", "failed-q") not in contents
+    assert ("user", "retry") in contents
 
 
 def test_chat_endpoint_passes_persisted_hermes_session_id(

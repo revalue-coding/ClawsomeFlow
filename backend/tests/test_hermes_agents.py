@@ -985,6 +985,85 @@ def test_update_skill_requires_existing(hermes_home: Path) -> None:
         svc.update_skill("agt", name="ghost", content="# x")
 
 
+def test_list_skills_finds_category_nested_local(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hermes agent-authored skills live under skills/<category>/<name>/."""
+    skills = hermes_home / "profiles" / "agt" / "skills"
+    nested = skills / "growth-operations" / "price-validation"
+    nested.mkdir(parents=True)
+    (nested / "SKILL.md").write_text(
+        '---\nname: price-validation\ndescription: "Validate pricing"\n---\n\n# body\n',
+        encoding="utf-8",
+    )
+    # Bundled flat skill must be excluded from the settings list.
+    bundled = skills / "dogfood"
+    bundled.mkdir()
+    (bundled / "SKILL.md").write_text(
+        '---\nname: dogfood\ndescription: "bundled"\n---\n\n# x\n',
+        encoding="utf-8",
+    )
+    (skills / ".bundled_manifest").write_text("dogfood:abc123\n", encoding="utf-8")
+
+    listed = svc.list_skills("agt")
+    names = [s["name"] for s in listed]
+    assert names == ["price-validation"]
+    assert listed[0]["description"] == "Validate pricing"
+    assert listed[0]["path"].endswith("growth-operations/price-validation")
+
+    md = svc.read_skill("agt", "price-validation")
+    assert "# body" in md
+    out = svc.update_skill(
+        "agt", name="price-validation", description="new", content="# updated"
+    )
+    assert out["path"].endswith("growth-operations/price-validation")
+    assert "# updated" in svc.read_skill("agt", "price-validation")
+
+    # Force filesystem fallback (CLI uninstall unavailable / non-zero).
+    monkeypatch.setattr(
+        svc, "_hermes_profile", lambda *_a, **_k: (1, "", "no hermes")
+    )
+    svc.delete_skill("agt", "price-validation")
+    assert not nested.exists()
+    assert svc.list_skills("agt") == []
+
+
+def test_list_skills_excludes_hub_installed(hermes_home: Path) -> None:
+    skills = hermes_home / "profiles" / "agt" / "skills"
+    hub_skill = skills / "community" / "hub-skill"
+    hub_skill.mkdir(parents=True)
+    (hub_skill / "SKILL.md").write_text(
+        '---\nname: hub-skill\ndescription: "from hub"\n---\n\n# hub\n',
+        encoding="utf-8",
+    )
+    local = skills / "my-local"
+    local.mkdir(parents=True)
+    (local / "SKILL.md").write_text(
+        '---\nname: my-local\ndescription: "mine"\n---\n\n# local\n',
+        encoding="utf-8",
+    )
+    hub_dir = skills / ".hub"
+    hub_dir.mkdir()
+    (hub_dir / "lock.json").write_text(
+        json.dumps({"installed": {"hub-skill": {"install_path": "community/hub-skill"}}}),
+        encoding="utf-8",
+    )
+    names = [s["name"] for s in svc.list_skills("agt")]
+    assert names == ["my-local"]
+
+
+def test_write_skill_rejects_name_collision_with_nested(hermes_home: Path) -> None:
+    skills = hermes_home / "profiles" / "agt" / "skills"
+    nested = skills / "content-strategy" / "content-marketing-plan"
+    nested.mkdir(parents=True)
+    (nested / "SKILL.md").write_text(
+        '---\nname: content-marketing-plan\ndescription: "x"\n---\n\n# x\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(svc.AgentAlreadyExists):
+        svc.write_skill("agt", name="content-marketing-plan", content="# y")
+
+
 def test_upsert_mcp_server_preserves_env_when_none(hermes_home: Path) -> None:
     (hermes_home / "profiles" / "mcpagent").mkdir(parents=True)
     svc.upsert_mcp_server(

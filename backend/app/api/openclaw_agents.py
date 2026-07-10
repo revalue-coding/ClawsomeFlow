@@ -3698,6 +3698,9 @@ async def chat_with_agent(
         )
         turn = {"role": "user", "content": injected_message}
 
+    # Previous turn may have persisted the user row then failed before an
+    # assistant reply — drop that orphan so it cannot linger in UI history.
+    await chat_history.drop_trailing_unanswered_user(session_key)
     await chat_history.append_message(
         session_key,
         role=turn["role"],

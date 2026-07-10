@@ -41,6 +41,7 @@ import {
   loadChatHistory,
   loadLastSeenCount,
   normalizeAssistantContent,
+  dropFailedTrailingTurn,
   reconcileTranscript,
   saveChatHistory,
   saveLastSeenCount,
@@ -1473,6 +1474,8 @@ function ChatRoom({ agentId }: { agentId: string }) {
   } = useStickyScroll<HTMLDivElement>();
   // AbortController for the in-flight SSE fetch, so "Stop" can cut the stream.
   const abortRef = useRef<AbortController | null>(null);
+  /** True when the last chat turn failed delivery and was shown to the user. */
+  const lastTurnDeliveryFailedRef = useRef(false);
   // Index (into the displayed, non-system message list) before which a "new
   // messages" divider is drawn on re-entry; -1 = none. Computed once at load.
   const [newDividerAt, setNewDividerAt] = useState(-1);
@@ -1851,6 +1854,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
           } else {
             await adoptFinalFromHistory();
             if (st.status === "error" && st.error && st.error !== "cancelled") {
+              lastTurnDeliveryFailedRef.current = true;
               setError(t("hermes.chatError", { message: st.error }));
             }
           }
@@ -1969,17 +1973,27 @@ function ChatRoom({ agentId }: { agentId: string }) {
       setError(t("hermes.workdirNeeded"));
       return;
     }
+    const priorDeliveryFailed = lastTurnDeliveryFailedRef.current;
+    lastTurnDeliveryFailedRef.current = false;
     setError("");
     setRecovering(false);
     setNewDividerAt(-1);
     didJumpToNewDividerRef.current = true;
-    turnDividerAtRef.current = turnDividerIndex(messagesRef.current, opts.appendUser);
+    const cleanedForDivider = opts.appendUser
+      ? dropFailedTrailingTurn(messagesRef.current, {
+          errorReported: priorDeliveryFailed,
+        })
+      : messagesRef.current;
+    turnDividerAtRef.current = turnDividerIndex(cleanedForDivider, opts.appendUser);
     setSending(true);
     const turnAttachments = opts.attachments ?? [];
     setMessages((prev) => {
+      const cleaned = opts.appendUser
+        ? dropFailedTrailingTurn(prev, { errorReported: priorDeliveryFailed })
+        : prev;
       const base = opts.appendUser
         ? [
-            ...prev,
+            ...cleaned,
             {
               role: "user" as const,
               content: message,
@@ -1987,7 +2001,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
               ts: Date.now(),
             },
           ]
-        : prev;
+        : cleaned;
       return [...base, { role: "assistant" as const, content: "" }];
     });
     scrollToBottom(); // the user just acted — jump to the latest
@@ -2047,11 +2061,15 @@ function ChatRoom({ agentId }: { agentId: string }) {
       if (controller.signal.aborted) {
         aborted = true;
       } else {
-        setError(t("hermes.chatError", { message: errText(e) }));
+        streamErr = errText(e);
+        setError(t("hermes.chatError", { message: streamErr }));
       }
     } finally {
       abortRef.current = null;
       setSending(false);
+      if (streamErr) {
+        lastTurnDeliveryFailedRef.current = true;
+      }
       if (aborted) {
         // Mark the (still-empty) pending reply as stopped; keep any partial text.
         setMessages((prev) => {
@@ -2144,6 +2162,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
     if (sending || resetting || uploadingAttachments) return;
     setResetting(true);
     setError("");
+    lastTurnDeliveryFailedRef.current = false;
     try {
       await api.resetHermesAgentChat(agentId);
       clearChatHistory(chatScope);
@@ -3311,6 +3330,7 @@ function SkillsTab({ agentId }: { agentId: string }) {
   return (
     <div className="space-y-2">
       {error && <ErrorBox>{error}</ErrorBox>}
+      <p className="text-xs text-ink-500">{t("hermes.settingsModal.skills.hint")}</p>
       {skills.length === 0 ? (
         <p className="text-sm text-ink-500">{t("hermes.settingsModal.skills.empty")}</p>
       ) : (

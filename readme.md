@@ -14,7 +14,9 @@
   <a href="./readme.zh.md">简体中文</a>
 </p>
 
-<p><b>Turn your goal into a task flow, and let an active scheduler drive a team of AI agents to execute it — parallel, isolated, observable, and convergent. You orchestrate the work; ClawsomeFlow keeps it under control.</b></p>
+<p><b>Turn your goal into a reusable task flow, and let an active scheduler drive a team of AI agents to execute it — parallel, isolated, observable, and convergent. You orchestrate the work; ClawsomeFlow keeps it under control.</b></p>
+
+<p><b>Don't just run a one-off task — build a workflow that ships the same result reliably, again and again.</b> Define a Flow once, parameterize it with runtime inputs, and re-run it whenever you need it. And it's not just for coding: orchestrate <b>every role of a one-person company</b> — research, content, growth, ops, engineering — into one <b>end-to-end, reusable</b> workflow.</p>
 
 <p>
   <b>Full compatibility with</b> OpenClaw, Claude Code, Codex, Cursor, Hermes and other CLI Agents.
@@ -54,17 +56,24 @@
 
 ## 🎯 Who Should Try It?
 
-- Building a software engineering agent team that can **develop in parallel across local branches**;
+- Anyone who wants **reusable, reliably repeatable workflows** — not one-off runs: define a Flow once, drive it with runtime parameters, and get the same convergent result again and again;
+- Builders of an **AI-native one-person company** who want to orchestrate **every role — not just coding** (research, content, growth, ops, engineering) into one **end-to-end** workflow;
 - Developers and teams who need multiple agents to collaborate like a real team (plan, implement, verify, converge) — not just more chat windows;
 - Founders and operators building an **AI-native company**, delegating repeatable work to orchestrated agent teams;
 - Ambitious **super-individual** creators — one person steering many specialized agents to continuously amplify output;
-- Engineering-minded folks **done with prompt-only black-box orchestration** — predictable behavior, controllable cost, rollback guardrails.
+- Engineering-minded folks **done with prompt-only black-box orchestration** — predictable behavior, controllable cost, rollback guardrails;
+- Building a software engineering agent team that can **develop in parallel across local branches**.
 
 ---
 
 ## ✨ Core Features
 
 ClawsomeFlow turns scattered AI agents into a controllable engineering system — from the first instruction to the final, reviewable result.
+
+**Two things set it apart from other agent tools:**
+
+- **♻️ Reusable, reliably repeatable workflows — not one-off tasks.** Most parallel-agent tools are one-shot: spin up a few agents, run once, and the process is neither controllable nor reliably repeatable. ClawsomeFlow makes the workflow the deliverable — define a Flow once and reuse it by supplying runtime parameters (`csflow runs start <flow-id> --input k=v`), so the same process produces stable, convergent, auditable output every single time.
+- **🏢 Beyond coding — end-to-end workflows for every role of a one-person company.** Competitors lock onto coding. ClawsomeFlow orchestrates collaboration across *all* the roles of an AI-native one-person company — research, content, growth, ops, engineering — composing the full value chain into one end-to-end, reusable workflow.
 
 | 🗣️ Get it done in natural language | 🧠 Precise orchestration, not guesswork | 🚀 Many agents, one graph |
 |---|---|---|
@@ -140,9 +149,11 @@ ClawsomeFlow's approach is direct: **migrate coordination from natural language 
 
 | Dimension | Other Multi-Agent Orchestration Platforms | ✅ ClawsomeFlow |
 |---|---|---|
+| **Reusability** | One-off execution: run once, then re-assemble by hand next time | **Workflows are the deliverable** — define once, re-run reliably via runtime parameters for stable, convergent output every time |
+| **Scope** | Mostly coding-only | **Every role of a one-person company** — research, content, growth, ops, engineering — as one end-to-end workflow |
+| **Engineering harness** | Generally missing; failures rely on Agent improvisation | **Harness engineering**: human checkpoints, rollbackable results, complaint-loop mechanism, periodic entropy management |
 | **Task orchestration fit** | Mostly framework-specific, bound to a single ecosystem | Task orchestration is **deeply adapted to OpenClaw/Hermes Agents**, while also being compatible with any CLI Agent (Claude / Codex / Cursor, etc.) collaborating in the same graph |
 | **Concurrency & isolation** | Easy contention in parallel, workspace conflicts, context cross-talk | **Workspace isolation and rollback under multi-task parallelism, and thoroughly resolves session conflicts**; **built-in cross-process repo lock makes parallel multi-branch development and merging absolutely reliable** |
-| **Engineering harness** | Generally missing; failures rely on Agent improvisation | **Harness engineering**: human checkpoints, rollbackable results, complaint-loop mechanism, periodic entropy management |
 | **Observability** | Context is mostly a black box | Full-chain RunEvent — traceable, auditable, replayable |
 
 #### ✨ The Result?
@@ -162,11 +173,11 @@ ClawsomeFlow is built on top of **ClawTeam**.
 | **Positioning** | Swarm-intelligence protocol foundation (Agent self-organization) | Agent workflow orchestration platform |
 | **Collaboration driver** | Agents self-poll and self-schedule in the Prompt | Server-side scheduler actively dispatches, deterministic execution |
 | **Collaboration flow** | Collaboration flow is uncontrollable; better suited to one-off tasks | Scheduler-driven deterministic workflows, suited to repeatable, convergent engineering collaboration |
-| **OpenClaw adaptation** | Supported as an optional CLI Agent | Deeply adapted, resolving session and workspace concurrency conflicts |
 | **Parallel-merge reliability** | **No repo-level merge lock** — concurrent baseline merges race and can corrupt git metadata; completely uncontrolled | **Built-in cross-process repo lock guarantees the absolute reliability of parallel multi-branch development** |
 | **Failure & guardrails** | Basic lifecycle protocol | Human checkpoints / rollback / complaint-loop / entropy management |
 | **Skill configuration** | Requires extra skill setup on the Agent platform | No extra skill configuration needed, works out of the box |
 | **Usage form** | CLI + MCP + monitoring dashboard | Web UI + CLI, full-flow governance in natural language |
+| **OpenClaw/Hermes adaptation** | Supported as an optional CLI Agent | Deeply adapted, resolving session and workspace concurrency conflicts |
 
 ---
 

@@ -136,3 +136,50 @@ def test_history_records_server_timestamp() -> None:
     assert all(isinstance(row.get("ts"), int) and row["ts"] > 0 for row in rows)
     # Recorded in order → non-decreasing timestamps.
     assert rows[0]["ts"] <= rows[1]["ts"]
+
+
+def test_drop_trailing_unanswered_user() -> None:
+    """A failed turn leaves a user row with no assistant; the next send must
+    drop that orphan before appending the new user message."""
+    import asyncio
+
+    from app.services import openclaw_chat_history as history
+
+    async def _run() -> tuple[bool, bool, list[dict], list[dict]]:
+        sk = "sk-drop-orphan"
+        await history.clear_messages(sk)
+        await history.append_message(sk, role="user", content="ok-q")
+        await history.append_message(sk, role="assistant", content="ok-a")
+        await history.append_message(sk, role="user", content="failed-q")
+        dropped = await history.drop_trailing_unanswered_user(sk)
+        after_drop = await history.list_messages(sk)
+        noop = await history.drop_trailing_unanswered_user(sk)
+        after_noop = await history.list_messages(sk)
+        return dropped, noop, after_drop, after_noop
+
+    dropped, noop, after_drop, after_noop = asyncio.run(_run())
+    assert dropped is True
+    assert noop is False
+    assert [(r["role"], r["content"]) for r in after_drop] == [
+        ("user", "ok-q"),
+        ("assistant", "ok-a"),
+    ]
+    assert [(r["role"], r["content"]) for r in after_noop] == [
+        ("user", "ok-q"),
+        ("assistant", "ok-a"),
+    ]
+
+
+def test_drop_trailing_unanswered_user_clears_empty_session() -> None:
+    import asyncio
+
+    from app.services import openclaw_chat_history as history
+
+    async def _run() -> list[dict]:
+        sk = "sk-drop-only-user"
+        await history.clear_messages(sk)
+        await history.append_message(sk, role="user", content="alone")
+        assert await history.drop_trailing_unanswered_user(sk) is True
+        return await history.list_messages(sk)
+
+    assert asyncio.run(_run()) == []

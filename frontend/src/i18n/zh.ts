@@ -1219,7 +1219,8 @@ const zh = {
         remove: "删除",
       },
       skills: {
-        empty: "暂无技能。",
+        hint: "此处仅展示用户自定义（local）技能；内置与 Hub 技能由 Hermes 管理。",
+        empty: "暂无自定义技能。",
         view: "查看",
         hide: "收起",
         edit: "编辑",

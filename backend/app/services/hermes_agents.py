@@ -1607,6 +1607,33 @@ def delete_secret(agent_id: str, key: str) -> None:
 # ──────────────────────────────────────────────────────────────────────
 # Settings — skills (read from profile skills/ dir)
 # ──────────────────────────────────────────────────────────────────────
+#
+# Hermes layouts (same as hermes-agent ``_find_skill_dir``):
+#   skills/<name>/SKILL.md
+#   skills/<category>/<name>/SKILL.md
+#   skills/<category>/<sub>/<name>/SKILL.md
+# Bundled seeds are tracked in ``.bundled_manifest``; hub installs in
+# ``.hub/lock.json``. The settings UI lists user/local skills only.
+
+
+_EXCLUDED_SKILL_DIR_NAMES = frozenset(
+    {
+        ".git",
+        ".github",
+        ".hub",
+        ".archive",
+        ".venv",
+        "venv",
+        "node_modules",
+        "site-packages",
+        "__pycache__",
+        ".tox",
+        ".nox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
+)
 
 
 def _parse_skill_front_matter(text: str) -> dict[str, str]:
@@ -1625,29 +1652,138 @@ def _parse_skill_front_matter(text: str) -> dict[str, str]:
     }
 
 
-def list_skills(agent_id: str) -> list[dict[str, str]]:
+def _skills_dir_for(agent_id: str) -> Path:
+    return hermes_profile_root(agent_id) / _SKILLS_DIRNAME
+
+
+def _is_excluded_skill_path(path: Path) -> bool:
+    return any(part in _EXCLUDED_SKILL_DIR_NAMES for part in path.parts)
+
+
+def _iter_skill_mds(skills_dir: Path):
+    """Yield every ``SKILL.md`` under *skills_dir*, skipping excluded dirs."""
+    if not skills_dir.is_dir():
+        return
+    for skill_md in skills_dir.rglob(_SKILL_ENTRY_FILENAME):
+        if not skill_md.is_file():
+            continue
+        if _is_excluded_skill_path(skill_md):
+            continue
+        yield skill_md
+
+
+def _skill_name_from_md(skill_md: Path) -> str:
+    meta = _parse_skill_front_matter(
+        skill_md.read_text(encoding="utf-8", errors="replace")
+    )
+    return (meta.get("name") or "").strip() or skill_md.parent.name
+
+
+def _read_bundled_manifest_names(skills_dir: Path) -> set[str]:
+    """Names seeded from Hermes bundled skills (``name:hash`` per line)."""
+    manifest = skills_dir / ".bundled_manifest"
+    if not manifest.is_file():
+        return set()
+    names: set[str] = set()
+    try:
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            name = line.split(":", 1)[0].strip()
+            if name:
+                names.add(name)
+    except OSError:
+        return set()
+    return names
+
+
+def _read_hub_installed_names(skills_dir: Path) -> set[str]:
+    """Names installed via Skills Hub (``.hub/lock.json``)."""
+    lock_path = skills_dir / ".hub" / "lock.json"
+    if not lock_path.is_file():
+        return set()
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    installed = data.get("installed") or {}
+    if not isinstance(installed, dict):
+        return set()
+    names = {str(k) for k in installed.keys()}
+    for entry in installed.values():
+        if not isinstance(entry, dict):
+            continue
+        install_path = entry.get("install_path")
+        if not isinstance(install_path, str) or not install_path.strip():
+            continue
+        skill_dir = Path(install_path)
+        if not skill_dir.is_absolute():
+            skill_dir = skills_dir / skill_dir
+        try:
+            resolved = skill_dir.resolve()
+            resolved.relative_to(skills_dir.resolve())
+        except (OSError, ValueError):
+            continue
+        skill_md = resolved / _SKILL_ENTRY_FILENAME
+        if skill_md.is_file():
+            names.add(_skill_name_from_md(skill_md))
+    return names
+
+
+def _find_skill_md(agent_id: str, name: str) -> Path | None:
+    """Locate ``SKILL.md`` by frontmatter/dir name (flat or category-nested)."""
     aid = _validate_agent_id(agent_id)
-    skills_dir = hermes_profile_root(aid) / _SKILLS_DIRNAME
+    skill_name = (name or "").strip()
+    if not skill_name:
+        return None
+    skills_dir = _skills_dir_for(aid)
+    # Fast path: UI-created skills live at skills/<name>/SKILL.md.
+    flat = skills_dir / skill_name / _SKILL_ENTRY_FILENAME
+    if flat.is_file() and not _is_excluded_skill_path(flat):
+        return flat
+    for skill_md in _iter_skill_mds(skills_dir):
+        if _skill_name_from_md(skill_md) == skill_name:
+            return skill_md
+    return None
+
+
+def list_skills(agent_id: str) -> list[dict[str, str]]:
+    """List user/local skills (excludes bundled + hub-installed).
+
+    Recurses category-nested layouts so agent-authored skills under e.g.
+    ``skills/growth-operations/<name>/`` are visible in the settings UI.
+    """
+    aid = _validate_agent_id(agent_id)
+    skills_dir = _skills_dir_for(aid)
     out: list[dict[str, str]] = []
     if not skills_dir.is_dir():
         return out
-    for entry in sorted(skills_dir.iterdir()):
-        skill_md = entry / _SKILL_ENTRY_FILENAME
-        if not skill_md.is_file():
+    off_limits = _read_bundled_manifest_names(skills_dir) | _read_hub_installed_names(
+        skills_dir
+    )
+    seen: set[str] = set()
+    for skill_md in sorted(_iter_skill_mds(skills_dir), key=lambda p: str(p)):
+        text = skill_md.read_text(encoding="utf-8", errors="replace")
+        meta = _parse_skill_front_matter(text)
+        name = (meta.get("name") or "").strip() or skill_md.parent.name
+        if name in off_limits or name in seen:
             continue
-        meta = _parse_skill_front_matter(skill_md.read_text(encoding="utf-8", errors="replace"))
+        seen.add(name)
         out.append({
-            "name": meta.get("name") or entry.name,
+            "name": name,
             "description": meta.get("description", ""),
-            "path": str(entry),
+            "path": str(skill_md.parent),
         })
+    out.sort(key=lambda s: s["name"])
     return out
 
 
 def read_skill(agent_id: str, name: str) -> str:
-    aid = _validate_agent_id(agent_id)
-    skill_md = hermes_profile_root(aid) / _SKILLS_DIRNAME / name / _SKILL_ENTRY_FILENAME
-    if not skill_md.is_file():
+    skill_md = _find_skill_md(agent_id, name)
+    if skill_md is None:
         raise AgentNotFound(f"skill {name!r} not found")
     return skill_md.read_text(encoding="utf-8", errors="replace")
 
@@ -1671,7 +1807,9 @@ def write_skill(agent_id: str, *, name: str, description: str = "", content: str
     body = (content or "").strip()
     if not body:
         raise AgentIdInvalid("skill content is required")
-    skill_dir = hermes_profile_root(aid) / _SKILLS_DIRNAME / skill_name
+    if _find_skill_md(aid, skill_name) is not None:
+        raise AgentAlreadyExists(f"skill {skill_name!r} already exists")
+    skill_dir = _skills_dir_for(aid) / skill_name
     if skill_dir.exists():
         raise AgentAlreadyExists(f"skill {skill_name!r} already exists")
     skill_dir.mkdir(parents=True, exist_ok=False)
@@ -1685,7 +1823,9 @@ def update_skill(agent_id: str, *, name: str, description: str = "", content: st
     """Overwrite an existing user-defined skill's ``SKILL.md``.
 
     Mirrors :func:`write_skill` but requires the skill to already exist (the
-    create path rejects existing dirs; this is the edit path)."""
+    create path rejects existing dirs; this is the edit path). Resolves
+    category-nested paths the same way as :func:`read_skill`.
+    """
     aid = _validate_agent_id(agent_id)
     skill_name = (name or "").strip()
     if not _SKILL_NAME_RE.match(skill_name):
@@ -1695,13 +1835,17 @@ def update_skill(agent_id: str, *, name: str, description: str = "", content: st
     body = (content or "").strip()
     if not body:
         raise AgentIdInvalid("skill content is required")
-    skill_dir = hermes_profile_root(aid) / _SKILLS_DIRNAME / skill_name
-    if not skill_dir.is_dir():
+    skill_md = _find_skill_md(aid, skill_name)
+    if skill_md is None:
         raise AgentNotFound(f"skill {skill_name!r} not found")
-    (skill_dir / _SKILL_ENTRY_FILENAME).write_text(
+    skill_md.write_text(
         _build_skill_md(skill_name, description, body), encoding="utf-8"
     )
-    return {"name": skill_name, "description": (description or "").strip(), "path": str(skill_dir)}
+    return {
+        "name": skill_name,
+        "description": (description or "").strip(),
+        "path": str(skill_md.parent),
+    }
 
 
 def delete_skill(agent_id: str, name: str) -> None:
@@ -1710,7 +1854,10 @@ def delete_skill(agent_id: str, name: str) -> None:
     rc, _out, _err = _hermes_profile(aid, ["skills", "uninstall", name])
     if rc == 0:
         return
-    skill_dir = hermes_profile_root(aid) / _SKILLS_DIRNAME / name
+    skill_md = _find_skill_md(aid, name)
+    if skill_md is None:
+        raise AgentNotFound(f"skill {name!r} not found")
+    skill_dir = skill_md.parent
     root = hermes_profile_root(aid).resolve(strict=False)
     target = skill_dir.resolve(strict=False)
     if not str(target).startswith(str(root)) or not skill_dir.is_dir():

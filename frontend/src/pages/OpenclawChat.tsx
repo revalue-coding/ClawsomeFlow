@@ -70,6 +70,7 @@ import {
   loadChatHistory,
   loadLastSeenCount,
   normalizeAssistantContent,
+  dropFailedTrailingTurn,
   reconcileTranscript,
   saveChatHistory,
   saveLastSeenCount,
@@ -2253,6 +2254,8 @@ function ChatRoom({
   } = useStickyScroll<HTMLDivElement>();
   // AbortController for the in-flight SSE fetch, so "Stop" can cut the stream.
   const abortRef = useRef<AbortController | null>(null);
+  /** True when the last chat turn failed delivery and was shown to the user. */
+  const lastTurnDeliveryFailedRef = useRef(false);
   // Index (into the displayed message list) before which a "new messages"
   // divider is drawn on re-entry; -1 = none. Computed once at load.
   const [newDividerAt, setNewDividerAt] = useState(-1);
@@ -2616,6 +2619,7 @@ function ChatRoom({
             await adoptFinalFromHistory();
           }
           if (st.status === "error" && st.error && st.error !== "cancelled") {
+            lastTurnDeliveryFailedRef.current = true;
             setActionError(st.error);
           }
           setRecovering(false);
@@ -2679,17 +2683,27 @@ function ChatRoom({
     text: string,
     opts: { appendUser: boolean; attachments?: ChatAttachmentMeta[] },
   ) {
+    const priorDeliveryFailed = lastTurnDeliveryFailedRef.current;
+    lastTurnDeliveryFailedRef.current = false;
     setActionError(null);
     setRecovering(false);
     setNewDividerAt(-1);
     didJumpToNewDividerRef.current = true;
-    turnDividerAtRef.current = turnDividerIndex(messagesRef.current, opts.appendUser);
+    const cleanedForDivider = opts.appendUser
+      ? dropFailedTrailingTurn(messagesRef.current, {
+          errorReported: priorDeliveryFailed,
+        })
+      : messagesRef.current;
+    turnDividerAtRef.current = turnDividerIndex(cleanedForDivider, opts.appendUser);
     setStreaming(true);
     const turnAttachments = opts.attachments ?? [];
     setMessages((m) => {
+      const cleaned = opts.appendUser
+        ? dropFailedTrailingTurn(m, { errorReported: priorDeliveryFailed })
+        : m;
       const base = opts.appendUser
         ? [
-            ...m,
+            ...cleaned,
             {
               role: "user" as const,
               content: text,
@@ -2697,7 +2711,7 @@ function ChatRoom({
               ts: Date.now(),
             },
           ]
-        : m;
+        : cleaned;
       // Add an empty assistant message to stream into (timestamped once it lands).
       return [...base, { role: "assistant" as const, content: "" }];
     });
@@ -2705,6 +2719,7 @@ function ChatRoom({
     const controller = new AbortController();
     abortRef.current = controller;
     let aborted = false;
+    let deliveryFailed = false;
     try {
       const resp = await api.chatWithOpenclawAgent(
         agentId,
@@ -2737,10 +2752,10 @@ function ChatRoom({
           if (payload === "[DONE]") continue;
           try {
             const chunk = JSON.parse(payload);
-            const delta = extractDelta(chunk);
             if (chunk.error) {
               throw new Error(String(chunk.error));
             }
+            const delta = extractDelta(chunk);
             if (delta) {
               setMessages((m) => {
                 const out = m.slice();
@@ -2752,8 +2767,12 @@ function ChatRoom({
                 return out;
               });
             }
-          } catch {
-            /* ignore non-JSON keepalives */
+          } catch (e) {
+            if (e instanceof SyntaxError) {
+              /* ignore non-JSON keepalives */
+            } else {
+              throw e;
+            }
           }
         }
       }
@@ -2761,6 +2780,7 @@ function ChatRoom({
       if (controller.signal.aborted) {
         aborted = true;
       } else {
+        deliveryFailed = true;
         setMessages((m) => {
           const out = m.slice();
           out[out.length - 1] = {
@@ -2774,6 +2794,9 @@ function ChatRoom({
     } finally {
       abortRef.current = null;
       setStreaming(false);
+      if (deliveryFailed) {
+        lastTurnDeliveryFailedRef.current = true;
+      }
       if (aborted) {
         // Mark the (still-empty) pending reply as stopped; keep any partial text.
         setMessages((m) => {
@@ -2788,7 +2811,7 @@ function ChatRoom({
           }
           return out;
         });
-      } else {
+      } else if (!deliveryFailed) {
         // SSE may end without emitting the final delta (NO_TEXT_REPLY / proxy
         // buffering). Pull authoritative history once the turn finishes.
         try {
@@ -2868,6 +2891,7 @@ function ChatRoom({
   async function onResetConversation() {
     if (streaming || resetting || uploadingAttachments) return;
     setActionError(null);
+    lastTurnDeliveryFailedRef.current = false;
     setResetting(true);
     try {
       await api.resetOpenclawAgentChat(agentId);

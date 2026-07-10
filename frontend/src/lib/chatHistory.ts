@@ -209,3 +209,39 @@ export function reconcileTranscript<T extends PersistedMessage>(
   const tail = cached.slice(server.length).filter((m) => m.content.trim() !== "");
   return tail.length > 0 ? [...server, ...tail] : server;
 }
+
+/** OpenClaw writes delivery failures into the assistant bubble with this prefix. */
+export function isErrorAssistantContent(content: string): boolean {
+  return content.trimStart().startsWith("(error)");
+}
+
+/**
+ * Drop a trailing user+assistant turn that already failed and was reported to
+ * the user. Used when the user sends a *new* message so the failed turn does
+ * not linger in the transcript (and cannot look like it will be re-sent).
+ *
+ * Detects:
+ * - OpenClaw ``(error) …`` assistant bubbles
+ * - Empty assistant + ``errorReported`` (Hermes ErrorBox / reconnect error)
+ * - Trailing unanswered user + ``errorReported`` (server kept user, no reply)
+ *
+ * Does **not** drop stopped turns or successful empty (tool-only) replies when
+ * ``errorReported`` is false.
+ */
+export function dropFailedTrailingTurn<T extends PersistedMessage>(
+  msgs: T[],
+  opts?: { errorReported?: boolean },
+): T[] {
+  if (msgs.length === 0) return msgs;
+  const last = msgs[msgs.length - 1];
+  if (last.role === "user" && opts?.errorReported) {
+    return msgs.slice(0, -1);
+  }
+  if (msgs.length < 2) return msgs;
+  const prev = msgs[msgs.length - 2];
+  if (prev.role !== "user" || last.role !== "assistant") return msgs;
+  const isErrorBubble = isErrorAssistantContent(last.content);
+  const isEmptyFailed = last.content.trim() === "" && !!opts?.errorReported;
+  if (!isErrorBubble && !isEmptyFailed) return msgs;
+  return msgs.slice(0, -2);
+}

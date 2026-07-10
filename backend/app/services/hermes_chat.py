@@ -5,6 +5,11 @@ invocation per attempt. Progress exposed to the WebUI is **elapsed time only**;
 the client-side :class:`~frontend PendingReply` bubble handles the 10s+
 "still thinking" hint.
 
+The authoritative final reply comes from a one-shot ``sessions export`` (scoped
+to the current turn after the last user message). ``chat -Q`` stdout is only a
+fallback — it often contains truncated tool previews (e.g. ``┊ review diff``)
+rather than the agent's real answer.
+
 Each turn is a :class:`ChatJob` in an in-memory registry keyed by
 ``session_key``, powering ``GET /hermes/agents/{id}/chat/status`` reconnect after
 a tab switch / refresh.
@@ -326,38 +331,57 @@ def _count_tool_calls(data: dict[str, Any]) -> int:
     return n if isinstance(n, int) else len(_tool_names(data))
 
 
-def _extract_assistant_text(export_data: dict[str, Any] | None) -> str:
-    """Last non-empty assistant text from a ``sessions export`` payload."""
-    if not export_data:
-        return ""
-    for msg in reversed(export_data.get("messages") or []):
-        if not isinstance(msg, dict) or (msg.get("role") or "").lower() != "assistant":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict):
-                    t = block.get("text") or block.get("content")
-                    if isinstance(t, str) and t.strip():
-                        parts.append(t.strip())
-            if parts:
-                return "\n".join(parts)
+def _message_text(content: Any) -> str:
+    """Flatten a Hermes message ``content`` field to plain text."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                t = block.get("text") or block.get("content")
+                if isinstance(t, str) and t.strip():
+                    parts.append(t.strip())
+        return "\n".join(parts)
     return ""
 
 
-def _recover_empty_stdout(
+def _extract_assistant_text(export_data: dict[str, Any] | None) -> str:
+    """Last non-empty assistant text from the **current turn** of a session export.
+
+    Scoped to messages after the last ``user`` row so a tool-only follow-up turn
+    does not accidentally reuse a previous turn's reply (multi-turn resume).
+    """
+    if not export_data:
+        return ""
+    messages = export_data.get("messages") or []
+    last_user = -1
+    for i, msg in enumerate(messages):
+        if isinstance(msg, dict) and (msg.get("role") or "").lower() == "user":
+            last_user = i
+    turn = messages[last_user + 1 :] if last_user >= 0 else messages
+    for msg in reversed(turn):
+        if not isinstance(msg, dict) or (msg.get("role") or "").lower() != "assistant":
+            continue
+        text = _message_text(msg.get("content"))
+        if text:
+            return text
+    return ""
+
+
+def _recover_from_session(
     job: ChatJob,
     *,
     preferred_session_id: str | None = None,
 ) -> tuple[str, FinalSource]:
-    """``rc==0`` but empty stdout: hermes printed nothing to the pipe (common for
-    ``-c`` resume / tool-heavy turns where the answer lives only in the session
-    store). Do a ONE-SHOT (no polling) ``sessions export`` to recover the final
-    assistant text. Returns ``(final_text, source)``; ``source==""`` when nothing
-    usable was found (caller then falls through to the error/retry path)."""
+    """ONE-SHOT ``sessions export`` for the authoritative final assistant text.
+
+    Hermes ``chat -Q`` often dumps tool previews (e.g. ``┊ review diff``) — and
+    sometimes truncates them mid-stream — onto stdout, while the real reply
+    lives only in the session store. Prefer this over raw stdout whenever the
+    session is identifiable. Returns ``(final_text, source)``; ``source==""``
+    when nothing usable was found.
+    """
     sid = preferred_session_id or _discover_session_id(job.agent_id)
     if not sid:
         return "", ""
@@ -368,11 +392,32 @@ def _recover_empty_stdout(
     text = _extract_assistant_text(data)
     if text:
         return text, "session_export"
-    if _count_tool_calls(data) > 0:
-        # The agent worked (tool calls) but emitted no text — a legitimate
-        # "no visible reply", NOT a failure. Marker is rendered specially by the UI.
+    # Count tool calls in the current turn only (after last user), so a prior
+    # turn's tools don't mask a genuinely empty new turn.
+    messages = data.get("messages") or []
+    last_user = -1
+    for i, msg in enumerate(messages):
+        if isinstance(msg, dict) and (msg.get("role") or "").lower() == "user":
+            last_user = i
+    turn_msgs = messages[last_user + 1 :] if last_user >= 0 else messages
+    turn_tool_count = 0
+    for msg in turn_msgs:
+        if not isinstance(msg, dict):
+            continue
+        turn_tool_count += len(msg.get("tool_calls") or [])
+        if (msg.get("role") or "").lower() == "tool":
+            turn_tool_count += 1
+    if turn_tool_count > 0 or _count_tool_calls(data) > 0:
+        # Tool calls happened but no assistant text — legitimate "no visible
+        # reply", NOT a failure. Marker is rendered specially by the UI.
+        # ``_count_tool_calls`` covers export payloads that only set
+        # ``tool_call_count`` without per-message ``tool_calls``.
         return _NO_TEXT_REPLY_MARKER, "none_after_tools"
     return "", ""
+
+
+# Back-compat alias for tests / callers that still import the old name.
+_recover_empty_stdout = _recover_from_session
 
 
 def _resolve_done(
@@ -383,15 +428,25 @@ def _resolve_done(
     preferred_session_id: str | None = None,
 ) -> tuple[str, FinalSource] | None:
     """Decide whether this hermes exit is a successful turn. Returns
-    ``(final_text, source)`` on success, else ``None`` (error/retry path)."""
+    ``(final_text, source)`` on success, else ``None`` (error/retry path).
+
+    Prefer session export over stdout: ``chat -Q`` stdout is not a reliable
+    final-reply channel (tool-preview noise / mid-stream truncation).
+    """
     if rc != 0:
         return None
+    text, source = _recover_from_session(
+        job, preferred_session_id=preferred_session_id
+    )
+    if source:
+        return text, source
     stdout_text = (out or "").strip()
     if stdout_text:
-        job.hermes_session_id = preferred_session_id or _discover_session_id(job.agent_id)
+        job.hermes_session_id = preferred_session_id or _discover_session_id(
+            job.agent_id
+        )
         return stdout_text, "stdout"
-    text, source = _recover_empty_stdout(job, preferred_session_id=preferred_session_id)
-    return (text, source) if source else None
+    return None
 
 
 def _run_turn(
