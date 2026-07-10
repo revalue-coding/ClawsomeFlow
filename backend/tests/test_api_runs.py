@@ -1872,10 +1872,11 @@ def test_run_diff_lists_only_merged_non_openclaw_agents(
                     "merge_count": 1, "commit_count": 2, "files_changed": 3,
                     "insertions": 10, "deletions": 4, "patch": "", "patch_truncated": False,
                 }
-            # leader merged nothing → omitted
+            # leader has a merge commit but ZERO net file changes (empty merge)
+            # → must be omitted (filter on files_changed, not merge_count).
             return {
                 "repo_root": "/tmp/r", "branch": f"clawteam/{run.team_name}/{agent}",
-                "merge_count": 0, "commit_count": 0, "files_changed": 0,
+                "merge_count": 1, "commit_count": 1, "files_changed": 0,
                 "insertions": 0, "deletions": 0, "patch": "", "patch_truncated": False,
             }
 
@@ -1932,7 +1933,8 @@ def test_run_agent_diff_no_merged_changes_404(
     class _FakeCli:
         async def run_merged_agent_patch(self, *, team, agent, repo, **kw):
             del team, agent, repo, kw
-            return {"merge_count": 0, "patch": ""}
+            # A merge commit exists but brought zero net file changes → 404.
+            return {"merge_count": 1, "files_changed": 0, "patch": ""}
 
     from app.api import runs as runs_mod
     monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
@@ -1946,6 +1948,80 @@ def test_run_agent_diff_openclaw_agent_404(app_client: TestClient) -> None:
     flow = _make_openclaw_flow()
     run = _make_run(flow_id=flow.id, status=RunStatus.completed)
     r = app_client.get(f"/api/runs/{run.id}/run-diff/ocw")
+    assert r.status_code == 404
+    assert r.json()["error"] == "AGENT_NOT_FOUND"
+
+
+def test_run_diff_revert_success_then_agent_hidden(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+
+    class _FakeCli:
+        async def run_merged_agent_patch(self, *, team, agent, repo, **kw):
+            del team, repo, kw
+            return {
+                "repo_root": "/tmp/r", "branch": f"clawteam/{run.team_name}/{agent}",
+                "merge_count": 1, "commit_count": 1, "files_changed": 2,
+                "insertions": 3, "deletions": 0, "patch": "diff\n+x\n",
+                "patch_truncated": False,
+            }
+
+        async def revert_agent_merges(self, *, team, agent, repo, target_branch):
+            del team, repo
+            return {
+                "ok": True, "target_branch": target_branch,
+                "merge_shas": ["abc123"], "revert_head": "def456",
+                "nothing_to_revert": False, "message": "ok",
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    # alice is present before revert.
+    before = app_client.get(f"/api/runs/{run.id}/run-diff").json()["items"]
+    assert "alice" in [i["agentId"] for i in before]
+
+    r = app_client.post(f"/api/runs/{run.id}/run-diff/alice/revert")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+    # After revert, alice is excluded from the list and detail is 404.
+    after = app_client.get(f"/api/runs/{run.id}/run-diff").json()["items"]
+    assert "alice" not in [i["agentId"] for i in after]
+    d = app_client.get(f"/api/runs/{run.id}/run-diff/alice")
+    assert d.status_code == 404
+    assert d.json()["error"] == "MERGE_REVERTED"
+
+
+def test_run_diff_revert_failure_409(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+
+    class _FakeCli:
+        async def revert_agent_merges(self, *, team, agent, repo, target_branch):
+            del team, agent, repo, target_branch
+            return {
+                "ok": False, "target_branch": "main", "merge_shas": [],
+                "revert_head": "", "nothing_to_revert": False,
+                "message": "git revert failed (conflict); rolled back",
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.post(f"/api/runs/{run.id}/run-diff/alice/revert")
+    assert r.status_code == 409
+    assert r.json()["error"] == "MERGE_REVERT_FAILED"
+
+
+def test_run_diff_revert_openclaw_agent_404(app_client: TestClient) -> None:
+    flow = _make_openclaw_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+    r = app_client.post(f"/api/runs/{run.id}/run-diff/ocw/revert")
     assert r.status_code == 404
     assert r.json()["error"] == "AGENT_NOT_FOUND"
 

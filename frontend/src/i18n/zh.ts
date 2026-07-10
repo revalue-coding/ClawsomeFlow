@@ -749,7 +749,7 @@ const zh = {
     leaderReplyFootnote:
       "所有输出物及文档更新将在任务流执行结束后自动合入各Agent工作目录（请查看“Run diff”），除非您手动“丢弃修改”或“中止任务流执行”",
     runDiffTitle: "Run diff",
-    runDiffHint: "本次任务流结束后，实际合入各基线分支的有效修改（点击各 Agent 查看 diff）。",
+    runDiffHint: "本次执行的有效修改。",
     runDiffEmpty: "本次运行没有任何修改被合入基线分支。",
     runDiffLoadError: "加载 Run diff 失败。",
     runDiffAgentSummary: "{{commits}} 个提交 · {{files}} 个文件",
@@ -757,6 +757,13 @@ const zh = {
     runDiffModalTitle: "Run diff — {{agent}}",
     runDiffPatchEmpty: "没有可展示的 diff 内容。",
     runDiffTruncated: "diff 过大已截断，请前往基线仓库查看完整 diff。",
+    runDiffRevert: "撤销合入",
+    runDiffReverting: "撤销中…",
+    runDiffRevertConfirmTitle: "撤销合入",
+    runDiffRevertConfirmBody:
+      "将对 {{agent}} 本次合入基线分支的提交执行 git revert（新增反向提交撤销这些改动，不会强改文件、不会改写历史）。若存在冲突等 git 无法自动完成的情况，将不做任何改动并告知失败原因。确认撤销？",
+    runDiffRevertConfirmOk: "确认撤销",
+    runDiffRevertFailed: "撤销失败：{{reason}}",
     eventTypeColumn: "事件类型",
     eventTimestampColumn: "时间",
     eventAgentColumn: "Agent",

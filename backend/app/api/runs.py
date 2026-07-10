@@ -83,6 +83,7 @@ from app.scheduler.run_metadata import (
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
+    REVERTED_MERGE_AGENT_IDS_KEY,
 )
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
@@ -127,6 +128,7 @@ _MERGE_DECISION_ALLOWED = {
 _POST_COMPLAINT_STATUS_KEY = POST_COMPLAINT_STATUS_KEY
 _POST_REVIEW_TERMINAL_STATUS_KEY = POST_REVIEW_TERMINAL_STATUS_KEY
 _PRESERVE_WORKTREE_AGENT_IDS_KEY = PRESERVE_WORKTREE_AGENT_IDS_KEY
+_REVERTED_MERGE_AGENT_IDS_KEY = REVERTED_MERGE_AGENT_IDS_KEY
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -199,6 +201,17 @@ class RunAgentDiffView(RunDiffAgentView):
 
     patch: str = ""
     patch_truncated: bool = False
+
+
+class RunMergeRevertView(_CamelModel):
+    """Result of the "撤销合入" (revert-merge) action for one agent."""
+
+    agent_id: str
+    ok: bool = False
+    target_branch: str = DEFAULT_TARGET_BRANCH
+    reverted_merges: list[str] = Field(default_factory=list)
+    revert_head: str = ""
+    message: str = ""
 
 
 class RunDetail(RunSummary):
@@ -625,6 +638,36 @@ def _write_preserved_worktree_agent_ids(
         merged_inputs[_PRESERVE_WORKTREE_AGENT_IDS_KEY] = sorted(agent_ids)
     else:
         merged_inputs.pop(_PRESERVE_WORKTREE_AGENT_IDS_KEY, None)
+    run.inputs = merged_inputs
+    storage.run_update(run)
+
+
+def _emit_run_event(
+    storage: StorageBackend, run_id: str, event_type: str, *,
+    agent_id: str | None = None, payload: dict[str, Any] | None = None,
+) -> None:
+    """Persist + broadcast a RunEvent via the single-source publisher."""
+    from app.events import publish_run_event
+    publish_run_event(
+        storage, run_id=run_id, event_type=event_type,
+        agent_id=agent_id, payload=payload,
+    )
+
+
+def _read_reverted_merge_agent_ids(run: FlowRun) -> set[str]:
+    raw = (run.inputs or {}).get(_REVERTED_MERGE_AGENT_IDS_KEY)
+    if not isinstance(raw, list):
+        return set()
+    return {str(a).strip() for a in raw if str(a or "").strip()}
+
+
+def _mark_merge_reverted(
+    *, run: FlowRun, storage: StorageBackend, agent_id: str,
+) -> None:
+    current = _read_reverted_merge_agent_ids(run)
+    current.add(agent_id)
+    merged_inputs = dict(run.inputs or {})
+    merged_inputs[_REVERTED_MERGE_AGENT_IDS_KEY] = sorted(current)
     run.inputs = merged_inputs
     storage.run_update(run)
 
@@ -1364,17 +1407,22 @@ async def get_run_diff(
     Reconstructed read-only from baseline-repo merge history (see
     :meth:`ClawTeamCli.run_merged_agent_patch`), so it survives worktree cleanup
     and correctly attributes commits to *this* run even when a baseline branch is
-    shared by concurrent runs. Agents with nothing effectively merged (dismissed,
-    failed+aborted, or empty) are omitted. No patch text here — the caller fetches
-    a single agent's full diff lazily via the per-agent endpoint.
+    shared by concurrent runs. An agent is shown only when its merge brought
+    **effective file changes** (``files_changed > 0``) — a merge commit that
+    landed zero net changes is NOT shown. Agents the user reverted ("撤销合入")
+    are also excluded. No patch text here — the caller fetches a single agent's
+    full diff lazily via the per-agent endpoint.
     """
     run = storage.run_get(run_id)
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
+    reverted = _read_reverted_merge_agent_ids(run)
     cli = get_clawteam_cli()
     items: list[RunDiffAgentView] = []
     for agent in _run_diff_agents(run, storage):
+        if agent.id in reverted:
+            continue
         repo = str(agent.repo or "").strip() or None
         try:
             result = await cli.run_merged_agent_patch(
@@ -1386,7 +1434,9 @@ async def get_run_diff(
                 run_id=run.id, agent_id=agent.id, error=str(exc),
             )
             continue
-        if result is None or int(result.get("merge_count") or 0) <= 0:
+        # Show only agents that landed real file changes — a merge commit with
+        # zero net changes (e.g. duplicated/empty content) is not an effective merge.
+        if result is None or int(result.get("files_changed") or 0) <= 0:
             continue
         items.append(
             RunDiffAgentView(
@@ -1423,6 +1473,12 @@ async def get_run_agent_diff(
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
+    if agent_id in _read_reverted_merge_agent_ids(run):
+        raise ApiError(
+            "MERGE_REVERTED",
+            f"agent {agent_id!r} merge was reverted",
+            status_code=404,
+        )
     agent = next(
         (a for a in _run_diff_agents(run, storage) if a.id == agent_id), None,
     )
@@ -1447,10 +1503,10 @@ async def get_run_agent_diff(
             f"failed to compute run diff for agent {agent_id!r}",
             status_code=502,
         ) from exc
-    if result is None or int(result.get("merge_count") or 0) <= 0:
+    if result is None or int(result.get("files_changed") or 0) <= 0:
         raise ApiError(
             "NO_MERGED_CHANGES",
-            f"agent {agent_id!r} merged no content into a baseline this run",
+            f"agent {agent_id!r} merged no effective content into a baseline this run",
             status_code=404,
         )
     return RunAgentDiffView(
@@ -1464,6 +1520,90 @@ async def get_run_agent_diff(
         deletions=int(result.get("deletions") or 0),
         patch=str(result.get("patch") or ""),
         patch_truncated=bool(result.get("patch_truncated")),
+    )
+
+
+@router.post(
+    "/runs/{run_id}/run-diff/{agent_id}/revert",
+    response_model=RunMergeRevertView,
+)
+async def revert_run_agent_merge(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunMergeRevertView:
+    """Revert (撤销合入) this run's merges of *agent_id* on its baseline branch.
+
+    Available any time after the run completed. Uses ``git revert -m 1`` — a
+    **non-destructive** operation that adds inverse commits; it never rewrites
+    history or edits files by any other means. If git can't do it cleanly
+    (conflicts with later commits, dirty tree, …) nothing is changed and the git
+    reason is returned (``ok=false``, ``409 MERGE_REVERT_FAILED``). On success the
+    agent is recorded as reverted and disappears from the Run-diff module.
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    agent = next(
+        (a for a in _run_diff_agents(run, storage) if a.id == agent_id), None,
+    )
+    if agent is None:
+        raise ApiError(
+            "AGENT_NOT_FOUND",
+            f"agent {agent_id!r} is not a diffable (non-OpenClaw) agent of this run",
+            status_code=404,
+        )
+    if agent_id in _read_reverted_merge_agent_ids(run):
+        # Idempotent: already reverted → report success without touching git.
+        return RunMergeRevertView(
+            agent_id=agent_id, ok=True,
+            target_branch=str(agent.target_branch or DEFAULT_TARGET_BRANCH),
+            message="already reverted",
+        )
+    repo = str(agent.repo or "").strip() or None
+    target = str(agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+    cli = get_clawteam_cli()
+    try:
+        result = await cli.revert_agent_merges(
+            team=run.team_name, agent=agent.id, repo=repo, target_branch=target,
+        )
+    except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
+        logger.warning(
+            "run_merge_revert_error", run_id=run.id, agent_id=agent.id, error=str(exc),
+        )
+        raise ApiError(
+            "MERGE_REVERT_FAILED",
+            f"failed to revert merges for agent {agent_id!r}: {exc}",
+            status_code=409,
+        ) from exc
+    if not result.get("ok"):
+        _emit_run_event(
+            storage, run.id, "run_merge_revert_failed", agent_id=agent_id,
+            payload={"target_branch": target, "message": str(result.get("message") or "")},
+        )
+        raise ApiError(
+            "MERGE_REVERT_FAILED",
+            str(result.get("message") or "git revert failed"),
+            status_code=409,
+        )
+    _mark_merge_reverted(run=run, storage=storage, agent_id=agent_id)
+    _emit_run_event(
+        storage, run.id, "run_merge_reverted", agent_id=agent_id,
+        payload={
+            "target_branch": result.get("target_branch") or target,
+            "reverted_merges": result.get("merge_shas") or [],
+            "revert_head": result.get("revert_head") or "",
+        },
+    )
+    return RunMergeRevertView(
+        agent_id=agent_id,
+        ok=True,
+        target_branch=str(result.get("target_branch") or target),
+        reverted_merges=[str(s) for s in (result.get("merge_shas") or [])],
+        revert_head=str(result.get("revert_head") or ""),
+        message=str(result.get("message") or ""),
     )
 
 

@@ -354,6 +354,16 @@ export interface RunAgentDiff extends RunDiffAgent {
   patchTruncated: boolean;
 }
 
+/** Result of the "撤销合入" (revert-merge) action for one agent. */
+export interface RunMergeRevert {
+  agentId: string;
+  ok: boolean;
+  targetBranch: string;
+  revertedMerges: string[];
+  revertHead: string;
+  message: string;
+}
+
 export interface RunTaskTerminal {
   taskId: string;
   subject: string;
@@ -1019,6 +1029,11 @@ export const api = {
     request<RunAgentDiff>(
       "GET",
       `/api/runs/${id}/run-diff/${encodeURIComponent(agentId)}`,
+    ),
+  revertRunAgentMerge: (id: string, agentId: string) =>
+    request<RunMergeRevert>(
+      "POST",
+      `/api/runs/${id}/run-diff/${encodeURIComponent(agentId)}/revert`,
     ),
   submitRunComplaint: (id: string, message: string) =>
     request<RunSummary>("POST", `/api/runs/${id}/complaint`, { message }),

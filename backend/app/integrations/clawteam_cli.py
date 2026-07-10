@@ -139,6 +139,29 @@ def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
     return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
 
 
+def _match_agent_merge_shas(log_out: str, branch: str) -> list[str]:
+    """From ``git log --format=%H%x1f%s`` output, return the commit shas (in
+    **chronological** order, oldest first) whose subject references *branch* as a
+    whole token.
+
+    Every csflow merge subject embeds the run-unique branch name
+    ``clawteam/{team}/{agent}`` — "[csflow] merge <branch> for …",
+    "csflow: scheduled merge <branch>", "csflow: merge <branch> after run". The
+    ``(?<!\\S)…(?!\\S)`` boundary keeps ``…/worker`` from matching ``…/worker2``.
+    ``git log`` prints newest-first, so we reverse to chronological.
+    """
+    token = re.compile(rf"(?<!\S){re.escape(branch)}(?!\S)")
+    matched: list[str] = []
+    for line in reversed(log_out.splitlines()):
+        if "\x1f" not in line:
+            continue
+        sha, _, subject = line.partition("\x1f")
+        sha = sha.strip()
+        if sha and token.search(subject):
+            matched.append(sha)
+    return matched
+
+
 def _expand_repo(path: str) -> str:
     """Expand a leading ``~`` in a filesystem path.
 
@@ -864,10 +887,13 @@ class ClawTeamCli:
         is never switched and the repo merge lock is unnecessary (same read-only
         posture as :meth:`workspace_agent_patch`).
 
-        Returns ``None`` when the repo can't be resolved / isn't a git repo. When
-        the repo is valid but nothing of this agent's merged (dismissed, merge
-        failed+aborted, or genuinely empty), returns a dict with ``merge_count=0``
-        and an empty ``patch`` — the caller drops such agents from the display.
+        Returns ``None`` when the repo can't be resolved / isn't a git repo.
+        Otherwise a dict; the caller keys "show this agent?" off **``files_changed``**
+        (not ``merge_count``): a merge commit can exist yet bring **zero net file
+        changes** to the baseline (e.g. the agent's commits duplicated content
+        already on the base, or the merge was empty) — that is NOT an effective
+        change and such agents must be dropped from the display. ``merge_count=0``
+        means no matching merge at all (dismissed / failed+aborted / never merged).
         ``patch`` is omitted (empty) when ``include_patch`` is False (list view).
         """
         repo_root = _expand_repo((repo or "").strip())
@@ -876,27 +902,14 @@ class ClawTeamCli:
         branch = f"clawteam/{team}/{agent}"
         env = self._env()
 
-        # All csflow merge-commit subjects embed the branch as a whitespace-
-        # delimited token: "[csflow] merge <branch> for …", "csflow: scheduled
-        # merge <branch>", "csflow: merge <branch> after run". Enumerate merge
-        # commits across all refs, then keep only those whose subject carries the
-        # branch as a whole token (guards against agent-id prefix collisions).
+        # Enumerate merge commits across all refs, then keep only those whose
+        # subject references this run's exact branch (see _match_agent_merge_shas).
         log_code, log_out, _ = await _run_in_cwd(
             ["git", "log", "--all", "--merges", "--format=%H%x1f%s"],
             cwd=repo_root,
             env=env,
         )
-        token = re.compile(rf"(?<!\S){re.escape(branch)}(?!\S)")
-        # git log lists newest-first; reverse to chronological merge order.
-        matched: list[str] = []
-        if log_code == 0:
-            for line in reversed(log_out.splitlines()):
-                if "\x1f" not in line:
-                    continue
-                sha, _, subject = line.partition("\x1f")
-                sha = sha.strip()
-                if sha and token.search(subject):
-                    matched.append(sha)
+        matched = _match_agent_merge_shas(log_out, branch) if log_code == 0 else []
 
         commit_count = 0
         files: set[str] = set()
@@ -960,6 +973,161 @@ class ClawTeamCli:
             "patch": patch,
             "patch_truncated": patch_truncated,
         }
+
+    async def revert_agent_merges(
+        self,
+        *,
+        team: str,
+        agent: str,
+        repo: str | None,
+        target_branch: str = "main",
+    ) -> dict[str, Any]:
+        """Revert (undo) this run's ``agent`` merges on ``target_branch`` via
+        ``git revert -m 1`` — the "撤销合入" action, available any time after the
+        run completes.
+
+        **Non-destructive & no-force.** A revert *adds* new commits that invert the
+        merges' changes; it never rewrites history or edits files by any other
+        means. Reverts newest→oldest so a later merge is undone before an earlier
+        one. If git can't do it cleanly (conflicts with commits that landed on top,
+        a dirty tree, a merge/revert already in progress, checkout failure, …) the
+        whole operation is **rolled back to the exact pre-revert tip** and we return
+        ``ok=False`` with the git reason — no partial state, no forced writes.
+
+        **Locking.** Unlike the read-only Run-diff path this WRITES the baseline
+        (checkout + revert commits), so it takes the same in-process +
+        cross-process repo locks as :meth:`workspace_merge`. Purely local — never
+        fetches or pushes.
+
+        Only merges that brought *effective* file changes are reverted (empty
+        merges are skipped). Returns a dict: ``ok``, ``target_branch``,
+        ``merge_shas`` (reverted, chronological), ``revert_head`` (new tip on
+        success), ``nothing_to_revert``, ``message``.
+        """
+        result: dict[str, Any] = {
+            "ok": False, "target_branch": target_branch, "merge_shas": [],
+            "revert_head": "", "nothing_to_revert": False, "message": "",
+        }
+        repo_root = _expand_repo((repo or "").strip())
+        if not repo_root or not (Path(repo_root) / ".git").exists():
+            result["message"] = f"repo not found or not a git repo: {repo_root!r}"
+            return result
+        target = (target_branch or "").strip() or "main"
+        result["target_branch"] = target
+        branch = f"clawteam/{team}/{agent}"
+        env = self._env()
+
+        async with self._locks.lock(
+            f"clawteam_main_repo:{repo_root}",
+            timeout=CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS,
+        ):
+            async with async_main_repo_file_lock(repo_root):
+                # Merges of this agent's branch that live on the target branch.
+                log_code, log_out, log_err = await _run_in_cwd(
+                    ["git", "log", target, "--merges", "--format=%H%x1f%s"],
+                    cwd=repo_root, env=env,
+                )
+                if log_code != 0:
+                    result["message"] = (
+                        f"cannot read history of {target!r}: {(log_err or '').strip()[:300]}"
+                    )
+                    return result
+                matched = _match_agent_merge_shas(log_out, branch)
+                # Keep only merges that brought real file changes (skip empty).
+                effective: list[str] = []
+                for sha in matched:
+                    q_code, _, _ = await _run_in_cwd(
+                        ["git", "diff", "--quiet", f"{sha}^1", sha],
+                        cwd=repo_root, env=env,
+                    )
+                    if q_code == 1:  # 1 = differences present; 0 = none
+                        effective.append(sha)
+                if not effective:
+                    result["nothing_to_revert"] = True
+                    result["message"] = (
+                        f"no effective merge of {branch!r} found on {target!r} to revert"
+                    )
+                    return result
+
+                # Refuse to touch a repo that is mid-merge/revert/cherry-pick.
+                for head_ref in ("MERGE_HEAD", "REVERT_HEAD", "CHERRY_PICK_HEAD"):
+                    hc, _, _ = await _run_in_cwd(
+                        ["git", "rev-parse", "-q", "--verify", head_ref],
+                        cwd=repo_root, env=env,
+                    )
+                    if hc == 0:
+                        result["message"] = (
+                            f"{repo_root!r} has an in-progress {head_ref}; "
+                            "resolve or abort it before reverting"
+                        )
+                        return result
+
+                co_code, co_out, co_err = await _run_in_cwd(
+                    ["git", "checkout", target], cwd=repo_root, env=env,
+                )
+                if co_code != 0:
+                    result["message"] = (
+                        f"git checkout {target} failed: "
+                        f"{((co_err or '') + (co_out or '')).strip()[:300]}"
+                    )
+                    return result
+                hb_code, hb_out, _ = await _run_in_cwd(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, env=env,
+                )
+                if hb_code != 0 or (hb_out or "").strip() != target:
+                    result["message"] = (
+                        f"expected to be on {target!r} after checkout, "
+                        f"got {(hb_out or '').strip()!r}"
+                    )
+                    return result
+                # Never modify files by force: require a clean tree.
+                st_code, st_out, _ = await _run_in_cwd(
+                    ["git", "status", "--porcelain"], cwd=repo_root, env=env,
+                )
+                if st_code != 0 or st_out.strip():
+                    result["message"] = (
+                        f"baseline {target!r} has uncommitted changes; "
+                        "commit or clean them first (not touching files)"
+                    )
+                    return result
+
+                orig_code, orig_out, _ = await _run_in_cwd(
+                    ["git", "rev-parse", "HEAD"], cwd=repo_root, env=env,
+                )
+                orig_tip = (orig_out or "").strip()
+
+                # Revert newest→oldest (mainline parent = -m 1). One command; git
+                # stops at the first conflict, which we roll back cleanly below.
+                newest_first = list(reversed(effective))
+                rv_code, rv_out, rv_err = await _run_in_cwd(
+                    ["git", "revert", "-m", "1", "--no-edit", *newest_first],
+                    cwd=repo_root, env=env,
+                )
+                if rv_code != 0:
+                    # Abort any in-progress revert, then restore to the exact
+                    # pre-revert tip so no partial reverts remain.
+                    await _run_in_cwd(
+                        ["git", "revert", "--abort"], cwd=repo_root, env=env,
+                    )
+                    if orig_tip:
+                        await _run_in_cwd(
+                            ["git", "reset", "--hard", orig_tip], cwd=repo_root, env=env,
+                        )
+                    combined = ((rv_out or "") + (rv_err or "")).strip()[:600]
+                    result["message"] = (
+                        "git revert failed (likely a conflict with commits that "
+                        f"landed later); rolled back, no changes made:\n{combined}"
+                    )
+                    return result
+
+                nh_code, nh_out, _ = await _run_in_cwd(
+                    ["git", "rev-parse", "HEAD"], cwd=repo_root, env=env,
+                )
+                result["ok"] = True
+                result["merge_shas"] = effective
+                result["revert_head"] = (nh_out or "").strip() if nh_code == 0 else ""
+                result["message"] = (rv_out or "").strip()[:600]
+                return result
 
     async def workspace_cleanup(
         self, *, team: str, agent: str, repo: str | None = None,

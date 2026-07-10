@@ -12,6 +12,8 @@ must import the constants from here.
   a run enters ``awaiting_user_review`` after an abort / task failure.
 * :data:`PRESERVE_WORKTREE_AGENT_IDS_KEY` — agent ids whose worktrees must
   survive terminal team cleanup (merge-conflict follow-up).
+* :data:`REVERTED_MERGE_AGENT_IDS_KEY` — agent ids whose run-diff merges the user
+  reverted ("撤销合入"); excluded from the post-run Run-diff module.
 
 NOTE: the string values are a persisted on-disk contract (existing user DBs
 contain them) — never rename the values, only the Python symbols.
@@ -22,9 +24,11 @@ from __future__ import annotations
 POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
 POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"
 PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
+REVERTED_MERGE_AGENT_IDS_KEY = "_csflow_reverted_merge_agent_ids"
 
 __all__ = [
     "POST_COMPLAINT_STATUS_KEY",
     "POST_REVIEW_TERMINAL_STATUS_KEY",
     "PRESERVE_WORKTREE_AGENT_IDS_KEY",
+    "REVERTED_MERGE_AGENT_IDS_KEY",
 ]

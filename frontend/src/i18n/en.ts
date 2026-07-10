@@ -760,8 +760,7 @@ const en = {
     leaderReplyFootnote:
       "All outputs and document updates will be automatically merged into each agent workspace after the task flow completes (see the \"Run diff\" below), unless you manually discard changes or abort the run.",
     runDiffTitle: "Run diff",
-    runDiffHint:
-      "The effective changes actually merged into each baseline branch after this run (click an agent to view its diff).",
+    runDiffHint: "The effective changes from this run.",
     runDiffEmpty: "No changes were merged into any baseline branch during this run.",
     runDiffLoadError: "Failed to load the Run diff.",
     runDiffAgentSummary: "{{commits}} commit(s) · {{files}} file(s)",
@@ -770,6 +769,13 @@ const en = {
     runDiffPatchEmpty: "No diff content to display.",
     runDiffTruncated:
       "Diff is too large and has been truncated. View the full diff in the baseline repo.",
+    runDiffRevert: "Revert merge",
+    runDiffReverting: "Reverting…",
+    runDiffRevertConfirmTitle: "Revert merge",
+    runDiffRevertConfirmBody:
+      "This runs git revert on {{agent}}'s commits merged into the baseline this run (adds inverse commits to undo them — no forced file edits, no history rewrite). If git can't do it cleanly (e.g. conflicts), nothing is changed and the reason is shown. Revert?",
+    runDiffRevertConfirmOk: "Revert",
+    runDiffRevertFailed: "Revert failed: {{reason}}",
     eventTypeColumn: "Type",
     eventTimestampColumn: "Time",
     eventAgentColumn: "Agent",

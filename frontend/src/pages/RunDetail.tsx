@@ -2285,13 +2285,20 @@ function DiffView({ patch }: { patch: string }) {
   return (
     <pre className="max-h-[60vh] overflow-auto rounded-md border border-ink-200 bg-ink-50 dark:bg-ink-900/40 p-3 text-xs font-mono leading-relaxed">
       {lines.map((line, i) => {
+        // Highlight added/removed lines with a background tint (not just text
+        // color) so the diff reads clearly at a glance in the Run diff module.
         let cls = "text-ink-600";
         if (line.startsWith("+") && !line.startsWith("+++")) {
-          cls = "text-emerald-600 dark:text-emerald-400";
+          cls =
+            "text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 dark:bg-emerald-500/15";
         } else if (line.startsWith("-") && !line.startsWith("---")) {
-          cls = "text-red-600 dark:text-red-400";
+          cls = "text-red-700 dark:text-red-300 bg-red-500/10 dark:bg-red-500/15";
         } else if (line.startsWith("@@")) {
-          cls = "text-sky-600 dark:text-sky-400";
+          cls =
+            "text-sky-700 dark:text-sky-300 bg-sky-500/10 dark:bg-sky-500/15 font-semibold";
+        } else if (line.startsWith("=====")) {
+          // Per-merge header injected when an agent has multiple merges.
+          cls = "text-brand-700 dark:text-brand-300 bg-brand-500/10 font-semibold";
         } else if (
           line.startsWith("diff ") ||
           line.startsWith("index ") ||
@@ -2301,7 +2308,7 @@ function DiffView({ patch }: { patch: string }) {
           cls = "text-ink-500 font-semibold";
         }
         return (
-          <div key={i} className={cls}>
+          <div key={i} className={`${cls} px-1 -mx-1`}>
             {line || " "}
           </div>
         );
@@ -2318,32 +2325,55 @@ function DiffView({ patch }: { patch: string }) {
  *  backend, so an empty list means "nothing was merged". */
 function RunDiffCard({ runId }: { runId: string }) {
   const { t } = useTranslation();
+  const { confirm, alert } = useDialog();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [agents, setAgents] = useState<RunDiffAgent[]>([]);
   const [openAgent, setOpenAgent] = useState<string | null>(null);
+  const [revertingId, setRevertingId] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    api
-      .getRunDiff(runId)
-      .then((res) => {
-        if (!cancelled) setAgents(res.items ?? []);
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setError(e instanceof ApiError ? e.message : String(e));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const res = await api.getRunDiff(runId);
+      setAgents(res.items ?? []);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
   }, [runId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const onRevert = useCallback(
+    async (agentId: string) => {
+      const ok = await confirm(
+        t("runDetail.runDiffRevertConfirmBody", { agent: agentId }),
+        {
+          title: t("runDetail.runDiffRevertConfirmTitle"),
+          okText: t("runDetail.runDiffRevertConfirmOk"),
+          danger: true,
+        },
+      );
+      if (!ok) return;
+      setRevertingId(agentId);
+      try {
+        await api.revertRunAgentMerge(runId, agentId);
+        // Reverted agent drops out of the list — reload to reflect it.
+        await load();
+      } catch (e) {
+        const reason = e instanceof ApiError ? e.message : String(e);
+        void alert(t("runDetail.runDiffRevertFailed", { reason }));
+      } finally {
+        setRevertingId(null);
+      }
+    },
+    [runId, confirm, alert, t, load],
+  );
 
   return (
     <Card className="border-ink-200">
@@ -2358,11 +2388,9 @@ function RunDiffCard({ runId }: { runId: string }) {
       ) : (
         <div className="space-y-2">
           {agents.map((a) => (
-            <button
+            <div
               key={a.agentId}
-              type="button"
-              onClick={() => setOpenAgent(a.agentId)}
-              className="flex w-full items-center justify-between gap-3 rounded-md border border-ink-200 bg-ink-50/40 px-3 py-2 text-left transition-colors hover:border-brand-300"
+              className="flex items-center justify-between gap-3 rounded-md border border-ink-200 bg-ink-50/40 px-3 py-2"
             >
               <div className="min-w-0">
                 <div className="truncate font-medium text-ink-900">{a.agentId}</div>
@@ -2385,11 +2413,25 @@ function RunDiffCard({ runId }: { runId: string }) {
                     </span>
                   </span>
                 )}
-                <span className="btn-outline pointer-events-none">
+                <button
+                  type="button"
+                  className="btn-outline"
+                  onClick={() => setOpenAgent(a.agentId)}
+                >
                   {t("runDetail.runDiffViewDiff")}
-                </span>
+                </button>
+                <button
+                  type="button"
+                  className="btn-outline text-red-600 dark:text-red-400"
+                  disabled={revertingId !== null}
+                  onClick={() => void onRevert(a.agentId)}
+                >
+                  {revertingId === a.agentId
+                    ? t("runDetail.runDiffReverting")
+                    : t("runDetail.runDiffRevert")}
+                </button>
               </div>
-            </button>
+            </div>
           ))}
         </div>
       )}
