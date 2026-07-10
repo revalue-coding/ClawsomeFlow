@@ -48,6 +48,22 @@ _NO_TEXT_REPLY_MARKER = "[[NO_TEXT_REPLY]]"
 _CHAT_SESSION_SOURCE = "csflow-web"
 _SESSION_ID_RE = re.compile(r"(?im)^\s*session_id:\s*(?P<sid>\S+)\s*$")
 
+# Lines that are ``chat -Q`` tool-preview / diff decoration rather than the
+# agent's real answer. Used only by the stdout *salvage* path (see
+# ``_salvage_stdout_reply``); kept deliberately narrow so genuine markdown
+# (``## heading``, ``- bullet``) is never mistaken for noise.
+_TOOL_PREVIEW_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"[┊│├└┌┐┘┏┓┗┛━┃╭╮╰╯╱╲▎▏]"  # box-drawing decoration
+    r"|@@ .*@@"  # diff hunk header
+    r"|(?:---|\+\+\+) [ab]/"  # diff file markers
+    r"|[ab]/\S+\s*→\s*[ab]/\S+"  # diff path-change line
+    r")"
+)
+# Minimum dense (whitespace-stripped) length for a salvaged stdout reply to be
+# treated as a real answer rather than a couple of stray preview residues.
+_MIN_SALVAGED_STDOUT_CHARS = 40
+
 
 @dataclass
 class ChatJob:
@@ -392,32 +408,60 @@ def _recover_from_session(
     text = _extract_assistant_text(data)
     if text:
         return text, "session_export"
-    # Count tool calls in the current turn only (after last user), so a prior
-    # turn's tools don't mask a genuinely empty new turn.
+    # No assistant text for the CURRENT turn. Decide whether this was a genuine
+    # tool-only turn (→ NO_TEXT marker) or an empty turn (→ let the caller fall
+    # back to stdout). Tool detection MUST be scoped to the current turn (after
+    # the last user message): the session-level ``tool_call_count`` sums every
+    # earlier turn, so on a long conversation it would mask a real reply that
+    # is only present on stdout (market-strategist regression — a turn that
+    # generated 2842 chars but was never persisted got mislabelled
+    # "none_after_tools" purely because prior turns had used tools). Only trust
+    # the session-level counter when the export carried no per-message data at
+    # all (nothing else to go on).
     messages = data.get("messages") or []
-    last_user = -1
-    for i, msg in enumerate(messages):
-        if isinstance(msg, dict) and (msg.get("role") or "").lower() == "user":
-            last_user = i
-    turn_msgs = messages[last_user + 1 :] if last_user >= 0 else messages
-    turn_tool_count = 0
-    for msg in turn_msgs:
-        if not isinstance(msg, dict):
-            continue
-        turn_tool_count += len(msg.get("tool_calls") or [])
-        if (msg.get("role") or "").lower() == "tool":
-            turn_tool_count += 1
-    if turn_tool_count > 0 or _count_tool_calls(data) > 0:
-        # Tool calls happened but no assistant text — legitimate "no visible
-        # reply", NOT a failure. Marker is rendered specially by the UI.
-        # ``_count_tool_calls`` covers export payloads that only set
-        # ``tool_call_count`` without per-message ``tool_calls``.
+    if messages:
+        last_user = -1
+        for i, msg in enumerate(messages):
+            if isinstance(msg, dict) and (msg.get("role") or "").lower() == "user":
+                last_user = i
+        turn_msgs = messages[last_user + 1 :] if last_user >= 0 else messages
+        turn_tool_count = 0
+        for msg in turn_msgs:
+            if not isinstance(msg, dict):
+                continue
+            turn_tool_count += len(msg.get("tool_calls") or [])
+            if (msg.get("role") or "").lower() == "tool":
+                turn_tool_count += 1
+        if turn_tool_count > 0:
+            return _NO_TEXT_REPLY_MARKER, "none_after_tools"
+        return "", ""
+    # Export payload set only ``tool_call_count`` without per-message rows.
+    if _count_tool_calls(data) > 0:
         return _NO_TEXT_REPLY_MARKER, "none_after_tools"
     return "", ""
 
 
 # Back-compat alias for tests / callers that still import the old name.
 _recover_empty_stdout = _recover_from_session
+
+
+def _salvage_stdout_reply(out: str) -> str:
+    """Best-effort recovery of a real reply from ``chat -Q`` stdout.
+
+    Used only when the session store has no assistant text for the current turn
+    yet Hermes still generated one (it finished the turn but failed to persist
+    the assistant row). Strips obvious tool-preview / diff decoration and
+    returns the remainder; returns ``""`` when what's left is too thin to be a
+    genuine answer, so the caller can keep the clean NO_TEXT marker instead.
+    """
+    cleaned = ha._strip_ansi(out or "")
+    if not cleaned.strip():
+        return ""
+    kept = [ln for ln in cleaned.splitlines() if not _TOOL_PREVIEW_LINE_RE.match(ln)]
+    result = "\n".join(kept).strip()
+    if len(re.sub(r"\s+", "", result)) < _MIN_SALVAGED_STDOUT_CHARS:
+        return ""
+    return result
 
 
 def _resolve_done(
@@ -430,23 +474,41 @@ def _resolve_done(
     """Decide whether this hermes exit is a successful turn. Returns
     ``(final_text, source)`` on success, else ``None`` (error/retry path).
 
-    Prefer session export over stdout: ``chat -Q`` stdout is not a reliable
-    final-reply channel (tool-preview noise / mid-stream truncation).
+    Ordering:
+    1. Session export assistant text — authoritative when present.
+    2. If export reports a tool-only turn (no assistant text), salvage a genuine
+       reply from stdout before accepting the bare NO_TEXT marker, so a reply
+       Hermes generated but failed to persist is never silently swallowed
+       (market-strategist regression).
+    3. Otherwise fall back to raw stdout (the reply channel for a plain turn).
     """
     if rc != 0:
         return None
     text, source = _recover_from_session(
         job, preferred_session_id=preferred_session_id
     )
-    if source:
+    if source == "session_export":
+        return text, source
+    if source == "none_after_tools":
+        salvaged = _salvage_stdout_reply(out)
+        if salvaged:
+            _bind_session_id(job, preferred_session_id)
+            return salvaged, "stdout"
         return text, source
     stdout_text = (out or "").strip()
     if stdout_text:
-        job.hermes_session_id = preferred_session_id or _discover_session_id(
-            job.agent_id
-        )
+        _bind_session_id(job, preferred_session_id)
         return stdout_text, "stdout"
     return None
+
+
+def _bind_session_id(job: ChatJob, preferred_session_id: str | None) -> None:
+    """Ensure the job carries a Hermes session id without clobbering a good one."""
+    job.hermes_session_id = (
+        job.hermes_session_id
+        or preferred_session_id
+        or _discover_session_id(job.agent_id)
+    )
 
 
 def _run_turn(

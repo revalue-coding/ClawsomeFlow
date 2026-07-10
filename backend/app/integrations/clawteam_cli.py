@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shlex
 import signal
 from contextlib import nullcontext
@@ -823,6 +824,141 @@ class ClawTeamCli:
             "uncommitted_truncated": uncommitted_truncated,
             "base_ahead": base_ahead,
             "branch_ahead": branch_ahead,
+        }
+
+    async def run_merged_agent_patch(
+        self,
+        *,
+        team: str,
+        agent: str,
+        repo: str | None,
+        include_patch: bool = True,
+        max_bytes: int = 400_000,
+    ) -> dict[str, Any] | None:
+        """Reconstruct what *this run's* ``agent`` branch actually merged into a
+        baseline branch, read from the baseline repo's **history** (not a worktree).
+
+        Powers the post-run "Run diff" module: unlike :meth:`workspace_agent_patch`
+        (which needs a live worktree and shows *pending* changes), this survives
+        worktree cleanup because it reads committed merge history in the main repo.
+
+        **Isolating this run's commits on a shared baseline.** A baseline branch is
+        routinely written by many runs concurrently, plus arbitrary later commits.
+        We key detection off the *run-unique* branch name
+        ``clawteam/{team}/{agent}`` (``team`` = ``csflow-{run_id_short}`` is unique
+        per run). Every csflow merge — the scheduler's :meth:`workspace_merge` and
+        the agent self-merge tool (``csflow-locked-merge.py``) — is a
+        ``git merge --no-ff <branch> -m "…<branch>…"``, so the branch name is
+        embedded in the merge-commit subject. We select only merge commits whose
+        subject references *this exact* branch (token-boundary match, so
+        ``…/worker`` never matches ``…/worker2``); other runs' merges (different
+        team) and unrelated later commits never match. For each matched merge ``M``
+        the introduced content is ``git diff M^1 M`` (first parent = the baseline
+        tip immediately before this merge, already including whatever else had
+        landed), which isolates only this agent's contribution regardless of
+        concurrent/subsequent baseline activity.
+
+        **No checkout, no lock.** Every git call here is read-only and addresses
+        commits by SHA (``log --all --merges``, ``diff <sha>^1 <sha>``,
+        ``rev-list --count``) — none touch HEAD or the working tree, so the branch
+        is never switched and the repo merge lock is unnecessary (same read-only
+        posture as :meth:`workspace_agent_patch`).
+
+        Returns ``None`` when the repo can't be resolved / isn't a git repo. When
+        the repo is valid but nothing of this agent's merged (dismissed, merge
+        failed+aborted, or genuinely empty), returns a dict with ``merge_count=0``
+        and an empty ``patch`` — the caller drops such agents from the display.
+        ``patch`` is omitted (empty) when ``include_patch`` is False (list view).
+        """
+        repo_root = _expand_repo((repo or "").strip())
+        if not repo_root or not (Path(repo_root) / ".git").exists():
+            return None
+        branch = f"clawteam/{team}/{agent}"
+        env = self._env()
+
+        # All csflow merge-commit subjects embed the branch as a whitespace-
+        # delimited token: "[csflow] merge <branch> for …", "csflow: scheduled
+        # merge <branch>", "csflow: merge <branch> after run". Enumerate merge
+        # commits across all refs, then keep only those whose subject carries the
+        # branch as a whole token (guards against agent-id prefix collisions).
+        log_code, log_out, _ = await _run_in_cwd(
+            ["git", "log", "--all", "--merges", "--format=%H%x1f%s"],
+            cwd=repo_root,
+            env=env,
+        )
+        token = re.compile(rf"(?<!\S){re.escape(branch)}(?!\S)")
+        # git log lists newest-first; reverse to chronological merge order.
+        matched: list[str] = []
+        if log_code == 0:
+            for line in reversed(log_out.splitlines()):
+                if "\x1f" not in line:
+                    continue
+                sha, _, subject = line.partition("\x1f")
+                sha = sha.strip()
+                if sha and token.search(subject):
+                    matched.append(sha)
+
+        commit_count = 0
+        files: set[str] = set()
+        insertions = 0
+        deletions = 0
+        patch_parts: list[str] = []
+        for sha in matched:
+            # Commits this agent uniquely contributed via this merge:
+            # reachable from the second parent (branch tip) but not the first
+            # (baseline before merge). Best-effort; 0 on any git error.
+            rc, rc_out, _ = await _run_in_cwd(
+                ["git", "rev-list", "--count", f"{sha}^1..{sha}^2"],
+                cwd=repo_root, env=env,
+            )
+            if rc == 0:
+                try:
+                    commit_count += int(rc_out.strip() or "0")
+                except ValueError:
+                    pass
+            # numstat drives file/line aggregates without the full patch text.
+            ns_code, ns_out, _ = await _run_in_cwd(
+                ["git", "diff", "--no-color", "--numstat", f"{sha}^1", sha],
+                cwd=repo_root, env=env,
+            )
+            if ns_code == 0:
+                for row in ns_out.splitlines():
+                    cols = row.split("\t")
+                    if len(cols) != 3:
+                        continue
+                    add_s, del_s, path = cols
+                    files.add(path)
+                    if add_s.isdigit():
+                        insertions += int(add_s)
+                    if del_s.isdigit():
+                        deletions += int(del_s)
+            if include_patch:
+                d_code, d_out, _ = await _run_in_cwd(
+                    ["git", "diff", "--no-color", f"{sha}^1", sha],
+                    cwd=repo_root, env=env,
+                )
+                if d_code == 0 and d_out.strip():
+                    if len(matched) > 1:
+                        # Multiple merges (e.g. an initial merge plus a
+                        # complaint-phase re-merge) — label each fragment.
+                        patch_parts.append(
+                            f"===== merged commit {sha[:12]} =====\n{d_out}"
+                        )
+                    else:
+                        patch_parts.append(d_out)
+
+        patch = "\n\n".join(patch_parts)
+        patch, patch_truncated = _truncate_utf8(patch, max_bytes)
+        return {
+            "repo_root": repo_root,
+            "branch": branch,
+            "merge_count": len(matched),
+            "commit_count": commit_count,
+            "files_changed": len(files),
+            "insertions": insertions,
+            "deletions": deletions,
+            "patch": patch,
+            "patch_truncated": patch_truncated,
         }
 
     async def workspace_cleanup(

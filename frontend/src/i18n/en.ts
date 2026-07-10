@@ -554,6 +554,7 @@ const en = {
     columnStarted: "Started",
     columnFinished: "Finished",
     columnUser: "User",
+    scheduledTag: "Scheduled",
     filterStatus: "Filter status",
     filterStatusAll: "All",
     schedule: {
@@ -757,7 +758,18 @@ const en = {
     leaderReplyHint: "",
     leaderReplyMissing: "No leader work report captured yet (check live events below).",
     leaderReplyFootnote:
-      "All outputs and document updates will be automatically merged into each agent workspace after the task flow completes, unless you manually discard changes or abort the run.",
+      "All outputs and document updates will be automatically merged into each agent workspace after the task flow completes (see the \"Run diff\" below), unless you manually discard changes or abort the run.",
+    runDiffTitle: "Run diff",
+    runDiffHint:
+      "The effective changes actually merged into each baseline branch after this run (click an agent to view its diff).",
+    runDiffEmpty: "No changes were merged into any baseline branch during this run.",
+    runDiffLoadError: "Failed to load the Run diff.",
+    runDiffAgentSummary: "{{commits}} commit(s) · {{files}} file(s)",
+    runDiffViewDiff: "View diff",
+    runDiffModalTitle: "Run diff — {{agent}}",
+    runDiffPatchEmpty: "No diff content to display.",
+    runDiffTruncated:
+      "Diff is too large and has been truncated. View the full diff in the baseline repo.",
     eventTypeColumn: "Type",
     eventTimestampColumn: "Time",
     eventAgentColumn: "Agent",
@@ -1119,7 +1131,7 @@ const en = {
       modelInheritNone: "None",
       modelInheritDefault: "default profile",
       modelInheritHint:
-        "Choose where to copy the initial model config from. After creation, this agent's model is independent. If a clone source is also set, the clone runs first and then model inheritance is applied on top.",
+        "Choose where to copy the initial model config from. When no clone source is set, the default profile is used automatically. After creation, this agent's model is independent. If a clone source is also set, the clone runs first and model inheritance is optional on top.",
       idLabel: "Profile ID",
       idPlaceholder: "e.g. backend-helper",
       idHint:

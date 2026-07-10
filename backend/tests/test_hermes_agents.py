@@ -152,6 +152,26 @@ def test_commit_agent_outcome_ok_on_success(
     assert outcome.ran is True
 
 
+def test_commit_agent_no_clone_no_inherit_defaults_to_default_profile(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither clone nor model inherit → seed from active/default profile."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(svc, "_run_hermes", _fake_run(calls))
+    monkeypatch.setattr(svc, "list_profile_names", lambda: [])
+    seeds: list[tuple] = []
+    monkeypatch.setattr(
+        svc, "_seed_profile_inference_config",
+        lambda *a, **k: seeds.append((a, k)),
+    )
+    svc.commit_agent(
+        svc.CommitInput(id="c0", name="C0", clone_from="", model_inherit_from=""),
+        user="alice",
+    )
+    assert ["profile", "create", "c0"] in calls
+    assert seeds == [(("c0",), {"source_profile": "default"})]
+
+
 def test_commit_agent_light_clone_from_other_profile(
     hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

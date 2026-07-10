@@ -755,6 +755,12 @@ def _commit_agent_locked(
         description = (cmd.description or "").strip()
         clone_from = (cmd.clone_from or "").strip()
         model_inherit = (cmd.model_inherit_from or "").strip()
+        # Fresh profiles must be runnable — bootstrap and later dispatch all go
+        # through `hermes -p <id>`. When the caller neither clones nor picks a
+        # model source, default to the active/default profile (same as the UI's
+        # "default profile" option).
+        if not clone_from and not model_inherit:
+            model_inherit = "default"
 
         # Step 1 — create the profile, optionally cloning an existing one. The
         # clone happens AT creation (Hermes copies config/.env[/full state] from
@@ -783,7 +789,7 @@ def _commit_agent_locked(
         #     inheritance ON TOP (override just the model + import its keys),
         #     preserving the cloned skills/mcp/etc.
         #   * model inherit only (fresh profile) → copy config.yaml + .env wholesale.
-        #   * neither → seed from the active/default profile so it still runs.
+        #   * neither clone nor model inherit → default to active/default profile.
         if model_inherit:
             if clone_from:
                 try:
@@ -796,8 +802,6 @@ def _commit_agent_locked(
                     )
             else:
                 _seed_profile_inference_config(aid, source_profile=model_inherit)
-        elif not clone_from:
-            _seed_profile_inference_config(aid)
 
         _abort_if_cancelled()  # cancelled during profile create → roll back now
 

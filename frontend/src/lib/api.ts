@@ -303,6 +303,8 @@ export interface RunSummary {
   startedAt: string;
   finishedAt: string | null;
   inputs: Record<string, unknown>;
+  /** True only for runs launched by a timed schedule (drives the "Scheduled" tag). */
+  isScheduled: boolean;
 }
 
 export interface PendingMerge {
@@ -332,6 +334,24 @@ export interface RunDetail extends RunSummary {
   pendingMerges: PendingMerge[] | null;
   clawteamBoardUrl: string | null;
   specSnapshot: FlowSpec;
+}
+
+/** One agent's merged-into-baseline summary in the post-run "Run diff" module. */
+export interface RunDiffAgent {
+  agentId: string;
+  branch: string;
+  repoRoot: string;
+  mergeCount: number;
+  commitCount: number;
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
+/** Full unified diff of what one agent merged into a baseline this run. */
+export interface RunAgentDiff extends RunDiffAgent {
+  patch: string;
+  patchTruncated: boolean;
 }
 
 export interface RunTaskTerminal {
@@ -992,6 +1012,13 @@ export const api = {
     request<PendingMergeDiff>(
       "GET",
       `/api/runs/${id}/pending-merges/${encodeURIComponent(agentId)}/diff`,
+    ),
+  getRunDiff: (id: string) =>
+    request<{ items: RunDiffAgent[] }>("GET", `/api/runs/${id}/run-diff`),
+  getRunAgentDiff: (id: string, agentId: string) =>
+    request<RunAgentDiff>(
+      "GET",
+      `/api/runs/${id}/run-diff/${encodeURIComponent(agentId)}`,
     ),
   submitRunComplaint: (id: string, message: string) =>
     request<RunSummary>("POST", `/api/runs/${id}/complaint`, { message }),

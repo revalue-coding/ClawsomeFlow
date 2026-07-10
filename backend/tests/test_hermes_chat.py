@@ -444,6 +444,122 @@ def test_run_turn_empty_stdout_tool_only_marks_no_text_reply(
     assert job.final_text == chat_svc._NO_TEXT_REPLY_MARKER
 
 
+def test_run_turn_recovers_stdout_reply_when_current_turn_unpersisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (market-strategist 2026-07-10): Hermes finished a turn and
+    generated a full reply but never persisted the assistant row. The export
+    therefore has NO current-turn text — only earlier turns' tools inflate the
+    session-level ``tool_call_count``. That session-level count must NOT mask
+    the real reply sitting on stdout: the current turn had no tools of its own,
+    so we fall through to stdout instead of emitting the NO_TEXT marker."""
+    job = _mk_job("sk-lostreply")
+    real_reply = "给客户运营的建议：先锁定一个具体领域社区，用手工交付验证付费意愿，再沉淀为可复用模板。"
+    monkeypatch.setattr(chat_svc, "_spawn_hermes", lambda *a, **k: _FakePopen())
+    monkeypatch.setattr(
+        chat_svc,
+        "_communicate",
+        lambda proc: (0, real_reply, "session_id: 20260710_110954_64ceae\n"),
+    )
+    monkeypatch.setattr(
+        chat_svc,
+        "_export_session",
+        lambda aid, sid: {
+            # Session accumulated tool calls over many earlier turns …
+            "tool_call_count": 31,
+            "messages": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "earlier reply"},
+                {"role": "user", "content": "give the customer-ops team advice"},
+                # … but the CURRENT turn persisted only the user row.
+            ],
+        },
+    )
+    chat_svc._JOBS["sk-lostreply"] = job
+
+    chat_svc._run_turn(job, "give advice", "/tmp/wd", resume=False)
+
+    assert job.status == "done"
+    assert job.final_text == real_reply
+    assert job.final_text != chat_svc._NO_TEXT_REPLY_MARKER
+    assert job.hermes_session_id == "20260710_110954_64ceae"
+
+
+def test_none_after_tools_salvages_real_stdout_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current turn genuinely ran tools with no persisted assistant text, but a
+    real reply is on stdout → salvage it rather than showing the NO_TEXT
+    marker."""
+    job = _mk_job("sk-salvage")
+    real_reply = "给客户运营的建议：先锁定一个具体领域社区，用手工交付验证付费意愿，再沉淀为可复用模板。"
+    monkeypatch.setattr(chat_svc, "_spawn_hermes", lambda *a, **k: _FakePopen())
+    monkeypatch.setattr(
+        chat_svc,
+        "_communicate",
+        lambda proc: (0, real_reply, "session_id: 20260101_000000_salv\n"),
+    )
+    monkeypatch.setattr(
+        chat_svc,
+        "_export_session",
+        lambda aid, sid: {
+            "messages": [
+                {"role": "user", "content": "give advice"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "1", "function": {"name": "write_file"}}],
+                },
+                {"role": "tool", "content": "wrote"},
+            ]
+        },
+    )
+    chat_svc._JOBS["sk-salvage"] = job
+
+    chat_svc._run_turn(job, "give advice", "/tmp/wd", resume=False)
+
+    assert job.status == "done"
+    assert job.final_text == real_reply
+    assert job.final_text != chat_svc._NO_TEXT_REPLY_MARKER
+    assert job.hermes_session_id == "20260101_000000_salv"
+
+
+def test_none_after_tools_keeps_marker_when_stdout_is_pure_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine tool-only turn whose stdout is only tool-preview noise must
+    keep the clean NO_TEXT marker (salvage must not surface diff decoration)."""
+    job = _mk_job("sk-noise-only")
+    noise = "┊ review diff\n┊ a/x.md → b/x.md\n"
+    monkeypatch.setattr(chat_svc, "_spawn_hermes", lambda *a, **k: _FakePopen())
+    monkeypatch.setattr(
+        chat_svc,
+        "_communicate",
+        lambda proc: (0, noise, "session_id: 20260101_000000_noise\n"),
+    )
+    monkeypatch.setattr(
+        chat_svc,
+        "_export_session",
+        lambda aid, sid: {
+            "messages": [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "1", "function": {"name": "patch"}}],
+                },
+                {"role": "tool", "content": "done"},
+            ]
+        },
+    )
+    chat_svc._JOBS["sk-noise-only"] = job
+
+    chat_svc._run_turn(job, "go", "/tmp/wd", resume=False)
+
+    assert job.status == "done"
+    assert job.final_text == chat_svc._NO_TEXT_REPLY_MARKER
+
+
 def test_run_turn_empty_stdout_no_recovery_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """rc==0, empty stdout, nothing recoverable → still a clean error (not hang)."""
     job = _mk_job("sk-none")

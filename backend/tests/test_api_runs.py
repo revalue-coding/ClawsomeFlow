@@ -1820,3 +1820,157 @@ def test_checkpoint_mark_read_requires_awaiting_status(app_client: TestClient) -
     r = app_client.post(f"/api/runs/{run.id}/checkpoint/items/t1/mark-read")
     assert r.status_code == 409
     assert r.json()["error"] == "NOT_AWAITING_CHECKPOINT"
+
+
+# ── Run diff (post-run merged-into-baseline module) -------------------
+
+
+def _make_openclaw_flow(owner: str = "alice") -> Flow:
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(id="alice", kind=AgentKind.claude, repo="/tmp/r",
+                      is_leader=False, merge_strategy=MergeStrategy.manual,
+                      on_failure=OnFailure.retry, max_retries=2),
+            FlowAgent(id="ocw", kind=AgentKind.openclaw,
+                      target_branch=None, is_leader=False,
+                      merge_strategy=MergeStrategy.agent_self,
+                      on_failure=OnFailure.retry, max_retries=2),
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/r",
+                      is_leader=True, merge_strategy=MergeStrategy.manual,
+                      on_failure=OnFailure.retry, max_retries=2),
+        ],
+        tasks=[
+            FlowTask(id="t1", owner_agent_id="alice", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="t2", owner_agent_id="ocw", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="y",
+                     description="", depends_on=["t1"], is_leader_summary=True),
+        ],
+    )
+    flow = Flow(name="oc", description="", owner_user=owner).with_spec(spec)
+    return get_storage().flow_create(flow)
+
+
+def test_run_diff_lists_only_merged_non_openclaw_agents(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_openclaw_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+
+    queried: list[str] = []
+
+    class _FakeCli:
+        async def run_merged_agent_patch(
+            self, *, team, agent, repo, include_patch=True, **kw,
+        ):
+            del team, repo, include_patch, kw
+            queried.append(agent)
+            if agent == "alice":
+                return {
+                    "repo_root": "/tmp/r", "branch": f"clawteam/{run.team_name}/alice",
+                    "merge_count": 1, "commit_count": 2, "files_changed": 3,
+                    "insertions": 10, "deletions": 4, "patch": "", "patch_truncated": False,
+                }
+            # leader merged nothing → omitted
+            return {
+                "repo_root": "/tmp/r", "branch": f"clawteam/{run.team_name}/{agent}",
+                "merge_count": 0, "commit_count": 0, "files_changed": 0,
+                "insertions": 0, "deletions": 0, "patch": "", "patch_truncated": False,
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/run-diff")
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [i["agentId"] for i in items] == ["alice"]
+    assert items[0]["commitCount"] == 2
+    assert items[0]["filesChanged"] == 3
+    assert items[0]["insertions"] == 10
+    # OpenClaw agent must never be queried.
+    assert "ocw" not in queried
+
+
+def test_run_agent_diff_returns_patch(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+
+    class _FakeCli:
+        async def run_merged_agent_patch(
+            self, *, team, agent, repo, include_patch=True, **kw,
+        ):
+            del team, repo, kw
+            assert include_patch is True
+            return {
+                "repo_root": "/tmp/r", "branch": f"clawteam/{run.team_name}/{agent}",
+                "merge_count": 1, "commit_count": 1, "files_changed": 1,
+                "insertions": 1, "deletions": 0,
+                "patch": "diff --git a/a.txt b/a.txt\n+alice\n", "patch_truncated": False,
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/run-diff/alice")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["agentId"] == "alice"
+    assert "+alice" in body["patch"]
+    assert body["patchTruncated"] is False
+
+
+def test_run_agent_diff_no_merged_changes_404(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+
+    class _FakeCli:
+        async def run_merged_agent_patch(self, *, team, agent, repo, **kw):
+            del team, agent, repo, kw
+            return {"merge_count": 0, "patch": ""}
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/run-diff/alice")
+    assert r.status_code == 404
+    assert r.json()["error"] == "NO_MERGED_CHANGES"
+
+
+def test_run_agent_diff_openclaw_agent_404(app_client: TestClient) -> None:
+    flow = _make_openclaw_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+    r = app_client.get(f"/api/runs/{run.id}/run-diff/ocw")
+    assert r.status_code == 404
+    assert r.json()["error"] == "AGENT_NOT_FOUND"
+
+
+def test_run_summary_exposes_is_scheduled(app_client: TestClient) -> None:
+    flow = _make_flow()
+    get_storage().run_create(FlowRun(
+        flow_id=flow.id, flow_version=1, team_name="csflow-sched",
+        status=RunStatus.completed, inputs={}, user="alice", is_scheduled=True,
+    ))
+    _make_run(flow_id=flow.id, status=RunStatus.completed, team_name="csflow-manual")
+    rows = {row["teamName"]: row for row in app_client.get("/api/runs").json()["items"]}
+    assert rows["csflow-sched"]["isScheduled"] is True
+    assert rows["csflow-manual"]["isScheduled"] is False
+
+
+def test_webhook_marker_key_hidden_from_run_inputs(app_client: TestClient) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id, status=RunStatus.completed,
+        inputs={
+            "topic": "real input",
+            "csflow.terminal_webhook_notified_at": "2026-07-10T00:00:00Z",
+            "_csflow_post_complaint_final_status": "completed",
+        },
+    )
+    body = app_client.get(f"/api/runs/{run.id}").json()
+    assert body["inputs"] == {"topic": "real input"}

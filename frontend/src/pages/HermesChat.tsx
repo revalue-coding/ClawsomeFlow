@@ -140,7 +140,8 @@ function createFieldError(opts: {
   ) {
     return "hermes.create.errors.cloneFromMissing";
   }
-  // Model inheritance is optional ("" = none); "default" = active profile.
+  // Model inheritance is optional when cloning ("" = use cloned config as-is);
+  // without a clone source it defaults to the active/default profile.
   if (
     opts.modelInheritFrom &&
     opts.modelInheritFrom !== "default" &&
@@ -327,7 +328,7 @@ function Picker() {
   );
   const [createModelInheritFrom, setCreateModelInheritFrom] = useSessionBackedState(
     "hermes:create:modelInheritFrom",
-    "",
+    "default",
   );
   // Optional "clone config from another agent" (default: none). When set, the
   // full-clone checkbox is enabled; cleared back to none disables/unchecks it.
@@ -754,7 +755,10 @@ function Picker() {
             name,
             responsibility,
             teamId,
-            modelInheritFrom: createModelInheritFrom,
+            // When not cloning, always seed model config (default profile).
+            modelInheritFrom: createCloneFrom
+              ? createModelInheritFrom
+              : (createModelInheritFrom || "default"),
             cloneFrom: createCloneFrom,
             // Full-clone only applies when a clone source is chosen.
             cloneAll: createCloneFrom ? createCloneAll : false,
@@ -1234,7 +1238,11 @@ function CreateModal({
               const v = e.target.value;
               onCloneFromChange(v);
               // Full clone only makes sense with a source — reset it otherwise.
-              if (!v) onCloneAllChange(false);
+              if (!v) {
+                onCloneAllChange(false);
+                // Without a clone source the profile still needs model config.
+                if (!modelInheritFrom) onModelInheritFromChange("default");
+              }
             }}
           >
             <option value="">{t("hermes.create.cloneFromNone")}</option>
@@ -1267,7 +1275,9 @@ function CreateModal({
             value={modelInheritFrom}
             onChange={(e) => onModelInheritFromChange(e.target.value)}
           >
-            <option value="">{t("hermes.create.modelInheritNone")}</option>
+            {cloneFrom ? (
+              <option value="">{t("hermes.create.modelInheritNone")}</option>
+            ) : null}
             <option value="default">{t("hermes.create.modelInheritDefault")}</option>
             {existingProfiles.map((agent) => (
               <option key={agent.id} value={agent.id}>

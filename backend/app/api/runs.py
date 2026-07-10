@@ -59,6 +59,7 @@ from app.logging_setup import get_logger
 from app.models import (
     DEFAULT_TARGET_BRANCH,
     TERMINAL_RUN_STATUSES,
+    AgentKind,
     Flow,
     FlowAgent,
     FlowRun,
@@ -85,6 +86,7 @@ from app.scheduler.run_metadata import (
 )
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
+from app.services.run_notify import NOTIFIED_MARKER_KEY
 from app.storage import StorageBackend, get_storage
 from app.worktree.lookup import WorktreeLookup, get_worktree_lookup
 
@@ -142,6 +144,9 @@ class RunSummary(_CamelModel):
     started_at: str
     finished_at: str | None = None
     inputs: dict[str, Any] = Field(default_factory=dict)
+    #: True only for runs launched by a timed schedule (run_schedules.py). The
+    #: WebUI renders a "Scheduled" tag so timed runs are distinguishable in history.
+    is_scheduled: bool = False
 
 
 class PendingMergeView(_CamelModel):
@@ -166,6 +171,34 @@ class PendingMergeDiffView(_CamelModel):
     uncommitted_truncated: bool = False
     base_ahead: int = 0
     branch_ahead: int = 0
+
+
+class RunDiffAgentView(_CamelModel):
+    """One agent's merged-into-baseline summary for the post-run "Run diff" list.
+
+    Only agents whose branch actually landed content on a baseline branch this
+    run appear (``merge_count > 0``); OpenClaw agents are excluded upstream.
+    """
+
+    agent_id: str
+    branch: str = ""
+    repo_root: str = ""
+    merge_count: int = 0
+    commit_count: int = 0
+    files_changed: int = 0
+    insertions: int = 0
+    deletions: int = 0
+
+
+class RunDiffView(_CamelModel):
+    items: list[RunDiffAgentView] = Field(default_factory=list)
+
+
+class RunAgentDiffView(RunDiffAgentView):
+    """Full unified diff for one agent's merged content (Run-diff modal)."""
+
+    patch: str = ""
+    patch_truncated: bool = False
 
 
 class RunDetail(RunSummary):
@@ -355,7 +388,10 @@ def _public_run_inputs(inputs: dict[str, Any] | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in (inputs or {}).items():
         k = str(key).strip()
-        if not k or k.startswith("_csflow_"):
+        # ``_csflow_*`` are scheduler markers; ``csflow.terminal_webhook_notified_at``
+        # is the run-notify dedupe stamp (dotted, not underscore-prefixed) — neither
+        # is a user-provided run input, so keep both out of "Execution Parameters".
+        if not k or k.startswith("_csflow_") or k == NOTIFIED_MARKER_KEY:
             continue
         out[k] = value
     return out
@@ -370,6 +406,7 @@ def _to_summary(r: FlowRun) -> RunSummary:
         started_at=iso_utc(r.started_at),
         finished_at=iso_utc(r.finished_at) if r.finished_at else None,
         inputs=_public_run_inputs(r.inputs),
+        is_scheduled=bool(r.is_scheduled),
     )
 
 
@@ -460,6 +497,7 @@ def _to_detail(r: FlowRun, *, flow: Flow | None, cfg: Config) -> RunDetail:
         started_at=iso_utc(r.started_at),
         finished_at=iso_utc(r.finished_at) if r.finished_at else None,
         inputs=_public_run_inputs(r.inputs),
+        is_scheduled=bool(r.is_scheduled),
         pending_merges=pending,
         clawteam_board_url=_board_url(r.team_name, cfg),
         spec_snapshot=spec_snapshot,
@@ -1295,6 +1333,137 @@ async def get_pending_merge_diff(
         uncommitted_truncated=bool(result.get("uncommitted_truncated")),
         base_ahead=int(result.get("base_ahead") or 0),
         branch_ahead=int(result.get("branch_ahead") or 0),
+    )
+
+
+def _run_diff_agents(run: FlowRun, storage: StorageBackend) -> list[FlowAgent]:
+    """Non-OpenClaw agents of *run*'s flow, in spec order.
+
+    OpenClaw agents self-merge in-task and are excluded from the Run-diff view
+    per product spec. Returns ``[]`` when the flow/spec can't be loaded.
+    """
+    flow = storage.flow_get(run.flow_id)
+    if flow is None:
+        return []
+    try:
+        spec = FlowSpec.model_validate(flow.spec)
+    except Exception:
+        return []
+    return [a for a in spec.agents if a.kind != AgentKind.openclaw]
+
+
+@router.get("/runs/{run_id}/run-diff", response_model=RunDiffView)
+async def get_run_diff(
+    run_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunDiffView:
+    """List each non-OpenClaw agent whose branch actually merged content into a
+    baseline branch during this run (the post-run "Run diff" module).
+
+    Reconstructed read-only from baseline-repo merge history (see
+    :meth:`ClawTeamCli.run_merged_agent_patch`), so it survives worktree cleanup
+    and correctly attributes commits to *this* run even when a baseline branch is
+    shared by concurrent runs. Agents with nothing effectively merged (dismissed,
+    failed+aborted, or empty) are omitted. No patch text here — the caller fetches
+    a single agent's full diff lazily via the per-agent endpoint.
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    cli = get_clawteam_cli()
+    items: list[RunDiffAgentView] = []
+    for agent in _run_diff_agents(run, storage):
+        repo = str(agent.repo or "").strip() or None
+        try:
+            result = await cli.run_merged_agent_patch(
+                team=run.team_name, agent=agent.id, repo=repo, include_patch=False,
+            )
+        except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
+            logger.warning(
+                "run_diff_summary_failed",
+                run_id=run.id, agent_id=agent.id, error=str(exc),
+            )
+            continue
+        if result is None or int(result.get("merge_count") or 0) <= 0:
+            continue
+        items.append(
+            RunDiffAgentView(
+                agent_id=agent.id,
+                branch=str(result.get("branch") or ""),
+                repo_root=str(result.get("repo_root") or ""),
+                merge_count=int(result.get("merge_count") or 0),
+                commit_count=int(result.get("commit_count") or 0),
+                files_changed=int(result.get("files_changed") or 0),
+                insertions=int(result.get("insertions") or 0),
+                deletions=int(result.get("deletions") or 0),
+            )
+        )
+    return RunDiffView(items=items)
+
+
+@router.get(
+    "/runs/{run_id}/run-diff/{agent_id}",
+    response_model=RunAgentDiffView,
+)
+async def get_run_agent_diff(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunAgentDiffView:
+    """Full unified diff of what *agent_id* merged into a baseline this run.
+
+    Powers the "View diff" modal in the Run-diff module. Read-only history
+    reconstruction (no checkout / no lock). 404 when the agent is unknown/OpenClaw
+    or nothing of theirs merged.
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    agent = next(
+        (a for a in _run_diff_agents(run, storage) if a.id == agent_id), None,
+    )
+    if agent is None:
+        raise ApiError(
+            "AGENT_NOT_FOUND",
+            f"agent {agent_id!r} is not a diffable (non-OpenClaw) agent of this run",
+            status_code=404,
+        )
+    repo = str(agent.repo or "").strip() or None
+    cli = get_clawteam_cli()
+    try:
+        result = await cli.run_merged_agent_patch(
+            team=run.team_name, agent=agent.id, repo=repo, include_patch=True,
+        )
+    except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
+        logger.warning(
+            "run_diff_failed", run_id=run.id, agent_id=agent.id, error=str(exc),
+        )
+        raise ApiError(
+            "DIFF_UNAVAILABLE",
+            f"failed to compute run diff for agent {agent_id!r}",
+            status_code=502,
+        ) from exc
+    if result is None or int(result.get("merge_count") or 0) <= 0:
+        raise ApiError(
+            "NO_MERGED_CHANGES",
+            f"agent {agent_id!r} merged no content into a baseline this run",
+            status_code=404,
+        )
+    return RunAgentDiffView(
+        agent_id=agent.id,
+        branch=str(result.get("branch") or ""),
+        repo_root=str(result.get("repo_root") or ""),
+        merge_count=int(result.get("merge_count") or 0),
+        commit_count=int(result.get("commit_count") or 0),
+        files_changed=int(result.get("files_changed") or 0),
+        insertions=int(result.get("insertions") or 0),
+        deletions=int(result.get("deletions") or 0),
+        patch=str(result.get("patch") or ""),
+        patch_truncated=bool(result.get("patch_truncated")),
     )
 
 

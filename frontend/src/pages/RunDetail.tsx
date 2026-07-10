@@ -17,7 +17,9 @@ import {
   ApiError,
   PendingMerge,
   PendingMergeDiff,
+  RunAgentDiff,
   RunDetail as RunDetailT,
+  RunDiffAgent,
   RunTaskTerminal,
   api,
 } from "@/lib/api";
@@ -1017,6 +1019,9 @@ export function RunDetail() {
           </div>
         </Card>
       )}
+
+      {/* Run diff — what actually landed on the baseline branches (terminal only) */}
+      {TERMINAL.has(run.status) && <RunDiffCard runId={run.id} />}
 
       {/* Task dependency board */}
       <Card className="p-0 overflow-hidden">
@@ -2302,6 +2307,156 @@ function DiffView({ patch }: { patch: string }) {
         );
       })}
     </pre>
+  );
+}
+
+
+/** Post-run "Run diff" module: lists each non-OpenClaw agent whose branch
+ *  actually landed content on a baseline branch this run, with a per-agent
+ *  diff modal. Rendered only for terminal runs (see call site). Agents with
+ *  nothing effectively merged (dismissed / failed / empty) are omitted by the
+ *  backend, so an empty list means "nothing was merged". */
+function RunDiffCard({ runId }: { runId: string }) {
+  const { t } = useTranslation();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [agents, setAgents] = useState<RunDiffAgent[]>([]);
+  const [openAgent, setOpenAgent] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .getRunDiff(runId)
+      .then((res) => {
+        if (!cancelled) setAgents(res.items ?? []);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof ApiError ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  return (
+    <Card className="border-ink-200">
+      <CardTitle>{t("runDetail.runDiffTitle")}</CardTitle>
+      <div className="text-xs text-ink-500 mb-3">{t("runDetail.runDiffHint")}</div>
+      {loading ? (
+        <Loading />
+      ) : error ? (
+        <ErrorBox>{t("runDetail.runDiffLoadError")}</ErrorBox>
+      ) : agents.length === 0 ? (
+        <div className="text-sm text-ink-500">{t("runDetail.runDiffEmpty")}</div>
+      ) : (
+        <div className="space-y-2">
+          {agents.map((a) => (
+            <button
+              key={a.agentId}
+              type="button"
+              onClick={() => setOpenAgent(a.agentId)}
+              className="flex w-full items-center justify-between gap-3 rounded-md border border-ink-200 bg-ink-50/40 px-3 py-2 text-left transition-colors hover:border-brand-300"
+            >
+              <div className="min-w-0">
+                <div className="truncate font-medium text-ink-900">{a.agentId}</div>
+                <div className="truncate text-xs text-ink-500 font-mono">{a.branch}</div>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                <span className="text-xs text-ink-500">
+                  {t("runDetail.runDiffAgentSummary", {
+                    commits: a.commitCount,
+                    files: a.filesChanged,
+                  })}
+                </span>
+                {(a.insertions > 0 || a.deletions > 0) && (
+                  <span className="text-xs font-mono">
+                    <span className="text-emerald-600 dark:text-emerald-400">
+                      +{a.insertions}
+                    </span>{" "}
+                    <span className="text-red-600 dark:text-red-400">
+                      -{a.deletions}
+                    </span>
+                  </span>
+                )}
+                <span className="btn-outline pointer-events-none">
+                  {t("runDetail.runDiffViewDiff")}
+                </span>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+      <Modal
+        open={openAgent !== null}
+        onClose={() => setOpenAgent(null)}
+        title={t("runDetail.runDiffModalTitle", { agent: openAgent ?? "" })}
+        width="max-w-5xl"
+      >
+        {openAgent !== null && <RunAgentDiffBody runId={runId} agentId={openAgent} />}
+      </Modal>
+    </Card>
+  );
+}
+
+
+/** Lazy per-agent diff body for the Run-diff modal. */
+function RunAgentDiffBody({ runId, agentId }: { runId: string; agentId: string }) {
+  const { t } = useTranslation();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<RunAgentDiff | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setData(null);
+    api
+      .getRunAgentDiff(runId, agentId)
+      .then((res) => {
+        if (!cancelled) setData(res);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof ApiError ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, agentId]);
+
+  if (loading) return <Loading />;
+  if (error) return <ErrorBox>{error}</ErrorBox>;
+  if (!data) return null;
+  const hasPatch = data.patch.trim().length > 0;
+  return (
+    <div className="space-y-3">
+      <div className="text-xs text-ink-500 font-mono break-all">
+        {data.branch}
+        {data.repoRoot ? ` @ ${data.repoRoot}` : ""}
+      </div>
+      {!hasPatch ? (
+        <div className="text-sm text-ink-500">{t("runDetail.runDiffPatchEmpty")}</div>
+      ) : (
+        <>
+          {data.patchTruncated && (
+            <div className="text-xs text-amber-600 mb-1">
+              {t("runDetail.runDiffTruncated")}
+            </div>
+          )}
+          <DiffView patch={data.patch} />
+        </>
+      )}
+    </div>
   );
 }
 

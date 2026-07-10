@@ -1116,3 +1116,200 @@ def test_resolve_argv_pins_clawteam_binary(monkeypatch: pytest.MonkeyPatch) -> N
     ]
     # Non-clawteam argv (git/tmux…) is left untouched.
     assert cli_mod._resolve_argv(["git", "status"]) == ["git", "status"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# run_merged_agent_patch — post-run Run-diff history reconstruction
+# ──────────────────────────────────────────────────────────────────────
+
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def _git(repo: Path, *args: str) -> str:
+    out = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env={**os.environ, **_GIT_ENV},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout
+
+
+def _make_baseline_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "seed.txt").write_text("seed\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    return repo
+
+
+def _agent_merge(
+    repo: Path, *, team: str, agent: str, filename: str, content: str, message: str,
+) -> None:
+    """Simulate one csflow agent worktree branch merged --no-ff into main."""
+    branch = f"clawteam/{team}/{agent}"
+    _git(repo, "checkout", "-q", "-b", branch)
+    (repo / filename).write_text(content)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", f"work by {agent}")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "--no-ff", branch, "-m", message)
+
+
+@pytest.mark.asyncio
+async def test_run_merged_agent_patch_isolates_this_agent(tmp_path: Path) -> None:
+    repo = _make_baseline_repo(tmp_path)
+    team = "csflow-abc12345"
+    # Two agents of THIS run merge; plus an unrelated later commit on main.
+    _agent_merge(
+        repo, team=team, agent="alice", filename="a.txt", content="alice\n",
+        message=f"[csflow] merge clawteam/{team}/alice for {team}/alice",
+    )
+    _agent_merge(
+        repo, team=team, agent="bob", filename="b.txt", content="bob\n",
+        message=f"csflow: scheduled merge clawteam/{team}/bob",
+    )
+    (repo / "later.txt").write_text("later unrelated commit\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "unrelated later work")
+
+    result = await ClawTeamCli().run_merged_agent_patch(
+        team=team, agent="alice", repo=str(repo),
+    )
+    assert result is not None
+    assert result["merge_count"] == 1
+    assert result["commit_count"] == 1
+    assert result["files_changed"] == 1
+    assert result["insertions"] == 1
+    # alice's file is in the diff; bob's and the unrelated file are NOT.
+    assert "a.txt" in result["patch"]
+    assert "alice" in result["patch"]
+    assert "b.txt" not in result["patch"]
+    assert "later.txt" not in result["patch"]
+
+
+@pytest.mark.asyncio
+async def test_run_merged_agent_patch_other_run_same_branch_excluded(
+    tmp_path: Path,
+) -> None:
+    """A different run (different team) touching the same baseline must not leak."""
+    repo = _make_baseline_repo(tmp_path)
+    _agent_merge(
+        repo, team="csflow-run1aaaa", agent="alice", filename="r1.txt",
+        content="run1\n",
+        message="[csflow] merge clawteam/csflow-run1aaaa/alice for csflow-run1aaaa/alice",
+    )
+    _agent_merge(
+        repo, team="csflow-run2bbbb", agent="alice", filename="r2.txt",
+        content="run2\n",
+        message="[csflow] merge clawteam/csflow-run2bbbb/alice for csflow-run2bbbb/alice",
+    )
+    result = await ClawTeamCli().run_merged_agent_patch(
+        team="csflow-run2bbbb", agent="alice", repo=str(repo),
+    )
+    assert result is not None
+    assert result["merge_count"] == 1
+    assert "r2.txt" in result["patch"]
+    assert "r1.txt" not in result["patch"]
+
+
+@pytest.mark.asyncio
+async def test_run_merged_agent_patch_prefix_collision(tmp_path: Path) -> None:
+    """Agent 'worker' must not match merges of 'worker2' (token boundary)."""
+    repo = _make_baseline_repo(tmp_path)
+    team = "csflow-abc12345"
+    _agent_merge(
+        repo, team=team, agent="worker2", filename="w2.txt", content="w2\n",
+        message=f"csflow: merge clawteam/{team}/worker2 after run",
+    )
+    result = await ClawTeamCli().run_merged_agent_patch(
+        team=team, agent="worker", repo=str(repo),
+    )
+    assert result is not None
+    assert result["merge_count"] == 0
+    assert result["patch"] == ""
+
+
+@pytest.mark.asyncio
+async def test_run_merged_agent_patch_no_merge_returns_zero(tmp_path: Path) -> None:
+    repo = _make_baseline_repo(tmp_path)
+    result = await ClawTeamCli().run_merged_agent_patch(
+        team="csflow-abc12345", agent="ghost", repo=str(repo),
+    )
+    assert result is not None
+    assert result["merge_count"] == 0
+    assert result["patch"] == ""
+
+
+@pytest.mark.asyncio
+async def test_run_merged_agent_patch_multiple_merges_concatenated(
+    tmp_path: Path,
+) -> None:
+    """Two merges of the same branch (e.g. initial + complaint re-merge) sum up."""
+    repo = _make_baseline_repo(tmp_path)
+    team = "csflow-abc12345"
+    branch = f"clawteam/{team}/alice"
+    _git(repo, "checkout", "-q", "-b", branch)
+    (repo / "one.txt").write_text("one\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "one")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "--no-ff", branch, "-m",
+         f"[csflow] merge {branch} for {team}/alice")
+    # second batch on the same branch, merged again
+    _git(repo, "checkout", "-q", branch)
+    (repo / "two.txt").write_text("two\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "two")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "--no-ff", branch, "-m",
+         f"csflow: merge {branch} after run")
+
+    result = await ClawTeamCli().run_merged_agent_patch(
+        team=team, agent="alice", repo=str(repo),
+    )
+    assert result is not None
+    assert result["merge_count"] == 2
+    assert result["commit_count"] == 2
+    assert "one.txt" in result["patch"]
+    assert "two.txt" in result["patch"]
+
+
+@pytest.mark.asyncio
+async def test_run_merged_agent_patch_invalid_repo_returns_none(
+    tmp_path: Path,
+) -> None:
+    assert await ClawTeamCli().run_merged_agent_patch(
+        team="csflow-x", agent="alice", repo=str(tmp_path / "nope"),
+    ) is None
+    assert await ClawTeamCli().run_merged_agent_patch(
+        team="csflow-x", agent="alice", repo=None,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_run_merged_agent_patch_include_patch_false_skips_body(
+    tmp_path: Path,
+) -> None:
+    repo = _make_baseline_repo(tmp_path)
+    team = "csflow-abc12345"
+    _agent_merge(
+        repo, team=team, agent="alice", filename="a.txt", content="alice\n",
+        message=f"[csflow] merge clawteam/{team}/alice for {team}/alice",
+    )
+    result = await ClawTeamCli().run_merged_agent_patch(
+        team=team, agent="alice", repo=str(repo), include_patch=False,
+    )
+    assert result is not None
+    assert result["merge_count"] == 1
+    assert result["files_changed"] == 1
+    assert result["patch"] == ""

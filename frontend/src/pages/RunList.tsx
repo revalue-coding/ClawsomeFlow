@@ -62,6 +62,16 @@ function formatRunInputs(inputs: Record<string, unknown> | null | undefined): st
   return parts.length > 0 ? parts.join(" | ") : "—";
 }
 
+/** Small badge marking a run that was launched by a timed schedule. */
+function ScheduledTag() {
+  const { t } = useTranslation();
+  return (
+    <span className="shrink-0 rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:border-sky-500/50 dark:bg-sky-500/10 dark:text-sky-300">
+      {t("runList.scheduledTag")}
+    </span>
+  );
+}
+
 export function RunList() {
   const [items, setItems] = useState<RunSummary[] | null>(null);
   const [flowNameById, setFlowNameById] = useState<Record<string, string>>({});
@@ -245,7 +255,12 @@ export function RunList() {
                     className="block rounded-md border border-ink-200 p-3 hover:border-brand-300 transition-colors"
                   >
                     <div className="flex items-center justify-between gap-3">
-                      <div className="font-medium text-ink-900">{flowNameById[r.flowId] || r.flowId}</div>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="font-medium text-ink-900 truncate">
+                          {flowNameById[r.flowId] || r.flowId}
+                        </div>
+                        {r.isScheduled && <ScheduledTag />}
+                      </div>
                       <StatusPill status={r.status} />
                     </div>
                     <div className="mt-2 text-xs text-ink-500 font-mono">{r.teamName}</div>
@@ -297,9 +312,12 @@ export function RunList() {
                   {historyPageItems.map((r) => (
                     <tr key={r.id} className="table-row">
                       <td className="px-4 py-3">
-                        <SilentLink to={`/runs/${r.id}`} className="font-medium text-ink-900 hover:text-brand-600">
-                          {flowNameById[r.flowId] || r.flowId}
-                        </SilentLink>
+                        <div className="flex items-center gap-2">
+                          <SilentLink to={`/runs/${r.id}`} className="font-medium text-ink-900 hover:text-brand-600">
+                            {flowNameById[r.flowId] || r.flowId}
+                          </SilentLink>
+                          {r.isScheduled && <ScheduledTag />}
+                        </div>
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-ink-700">{r.teamName}</td>
                       <td className="px-4 py-3 align-middle">
