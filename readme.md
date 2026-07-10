@@ -74,7 +74,7 @@ ClawsomeFlow turns scattered AI agents into a controllable engineering system �
 
 | 🔐 Isolation & rollback by default | 📊 Observability you can audit | 🔄 A system that improves itself |
 |---|---|---|
-| Built on Git worktree isolation with a **built-in cross-process repo lock**, ensuring absolute reliability of all agent collaboration behaviors; supports intelligent merge and rollback, plus optional human checkpoints for in-flight course correction. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
+| Built on Git worktree isolation with a **built-in cross-process repo lock**, ensuring absolute reliability of all agent collaboration behaviors; supports intelligent merge and rollback, and any merge can be quickly checked and  **reverted with one click**, plus optional human checkpoints for in-flight course correction. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
 
 | ♻️ Reusable, reliably repeatable workflows | 🏢 End-to-end workflows for every role of a one-person company |
 |---|---|
@@ -85,7 +85,7 @@ ClawsomeFlow inherits the following capabilities from ClawTeam:
 - **Git Worktree parallel isolation foundation**: each Agent has an independent branch and directory, naturally fitting multi-agent parallel development.
 - **Inter-Agent messaging**: point-to-point inbox and broadcast, so team members share progress in real time.
 
-> On top of this, ClawsomeFlow adds **AI combined with precise orchestration, enhanced Harness engineering (built-in cross-process repo lock for absolutely reliable multi-branch parallel development, intelligent merge and rollback, complaint-loop mechanism, optional human checkpoints for in-flight correction), deep OpenClaw/Hermes adaptation, and Web productization**.
+> On top of this, ClawsomeFlow adds **AI combined with precise orchestration, enhanced Harness engineering (built-in cross-process repo lock for absolutely reliable multi-branch parallel development, intelligent merge and rollback — including a post-run per-agent Run diff and one-click merge revert, complaint-loop mechanism, optional human checkpoints for in-flight correction), deep OpenClaw/Hermes adaptation, and Web productization**.
 
 ---
 
