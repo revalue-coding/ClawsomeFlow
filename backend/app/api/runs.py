@@ -53,6 +53,7 @@ from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.config import Config, load_config
 from app.deployment import get_deployment_capabilities
+from app.integrations.clawteam_cli import get_clawteam_cli
 from app.integrations.clawteam_mcp import get_mcp_client
 from app.logging_setup import get_logger
 from app.models import (
@@ -71,6 +72,7 @@ from app.models import (
 from app.scheduler.controller import RunController
 from app.scheduler.engine import abort_run_to_terminal, get_scheduler
 from app.scheduler.finalize import (
+    _resolve_agent_repo_for_run,
     classify_merge_failure,
     perform_manual_merge,
     run_terminal_tail_cleanup,
@@ -148,6 +150,22 @@ class PendingMergeView(_CamelModel):
     target_branch: str = DEFAULT_TARGET_BRANCH
     diff_summary: dict[str, Any] = Field(default_factory=dict)
     leader_suggestion: str = ""
+
+
+class PendingMergeDiffView(_CamelModel):
+    """Full unified diff for a pending-merge agent worktree (view-diff modal)."""
+
+    agent_id: str
+    branch: str
+    base_branch: str
+    target_branch: str = DEFAULT_TARGET_BRANCH
+    repo_root: str = ""
+    patch: str = ""
+    patch_truncated: bool = False
+    uncommitted_patch: str = ""
+    uncommitted_truncated: bool = False
+    base_ahead: int = 0
+    branch_ahead: int = 0
 
 
 class RunDetail(RunSummary):
@@ -1203,6 +1221,81 @@ async def abort_run(
         await _cleanup_terminal_tail(run=run, storage=storage, flow=flow)
     refreshed = storage.run_get(run.id) or run
     return _to_summary(refreshed)
+
+
+@router.get(
+    "/runs/{run_id}/pending-merges/{agent_id}/diff",
+    response_model=PendingMergeDiffView,
+)
+async def get_pending_merge_diff(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> PendingMergeDiffView:
+    """Return the full unified diff of a pending-merge agent's worktree.
+
+    Powers the "View diff" modal in the awaiting-review UI: the patch is the
+    committed content (``base...branch``) that "Merge" would bring into the
+    target branch, plus any not-yet-committed working-tree changes (which would
+    NOT be merged). Only agents currently in ``pending_merges`` are diffable.
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    item = next(
+        (p for p in (run.pending_merges or []) if p.get("agent_id") == agent_id),
+        None,
+    )
+    if item is None:
+        raise ApiError(
+            "MERGE_NOT_PENDING",
+            f"agent {agent_id!r} is not in pending_merges",
+            status_code=404,
+        )
+    target_branch = (
+        str(item.get("target_branch") or DEFAULT_TARGET_BRANCH).strip()
+        or DEFAULT_TARGET_BRANCH
+    )
+    branch_hint = str(item.get("branch") or "").strip()
+    repo = str(item.get("repo_root") or item.get("repo") or "").strip() or None
+    if repo is None:
+        repo = _resolve_agent_repo_for_run(run=run, agent_id=agent_id, storage=storage)
+    cli = get_clawteam_cli()
+    try:
+        result = await cli.workspace_agent_patch(
+            team=run.team_name, agent=agent_id, repo=repo,
+        )
+    except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
+        logger.warning(
+            "pending_merge_diff_failed",
+            run_id=run.id, agent_id=agent_id, error=str(exc),
+        )
+        raise ApiError(
+            "DIFF_UNAVAILABLE",
+            f"failed to compute diff for agent {agent_id!r}",
+            status_code=502,
+        ) from exc
+    if result is None:
+        raise ApiError(
+            "WORKSPACE_NOT_FOUND",
+            f"no worktree found for agent {agent_id!r} (it may have been cleaned up)",
+            status_code=404,
+        )
+    return PendingMergeDiffView(
+        agent_id=agent_id,
+        branch=str(result.get("branch") or branch_hint),
+        base_branch=str(result.get("base_branch") or ""),
+        target_branch=target_branch,
+        repo_root=str(result.get("repo_root") or ""),
+        patch=str(result.get("patch") or ""),
+        patch_truncated=bool(result.get("patch_truncated")),
+        uncommitted_patch=str(result.get("uncommitted_patch") or ""),
+        uncommitted_truncated=bool(result.get("uncommitted_truncated")),
+        base_ahead=int(result.get("base_ahead") or 0),
+        branch_ahead=int(result.get("branch_ahead") or 0),
+    )
 
 
 @router.post("/runs/{run_id}/merge", response_model=MergeResponse)

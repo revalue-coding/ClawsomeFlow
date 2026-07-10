@@ -480,6 +480,82 @@ async def test_spawn_resume_uses_replace_flag(monkeypatch: pytest.MonkeyPatch) -
     assert out.exit_code == 0
 
 
+def test_truncate_utf8() -> None:
+    assert cli_mod._truncate_utf8("hello", 100) == ("hello", False)
+    text, truncated = cli_mod._truncate_utf8("abcdef", 3)
+    assert text == "abc"
+    assert truncated is True
+    # 0/negative max = no truncation.
+    assert cli_mod._truncate_utf8("abc", 0) == ("abc", False)
+
+
+@pytest.mark.asyncio
+async def test_workspace_agent_patch_returns_committed_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_workspace_list(self, *, team: str, repo: str | None = None):
+        del self, repo
+        return [{
+            "team_name": team,
+            "agent_name": "alice",
+            "repo_root": "/tmp/repo",
+            "branch_name": "clawteam/csflow-x/alice",
+            "base_branch": "main",
+            "worktree_path": "/tmp/does-not-exist/alice",
+        }]
+
+    seen: list[list[str]] = []
+
+    async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):
+        del env
+        seen.append(argv)
+        assert cwd == "/tmp/repo"
+        if argv[:3] == ["git", "diff", "--no-color"]:
+            assert argv[3] == "main...clawteam/csflow-x/alice"
+            return 0, "diff --git a/x b/x\n+added\n", ""
+        if argv[:2] == ["git", "rev-list"]:
+            assert argv == [
+                "git", "rev-list", "--left-right", "--count",
+                "main...clawteam/csflow-x/alice",
+            ]
+            return 0, "2\t3\n", ""
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(ClawTeamCli, "workspace_list", _fake_workspace_list)
+    monkeypatch.setattr(cli_mod, "_run_in_cwd", _fake_run_in_cwd)
+
+    result = await ClawTeamCli().workspace_agent_patch(
+        team="csflow-x", agent="alice", repo="/tmp/repo",
+    )
+    assert result is not None
+    assert result["base_branch"] == "main"
+    assert result["branch"] == "clawteam/csflow-x/alice"
+    assert "+added" in result["patch"]
+    assert result["patch_truncated"] is False
+    # Worktree path doesn't exist → uncommitted diff skipped.
+    assert result["uncommitted_patch"] == ""
+    # Divergence: left=base ahead, right=branch ahead.
+    assert result["base_ahead"] == 2
+    assert result["branch_ahead"] == 3
+    # committed diff + rev-list (uncommitted skipped: worktree absent).
+    assert len(seen) == 2
+
+
+@pytest.mark.asyncio
+async def test_workspace_agent_patch_missing_workspace_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_workspace_list(self, *, team: str, repo: str | None = None):
+        del self, team, repo
+        return []
+
+    monkeypatch.setattr(ClawTeamCli, "workspace_list", _fake_workspace_list)
+    result = await ClawTeamCli().workspace_agent_patch(
+        team="csflow-x", agent="ghost", repo="/tmp/repo",
+    )
+    assert result is None
+
+
 @pytest.mark.asyncio
 async def test_workspace_has_uncommitted_changes_true(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake_run_in_cwd(argv: list[str], *, cwd: str, env: dict[str, str]):

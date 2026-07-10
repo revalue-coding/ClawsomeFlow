@@ -27,7 +27,7 @@ import signal
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from app import logging_setup
 from app.concurrency import LockManager, get_lock_manager
@@ -121,6 +121,21 @@ class WorkspaceCleanupResult:
 
     success: bool
     attempts: list[WorkspaceCleanupAttempt] = field(default_factory=list)
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Cap *text* to ``max_bytes`` UTF-8 bytes; return ``(text, truncated)``.
+
+    Used to bound diff patches surfaced over the API — a multi-MB patch would
+    balloon the JSON response and the browser render. Cuts on a byte boundary
+    (decoding with ``errors="ignore"`` drops any split multibyte tail).
+    """
+    if max_bytes <= 0:
+        return text, False
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
 
 
 def _expand_repo(path: str) -> str:
@@ -701,6 +716,114 @@ class ClawTeamCli:
             )
         lines = [line.rstrip() for line in stdout.splitlines() if line.strip()]
         return bool(lines), lines
+
+    async def workspace_agent_patch(
+        self,
+        *,
+        team: str,
+        agent: str,
+        repo: str | None = None,
+        max_bytes: int = 400_000,
+    ) -> dict[str, Any] | None:
+        """Return the full unified diff for an agent's worktree branch.
+
+        Resolves the workspace row (``repo_root`` / ``branch_name`` /
+        ``base_branch`` / ``worktree_path``), then computes two patches:
+
+        * ``patch`` — ``git diff --no-color {base}...{branch}`` in the main
+          repo: the *committed* content that :meth:`workspace_merge` would
+          bring into the target branch (three-dot = diff vs the merge base,
+          identical semantics to ClawTeam's ``agent_diff`` stats).
+        * ``uncommitted_patch`` — ``git diff --no-color HEAD`` inside the
+          worktree: working-tree changes that are NOT yet committed and would
+          therefore NOT be merged (best-effort; empty when the worktree is
+          gone or clean).
+
+        Also reports the divergence between the two tips (``git rev-list
+        --left-right --count {base}...{branch}``): ``branch_ahead`` = commits
+        the worktree adds on top of the fork point (all of which the merge
+        brings in), ``base_ahead`` = commits the target branch gained since the
+        worktree forked (invisible in the three-dot ``patch`` — a >0 value warns
+        the base moved on and the merge may need to reconcile them). The count
+        uses the LOCAL base ref (no network fetch — this is a read-only path);
+        the real merge fast-forwards the base to ``origin`` first.
+
+        Each patch is truncated to ``max_bytes`` (UTF-8) with a companion
+        ``*_truncated`` flag so a huge diff can't blow up the response. Returns
+        ``None`` when the workspace can't be resolved (caller maps to 404).
+        """
+        repo_hint = _expand_repo((repo or "").strip()) or None
+        rows = await self.workspace_list(team=team, repo=repo_hint)
+        row = next(
+            (
+                item
+                for item in rows
+                if str(item.get("agent_name") or item.get("agent_id") or "").strip() == agent
+            ),
+            None,
+        )
+        if row is None:
+            return None
+
+        repo_root = _expand_repo(repo_hint or str(row.get("repo_root") or "").strip())
+        branch_name = str(row.get("branch_name") or "").strip()
+        base_branch = str(row.get("base_branch") or "").strip() or "main"
+        worktree_path = _expand_repo(str(row.get("worktree_path") or "").strip())
+        if not repo_root or not branch_name:
+            return None
+
+        env = self._env()
+        patch = ""
+        patch_truncated = False
+        diff_argv = ["git", "diff", "--no-color", f"{base_branch}...{branch_name}"]
+        code, out, _ = await _run_in_cwd(diff_argv, cwd=repo_root, env=env)
+        if code == 0:
+            patch, patch_truncated = _truncate_utf8(out, max_bytes)
+
+        uncommitted_patch = ""
+        uncommitted_truncated = False
+        if worktree_path and Path(worktree_path).exists():
+            u_code, u_out, _ = await _run_in_cwd(
+                ["git", "diff", "--no-color", "HEAD"],
+                cwd=worktree_path,
+                env=env,
+            )
+            if u_code == 0:
+                uncommitted_patch, uncommitted_truncated = _truncate_utf8(
+                    u_out, max_bytes
+                )
+
+        # Divergence: left = base ahead (commits target gained since the fork,
+        # invisible in the three-dot patch), right = branch ahead (worktree's
+        # own commits, all merged in). Best-effort; 0/0 on any git error.
+        base_ahead = 0
+        branch_ahead = 0
+        rl_code, rl_out, _ = await _run_in_cwd(
+            ["git", "rev-list", "--left-right", "--count", f"{base_branch}...{branch_name}"],
+            cwd=repo_root,
+            env=env,
+        )
+        if rl_code == 0:
+            parts = rl_out.split()
+            if len(parts) == 2:
+                try:
+                    base_ahead = int(parts[0])
+                    branch_ahead = int(parts[1])
+                except ValueError:
+                    base_ahead = branch_ahead = 0
+
+        return {
+            "repo_root": repo_root,
+            "worktree_path": worktree_path,
+            "branch": branch_name,
+            "base_branch": base_branch,
+            "patch": patch,
+            "patch_truncated": patch_truncated,
+            "uncommitted_patch": uncommitted_patch,
+            "uncommitted_truncated": uncommitted_truncated,
+            "base_ahead": base_ahead,
+            "branch_ahead": branch_ahead,
+        }
 
     async def workspace_cleanup(
         self, *, team: str, agent: str, repo: str | None = None,

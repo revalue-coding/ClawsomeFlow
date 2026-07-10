@@ -56,12 +56,10 @@
 
 ## 🎯 Who Should Try It?
 
-- Builders of an **AI-native one-person company** who want to orchestrate **every role — not just coding** (market, content, ops, customer service, engineering) into one **end-to-end** workflow;
+- Builders of an **AI-native one-person company** who want to orchestrate **every role — not just coding** (market, content, ops, customer service, engineering) into one **end-to-end** workflow; founders and operators who systematically delegate repeatable work to agent teams;
 - Developers and teams who need multiple agents to collaborate like a real team (plan, implement, verify, converge) — not just more chat windows;
-- Founders and operators building an **AI-native company**, systematically delegating repeatable work to orchestrated agent teams;
 - Ambitious **super-individual** creators — one person steering many specialized agents to continuously amplify output;
 - Engineering-minded folks **done with prompt-only black-box orchestration** — predictable behavior, controllable cost, rollback guardrails;
-- Anyone who wants **reusable, reliably repeatable workflows** — not one-off runs: define a Flow once, drive it with runtime parameters, and get the same convergent result again and again;
 - Building a software engineering agent team that can **develop in parallel across local branches**.
 
 ---

@@ -1113,6 +1113,91 @@ def test_merge_not_awaiting_review_409(app_client: TestClient) -> None:
     assert r.json()["error"] == "NOT_AWAITING_REVIEW"
 
 
+def test_pending_merge_diff_returns_patch(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id, status=RunStatus.awaiting_user_review,
+        pending=[{
+            "agent_id": "alice",
+            "branch": "clawteam/csflow-test/alice",
+            "target_branch": "main",
+            "diff_summary": {},
+        }],
+    )
+
+    captured: dict[str, Any] = {}
+
+    class _FakeCli:
+        async def workspace_agent_patch(self, *, team, agent, repo, **kw):
+            captured["team"] = team
+            captured["agent"] = agent
+            captured["repo"] = repo
+            return {
+                "repo_root": "/tmp/r",
+                "worktree_path": "/tmp/wt/alice",
+                "branch": "clawteam/csflow-test/alice",
+                "base_branch": "main",
+                "patch": "diff --git a/x b/x\n+added\n-removed\n",
+                "patch_truncated": False,
+                "uncommitted_patch": "",
+                "uncommitted_truncated": False,
+                "base_ahead": 1,
+                "branch_ahead": 4,
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/pending-merges/alice/diff")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["agentId"] == "alice"
+    assert body["baseBranch"] == "main"
+    assert body["targetBranch"] == "main"
+    assert body["branch"] == "clawteam/csflow-test/alice"
+    assert "+added" in body["patch"]
+    assert body["patchTruncated"] is False
+    assert body["baseAhead"] == 1
+    assert body["branchAhead"] == 4
+    assert captured["team"] == "csflow-test"
+    assert captured["agent"] == "alice"
+
+
+def test_pending_merge_diff_unknown_agent_404(app_client: TestClient) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id, status=RunStatus.awaiting_user_review,
+        pending=[{"agent_id": "alice", "branch": "b1", "diff_summary": {}}],
+    )
+    r = app_client.get(f"/api/runs/{run.id}/pending-merges/ghost/diff")
+    assert r.status_code == 404
+    assert r.json()["error"] == "MERGE_NOT_PENDING"
+
+
+def test_pending_merge_diff_workspace_not_found_404(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id, status=RunStatus.awaiting_user_review,
+        pending=[{"agent_id": "alice", "branch": "b1", "diff_summary": {}}],
+    )
+
+    class _FakeCli:
+        async def workspace_agent_patch(self, *, team, agent, repo, **kw):
+            del team, agent, repo, kw
+            return None
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/pending-merges/alice/diff")
+    assert r.status_code == 404
+    assert r.json()["error"] == "WORKSPACE_NOT_FOUND"
+
+
 def test_merge_calls_perform_manual_merge(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

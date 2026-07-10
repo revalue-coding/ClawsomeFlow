@@ -313,6 +313,20 @@ export interface PendingMerge {
   leaderSuggestion: string;
 }
 
+export interface PendingMergeDiff {
+  agentId: string;
+  branch: string;
+  baseBranch: string;
+  targetBranch: string;
+  repoRoot: string;
+  patch: string;
+  patchTruncated: boolean;
+  uncommittedPatch: string;
+  uncommittedTruncated: boolean;
+  baseAhead: number;
+  branchAhead: number;
+}
+
 export interface RunDetail extends RunSummary {
   inputs: Record<string, unknown>;
   pendingMerges: PendingMerge[] | null;
@@ -974,6 +988,11 @@ export const api = {
     ),
   dismissPending: (id: string, agentId: string) =>
     request<RunSummary>("POST", `/api/runs/${id}/dismiss-merge`, { agentId }),
+  getPendingMergeDiff: (id: string, agentId: string) =>
+    request<PendingMergeDiff>(
+      "GET",
+      `/api/runs/${id}/pending-merges/${encodeURIComponent(agentId)}/diff`,
+    ),
   submitRunComplaint: (id: string, message: string) =>
     request<RunSummary>("POST", `/api/runs/${id}/complaint`, { message }),
   skipRunComplaint: (id: string) =>

@@ -16,6 +16,7 @@ import { useTranslation } from "react-i18next";
 import {
   ApiError,
   PendingMerge,
+  PendingMergeDiff,
   RunDetail as RunDetailT,
   RunTaskTerminal,
   api,
@@ -742,6 +743,7 @@ export function RunDetail() {
             {run.pendingMerges.map((p) => (
               <PendingMergeCard
                 key={p.agentId}
+                runId={run.id}
                 pending={p}
                 onMerge={() => onMerge(p.agentId)}
                 onDismiss={() => onDismiss(p.agentId)}
@@ -2116,10 +2118,12 @@ function firstNonEmptyString(...values: unknown[]): string | null {
 
 
 function PendingMergeCard({
+  runId,
   pending,
   onMerge,
   onDismiss,
 }: {
+  runId: string;
   pending: PendingMerge;
   onMerge: () => void;
   onDismiss: () => void;
@@ -2135,6 +2139,27 @@ function PendingMergeCard({
   const fileCount = Array.isArray(diff?.files_changed)
     ? diff.files_changed.length
     : diff?.files_changed;
+
+  const [diffOpen, setDiffOpen] = useState(false);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [diffData, setDiffData] = useState<PendingMergeDiff | null>(null);
+
+  const openDiff = useCallback(async () => {
+    setDiffOpen(true);
+    setDiffLoading(true);
+    setDiffError(null);
+    setDiffData(null);
+    try {
+      const data = await api.getPendingMergeDiff(runId, pending.agentId);
+      setDiffData(data);
+    } catch (e) {
+      setDiffError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setDiffLoading(false);
+    }
+  }, [runId, pending.agentId]);
+
   return (
     <div className="rounded-md border border-amber-200 bg-amber-50/40 p-4 flex items-center justify-between gap-3">
       <div>
@@ -2159,6 +2184,9 @@ function PendingMergeCard({
         )}
       </div>
       <div className="flex items-center gap-2 shrink-0">
+        <button className="btn-outline" onClick={() => void openDiff()}>
+          {t("runDetail.viewDiff")}
+        </button>
         <button className="btn-primary" onClick={onMerge}>
           {t("runDetail.merge")}
         </button>
@@ -2166,7 +2194,114 @@ function PendingMergeCard({
           {t("runDetail.dismiss")}
         </button>
       </div>
+      <Modal
+        open={diffOpen}
+        onClose={() => setDiffOpen(false)}
+        title={t("runDetail.diffModalTitle", { agent: pending.agentId })}
+        width="max-w-5xl"
+      >
+        <PendingMergeDiffBody
+          loading={diffLoading}
+          error={diffError}
+          data={diffData}
+        />
+      </Modal>
     </div>
+  );
+}
+
+
+function PendingMergeDiffBody({
+  loading,
+  error,
+  data,
+}: {
+  loading: boolean;
+  error: string | null;
+  data: PendingMergeDiff | null;
+}) {
+  const { t } = useTranslation();
+  if (loading) return <Loading />;
+  if (error) return <ErrorBox>{error}</ErrorBox>;
+  if (!data) return null;
+  const hasPatch = data.patch.trim().length > 0;
+  const hasUncommitted = data.uncommittedPatch.trim().length > 0;
+  return (
+    <div className="space-y-3">
+      <div className="text-xs text-ink-500 font-mono break-all">
+        {data.branch}
+        {data.baseBranch ? ` (base: ${data.baseBranch})` : ""} → {data.targetBranch}
+        {data.branchAhead > 0
+          ? ` · ${t("runDetail.diffBranchAhead", { count: data.branchAhead })}`
+          : ""}
+      </div>
+      {data.baseAhead > 0 && (
+        <div className="rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-700">
+          {t("runDetail.diffBaseAhead", { count: data.baseAhead })}
+        </div>
+      )}
+      {!hasPatch && !hasUncommitted ? (
+        <div className="text-sm text-ink-500">{t("runDetail.diffEmpty")}</div>
+      ) : (
+        <>
+          {hasPatch && (
+            <div>
+              {data.patchTruncated && (
+                <div className="text-xs text-amber-600 mb-1">
+                  {t("runDetail.diffTruncated")}
+                </div>
+              )}
+              <DiffView patch={data.patch} />
+            </div>
+          )}
+          {hasUncommitted && (
+            <div>
+              <div className="text-xs font-medium text-ink-700 mt-2 mb-1">
+                {t("runDetail.diffUncommitted")}
+              </div>
+              {data.uncommittedTruncated && (
+                <div className="text-xs text-amber-600 mb-1">
+                  {t("runDetail.diffTruncated")}
+                </div>
+              )}
+              <DiffView patch={data.uncommittedPatch} />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+
+/** Render a unified diff patch with per-line +/- coloring. */
+function DiffView({ patch }: { patch: string }) {
+  const lines = patch.split("\n");
+  return (
+    <pre className="max-h-[60vh] overflow-auto rounded-md border border-ink-200 bg-ink-50 dark:bg-ink-900/40 p-3 text-xs font-mono leading-relaxed">
+      {lines.map((line, i) => {
+        let cls = "text-ink-600";
+        if (line.startsWith("+") && !line.startsWith("+++")) {
+          cls = "text-emerald-600 dark:text-emerald-400";
+        } else if (line.startsWith("-") && !line.startsWith("---")) {
+          cls = "text-red-600 dark:text-red-400";
+        } else if (line.startsWith("@@")) {
+          cls = "text-sky-600 dark:text-sky-400";
+        } else if (
+          line.startsWith("diff ") ||
+          line.startsWith("index ") ||
+          line.startsWith("+++") ||
+          line.startsWith("---")
+        ) {
+          cls = "text-ink-500 font-semibold";
+        }
+        return (
+          <div key={i} className={cls}>
+            {line || " "}
+          </div>
+        );
+      })}
+    </pre>
   );
 }
 
