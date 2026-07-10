@@ -16,7 +16,7 @@
 
 <p><b>Turn your goal into a reusable task flow, and let an active scheduler drive a team of AI agents to execute it — parallel, isolated, observable, and convergent. You orchestrate the work; ClawsomeFlow keeps it under control.</b></p>
 
-<p><b>Don't just run a one-off task — build a workflow that ships the same result reliably, again and again.</b> Define a Flow once, parameterize it with runtime inputs, and re-run it whenever you need it. And it's not just for coding: orchestrate <b>every role of a one-person company</b> — research, content, growth, ops, engineering — into one <b>end-to-end, reusable</b> workflow.</p>
+<p><b>Don't just run a one-off task — build a workflow that ships the same result reliably, again and again.</b> Define a Flow once, reuse it flexibly with execution parameters, and re-run it whenever you need it. And it's not just for coding: orchestrate <b>every role of a one-person company</b> — market, content, ops, customer service, engineering — into one <b>end-to-end, reusable</b> workflow.</p>
 
 <p>
   <b>Full compatibility with</b> OpenClaw, Claude Code, Codex, Cursor, Hermes and other CLI Agents.
@@ -56,12 +56,12 @@
 
 ## 🎯 Who Should Try It?
 
-- Anyone who wants **reusable, reliably repeatable workflows** — not one-off runs: define a Flow once, drive it with runtime parameters, and get the same convergent result again and again;
-- Builders of an **AI-native one-person company** who want to orchestrate **every role — not just coding** (research, content, growth, ops, engineering) into one **end-to-end** workflow;
+- Builders of an **AI-native one-person company** who want to orchestrate **every role — not just coding** (market, content, ops, customer service, engineering) into one **end-to-end** workflow;
 - Developers and teams who need multiple agents to collaborate like a real team (plan, implement, verify, converge) — not just more chat windows;
-- Founders and operators building an **AI-native company**, delegating repeatable work to orchestrated agent teams;
+- Founders and operators building an **AI-native company**, systematically delegating repeatable work to orchestrated agent teams;
 - Ambitious **super-individual** creators — one person steering many specialized agents to continuously amplify output;
 - Engineering-minded folks **done with prompt-only black-box orchestration** — predictable behavior, controllable cost, rollback guardrails;
+- Anyone who wants **reusable, reliably repeatable workflows** — not one-off runs: define a Flow once, drive it with runtime parameters, and get the same convergent result again and again;
 - Building a software engineering agent team that can **develop in parallel across local branches**.
 
 ---
@@ -70,11 +70,6 @@
 
 ClawsomeFlow turns scattered AI agents into a controllable engineering system — from the first instruction to the final, reviewable result.
 
-**Two things set it apart from other agent tools:**
-
-- **♻️ Reusable, reliably repeatable workflows — not one-off tasks.** Most parallel-agent tools are one-shot: spin up a few agents, run once, and the process is neither controllable nor reliably repeatable. ClawsomeFlow makes the workflow the deliverable — define a Flow once and reuse it by supplying runtime parameters (`csflow runs start <flow-id> --input k=v`), so the same process produces stable, convergent, auditable output every single time.
-- **🏢 Beyond coding — end-to-end workflows for every role of a one-person company.** Competitors lock onto coding. ClawsomeFlow orchestrates collaboration across *all* the roles of an AI-native one-person company — research, content, growth, ops, engineering — composing the full value chain into one end-to-end, reusable workflow.
-
 | 🗣️ Get it done in natural language | 🧠 Precise orchestration, not guesswork | 🚀 Many agents, one graph |
 |---|---|---|
 | Define flows, create agents, orchestrate tasks, and step in at runtime — all by describing what you want. No glue code, no SDK wrangling. | Control flow lives in code, not in a prompt. The scheduler decides dispatch, retry, timeout and convergence — so behavior is predictable and tokens aren't wasted. | Lay out your work as a DAG and let multiple agents collaborate in parallel; a leader summarizes and converges the results into one deliverable. |
@@ -82,6 +77,10 @@ ClawsomeFlow turns scattered AI agents into a controllable engineering system �
 | 🔐 Isolation & rollback by default | 📊 Observability you can audit | 🔄 A system that improves itself |
 |---|---|---|
 | Built on Git worktree isolation with a **built-in cross-process repo lock**, ensuring absolute reliability of all agent collaboration behaviors; supports intelligent merge and rollback, plus optional human checkpoints for in-flight course correction. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
+
+| ♻️ Reusable, reliably repeatable workflows | 🏢 End-to-end workflows for every role of a one-person company |
+|---|---|
+| Define a Flow once, reuse it with runtime parameters — stable, convergent, and auditable every time, not a one-off task. | Beyond coding: orchestrate market, content, ops, customer service, and engineering into one end-to-end, reusable workflow. |
 
 ClawsomeFlow inherits the following capabilities from ClawTeam:
 
@@ -149,8 +148,8 @@ ClawsomeFlow's approach is direct: **migrate coordination from natural language 
 
 | Dimension | Other Multi-Agent Orchestration Platforms | ✅ ClawsomeFlow |
 |---|---|---|
-| **Reusability** | One-off execution: run once, then re-assemble by hand next time | **Workflows are the deliverable** — define once, re-run reliably via runtime parameters for stable, convergent output every time |
-| **Scope** | Mostly coding-only | **Every role of a one-person company** — research, content, growth, ops, engineering — as one end-to-end workflow |
+| **Reusability** | One-off execution: the process is uncontrollable and hard to reuse reliably | **Workflows are the deliverable** — define once, re-run flexibly via execution parameters for stable, convergent output every time |
+| **Scope** | Mostly coding-only | **Every role of a one-person company** — market, content, ops, customer service, engineering — as one end-to-end workflow |
 | **Engineering harness** | Generally missing; failures rely on Agent improvisation | **Harness engineering**: human checkpoints, rollbackable results, complaint-loop mechanism, periodic entropy management |
 | **Task orchestration fit** | Mostly framework-specific, bound to a single ecosystem | Task orchestration is **deeply adapted to OpenClaw/Hermes Agents**, while also being compatible with any CLI Agent (Claude / Codex / Cursor, etc.) collaborating in the same graph |
 | **Concurrency & isolation** | Easy contention in parallel, workspace conflicts, context cross-talk | **Workspace isolation and rollback under multi-task parallelism, and thoroughly resolves session conflicts**; **built-in cross-process repo lock makes parallel multi-branch development and merging absolutely reliable** |
