@@ -200,6 +200,69 @@ def test_tmux_live_session_temporary_hermes_skips_profile_binding() -> None:
     assert session._resolve_profile() is None
 
 
+def test_tmux_live_session_hermes_ready_timeout_is_90s() -> None:
+    hermes = FlowAgent(
+        id="h1", kind=AgentKind.hermes, repo="/tmp/x",
+        is_leader=False, merge_strategy=MergeStrategy.manual,
+        on_failure=OnFailure.retry, max_retries=2, is_temporary=True,
+    )
+    session = TmuxLiveSession(agent=hermes, team_name="csflow-x", run_id="run-x")
+    assert session._ready_timeout == 90.0
+
+    claude = FlowAgent(
+        id="c1", kind=AgentKind.claude, repo="/tmp/x",
+        is_leader=False, merge_strategy=MergeStrategy.manual,
+        on_failure=OnFailure.retry, max_retries=2, is_temporary=True,
+    )
+    claude_session = TmuxLiveSession(agent=claude, team_name="csflow-x", run_id="run-x")
+    assert claude_session._ready_timeout == 60.0
+
+
+class _SpawnCliStub:
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+        self.kill_calls = 0
+
+    async def spawn_fresh(self, **kwargs: object) -> None:
+        del kwargs
+
+    async def lifecycle_request_shutdown(self, **kwargs: object) -> None:
+        del kwargs
+        self.shutdown_calls += 1
+
+    async def tmux_kill_agent_windows(self, *, team: str, agent: str) -> int:
+        del team, agent
+        self.kill_calls += 1
+        return 1
+
+
+@pytest.mark.asyncio
+async def test_tmux_live_spawn_tui_timeout_cleans_zombie_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hermes = FlowAgent(
+        id="h1", kind=AgentKind.hermes, repo="/tmp/x",
+        is_leader=False, merge_strategy=MergeStrategy.manual,
+        on_failure=OnFailure.retry, max_retries=2, is_temporary=True,
+    )
+    cli = _SpawnCliStub()
+    session = TmuxLiveSession(
+        agent=hermes, team_name="csflow-x", run_id="run-x", cli=cli,  # type: ignore[arg-type]
+    )
+
+    async def _never_ready(*_args: object, **_kwargs: object) -> TuiReadyResult:
+        return TuiReadyResult(ok=False, reason_code="tui_timeout", message="nope")
+
+    monkeypatch.setattr(tmux_live_mod, "wait_tui_ready", _never_ready)
+
+    with pytest.raises(Exception):
+        await session.spawn()
+
+    assert session.state == SessionState.Crashed
+    assert cli.shutdown_calls == 1
+    assert cli.kill_calls == 1
+
+
 def test_tmux_live_session_temporary_claude_skips_managed_profile() -> None:
     """A temporary claude agent must not trigger managed-profile creation."""
     from app.scheduler.sessions.tmux_live import TmuxLiveSession

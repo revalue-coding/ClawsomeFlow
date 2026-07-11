@@ -39,6 +39,11 @@ from app.scheduler.sessions.tmux_ready import (
 
 logger = get_logger("scheduler.sessions.tmux_live")
 
+_DEFAULT_READY_TIMEOUT_SEC = 60.0
+# Hermes cold-starts (MCP probe, tool/skill inventory, update check) routinely
+# exceed 60s under load; keep other TUIs on the shorter default.
+_HERMES_READY_TIMEOUT_SEC = 90.0
+
 
 # Per-process `-c` config overrides applied to every codex spawn so the
 # unattended TUI behaves. We override at spawn time rather than editing the
@@ -172,7 +177,7 @@ class TmuxLiveSession(WorkerSession):
         team_name: str,
         run_id: str,
         cli: ClawTeamCli | None = None,
-        ready_timeout_sec: float = 30.0,
+        ready_timeout_sec: float = _DEFAULT_READY_TIMEOUT_SEC,
     ) -> None:
         super().__init__(agent=agent, team_name=team_name, run_id=run_id)
         if agent.kind not in _KIND_TO_CMD and agent.kind != AgentKind.custom:
@@ -184,7 +189,10 @@ class TmuxLiveSession(WorkerSession):
                 f"agent {agent.id!r}: kind=custom requires explicit 'command'"
             )
         self._cli = cli or get_clawteam_cli()
-        self._ready_timeout = ready_timeout_sec
+        if agent.kind == AgentKind.hermes:
+            self._ready_timeout = _HERMES_READY_TIMEOUT_SEC
+        else:
+            self._ready_timeout = ready_timeout_sec
         if agent.kind == AgentKind.custom:
             # For custom, fresh==resume==agent.command (caller knows the binary).
             self._spawn_cmd = list(agent.command or [])
@@ -238,6 +246,23 @@ class TmuxLiveSession(WorkerSession):
             return None
         return self.agent.profile
 
+    async def _cleanup_zombie_runtime(self) -> None:
+        """Best-effort kill when ``clawteam spawn`` succeeded but TUI-ready wait failed.
+
+        Leaves session state unchanged (caller already marks Crashed). Without
+        this, ClawTeam still reports the agent as running and a later fresh
+        spawn hits "already running".
+        """
+        try:
+            await self._do_shutdown()
+        except Exception as exc:
+            logger.warning(
+                "spawn_zombie_cleanup_failed",
+                agent_id=self.agent.id,
+                team=self.team_name,
+                error=str(exc),
+            )
+
     async def _do_spawn(self) -> None:
         if not self.agent.repo:
             # Defence in depth — Flow validators forbid this for non-OpenClaw,
@@ -265,6 +290,7 @@ class TmuxLiveSession(WorkerSession):
             timeout_sec=self._ready_timeout,
         )
         if not result.ok:
+            await self._cleanup_zombie_runtime()
             raise CliInvocationError(
                 argv=["wait_tui_ready", result.reason_code],
                 exit_code=1,
@@ -363,6 +389,7 @@ class TmuxLiveSession(WorkerSession):
         stderr = result.message or (
             f"TUI prompt never appeared after {phase} on {self.tmux_target}"
         )
+        await self._cleanup_zombie_runtime()
         raise CliInvocationError(
             argv=["wait_tui_ready", result.reason_code, self.tmux_target, phase],
             exit_code=1,
