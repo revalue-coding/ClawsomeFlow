@@ -75,11 +75,13 @@ from app.scheduler.engine import abort_run_to_terminal, get_scheduler
 from app.scheduler.finalize import (
     _resolve_agent_repo_for_run,
     classify_merge_failure,
+    cleanup_non_openclaw_workspace_after_review_decision,
     perform_manual_merge,
     run_terminal_tail_cleanup,
 )
 from app.scheduler.naming import team_name_for_run
 from app.scheduler.run_metadata import (
+    DEV_PENDING_PR_AGENT_IDS_KEY,
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
@@ -211,6 +213,30 @@ class RunMergeRevertView(_CamelModel):
     target_branch: str = DEFAULT_TARGET_BRANCH
     reverted_merges: list[str] = Field(default_factory=list)
     revert_head: str = ""
+    message: str = ""
+
+
+class PendingPrAgentView(_CamelModel):
+    """One dev-mode agent whose worktree awaits a PR decision (PR module)."""
+
+    agent_id: str
+    branch: str = ""
+    base_branch: str = ""
+    target_branch: str = DEFAULT_TARGET_BRANCH
+    repo_root: str = ""
+    worktree_path: str = ""
+
+
+class PendingPrListView(_CamelModel):
+    items: list[PendingPrAgentView] = Field(default_factory=list)
+
+
+class PendingPrSubmitResponse(_CamelModel):
+    """Result of the one-click "PR to baseline branch" action."""
+
+    agent_id: str
+    success: bool = False
+    pr_url: str = ""
     message: str = ""
 
 
@@ -1605,6 +1631,390 @@ async def revert_run_agent_merge(
         revert_head=str(result.get("revert_head") or ""),
         message=str(result.get("message") or ""),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Developer-mode PR module (pending PRs)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _list_dev_pending_pr_agent_ids(run: FlowRun) -> list[str]:
+    """Marker list in original (spec) order, de-duplicated."""
+    raw = (run.inputs or {}).get(DEV_PENDING_PR_AGENT_IDS_KEY)
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        aid = str(item or "").strip()
+        if aid and aid not in seen:
+            out.append(aid)
+            seen.add(aid)
+    return out
+
+
+def _remove_dev_pending_pr_agent(
+    *, run: FlowRun, storage: StorageBackend, agent_id: str,
+) -> list[str]:
+    """Drop *agent_id* from the pending-PR marker; returns the remaining ids."""
+    remaining = [a for a in _list_dev_pending_pr_agent_ids(run) if a != agent_id]
+    merged_inputs = dict(run.inputs or {})
+    if remaining:
+        merged_inputs[DEV_PENDING_PR_AGENT_IDS_KEY] = remaining
+    else:
+        merged_inputs.pop(DEV_PENDING_PR_AGENT_IDS_KEY, None)
+    run.inputs = merged_inputs
+    storage.run_update(run)
+    return remaining
+
+
+def _flow_currently_dev_mode(flow: Flow | None) -> bool:
+    if flow is None:
+        return False
+    from app.flow_modes import flow_mode
+
+    return flow_mode((flow.spec or {}).get("variables") or {}) == "dev"
+
+
+def _spec_agent_for_run(
+    *, run: FlowRun, agent_id: str, storage: StorageBackend,
+) -> FlowAgent | None:
+    flow = storage.flow_get(run.flow_id)
+    if flow is None:
+        return None
+    try:
+        spec = FlowSpec.model_validate(flow.spec)
+    except Exception:
+        return None
+    return next((a for a in spec.agents if a.id == agent_id), None)
+
+
+async def _find_pending_pr_workspace_row(
+    *, run: FlowRun, agent_id: str, storage: StorageBackend,
+) -> dict[str, Any] | None:
+    """Resolve the live worktree row for a pending-PR agent (None when gone).
+
+    A worktree removed out-of-band simply disappears from the module by
+    design — we never surface an error for it.
+    """
+    repo = _resolve_agent_repo_for_run(run=run, agent_id=agent_id, storage=storage)
+    cli = get_clawteam_cli()
+    try:
+        rows = await cli.workspace_list(team=run.team_name, repo=repo)
+    except Exception as exc:
+        logger.warning(
+            "pending_pr_workspace_list_failed",
+            run_id=run.id, agent_id=agent_id, error=str(exc),
+        )
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("agent_name") or "").strip() != agent_id:
+            continue
+        wt = str(row.get("worktree_path") or "").strip()
+        if not wt or not FsPath(wt).expanduser().exists():
+            return None
+        return row
+    return None
+
+
+_PR_PUSH_TIMEOUT_SEC = 300.0
+_PR_CREATE_TIMEOUT_SEC = 120.0
+
+
+async def _run_pr_command(
+    argv: list[str], *, cwd: str, timeout_sec: float,
+) -> tuple[int, str, str]:
+    """Run one PR-pipeline subprocess with a hard timeout + group kill."""
+    import os
+    import signal
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        return 127, "", f"command not found: {argv[0]}"
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            pass
+        return 124, "", f"timed out after {int(timeout_sec)}s: {' '.join(argv)}"
+    return (
+        proc.returncode or 0,
+        (stdout_b or b"").decode(errors="replace"),
+        (stderr_b or b"").decode(errors="replace"),
+    )
+
+
+async def _pending_pr_tail_cleanup_if_done(
+    *, run: FlowRun, storage: StorageBackend, remaining: list[str],
+) -> None:
+    if remaining:
+        return
+    flow = storage.flow_get(run.flow_id)
+    await _cleanup_terminal_tail(run=run, storage=storage, flow=flow)
+
+
+@router.get("/runs/{run_id}/pending-prs", response_model=PendingPrListView)
+async def list_pending_prs(
+    run_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> PendingPrListView:
+    """Dev-mode PR module list: agents whose worktree still awaits a PR decision.
+
+    Empty (module hidden) unless ALL of: the run recorded pending-PR agents at
+    finalize (i.e. it EXECUTED in developer mode), the Flow is CURRENTLY in
+    developer mode, the run is terminal, and the agent's worktree still exists
+    on disk (out-of-band deletions silently drop out — never an error).
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if run.status not in _TERMINAL:
+        return PendingPrListView()
+    pending_ids = _list_dev_pending_pr_agent_ids(run)
+    if not pending_ids:
+        return PendingPrListView()
+    flow = storage.flow_get(run.flow_id)
+    if not _flow_currently_dev_mode(flow):
+        return PendingPrListView()
+    items: list[PendingPrAgentView] = []
+    for agent_id in pending_ids:
+        agent = _spec_agent_for_run(run=run, agent_id=agent_id, storage=storage)
+        if agent is None or agent.kind == AgentKind.openclaw:
+            continue
+        row = await _find_pending_pr_workspace_row(
+            run=run, agent_id=agent_id, storage=storage,
+        )
+        if row is None:
+            continue
+        target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+        items.append(
+            PendingPrAgentView(
+                agent_id=agent_id,
+                branch=str(row.get("branch_name") or ""),
+                base_branch=str(row.get("base_branch") or ""),
+                target_branch=target,
+                repo_root=str(row.get("repo_root") or ""),
+                worktree_path=str(row.get("worktree_path") or ""),
+            )
+        )
+    return PendingPrListView(items=items)
+
+
+@router.get(
+    "/runs/{run_id}/pending-prs/{agent_id}/diff",
+    response_model=PendingMergeDiffView,
+)
+async def get_pending_pr_diff(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> PendingMergeDiffView:
+    """Full unified diff of a pending-PR agent's worktree ("查看全部修改")."""
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if agent_id not in _list_dev_pending_pr_agent_ids(run):
+        raise ApiError(
+            "PR_NOT_PENDING",
+            f"agent {agent_id!r} has no pending PR in this run",
+            status_code=404,
+        )
+    agent = _spec_agent_for_run(run=run, agent_id=agent_id, storage=storage)
+    target = DEFAULT_TARGET_BRANCH
+    if agent is not None:
+        target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+    repo = _resolve_agent_repo_for_run(run=run, agent_id=agent_id, storage=storage)
+    cli = get_clawteam_cli()
+    try:
+        result = await cli.workspace_agent_patch(
+            team=run.team_name, agent=agent_id, repo=repo,
+        )
+    except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
+        logger.warning(
+            "pending_pr_diff_failed",
+            run_id=run.id, agent_id=agent_id, error=str(exc),
+        )
+        raise ApiError(
+            "DIFF_UNAVAILABLE",
+            f"failed to compute diff for agent {agent_id!r}",
+            status_code=502,
+        ) from exc
+    if result is None:
+        raise ApiError(
+            "WORKSPACE_NOT_FOUND",
+            f"no worktree found for agent {agent_id!r} (it may have been cleaned up)",
+            status_code=404,
+        )
+    return PendingMergeDiffView(
+        agent_id=agent_id,
+        branch=str(result.get("branch") or ""),
+        base_branch=str(result.get("base_branch") or ""),
+        target_branch=target,
+        repo_root=str(result.get("repo_root") or ""),
+        patch=str(result.get("patch") or ""),
+        patch_truncated=bool(result.get("patch_truncated")),
+        uncommitted_patch=str(result.get("uncommitted_patch") or ""),
+        uncommitted_truncated=bool(result.get("uncommitted_truncated")),
+        base_ahead=int(result.get("base_ahead") or 0),
+        branch_ahead=int(result.get("branch_ahead") or 0),
+    )
+
+
+@router.post(
+    "/runs/{run_id}/pending-prs/{agent_id}/submit",
+    response_model=PendingPrSubmitResponse,
+)
+async def submit_pending_pr(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> PendingPrSubmitResponse:
+    """One-click PR: push the worktree branch, open a PR against the baseline.
+
+    Remote validity is the developer's responsibility by design (dev mode
+    only): we simply run ``git push -u origin <branch>`` then
+    ``gh pr create --base <baseline> --head <branch>`` inside the worktree and
+    surface any failure verbatim (frontend shows it in an alert; nothing is
+    mutated on failure). On success the local worktree is removed and the agent
+    leaves the module.
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if agent_id not in _list_dev_pending_pr_agent_ids(run):
+        raise ApiError(
+            "PR_NOT_PENDING",
+            f"agent {agent_id!r} has no pending PR in this run",
+            status_code=404,
+        )
+    flow = storage.flow_get(run.flow_id)
+    if not _flow_currently_dev_mode(flow):
+        raise ApiError(
+            "NOT_DEV_MODE",
+            "the Flow is not in developer mode",
+            status_code=409,
+        )
+    row = await _find_pending_pr_workspace_row(
+        run=run, agent_id=agent_id, storage=storage,
+    )
+    if row is None:
+        raise ApiError(
+            "WORKSPACE_NOT_FOUND",
+            f"no worktree found for agent {agent_id!r} (it may have been cleaned up)",
+            status_code=404,
+        )
+    worktree = str(FsPath(str(row.get("worktree_path") or "")).expanduser())
+    branch = str(row.get("branch_name") or "").strip()
+    if not branch:
+        branch = f"clawteam/{run.team_name}/{agent_id}"
+    agent = _spec_agent_for_run(run=run, agent_id=agent_id, storage=storage)
+    target = DEFAULT_TARGET_BRANCH
+    if agent is not None:
+        target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+
+    rc, out, err = await _run_pr_command(
+        ["git", "push", "-u", "origin", branch],
+        cwd=worktree, timeout_sec=_PR_PUSH_TIMEOUT_SEC,
+    )
+    if rc != 0:
+        detail = (err or out).strip()[:1000]
+        _emit_run_event(
+            storage, run.id, "dev_pr_submit_failed", agent_id=agent_id,
+            payload={"step": "push", "branch": branch, "detail": detail},
+        )
+        return PendingPrSubmitResponse(
+            agent_id=agent_id, success=False,
+            message=f"git push failed: {detail}",
+        )
+
+    title = f"[ClawsomeFlow] {agent_id}: {branch} -> {target}"
+    body = (
+        f"Automated PR opened by ClawsomeFlow developer mode.\n\n"
+        f"- Run: {run.id}\n- Agent: {agent_id}\n- Branch: `{branch}` -> `{target}`"
+    )
+    rc, out, err = await _run_pr_command(
+        ["gh", "pr", "create", "--base", target, "--head", branch,
+         "--title", title, "--body", body],
+        cwd=worktree, timeout_sec=_PR_CREATE_TIMEOUT_SEC,
+    )
+    if rc != 0:
+        detail = (err or out).strip()[:1000]
+        _emit_run_event(
+            storage, run.id, "dev_pr_submit_failed", agent_id=agent_id,
+            payload={"step": "pr_create", "branch": branch, "detail": detail},
+        )
+        return PendingPrSubmitResponse(
+            agent_id=agent_id, success=False,
+            message=f"gh pr create failed: {detail}",
+        )
+    pr_url = next(
+        (ln.strip() for ln in reversed(out.splitlines()) if ln.strip().startswith("http")),
+        "",
+    )
+    _emit_run_event(
+        storage, run.id, "dev_pr_submitted", agent_id=agent_id,
+        payload={"branch": branch, "target_branch": target, "pr_url": pr_url},
+    )
+    remaining = _remove_dev_pending_pr_agent(run=run, storage=storage, agent_id=agent_id)
+    await cleanup_non_openclaw_workspace_after_review_decision(
+        run=run, agent_id=agent_id, storage=storage,
+    )
+    await _pending_pr_tail_cleanup_if_done(run=run, storage=storage, remaining=remaining)
+    return PendingPrSubmitResponse(
+        agent_id=agent_id, success=True, pr_url=pr_url, message="PR created",
+    )
+
+
+@router.post(
+    "/runs/{run_id}/pending-prs/{agent_id}/discard",
+    response_model=RunSummary,
+)
+async def discard_pending_pr(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunSummary:
+    """Discard a pending-PR worktree without pushing anything anywhere."""
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if agent_id not in _list_dev_pending_pr_agent_ids(run):
+        raise ApiError(
+            "PR_NOT_PENDING",
+            f"agent {agent_id!r} has no pending PR in this run",
+            status_code=404,
+        )
+    _emit_run_event(
+        storage, run.id, "dev_pr_discarded", agent_id=agent_id, payload={},
+    )
+    remaining = _remove_dev_pending_pr_agent(run=run, storage=storage, agent_id=agent_id)
+    await cleanup_non_openclaw_workspace_after_review_decision(
+        run=run, agent_id=agent_id, storage=storage,
+    )
+    await _pending_pr_tail_cleanup_if_done(run=run, storage=storage, remaining=remaining)
+    refreshed = storage.run_get(run.id) or run
+    return _to_summary(refreshed)
 
 
 @router.post("/runs/{run_id}/merge", response_model=MergeResponse)

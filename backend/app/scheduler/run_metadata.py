@@ -14,6 +14,12 @@ must import the constants from here.
   survive terminal team cleanup (merge-conflict follow-up).
 * :data:`REVERTED_MERGE_AGENT_IDS_KEY` — agent ids whose run-diff merges the user
   reverted ("撤销合入"); excluded from the post-run Run-diff module.
+* :data:`DEV_PENDING_PR_AGENT_IDS_KEY` — developer-mode runs only: non-OpenClaw
+  agent ids that owned at least one no-merge (``devAutoMerge=false``) task.
+  Their worktrees survive terminal cleanup so the user can inspect / one-click
+  PR / discard them from the Run detail "PR" module. Written at finalize time,
+  so it doubles as the "this run executed in developer mode" record (a Flow
+  later switched to dev mode never grows this marker retroactively).
 
 NOTE: the string values are a persisted on-disk contract (existing user DBs
 contain them) — never rename the values, only the Python symbols.
@@ -25,8 +31,10 @@ POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
 POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"
 PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
 REVERTED_MERGE_AGENT_IDS_KEY = "_csflow_reverted_merge_agent_ids"
+DEV_PENDING_PR_AGENT_IDS_KEY = "_csflow_dev_pending_pr_agent_ids"
 
 __all__ = [
+    "DEV_PENDING_PR_AGENT_IDS_KEY",
     "POST_COMPLAINT_STATUS_KEY",
     "POST_REVIEW_TERMINAL_STATUS_KEY",
     "PRESERVE_WORKTREE_AGENT_IDS_KEY",

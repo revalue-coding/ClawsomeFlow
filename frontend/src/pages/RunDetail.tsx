@@ -17,6 +17,7 @@ import {
   ApiError,
   PendingMerge,
   PendingMergeDiff,
+  PendingPrAgent,
   RunAgentDiff,
   RunDetail as RunDetailT,
   RunDiffAgent,
@@ -1022,6 +1023,10 @@ export function RunDetail() {
 
       {/* Run diff — what actually landed on the baseline branches (terminal only) */}
       {TERMINAL.has(run.status) && <RunDiffCard runId={run.id} />}
+
+      {/* Dev-mode PR module — worktrees awaiting a PR decision (terminal only;
+          hides itself unless the backend returns pending items) */}
+      {TERMINAL.has(run.status) && <PendingPrCard runId={run.id} />}
 
       {/* Task dependency board */}
       <Card className="p-0 overflow-hidden">
@@ -2442,6 +2447,183 @@ function RunDiffCard({ runId }: { runId: string }) {
         width="max-w-5xl"
       >
         {openAgent !== null && <RunAgentDiffBody runId={runId} agentId={openAgent} />}
+      </Modal>
+    </Card>
+  );
+}
+
+
+/** Developer-mode PR module: agents whose worktree branch neither self-merged
+ *  into the baseline nor went out as a PR yet. Backend gates visibility (dev
+ *  mode at run time AND now, terminal status, worktree still on disk), so this
+ *  card renders nothing whenever the list is empty or unavailable. */
+function PendingPrCard({ runId }: { runId: string }) {
+  const { t } = useTranslation();
+  const { confirm, alert } = useDialog();
+  const [items, setItems] = useState<PendingPrAgent[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [diffAgent, setDiffAgent] = useState<string | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [diffData, setDiffData] = useState<PendingMergeDiff | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.getPendingPrs(runId);
+      setItems(res.items ?? []);
+    } catch {
+      // Module is best-effort by design: any failure simply hides it.
+      setItems([]);
+    } finally {
+      setLoaded(true);
+    }
+  }, [runId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const openDiff = useCallback(
+    async (agentId: string) => {
+      setDiffAgent(agentId);
+      setDiffLoading(true);
+      setDiffError(null);
+      setDiffData(null);
+      try {
+        const data = await api.getPendingPrDiff(runId, agentId);
+        setDiffData(data);
+      } catch (e) {
+        setDiffError(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        setDiffLoading(false);
+      }
+    },
+    [runId],
+  );
+
+  const onSubmitPr = useCallback(
+    async (item: PendingPrAgent) => {
+      const ok = await confirm(
+        t("runDetail.pendingPrSubmitConfirmBody", {
+          agent: item.agentId,
+          target: item.targetBranch,
+        }),
+        {
+          title: t("runDetail.pendingPrSubmitConfirmTitle"),
+          okText: t("runDetail.pendingPrSubmitConfirmOk"),
+        },
+      );
+      if (!ok) return;
+      setBusyId(item.agentId);
+      try {
+        const res = await api.submitPendingPr(runId, item.agentId);
+        if (res.success) {
+          void alert(
+            t("runDetail.pendingPrSubmitSuccess", {
+              url: res.prUrl || t("common.none"),
+            }),
+          );
+          await load();
+        } else {
+          void alert(
+            t("runDetail.pendingPrSubmitFailed", { reason: res.message }),
+          );
+        }
+      } catch (e) {
+        const reason = e instanceof ApiError ? e.message : String(e);
+        void alert(t("runDetail.pendingPrSubmitFailed", { reason }));
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [runId, confirm, alert, t, load],
+  );
+
+  const onDiscard = useCallback(
+    async (item: PendingPrAgent) => {
+      const ok = await confirm(
+        t("runDetail.pendingPrDiscardConfirmBody", { agent: item.agentId }),
+        {
+          title: t("runDetail.pendingPrDiscardConfirmTitle"),
+          okText: t("runDetail.pendingPrDiscardConfirmOk"),
+          danger: true,
+        },
+      );
+      if (!ok) return;
+      setBusyId(item.agentId);
+      try {
+        await api.discardPendingPr(runId, item.agentId);
+        await load();
+      } catch (e) {
+        const reason = e instanceof ApiError ? e.message : String(e);
+        void alert(t("runDetail.pendingPrDiscardFailed", { reason }));
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [runId, confirm, alert, t, load],
+  );
+
+  if (!loaded || items.length === 0) return null;
+
+  return (
+    <Card className="border-ink-200">
+      <CardTitle>{t("runDetail.pendingPrTitle")}</CardTitle>
+      <div className="text-xs text-ink-500 mb-3">{t("runDetail.pendingPrHint")}</div>
+      <div className="space-y-2">
+        {items.map((item) => (
+          <div
+            key={item.agentId}
+            className="flex items-center justify-between gap-3 rounded-md border border-ink-200 bg-ink-50/40 px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="truncate font-medium text-ink-900">{item.agentId}</div>
+              <div className="truncate text-xs text-ink-500 font-mono">
+                {item.branch} → {item.targetBranch}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                className="btn-outline"
+                onClick={() => void openDiff(item.agentId)}
+              >
+                {t("runDetail.pendingPrViewDiff")}
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busyId !== null}
+                onClick={() => void onSubmitPr(item)}
+              >
+                {busyId === item.agentId
+                  ? t("runDetail.pendingPrSubmitting")
+                  : t("runDetail.pendingPrSubmit")}
+              </button>
+              <button
+                type="button"
+                className="btn-outline text-red-600 dark:text-red-400"
+                disabled={busyId !== null}
+                onClick={() => void onDiscard(item)}
+              >
+                {t("runDetail.pendingPrDiscard")}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <Modal
+        open={diffAgent !== null}
+        onClose={() => setDiffAgent(null)}
+        title={t("runDetail.pendingPrDiffModalTitle", { agent: diffAgent ?? "" })}
+        width="max-w-5xl"
+      >
+        <PendingMergeDiffBody
+          loading={diffLoading}
+          error={diffError}
+          data={diffData}
+        />
       </Modal>
     </Card>
   );

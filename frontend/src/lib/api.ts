@@ -364,6 +364,24 @@ export interface RunMergeRevert {
   message: string;
 }
 
+/** One dev-mode agent whose worktree awaits a PR decision (PR module). */
+export interface PendingPrAgent {
+  agentId: string;
+  branch: string;
+  baseBranch: string;
+  targetBranch: string;
+  repoRoot: string;
+  worktreePath: string;
+}
+
+/** Result of the one-click "PR to baseline branch" action. */
+export interface PendingPrSubmitResult {
+  agentId: string;
+  success: boolean;
+  prUrl: string;
+  message: string;
+}
+
 export interface RunTaskTerminal {
   taskId: string;
   subject: string;
@@ -1034,6 +1052,23 @@ export const api = {
     request<RunMergeRevert>(
       "POST",
       `/api/runs/${id}/run-diff/${encodeURIComponent(agentId)}/revert`,
+    ),
+  getPendingPrs: (id: string) =>
+    request<{ items: PendingPrAgent[] }>("GET", `/api/runs/${id}/pending-prs`),
+  getPendingPrDiff: (id: string, agentId: string) =>
+    request<PendingMergeDiff>(
+      "GET",
+      `/api/runs/${id}/pending-prs/${encodeURIComponent(agentId)}/diff`,
+    ),
+  submitPendingPr: (id: string, agentId: string) =>
+    request<PendingPrSubmitResult>(
+      "POST",
+      `/api/runs/${id}/pending-prs/${encodeURIComponent(agentId)}/submit`,
+    ),
+  discardPendingPr: (id: string, agentId: string) =>
+    request<RunSummary>(
+      "POST",
+      `/api/runs/${id}/pending-prs/${encodeURIComponent(agentId)}/discard`,
     ),
   submitRunComplaint: (id: string, message: string) =>
     request<RunSummary>("POST", `/api/runs/${id}/complaint`, { message }),

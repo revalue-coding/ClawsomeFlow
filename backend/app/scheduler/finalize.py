@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import load_config
-from app.flow_modes import flow_mode
+from app.flow_modes import flow_mode, task_self_merges
 from app.integrations.clawteam_cli import (
     ClawTeamCli,
     get_clawteam_cli,
@@ -62,6 +62,7 @@ from app.models import (
     RunStatus,
 )
 from app.scheduler.run_metadata import (
+    DEV_PENDING_PR_AGENT_IDS_KEY,
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
@@ -185,6 +186,14 @@ async def finalize_run(
             merged_inputs = dict(ipt.run.inputs or {})
             merged_inputs.pop(_POST_COMPLAINT_STATUS_KEY, None)
             merged_inputs.pop(_POST_REVIEW_TERMINAL_STATUS_KEY, None)
+            # Scheduled dev runs still honour per-task devAutoMerge=false —
+            # record those agents so their worktrees survive tail cleanup
+            # for the Run-detail PR module.
+            dev_pending_pr = compute_dev_pending_pr_agent_ids(
+                flow=ipt.flow, run=ipt.run,
+            )
+            if dev_pending_pr:
+                merged_inputs[DEV_PENDING_PR_AGENT_IDS_KEY] = dev_pending_pr
             ipt.run.inputs = merged_inputs
             if ipt.run.finished_at is None:
                 ipt.run.finished_at = datetime.now(timezone.utc)
@@ -224,6 +233,14 @@ async def finalize_run(
             merged_inputs = dict(ipt.run.inputs or {})
             merged_inputs[_POST_COMPLAINT_STATUS_KEY] = RunStatus.completed.value
             merged_inputs.pop(_POST_REVIEW_TERMINAL_STATUS_KEY, None)
+            # Dev mode: agents with no-merge (devAutoMerge=false) tasks keep
+            # their worktrees at terminal cleanup for the PR module
+            # (easy mode self-merges everything → helper returns []).
+            dev_pending_pr = compute_dev_pending_pr_agent_ids(
+                flow=ipt.flow, run=ipt.run,
+            )
+            if dev_pending_pr:
+                merged_inputs[DEV_PENDING_PR_AGENT_IDS_KEY] = dev_pending_pr
             ipt.run.inputs = merged_inputs
             if ipt.run.finished_at is None:
                 ipt.run.finished_at = datetime.now(timezone.utc)
@@ -851,6 +868,52 @@ def _read_preserved_worktree_agent_ids(run: FlowRun) -> set[str]:
     return out
 
 
+def read_dev_pending_pr_agent_ids(run: FlowRun) -> set[str]:
+    """Agent ids awaiting a PR decision in the developer-mode PR module."""
+    raw = (run.inputs or {}).get(DEV_PENDING_PR_AGENT_IDS_KEY)
+    if not isinstance(raw, list):
+        return set()
+    out: set[str] = set()
+    for item in raw:
+        aid = str(item or "").strip()
+        if aid:
+            out.add(aid)
+    return out
+
+
+def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
+    """Developer-mode runs only: non-OpenClaw agents owning ≥1 no-merge task.
+
+    Those agents' branches never self-merged into the baseline, so their
+    worktrees must survive terminal cleanup for the Run detail "PR" module
+    (inspect / one-click PR / discard). Returns ``[]`` for every other mode —
+    the resulting marker therefore also records "this run executed in dev
+    mode". Order follows the spec's agent order (deterministic UI).
+    """
+    variables = (flow.spec or {}).get("variables") or {}
+    if flow_mode(variables) != "dev":
+        return []
+    try:
+        spec = FlowSpec.model_validate(flow.spec)
+    except Exception:
+        return []
+    agents_by_id = {a.id: a for a in spec.agents}
+    pending: set[str] = set()
+    for task in spec.tasks:
+        agent = agents_by_id.get(task.owner_agent_id)
+        if agent is None or agent.kind == AgentKind.openclaw:
+            continue
+        if task_self_merges(
+            mode="dev",
+            run_is_scheduled=bool(getattr(run, "is_scheduled", False)),
+            task=task,
+            agent=agent,
+        ):
+            continue
+        pending.add(agent.id)
+    return [a.id for a in spec.agents if a.id in pending]
+
+
 def _emit(
     storage: StorageBackend, run_id: str, event_type: str, *,
     agent_id: str | None = None,
@@ -908,21 +971,32 @@ async def _maybe_cleanup_team_after_terminal(
         )
         return False
     preserved_agent_ids = _read_preserved_worktree_agent_ids(run)
+    # Dev-mode PR module: unresolved pending-PR agents keep their worktrees
+    # until the user submits a PR or discards them (api/runs.py pending-prs
+    # endpoints remove ids from the marker, then re-trigger this cleanup).
+    dev_pending_pr_ids = read_dev_pending_pr_agent_ids(run)
     preserve_due_to_conflicts = run.status == RunStatus.completed_with_conflicts
-    if preserve_worktree_dirs or preserve_due_to_conflicts:
-        if preserve_due_to_conflicts and preserved_agent_ids:
+    if preserve_worktree_dirs or preserve_due_to_conflicts or dev_pending_pr_ids:
+        combined_preserve = preserved_agent_ids | dev_pending_pr_ids
+        selective = not preserve_worktree_dirs and (
+            (preserve_due_to_conflicts and bool(preserved_agent_ids))
+            or bool(dev_pending_pr_ids)
+        )
+        if selective and combined_preserve:
             await _cleanup_non_openclaw_worktrees_except_preserved(
                 run=run,
                 flow=flow,
                 storage=storage,
                 cli=cli,
-                preserved_agent_ids=preserved_agent_ids,
+                preserved_agent_ids=combined_preserve,
             )
-        reason = (
-            "preserve_worktree_dirs"
-            if preserve_worktree_dirs
-            else "completed_with_conflicts"
-        )
+        preserved_agent_ids = combined_preserve
+        if preserve_worktree_dirs:
+            reason = "preserve_worktree_dirs"
+        elif preserve_due_to_conflicts:
+            reason = "completed_with_conflicts"
+        else:
+            reason = "dev_pending_pr"
         logger.info(
             "team_cleanup_skipped_preserve_worktree",
             run_id=run.id,
