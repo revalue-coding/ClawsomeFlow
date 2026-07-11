@@ -2794,6 +2794,12 @@ def test_agent_complaint_prompt_merge_only_for_openclaw(fake_lookup) -> None:
     assert "Implement fixes based on the complaint" not in hermes_prompt
     assert "Make changes in this task worktree" not in hermes_prompt
     assert "VERY IMPORTANT! you MUST execute" in hermes_prompt
+    # Worktree write-prohibition (PR module may still publish this worktree's
+    # content after the complaint phase — Hermes must not touch it).
+    assert "STRICTLY FORBIDDEN" in hermes_prompt
+    assert "do NOT create, modify or delete ANY file" in hermes_prompt
+    # OpenClaw fix tasks DO write + self-merge — no prohibition there.
+    assert "STRICTLY FORBIDDEN" not in oc_prompt
 
 
 @pytest.mark.asyncio

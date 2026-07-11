@@ -421,7 +421,7 @@ const en = {
       description: "Detailed instruction *",
       descriptionPlaceholder: "All work the worker must complete when receiving this task.",
       descriptionCollabHint:
-        "Tip: you can direct upstream collaboration in this description, e.g. \"merge [agent]'s worktree branch into xxx\" or \"open a PR for [agent]\". [agent] must be one of this task's upstream dependency agents:",
+        "Tip: you can direct upstream collaboration in this description, e.g. \"open a PR for [agent]\". Or wait until the run finishes and open a PR in one click. [agent] must be one of this task's upstream dependency agents:",
       paramFieldsHintPrefix: "Reference Flow parameter fields:",
       outputSummary: "Output summary requirement",
       outputSummaryHint: "(optional; the summary will be sent to downstream dependent tasks)",
@@ -779,18 +779,32 @@ const en = {
       "This runs git revert on {{agent}}'s commits merged into the baseline this run (adds inverse commits to undo them — no forced file edits, no history rewrite). If git can't do it cleanly (e.g. conflicts), nothing is changed and the reason is shown. Revert?",
     runDiffRevertConfirmOk: "Revert",
     runDiffRevertFailed: "Revert failed: {{reason}}",
+    postRunModuleComplaintBlocked:
+      "Complaint workflow is processing — this action is temporarily unavailable. Please try again after it finishes.",
     pendingPrTitle: "Pending PRs",
     pendingPrHint:
       "These agents' changes were neither auto-merged into the baseline branch nor submitted as a PR. Their worktrees are preserved: view all changes, open a PR against the baseline in one click, or discard the worktree. Opening a PR requires a configured remote and the gh CLI (the environment is the developer's responsibility).",
     pendingPrViewDiff: "View changes",
     pendingPrSubmit: "Open PR",
     pendingPrSubmitting: "Submitting…",
+    pendingPrMerge: "Merge into baseline",
+    pendingPrMerging: "Merging…",
+    pendingPrMergeConfirmTitle: "Merge into baseline branch",
+    pendingPrMergeConfirmBody:
+      "This merges {{agent}}'s worktree branch directly into the baseline branch {{target}} (a local merge — no remote needed). On success the entry leaves this list and its worktree is cleaned up automatically when the run wraps up. Continue?",
+    pendingPrMergeConfirmOk: "Merge",
+    pendingPrMergeSuccess:
+      "Merged into baseline branch {{target}} — see \"Changes from this run\" for the merged content.",
+    pendingPrMergeFailed: "Merge failed: {{reason}}",
     pendingPrDiscard: "Discard worktree",
+    pendingPrDiscarding: "Discarding…",
+    pendingPrDiffEmpty:
+      "This branch has no commits ahead of the baseline and no uncommitted changes (the run may not have modified files, or its output already exists in the baseline).",
     pendingPrSubmitConfirmTitle: "Open PR against baseline",
     pendingPrSubmitConfirmBody:
-      "This pushes {{agent}}'s worktree branch to the remote and opens a PR against the baseline branch {{target}}. On success the local worktree is deleted. Continue?",
+      "This pushes {{agent}}'s worktree branch to the remote and opens a PR against the baseline branch {{target}}. On success the entry leaves this list and its worktree is cleaned up automatically when the run wraps up. Continue?",
     pendingPrSubmitConfirmOk: "Open PR",
-    pendingPrSubmitSuccess: "PR created: {{url}}. The local worktree has been removed.",
+    pendingPrSubmitSuccess: "PR created: {{url}}.",
     pendingPrSubmitFailed: "Failed to open PR: {{reason}}",
     pendingPrDiscardConfirmTitle: "Discard worktree",
     pendingPrDiscardConfirmBody:

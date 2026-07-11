@@ -2026,6 +2026,43 @@ def test_run_diff_revert_openclaw_agent_404(app_client: TestClient) -> None:
     assert r.json()["error"] == "AGENT_NOT_FOUND"
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        RunStatus.awaiting_user_complaint,
+        RunStatus.complaint_processing,
+        RunStatus.completed,
+    ],
+)
+def test_run_diff_list_during_complaint_window_all_modes(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, status: RunStatus,
+) -> None:
+    # Run diff is mode-agnostic (easy / normal / dev): the API has no flow-mode
+    # gate — only the frontend render window starts at awaiting_user_complaint.
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=status)
+
+    class _FakeCli:
+        async def run_merged_agent_patch(
+            self, *, team, agent, repo, include_patch=True, **kw,
+        ):
+            del team, repo, include_patch, kw
+            if agent != "alice":
+                return None
+            return {
+                "repo_root": "/tmp/r", "branch": f"clawteam/{run.team_name}/alice",
+                "merge_count": 1, "commit_count": 1, "files_changed": 1,
+                "insertions": 1, "deletions": 0, "patch": "", "patch_truncated": False,
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/run-diff")
+    assert r.status_code == 200, r.text
+    assert [i["agentId"] for i in r.json()["items"]] == ["alice"]
+
+
 def test_run_summary_exposes_is_scheduled(app_client: TestClient) -> None:
     flow = _make_flow()
     get_storage().run_create(FlowRun(

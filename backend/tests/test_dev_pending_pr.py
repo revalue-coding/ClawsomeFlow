@@ -11,6 +11,7 @@ Covers the full pending-PR chain:
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,9 @@ def _dev_spec(*, mode: str = "dev", alice_auto_merge: bool = False) -> FlowSpec:
     )
 
 
+_TEAM_SEQ = itertools.count(1)
+
+
 def _make_flow_and_run(
     *,
     mode: str = "dev",
@@ -91,8 +95,10 @@ def _make_flow_and_run(
         cleanup_team_on_finish=cleanup_team,
     ).with_spec(_dev_spec(mode=mode, alice_auto_merge=alice_auto_merge))
     flow = storage.flow_create(flow)
+    # team_name is UNIQUE — some tests create several runs.
     run = storage.run_create(FlowRun(
-        flow_id=flow.id, flow_version=1, team_name="csflow-devpr",
+        flow_id=flow.id, flow_version=1,
+        team_name=f"csflow-devpr{next(_TEAM_SEQ)}",
         status=status, inputs=inputs or {}, user="alice",
     ))
     return flow, run
@@ -252,12 +258,23 @@ async def test_tail_cleanup_runs_team_cleanup_once_marker_empty() -> None:
 
 
 class _ApiStubCli:
-    def __init__(self, rows: list[dict[str, str]]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, str]],
+        *,
+        dirty: tuple[bool, list[str]] = (False, []),
+    ) -> None:
         self.rows = rows
+        self.dirty = dirty
+        self.dirty_checks: list[str] = []
 
     async def workspace_list(self, *, team: str, repo: str | None = None):
         del team, repo
         return list(self.rows)
+
+    async def workspace_has_uncommitted_changes(self, *, worktree_path: str):
+        self.dirty_checks.append(worktree_path)
+        return self.dirty
 
     async def workspace_agent_patch(self, *, team: str, agent: str, repo=None, **kw):
         del team, repo, kw
@@ -328,11 +345,51 @@ def test_pending_prs_list_empty_when_flow_not_dev_mode(
     assert r.json()["items"] == []
 
 
-def test_pending_prs_list_empty_when_not_terminal(
-    app_client: TestClient, tmp_path: Path,
+def test_pending_prs_list_shows_at_awaiting_user_complaint(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    # The module surfaces as soon as the run parks on complaint input —
+    # worktrees are alive (cleanup deferred to complaint end).
     flow, run = _make_flow_and_run(
         mode="dev", status=RunStatus.awaiting_user_complaint,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _ApiStubCli(rows))
+    r = app_client.get(f"/api/runs/{run.id}/pending-prs")
+    assert r.status_code == 200
+    assert [i["agentId"] for i in r.json()["items"]] == ["alice"]
+
+
+def test_pending_prs_list_visible_during_complaint_processing(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # List stays visible during complaint_processing (read-only); actions are
+    # gated separately via _PR_MODULE_ACTIONABLE_STATUSES.
+    flow, run = _make_flow_and_run(
+        mode="dev", status=RunStatus.complaint_processing,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _ApiStubCli(rows))
+    r = app_client.get(f"/api/runs/{run.id}/pending-prs")
+    assert r.status_code == 200
+    assert [i["agentId"] for i in r.json()["items"]] == ["alice"]
+
+
+def test_pending_prs_list_hidden_while_running(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _ApiStubCli(rows))
+    flow, run = _make_flow_and_run(
+        mode="dev", status=RunStatus.running,
         inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
     )
     r = app_client.get(f"/api/runs/{run.id}/pending-prs")
@@ -524,3 +581,333 @@ def test_discard_pending_pr_unknown_agent_404(app_client: TestClient) -> None:
     r = app_client.post(f"/api/runs/{run.id}/pending-prs/ghost/discard")
     assert r.status_code == 404
     assert r.json()["error"] == "PR_NOT_PENDING"
+
+
+# ── direct merge into baseline (item 4) ───────────────────────────────
+
+
+class _MergeStubCli(_ApiStubCli):
+    def __init__(self, rows: list[dict[str, str]], merge_result=(True, "")) -> None:
+        super().__init__(rows)
+        self.merge_result = merge_result
+        self.merge_calls: list[dict] = []
+
+    async def workspace_merge(self, *, team: str, agent: str, repo=None, target=None):
+        self.merge_calls.append({"team": team, "agent": agent, "repo": repo, "target": target})
+        return self.merge_result
+
+
+def test_merge_pending_pr_success(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    flow, run = _make_flow_and_run(
+        mode="dev", status=RunStatus.completed,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    cli = _MergeStubCli(rows, merge_result=(True, ""))
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: cli)
+
+    cleaned: list[str] = []
+
+    async def fake_cleanup(*, run, agent_id, storage, **kw):
+        del run, storage, kw
+        cleaned.append(agent_id)
+        return True
+
+    monkeypatch.setattr(
+        runs_mod, "cleanup_non_openclaw_workspace_after_review_decision", fake_cleanup,
+    )
+
+    tail: list[str] = []
+
+    async def fake_tail(*, run, storage, flow=None, **kw):
+        del storage, flow, kw
+        tail.append(run.id)
+
+    monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_tail)
+
+    r = app_client.post(f"/api/runs/{run.id}/pending-prs/alice/merge")
+    assert r.status_code == 200, r.text
+    assert r.json()["success"] is True
+    assert cli.merge_calls and cli.merge_calls[0]["target"] == "main"
+    refreshed = get_storage().run_get(run.id)
+    assert DEV_PENDING_PR_AGENT_IDS_KEY not in (refreshed.inputs or {})
+    assert cleaned == ["alice"]
+    assert tail == [run.id]
+    events = get_storage().event_list(run_id=run.id, since_id=None, limit=50)
+    assert any(e.type == "dev_pr_merged" for e in events)
+
+
+def test_merge_pending_pr_failure_keeps_marker(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    flow, run = _make_flow_and_run(
+        mode="dev", status=RunStatus.completed,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    cli = _MergeStubCli(rows, merge_result=(False, "CONFLICT (content): merge conflict in x"))
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: cli)
+
+    r = app_client.post(f"/api/runs/{run.id}/pending-prs/alice/merge")
+    assert r.status_code == 200, r.text
+    assert r.json()["success"] is False
+    refreshed = get_storage().run_get(run.id)
+    assert refreshed.inputs.get(DEV_PENDING_PR_AGENT_IDS_KEY) == ["alice"]
+    events = get_storage().event_list(run_id=run.id, since_id=None, limit=50)
+    assert any(e.type == "merge_conflict" for e in events)
+
+
+def test_merge_pending_pr_rejected_when_not_dev_mode(
+    app_client: TestClient, tmp_path: Path,
+) -> None:
+    flow, run = _make_flow_and_run(
+        mode="normal", status=RunStatus.completed,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    r = app_client.post(f"/api/runs/{run.id}/pending-prs/alice/merge")
+    assert r.status_code == 409
+    assert r.json()["error"] == "NOT_DEV_MODE"
+
+
+# ── abort / abnormal-terminal robustness ──────────────────────────────
+
+
+@pytest.mark.parametrize("status", [RunStatus.aborted, RunStatus.failed])
+def test_pending_prs_hidden_for_abnormal_terminal(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    status: RunStatus,
+) -> None:
+    # Even with a lingering marker + on-disk worktree, an aborted/failed run
+    # must never show the PR module.
+    flow, run = _make_flow_and_run(
+        mode="dev", status=status,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _ApiStubCli(rows))
+    r = app_client.get(f"/api/runs/{run.id}/pending-prs")
+    assert r.status_code == 200
+    assert r.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_abort_clears_marker_and_force_cleans() -> None:
+    flow, run = _make_flow_and_run(
+        mode="dev", alice_auto_merge=False, status=RunStatus.running,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    spec = FlowSpec.model_validate(flow.spec)
+    cli = _RecordingCli(workspace_rows=[
+        {"team_name": run.team_name, "agent_name": "alice"},
+    ])
+    out = await fin.finalize_run(
+        fin.FinalizeInput(run=run, flow=flow, agents=spec.agents,
+                          leader_agent_id="leader", has_failed_tasks=False,
+                          aborted=True),
+        storage=get_storage(), cli=cli, mcp=object(),
+    )
+    assert out.final_status == RunStatus.aborted
+    # Marker cleared and full team cleanup ran (no preservation on abort).
+    assert DEV_PENDING_PR_AGENT_IDS_KEY not in (run.inputs or {})
+    assert cli.team_cleanup_calls == [run.team_name]
+
+
+@pytest.mark.asyncio
+async def test_tail_cleanup_ignores_marker_on_aborted_status() -> None:
+    # A run that reached aborted with a stale marker still force-cleans.
+    flow, run = _make_flow_and_run(
+        mode="dev", alice_auto_merge=False, status=RunStatus.aborted,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    cli = _RecordingCli(workspace_rows=[
+        {"team_name": run.team_name, "agent_name": "alice"},
+    ])
+    out = await fin.run_terminal_tail_cleanup(
+        run=run, flow=flow, storage=get_storage(), cli=cli,
+    )
+    assert out.team_cleaned is True
+    assert cli.team_cleanup_calls == [run.team_name]
+
+
+# ── complaint-window semantics (deferred cleanup + action gating) ─────
+
+
+def _patch_pr_pipeline(monkeypatch, runs_mod):
+    """Track per-agent worktree cleanup + tail cleanup + git subprocess calls."""
+    calls = {"cleanup": [], "tail": [], "cmds": []}
+
+    async def fake_cleanup(*, run, agent_id, storage, **kw):
+        del run, storage, kw
+        calls["cleanup"].append(agent_id)
+        return True
+
+    async def fake_tail(*, run, storage, flow=None, **kw):
+        del storage, flow, kw
+        calls["tail"].append(run.id)
+
+    async def fake_cmd(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        calls["cmds"].append(list(argv))
+        if argv[0] == "gh":
+            return 0, "https://github.com/acme/x/pull/9\n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(
+        runs_mod, "cleanup_non_openclaw_workspace_after_review_decision", fake_cleanup,
+    )
+    monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_tail)
+    monkeypatch.setattr(runs_mod, "_run_pr_command", fake_cmd)
+    return calls
+
+
+def test_actions_during_awaiting_complaint_defer_worktree_cleanup(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # merge + discard while the run awaits complaint input: marker updates,
+    # but NO worktree is deleted (complaint fix agents need them as cwd);
+    # everything is swept once the complaint phase ends.
+    flow, run = _make_flow_and_run(
+        mode="dev", status=RunStatus.awaiting_user_complaint,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice", "bob"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice", "bob"])
+    cli = _MergeStubCli(rows, merge_result=(True, ""))
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: cli)
+    calls = _patch_pr_pipeline(monkeypatch, runs_mod)
+
+    r = app_client.post(f"/api/runs/{run.id}/pending-prs/alice/merge")
+    assert r.status_code == 200 and r.json()["success"] is True
+    r2 = app_client.post(f"/api/runs/{run.id}/pending-prs/bob/discard")
+    assert r2.status_code == 200
+
+    refreshed = get_storage().run_get(run.id)
+    assert DEV_PENDING_PR_AGENT_IDS_KEY not in (refreshed.inputs or {})
+    # Deferred: no per-agent cleanup, no tail cleanup while awaiting complaint.
+    assert calls["cleanup"] == []
+    assert calls["tail"] == []
+
+
+def test_actions_rejected_during_complaint_processing(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    flow, run = _make_flow_and_run(
+        mode="dev", status=RunStatus.complaint_processing,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _MergeStubCli(rows))
+    for action in ("merge", "submit", "discard"):
+        r = app_client.post(f"/api/runs/{run.id}/pending-prs/alice/{action}")
+        assert r.status_code == 409, action
+        assert r.json()["error"] == "PR_NOT_ACTIONABLE", action
+
+
+def test_submit_clears_uncommitted_and_instruments(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # A dirty worktree (agent skipped its mandatory commit step) is logged,
+    # a RunEvent is emitted, and the dirt is reset before push.
+    flow, run = _make_flow_and_run(
+        mode="dev", status=RunStatus.completed,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    cli = _ApiStubCli(rows, dirty=(True, [" M foo.py", "?? scratch.txt"]))
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: cli)
+    calls = _patch_pr_pipeline(monkeypatch, runs_mod)
+
+    r = app_client.post(f"/api/runs/{run.id}/pending-prs/alice/submit")
+    assert r.status_code == 200, r.text
+    assert r.json()["success"] is True
+    # Reset + clean ran BEFORE push / pr-create.
+    assert calls["cmds"][0] == ["git", "reset", "--hard", "HEAD"]
+    assert calls["cmds"][1] == ["git", "clean", "-fd"]
+    assert calls["cmds"][2][:2] == ["git", "push"]
+    assert calls["cmds"][3][:3] == ["gh", "pr", "create"]
+    events = get_storage().event_list(run_id=run.id, since_id=None, limit=50)
+    cleared = [e for e in events if e.type == "worktree_uncommitted_cleared"]
+    assert len(cleared) == 1
+    assert cleared[0].payload.get("entries") == [" M foo.py", "?? scratch.txt"]
+
+
+def test_merge_clean_worktree_skips_reset(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    flow, run = _make_flow_and_run(
+        mode="dev", status=RunStatus.completed,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["alice"]},
+    )
+    from app.api import runs as runs_mod
+
+    rows = _stub_worktree_rows(tmp_path, ["alice"])
+    cli = _MergeStubCli(rows, merge_result=(True, ""))
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: cli)
+    calls = _patch_pr_pipeline(monkeypatch, runs_mod)
+
+    r = app_client.post(f"/api/runs/{run.id}/pending-prs/alice/merge")
+    assert r.status_code == 200 and r.json()["success"] is True
+    # Clean worktree → no git reset/clean subprocesses at all.
+    assert calls["cmds"] == []
+    assert cli.dirty_checks  # the check itself DID run
+    events = get_storage().event_list(run_id=run.id, since_id=None, limit=50)
+    assert not any(e.type == "worktree_uncommitted_cleared" for e in events)
+
+
+def test_revert_blocked_while_active_allowed_awaiting_complaint(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from app.api import runs as runs_mod
+
+    class _RevertCli:
+        async def run_merged_agent_patch(self, *, team, agent, repo, **kw):
+            del team, repo, kw
+            return {
+                "repo_root": "/tmp/r", "branch": f"x/{agent}", "merge_count": 1,
+                "commit_count": 1, "files_changed": 1, "insertions": 1,
+                "deletions": 0, "patch": "", "patch_truncated": False,
+            }
+
+        async def revert_agent_merges(self, *, team, agent, repo, target_branch):
+            del team, agent, repo
+            return {
+                "ok": True, "target_branch": target_branch,
+                "merge_shas": ["abc"], "revert_head": "def",
+                "nothing_to_revert": False, "message": "ok",
+            }
+
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _RevertCli())
+
+    # Active statuses → 409.
+    flow, run = _make_flow_and_run(mode="dev", status=RunStatus.complaint_processing)
+    r = app_client.post(f"/api/runs/{run.id}/run-diff/alice/revert")
+    assert r.status_code == 409
+    assert r.json()["error"] == "MERGE_REVERT_NOT_ALLOWED"
+
+    # awaiting_user_complaint → allowed; revert must NOT touch the pending-PR
+    # marker (bob stays) so terminal cleanup later removes alice's worktree
+    # (not preserved) and keeps bob's.
+    flow2, run2 = _make_flow_and_run(
+        mode="dev", status=RunStatus.awaiting_user_complaint,
+        inputs={DEV_PENDING_PR_AGENT_IDS_KEY: ["bob"]},
+    )
+    r2 = app_client.post(f"/api/runs/{run2.id}/run-diff/alice/revert")
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["ok"] is True
+    refreshed = get_storage().run_get(run2.id)
+    assert refreshed.inputs.get(DEV_PENDING_PR_AGENT_IDS_KEY) == ["bob"]
+    from app.scheduler.run_metadata import PRESERVE_WORKTREE_AGENT_IDS_KEY
+    assert PRESERVE_WORKTREE_AGENT_IDS_KEY not in (refreshed.inputs or {})

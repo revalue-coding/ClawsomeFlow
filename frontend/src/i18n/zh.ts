@@ -415,7 +415,7 @@ const zh = {
       description: "任务详细说明 *",
       descriptionPlaceholder: "Worker 收到本任务时需要完成的全部工作。",
       descriptionCollabHint:
-        "提示：可在说明中直接指挥上游协作，例如「将 [agent] 的 worktree 分支合入 xxx 分支」或「为 [agent] 提交 PR」。可指挥的 [agent] 仅限本任务的上游依赖 Agent：",
+        "提示：可在说明中直接指挥上游协作，例如「为 [agent] 提交 PR」。或者等待任务执行完后一键提交PR。可指挥的 [agent] 仅限本任务的上游依赖 Agent：",
       paramFieldsHintPrefix: "可引用Flow 参数字段：",
       outputSummary: "输出摘要要求",
       outputSummaryHint: "（可选；摘要将发送给下游依赖任务）",
@@ -765,18 +765,32 @@ const zh = {
       "将对 {{agent}} 本次合入基线分支的提交执行 git revert（新增反向提交撤销这些改动，不会强改文件、不会改写历史）。若存在冲突等 git 无法自动完成的情况，将不做任何改动并告知失败原因。确认撤销？",
     runDiffRevertConfirmOk: "确认撤销",
     runDiffRevertFailed: "撤销失败：{{reason}}",
+    postRunModuleComplaintBlocked:
+      "投诉处理中，暂时无法执行此操作。请等待投诉流程完成后再试。",
     pendingPrTitle: "待提交 PR",
     pendingPrHint:
       "以下 Agent 的修改未自动合入基线分支，也尚未提交 PR。其 worktree 已保留，您可以查看全部修改、一键向基线分支提交 PR，或丢弃该 worktree。提交 PR 需要该仓库已配置远程仓库及 gh CLI（环境由开发者自行保证）。",
     pendingPrViewDiff: "查看全部修改",
     pendingPrSubmit: "一键 PR",
     pendingPrSubmitting: "提交中…",
+    pendingPrMerge: "直接合入基线分支",
+    pendingPrMerging: "合入中…",
+    pendingPrMergeConfirmTitle: "直接合入基线分支",
+    pendingPrMergeConfirmBody:
+      "将把 {{agent}} 的 worktree 分支直接合入基线分支 {{target}}（本地合入，无需远程）。合入成功后该条目移出本列表，其 worktree 将在流程收尾时自动清理。继续？",
+    pendingPrMergeConfirmOk: "合入",
+    pendingPrMergeSuccess:
+      "已合入基线分支 {{target}}，可在「本次执行的修改」中查看该修改。",
+    pendingPrMergeFailed: "合入失败：{{reason}}",
     pendingPrDiscard: "丢弃 worktree",
+    pendingPrDiscarding: "丢弃中…",
+    pendingPrDiffEmpty:
+      "该分支相对基线没有新增提交，也没有未提交改动（本次执行可能未改动文件，或其产出已存在于基线）。",
     pendingPrSubmitConfirmTitle: "向基线分支提交 PR",
     pendingPrSubmitConfirmBody:
-      "将把 {{agent}} 的 worktree 分支推送到远程仓库，并向基线分支 {{target}} 发起 PR。提交成功后本地 worktree 将被删除。继续？",
+      "将把 {{agent}} 的 worktree 分支推送到远程仓库，并向基线分支 {{target}} 发起 PR。提交成功后该条目移出本列表，其 worktree 将在流程收尾时自动清理。继续？",
     pendingPrSubmitConfirmOk: "提交 PR",
-    pendingPrSubmitSuccess: "PR 已提交：{{url}}。本地 worktree 已删除。",
+    pendingPrSubmitSuccess: "PR 已提交：{{url}}。",
     pendingPrSubmitFailed: "提交 PR 失败：{{reason}}",
     pendingPrDiscardConfirmTitle: "丢弃 worktree",
     pendingPrDiscardConfirmBody:

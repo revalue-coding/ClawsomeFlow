@@ -3145,7 +3145,12 @@ class RunController:
                 "Execution requirements:\n"
                 "1) Remember what the user was dissatisfied with and refine your "
                 "behavioral guidelines accordingly.\n"
-                "2) No inbox send is needed. After completion, **VERY IMPORTANT! you MUST execute**:\n"
+                "2) **STRICTLY FORBIDDEN: do NOT create, modify or delete ANY file in "
+                "your current working directory (the task worktree), and do NOT run "
+                "any git command that changes its state.** The user may still review, "
+                "adopt or publish this worktree's content afterwards — it must stay "
+                "exactly as the run left it.\n"
+                "3) No inbox send is needed. After completion, **VERY IMPORTANT! you MUST execute**:\n"
                 f"`clawteam task update {self.team_name} {task_id} --status completed`."
             )
         return (

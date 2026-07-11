@@ -1065,6 +1065,11 @@ export const api = {
       "POST",
       `/api/runs/${id}/pending-prs/${encodeURIComponent(agentId)}/submit`,
     ),
+  mergePendingPr: (id: string, agentId: string) =>
+    request<{ agentId: string; success: boolean; message: string }>(
+      "POST",
+      `/api/runs/${id}/pending-prs/${encodeURIComponent(agentId)}/merge`,
+    ),
   discardPendingPr: (id: string, agentId: string) =>
     request<RunSummary>(
       "POST",

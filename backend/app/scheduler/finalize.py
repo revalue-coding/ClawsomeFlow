@@ -152,6 +152,10 @@ async def finalize_run(
             merged_inputs = dict(ipt.run.inputs or {})
             merged_inputs.pop(_POST_COMPLAINT_STATUS_KEY, None)
             merged_inputs.pop(_POST_REVIEW_TERMINAL_STATUS_KEY, None)
+            # Abnormal terminal: no PR module for aborted/failed runs, and all
+            # worktrees are force-cleaned below — drop any pending-PR marker so
+            # no stale entry can survive.
+            merged_inputs.pop(DEV_PENDING_PR_AGENT_IDS_KEY, None)
             ipt.run.inputs = merged_inputs
             if ipt.run.finished_at is None:
                 ipt.run.finished_at = datetime.now(timezone.utc)
@@ -974,7 +978,12 @@ async def _maybe_cleanup_team_after_terminal(
     # Dev-mode PR module: unresolved pending-PR agents keep their worktrees
     # until the user submits a PR or discards them (api/runs.py pending-prs
     # endpoints remove ids from the marker, then re-trigger this cleanup).
-    dev_pending_pr_ids = read_dev_pending_pr_agent_ids(run)
+    # NEVER preserve on an abnormal terminal (aborted / failed / complaint_failed):
+    # those force a full cleanup, and the PR module is hidden for them — so a
+    # lingering marker must not strand worktrees. Only healthy terminals honour it.
+    dev_pending_pr_ids = (
+        set() if abnormal_terminal else read_dev_pending_pr_agent_ids(run)
+    )
     preserve_due_to_conflicts = run.status == RunStatus.completed_with_conflicts
     if preserve_worktree_dirs or preserve_due_to_conflicts or dev_pending_pr_ids:
         combined_preserve = preserved_agent_ids | dev_pending_pr_ids

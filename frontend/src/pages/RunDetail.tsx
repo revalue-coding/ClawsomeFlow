@@ -51,6 +51,16 @@ const LEADER_REPLY_VISIBLE = new Set([
   "complaint_processing",
   ...TERMINAL,
 ]);
+// "本次执行的修改" — all flow modes (easy / normal / dev): from
+// awaiting_user_complaint (worktrees alive, cleanup deferred) through terminal.
+// "待提交 PR" uses the same render window; the backend returns an empty list
+// unless the run executed in developer mode.
+const RUN_DIFF_VISIBLE = new Set([
+  "awaiting_user_complaint",
+  "complaint_processing",
+  ...TERMINAL,
+]);
+const POST_RUN_MODULES_VISIBLE = RUN_DIFF_VISIBLE;
 
 const TASK_CANVAS_MIN_WIDTH = 280;
 const TASK_CANVAS_MIN_HEIGHT = 300;
@@ -180,6 +190,9 @@ export function RunDetail() {
   const alertedSessionStartFails = useRef(new Set<number>());
   const [run, setRun] = useState<RunDetailT | null>(null);
   const [flowName, setFlowName] = useState<string>("");
+  // Bumped by PendingPrCard after a direct merge so RunDiffCard reloads and
+  // the freshly merged content appears in "本次执行的修改" immediately.
+  const [runDiffRefresh, setRunDiffRefresh] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<RunWsEvent[]>([]);
   const [wsStatus, setWsStatus] = useState<
@@ -1021,12 +1034,27 @@ export function RunDetail() {
         </Card>
       )}
 
-      {/* Run diff — what actually landed on the baseline branches (terminal only) */}
-      {TERMINAL.has(run.status) && <RunDiffCard runId={run.id} />}
+      {/* Run diff — what actually landed on the baseline branches. Shown from
+          awaiting_user_complaint (worktrees still alive, cleanup deferred)
+          through terminal statuses; also visible during complaint_processing
+          (read-only — mutating actions blocked in-card). */}
+      {RUN_DIFF_VISIBLE.has(run.status) && (
+        <RunDiffCard
+          runId={run.id}
+          runStatus={run.status}
+          refreshToken={runDiffRefresh}
+        />
+      )}
 
-      {/* Dev-mode PR module — worktrees awaiting a PR decision (terminal only;
-          hides itself unless the backend returns pending items) */}
-      {TERMINAL.has(run.status) && <PendingPrCard runId={run.id} />}
+      {/* Dev-mode PR module — worktrees awaiting a PR decision (same window
+          as Run diff; hides itself unless the backend returns pending items) */}
+      {POST_RUN_MODULES_VISIBLE.has(run.status) && (
+        <PendingPrCard
+          runId={run.id}
+          runStatus={run.status}
+          onMerged={() => setRunDiffRefresh((v) => v + 1)}
+        />
+      )}
 
       {/* Task dependency board */}
       <Card className="p-0 overflow-hidden">
@@ -2225,10 +2253,14 @@ function PendingMergeDiffBody({
   loading,
   error,
   data,
+  hideBaseAhead = false,
+  emptyText,
 }: {
   loading: boolean;
   error: string | null;
   data: PendingMergeDiff | null;
+  hideBaseAhead?: boolean;
+  emptyText?: string;
 }) {
   const { t } = useTranslation();
   if (loading) return <Loading />;
@@ -2245,13 +2277,13 @@ function PendingMergeDiffBody({
           ? ` · ${t("runDetail.diffBranchAhead", { count: data.branchAhead })}`
           : ""}
       </div>
-      {data.baseAhead > 0 && (
+      {!hideBaseAhead && data.baseAhead > 0 && (
         <div className="rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-700">
           {t("runDetail.diffBaseAhead", { count: data.baseAhead })}
         </div>
       )}
       {!hasPatch && !hasUncommitted ? (
-        <div className="text-sm text-ink-500">{t("runDetail.diffEmpty")}</div>
+        <div className="text-sm text-ink-500">{emptyText ?? t("runDetail.diffEmpty")}</div>
       ) : (
         <>
           {hasPatch && (
@@ -2325,12 +2357,20 @@ function DiffView({ patch }: { patch: string }) {
 
 /** Post-run "Run diff" module: lists each non-OpenClaw agent whose branch
  *  actually landed content on a baseline branch this run, with a per-agent
- *  diff modal. Rendered only for terminal runs (see call site). Agents with
- *  nothing effectively merged (dismissed / failed / empty) are omitted by the
- *  backend, so an empty list means "nothing was merged". */
-function RunDiffCard({ runId }: { runId: string }) {
+ *  diff modal. Rendered from awaiting_user_complaint through terminal runs.
+ *  Mutating actions (revert) are blocked during complaint_processing. */
+function RunDiffCard({
+  runId,
+  runStatus,
+  refreshToken = 0,
+}: {
+  runId: string;
+  runStatus: string;
+  refreshToken?: number;
+}) {
   const { t } = useTranslation();
   const { confirm, alert } = useDialog();
+  const actionsBlocked = runStatus === "complaint_processing";
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [agents, setAgents] = useState<RunDiffAgent[]>([]);
@@ -2352,10 +2392,16 @@ function RunDiffCard({ runId }: { runId: string }) {
 
   useEffect(() => {
     void load();
-  }, [load]);
+    // refreshToken bumps when a pending-PR direct merge lands new content on
+    // the baseline, so the merged entry appears here without a page reload.
+  }, [load, refreshToken]);
 
   const onRevert = useCallback(
     async (agentId: string) => {
+      if (actionsBlocked) {
+        void alert(t("runDetail.postRunModuleComplaintBlocked"));
+        return;
+      }
       const ok = await confirm(
         t("runDetail.runDiffRevertConfirmBody", { agent: agentId }),
         {
@@ -2377,7 +2423,7 @@ function RunDiffCard({ runId }: { runId: string }) {
         setRevertingId(null);
       }
     },
-    [runId, confirm, alert, t, load],
+    [runId, confirm, alert, t, load, actionsBlocked],
   );
 
   return (
@@ -2453,16 +2499,28 @@ function RunDiffCard({ runId }: { runId: string }) {
 }
 
 
+type PendingPrBusy = { agentId: string; action: "submit" | "merge" | "discard" };
+
 /** Developer-mode PR module: agents whose worktree branch neither self-merged
  *  into the baseline nor went out as a PR yet. Backend gates visibility (dev
- *  mode at run time AND now, terminal status, worktree still on disk), so this
- *  card renders nothing whenever the list is empty or unavailable. */
-function PendingPrCard({ runId }: { runId: string }) {
+ *  mode at run time AND now, eligible status, worktree still on disk), so this
+ *  card renders nothing whenever the list is empty or unavailable. Mutating
+ *  actions are blocked during complaint_processing. */
+function PendingPrCard({
+  runId,
+  runStatus,
+  onMerged,
+}: {
+  runId: string;
+  runStatus: string;
+  onMerged?: () => void;
+}) {
   const { t } = useTranslation();
   const { confirm, alert } = useDialog();
+  const actionsBlocked = runStatus === "complaint_processing";
   const [items, setItems] = useState<PendingPrAgent[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [busy, setBusy] = useState<PendingPrBusy | null>(null);
   const [diffAgent, setDiffAgent] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
@@ -2504,6 +2562,10 @@ function PendingPrCard({ runId }: { runId: string }) {
 
   const onSubmitPr = useCallback(
     async (item: PendingPrAgent) => {
+      if (actionsBlocked) {
+        void alert(t("runDetail.postRunModuleComplaintBlocked"));
+        return;
+      }
       const ok = await confirm(
         t("runDetail.pendingPrSubmitConfirmBody", {
           agent: item.agentId,
@@ -2515,7 +2577,7 @@ function PendingPrCard({ runId }: { runId: string }) {
         },
       );
       if (!ok) return;
-      setBusyId(item.agentId);
+      setBusy({ agentId: item.agentId, action: "submit" });
       try {
         const res = await api.submitPendingPr(runId, item.agentId);
         if (res.success) {
@@ -2534,14 +2596,57 @@ function PendingPrCard({ runId }: { runId: string }) {
         const reason = e instanceof ApiError ? e.message : String(e);
         void alert(t("runDetail.pendingPrSubmitFailed", { reason }));
       } finally {
-        setBusyId(null);
+        setBusy(null);
       }
     },
-    [runId, confirm, alert, t, load],
+    [runId, confirm, alert, t, load, actionsBlocked],
+  );
+
+  const onMergeToBaseline = useCallback(
+    async (item: PendingPrAgent) => {
+      if (actionsBlocked) {
+        void alert(t("runDetail.postRunModuleComplaintBlocked"));
+        return;
+      }
+      const ok = await confirm(
+        t("runDetail.pendingPrMergeConfirmBody", {
+          agent: item.agentId,
+          target: item.targetBranch,
+        }),
+        {
+          title: t("runDetail.pendingPrMergeConfirmTitle"),
+          okText: t("runDetail.pendingPrMergeConfirmOk"),
+        },
+      );
+      if (!ok) return;
+      setBusy({ agentId: item.agentId, action: "merge" });
+      try {
+        const res = await api.mergePendingPr(runId, item.agentId);
+        if (res.success) {
+          void alert(t("runDetail.pendingPrMergeSuccess", { target: item.targetBranch }));
+          await load();
+          // The merged content now exists on the baseline — refresh the
+          // Run-diff module so the new entry shows up immediately.
+          onMerged?.();
+        } else {
+          void alert(t("runDetail.pendingPrMergeFailed", { reason: res.message }));
+        }
+      } catch (e) {
+        const reason = e instanceof ApiError ? e.message : String(e);
+        void alert(t("runDetail.pendingPrMergeFailed", { reason }));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [runId, confirm, alert, t, load, onMerged, actionsBlocked],
   );
 
   const onDiscard = useCallback(
     async (item: PendingPrAgent) => {
+      if (actionsBlocked) {
+        void alert(t("runDetail.postRunModuleComplaintBlocked"));
+        return;
+      }
       const ok = await confirm(
         t("runDetail.pendingPrDiscardConfirmBody", { agent: item.agentId }),
         {
@@ -2551,7 +2656,7 @@ function PendingPrCard({ runId }: { runId: string }) {
         },
       );
       if (!ok) return;
-      setBusyId(item.agentId);
+      setBusy({ agentId: item.agentId, action: "discard" });
       try {
         await api.discardPendingPr(runId, item.agentId);
         await load();
@@ -2559,10 +2664,10 @@ function PendingPrCard({ runId }: { runId: string }) {
         const reason = e instanceof ApiError ? e.message : String(e);
         void alert(t("runDetail.pendingPrDiscardFailed", { reason }));
       } finally {
-        setBusyId(null);
+        setBusy(null);
       }
     },
-    [runId, confirm, alert, t, load],
+    [runId, confirm, alert, t, load, actionsBlocked],
   );
 
   if (!loaded || items.length === 0) return null;
@@ -2572,7 +2677,9 @@ function PendingPrCard({ runId }: { runId: string }) {
       <CardTitle>{t("runDetail.pendingPrTitle")}</CardTitle>
       <div className="text-xs text-ink-500 mb-3">{t("runDetail.pendingPrHint")}</div>
       <div className="space-y-2">
-        {items.map((item) => (
+        {items.map((item) => {
+          const rowBusy = busy?.agentId === item.agentId ? busy.action : null;
+          return (
           <div
             key={item.agentId}
             className="flex items-center justify-between gap-3 rounded-md border border-ink-200 bg-ink-50/40 px-3 py-2"
@@ -2594,24 +2701,37 @@ function PendingPrCard({ runId }: { runId: string }) {
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busyId !== null}
+                disabled={busy !== null}
                 onClick={() => void onSubmitPr(item)}
               >
-                {busyId === item.agentId
+                {rowBusy === "submit"
                   ? t("runDetail.pendingPrSubmitting")
                   : t("runDetail.pendingPrSubmit")}
               </button>
               <button
                 type="button"
+                className="btn-outline"
+                disabled={busy !== null}
+                onClick={() => void onMergeToBaseline(item)}
+              >
+                {rowBusy === "merge"
+                  ? t("runDetail.pendingPrMerging")
+                  : t("runDetail.pendingPrMerge")}
+              </button>
+              <button
+                type="button"
                 className="btn-outline text-red-600 dark:text-red-400"
-                disabled={busyId !== null}
+                disabled={busy !== null}
                 onClick={() => void onDiscard(item)}
               >
-                {t("runDetail.pendingPrDiscard")}
+                {rowBusy === "discard"
+                  ? t("runDetail.pendingPrDiscarding")
+                  : t("runDetail.pendingPrDiscard")}
               </button>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
       <Modal
         open={diffAgent !== null}
@@ -2623,6 +2743,8 @@ function PendingPrCard({ runId }: { runId: string }) {
           loading={diffLoading}
           error={diffError}
           data={diffData}
+          hideBaseAhead
+          emptyText={t("runDetail.pendingPrDiffEmpty")}
         />
       </Modal>
     </Card>

@@ -125,6 +125,23 @@ _MERGE_DECISION_ALLOWED = {
     RunStatus.failed,
     RunStatus.aborted,
 }
+# Statuses that surface the developer-mode PR module (read-only list/diff).
+# ``complaint_processing`` is included so the UI can keep showing pending items
+# while headless fix agents run; mutating actions use ``_PR_MODULE_ACTIONABLE``.
+# Abnormal terminals (aborted / failed / complaint_failed / orphaned) force a
+# full worktree cleanup, so the module must never render for them.
+_PR_MODULE_VISIBLE_STATUSES = {
+    RunStatus.awaiting_user_complaint,
+    RunStatus.complaint_processing,
+    RunStatus.completed,
+    RunStatus.completed_with_conflicts,
+}
+# Statuses that allow submit / merge / discard on the PR module.
+_PR_MODULE_ACTIONABLE_STATUSES = {
+    RunStatus.awaiting_user_complaint,
+    RunStatus.completed,
+    RunStatus.completed_with_conflicts,
+}
 
 # Single-sourced scheduler-internal run.inputs markers (see run_metadata.py).
 _POST_COMPLAINT_STATUS_KEY = POST_COMPLAINT_STATUS_KEY
@@ -1561,17 +1578,28 @@ async def revert_run_agent_merge(
 ) -> RunMergeRevertView:
     """Revert (撤销合入) this run's merges of *agent_id* on its baseline branch.
 
-    Available any time after the run completed. Uses ``git revert -m 1`` — a
-    **non-destructive** operation that adds inverse commits; it never rewrites
-    history or edits files by any other means. If git can't do it cleanly
-    (conflicts with later commits, dirty tree, …) nothing is changed and the git
-    reason is returned (``ok=false``, ``409 MERGE_REVERT_FAILED``). On success the
-    agent is recorded as reverted and disappears from the Run-diff module.
+    Available while the run awaits complaint input and at any terminal status.
+    Uses ``git revert -m 1`` — a **non-destructive** operation that adds
+    inverse commits; it never rewrites history or edits files by any other
+    means. If git can't do it cleanly (conflicts with later commits, dirty
+    tree, …) nothing is changed and the git reason is returned (``ok=false``,
+    ``409 MERGE_REVERT_FAILED``). On success the agent is recorded as reverted
+    and disappears from the Run-diff module; its worktree is NOT preserved —
+    the normal (deferred) terminal cleanup removes it.
     """
     run = storage.run_get(run_id)
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
+    # Block while the scheduler / complaint agents may be writing baselines
+    # (running, complaint_processing, …); allow awaiting_user_complaint (no
+    # scheduler activity — the run is parked on user input) and terminals.
+    if run.status not in _TERMINAL and run.status != RunStatus.awaiting_user_complaint:
+        raise ApiError(
+            "MERGE_REVERT_NOT_ALLOWED",
+            f"revert is not available in status {_status_str(run.status)}",
+            status_code=409,
+        )
     agent = next(
         (a for a in _run_diff_agents(run, storage) if a.id == agent_id), None,
     )
@@ -1766,6 +1794,88 @@ async def _pending_pr_tail_cleanup_if_done(
     await _cleanup_terminal_tail(run=run, storage=storage, flow=flow)
 
 
+def _ensure_pending_pr_actionable(run: FlowRun) -> None:
+    """Reject PR-module actions outside allowed statuses (409).
+
+    During ``complaint_processing`` headless fix agents run with worktrees as
+    cwd; user merge/PR/discard actions must not race them.
+    """
+    if run.status not in _PR_MODULE_ACTIONABLE_STATUSES:
+        raise ApiError(
+            "PR_NOT_ACTIONABLE",
+            f"pending-PR actions are not available in status {_status_str(run.status)}",
+            status_code=409,
+        )
+
+
+async def _pending_pr_post_action_cleanup(
+    *, run: FlowRun, storage: StorageBackend, agent_id: str, remaining: list[str],
+) -> None:
+    """Worktree cleanup after a successful submit / merge / discard.
+
+    Terminal runs clean the agent worktree immediately (and trigger the
+    deferred team cleanup once the marker empties). While the run is still
+    ``awaiting_user_complaint`` ALL deletions are deferred: complaint fix
+    agents need worktrees as their cwd, and the whole team is swept in one
+    place when the complaint phase finishes (run_terminal_tail_cleanup — a
+    handled agent is no longer in the marker, so it is not preserved there).
+    """
+    if run.status not in _TERMINAL:
+        return
+    await cleanup_non_openclaw_workspace_after_review_decision(
+        run=run, agent_id=agent_id, storage=storage,
+    )
+    await _pending_pr_tail_cleanup_if_done(run=run, storage=storage, remaining=remaining)
+
+
+async def _clear_worktree_uncommitted(
+    *, run: FlowRun, storage: StorageBackend, agent_id: str, worktree: str,
+) -> None:
+    """Drop ALL uncommitted changes in *worktree* before a merge / PR push.
+
+    Defensive: dispatch prompts require agents to commit their work in-task
+    and complaint-phase Hermes agents are told not to touch worktrees at all —
+    but if anything slipped through, uncommitted noise must never ride into a
+    user-triggered merge/PR. Instrumented: when dirt IS found we log a warning
+    and emit a ``worktree_uncommitted_cleared`` RunEvent, so "did the agent
+    commit as instructed?" is auditable from logs.
+    """
+    cli = get_clawteam_cli()
+    entries: list[str] = []
+    try:
+        dirty, entries = await cli.workspace_has_uncommitted_changes(
+            worktree_path=worktree,
+        )
+    except Exception as exc:
+        logger.warning(
+            "pending_pr_dirty_check_failed",
+            run_id=run.id, agent_id=agent_id, error=str(exc),
+        )
+        dirty = True  # be safe: still run the reset below
+        entries = []
+    if not dirty:
+        return
+    if entries:
+        # Instrumentation: the agent did NOT commit everything as instructed.
+        logger.warning(
+            "agent_left_uncommitted_changes",
+            run_id=run.id, agent_id=agent_id,
+            worktree=worktree, entries=entries[:50],
+        )
+        _emit_run_event(
+            storage, run.id, "worktree_uncommitted_cleared", agent_id=agent_id,
+            payload={"worktree": worktree, "entries": entries[:50]},
+        )
+    for argv in (["git", "reset", "--hard", "HEAD"], ["git", "clean", "-fd"]):
+        rc, _out, err = await _run_pr_command(argv, cwd=worktree, timeout_sec=60.0)
+        if rc != 0:
+            logger.warning(
+                "pending_pr_worktree_clear_failed",
+                run_id=run.id, agent_id=agent_id,
+                argv=argv, detail=(err or "")[:500],
+            )
+
+
 @router.get("/runs/{run_id}/pending-prs", response_model=PendingPrListView)
 async def list_pending_prs(
     run_id: Annotated[str, Path()],
@@ -1776,14 +1886,21 @@ async def list_pending_prs(
 
     Empty (module hidden) unless ALL of: the run recorded pending-PR agents at
     finalize (i.e. it EXECUTED in developer mode), the Flow is CURRENTLY in
-    developer mode, the run is terminal, and the agent's worktree still exists
-    on disk (out-of-band deletions silently drop out — never an error).
+    developer mode, the run status is in ``_PR_MODULE_VISIBLE_STATUSES``
+    (``awaiting_user_complaint``, ``complaint_processing``, or a healthy
+    terminal), and the agent's worktree still exists on disk (out-of-band
+    deletions silently drop out — never an error).
     """
     run = storage.run_get(run_id)
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
-    if run.status not in _TERMINAL:
+    # Module surfaces while awaiting complaint input, during complaint
+    # processing (read-only — actions are gated separately), and at healthy
+    # terminals. Abnormal terminals (aborted / failed / complaint_failed /
+    # orphaned) stay hidden because termination force-cleans all worktrees
+    # even if a stale marker lingers in run.inputs.
+    if run.status not in _PR_MODULE_VISIBLE_STATUSES:
         return PendingPrListView()
     pending_ids = _list_dev_pending_pr_agent_ids(run)
     if not pending_ids:
@@ -1900,6 +2017,7 @@ async def submit_pending_pr(
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
+    _ensure_pending_pr_actionable(run)
     if agent_id not in _list_dev_pending_pr_agent_ids(run):
         raise ApiError(
             "PR_NOT_PENDING",
@@ -1931,6 +2049,10 @@ async def submit_pending_pr(
     if agent is not None:
         target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
 
+    # Defensive: only committed content may ride into the PR.
+    await _clear_worktree_uncommitted(
+        run=run, storage=storage, agent_id=agent_id, worktree=worktree,
+    )
     rc, out, err = await _run_pr_command(
         ["git", "push", "-u", "origin", branch],
         cwd=worktree, timeout_sec=_PR_PUSH_TIMEOUT_SEC,
@@ -1975,10 +2097,9 @@ async def submit_pending_pr(
         payload={"branch": branch, "target_branch": target, "pr_url": pr_url},
     )
     remaining = _remove_dev_pending_pr_agent(run=run, storage=storage, agent_id=agent_id)
-    await cleanup_non_openclaw_workspace_after_review_decision(
-        run=run, agent_id=agent_id, storage=storage,
+    await _pending_pr_post_action_cleanup(
+        run=run, storage=storage, agent_id=agent_id, remaining=remaining,
     )
-    await _pending_pr_tail_cleanup_if_done(run=run, storage=storage, remaining=remaining)
     return PendingPrSubmitResponse(
         agent_id=agent_id, success=True, pr_url=pr_url, message="PR created",
     )
@@ -1999,6 +2120,7 @@ async def discard_pending_pr(
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
+    _ensure_pending_pr_actionable(run)
     if agent_id not in _list_dev_pending_pr_agent_ids(run):
         raise ApiError(
             "PR_NOT_PENDING",
@@ -2009,12 +2131,108 @@ async def discard_pending_pr(
         storage, run.id, "dev_pr_discarded", agent_id=agent_id, payload={},
     )
     remaining = _remove_dev_pending_pr_agent(run=run, storage=storage, agent_id=agent_id)
-    await cleanup_non_openclaw_workspace_after_review_decision(
-        run=run, agent_id=agent_id, storage=storage,
+    await _pending_pr_post_action_cleanup(
+        run=run, storage=storage, agent_id=agent_id, remaining=remaining,
     )
-    await _pending_pr_tail_cleanup_if_done(run=run, storage=storage, remaining=remaining)
     refreshed = storage.run_get(run.id) or run
     return _to_summary(refreshed)
+
+
+@router.post(
+    "/runs/{run_id}/pending-prs/{agent_id}/merge",
+    response_model=MergeResponse,
+)
+async def merge_pending_pr(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> MergeResponse:
+    """Directly merge a pending-PR agent's worktree branch into its baseline.
+
+    Local-only (no remote required — the locked merge fetches origin only when
+    one is configured, otherwise it is a pure local merge), so this works even
+    when the repo has no remote. On success the worktree is removed and the
+    agent leaves the module; on failure nothing changes and the git reason is
+    surfaced (the frontend shows an alert). Requires the Flow to currently be in
+    developer mode.
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    _ensure_pending_pr_actionable(run)
+    if agent_id not in _list_dev_pending_pr_agent_ids(run):
+        raise ApiError(
+            "PR_NOT_PENDING",
+            f"agent {agent_id!r} has no pending PR in this run",
+            status_code=404,
+        )
+    flow = storage.flow_get(run.flow_id)
+    if not _flow_currently_dev_mode(flow):
+        raise ApiError(
+            "NOT_DEV_MODE",
+            "the Flow is not in developer mode",
+            status_code=409,
+        )
+    agent = _spec_agent_for_run(run=run, agent_id=agent_id, storage=storage)
+    target = DEFAULT_TARGET_BRANCH
+    if agent is not None:
+        target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+    source_branch = f"clawteam/{run.team_name}/{agent_id}"
+    merge_repo = _resolve_agent_repo_for_run(run=run, agent_id=agent_id, storage=storage)
+    # Defensive: uncommitted worktree noise never rides into the merge (the
+    # merge itself only takes commits, but a dirty worktree left by an agent
+    # is also evidence it skipped its mandatory commit step — log + clear).
+    row = await _find_pending_pr_workspace_row(
+        run=run, agent_id=agent_id, storage=storage,
+    )
+    if row is not None:
+        wt = str(FsPath(str(row.get("worktree_path") or "")).expanduser())
+        if wt:
+            await _clear_worktree_uncommitted(
+                run=run, storage=storage, agent_id=agent_id, worktree=wt,
+            )
+    cli = get_clawteam_cli()
+    ok, msg = await cli.workspace_merge(
+        team=run.team_name, agent=agent_id, repo=merge_repo, target=target,
+    )
+    if ok:
+        _emit_run_event(
+            storage, run.id, "dev_pr_merged", agent_id=agent_id,
+            payload={"source_branch": source_branch, "target_branch": target,
+                     "repo_root": merge_repo},
+        )
+    else:
+        failure_kind = classify_merge_failure(msg)
+        _emit_run_event(
+            storage, run.id,
+            "merge_conflict" if failure_kind == "conflict" else "merge_error",
+            agent_id=agent_id,
+            payload={"source_branch": source_branch, "target_branch": target,
+                     "repo_root": merge_repo, "stderr": (msg or "")[:1000],
+                     "failure_kind": failure_kind},
+        )
+    if not ok:
+        # Keep the worktree + marker so the user can retry / discard / PR.
+        reason = (msg or "").strip()[:900]
+        if failure_kind == "conflict":
+            guidance = (
+                "Merge failed due to a git conflict. Resolve it manually in the "
+                "agent worktree, then retry or discard. The worktree is kept intact."
+            )
+        else:
+            guidance = (
+                "Merge failed due to an environment/repository error. Verify the "
+                "repository/branch state, then retry. The worktree is kept intact."
+            )
+        message = f"{guidance}\n\n{reason}" if reason else guidance
+        return MergeResponse(agent_id=agent_id, success=False, message=message[:1000])
+    remaining = _remove_dev_pending_pr_agent(run=run, storage=storage, agent_id=agent_id)
+    await _pending_pr_post_action_cleanup(
+        run=run, storage=storage, agent_id=agent_id, remaining=remaining,
+    )
+    return MergeResponse(agent_id=agent_id, success=True, message="merged")
 
 
 @router.post("/runs/{run_id}/merge", response_model=MergeResponse)
