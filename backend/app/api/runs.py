@@ -1435,12 +1435,25 @@ async def get_checkpoint_item_diff(
     """Return the full worktree diff (vs baseline) for one manual-checkpoint item.
 
     Powers the "View changes" modal in the awaiting-checkpoint UI: shows every
-    modification the item's owner agent has made in its worktree *so far* —
-    committed content (``base...branch``) plus not-yet-committed working-tree
-    changes. The checkpoint fires mid-run, so the worktree still exists. Read
-    only (no checkout / no lock), reusing the same primitive as the pending-merge
-    diff. The active checkpoint lives only on the live controller, so this 409s
-    when no controller is attached (same as ``GET .../checkpoint``).
+    modification the item's owner agent has made *so far*, relative to the
+    baseline. The active checkpoint lives only on the live controller, so this
+    409s when no controller is attached (same as ``GET .../checkpoint``).
+
+    Two reference points, because a checkpoint item may or may not have merged
+    already, and both must render:
+
+    * **Not-yet-merged** (normal manual TUI tasks): the live worktree's
+      committed content (``base...branch``) plus not-yet-committed working-tree
+      changes — :meth:`ClawTeamCli.workspace_agent_patch`.
+    * **Auto-merge / self-merge sub-tasks** (OpenClaw always, plus dev/easy
+      self-merge tasks): the agent already merged its branch into the baseline as
+      the final task step, so the three-dot ``base...branch`` diff is empty (the
+      branch is fully contained in the base). We then reconstruct the agent's
+      contribution from the baseline's **merge history** —
+      :meth:`ClawTeamCli.run_merged_agent_patch`, the same read-only primitive the
+      post-run Run diff uses — so the reviewer still sees what changed.
+
+    Read only (no checkout / no lock) in both paths.
     """
     run = storage.run_get(run_id)
     if run is None:
@@ -1482,32 +1495,61 @@ async def get_checkpoint_item_diff(
             "checkpoint_diff_failed",
             run_id=run.id, agent_id=agent_id, error=str(exc),
         )
-        raise ApiError(
-            "DIFF_UNAVAILABLE",
-            f"failed to compute diff for agent {agent_id!r}",
-            status_code=502,
-        ) from exc
-    if result is None:
+        result = None
+
+    wt = result or {}
+    branch = str(wt.get("branch") or item.get("branch_name") or "")
+    base_branch = str(wt.get("base_branch") or item.get("base_branch") or "")
+    repo_root = str(wt.get("repo_root") or "")
+    committed_patch = str(wt.get("patch") or "")
+    committed_truncated = bool(wt.get("patch_truncated"))
+    uncommitted_patch = str(wt.get("uncommitted_patch") or "")
+    uncommitted_truncated = bool(wt.get("uncommitted_truncated"))
+
+    # Auto-merge / self-merge sub-tasks have already landed their work on the
+    # baseline, so the three-dot worktree diff is empty. Reconstruct what the
+    # agent merged from the baseline's merge history so the change is still shown.
+    if not committed_patch.strip():
+        try:
+            merged = await cli.run_merged_agent_patch(
+                team=run.team_name, agent=agent_id, repo=repo, include_patch=True,
+            )
+        except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
+            logger.warning(
+                "checkpoint_merged_diff_failed",
+                run_id=run.id, agent_id=agent_id, error=str(exc),
+            )
+            merged = None
+        if merged and str(merged.get("patch") or "").strip():
+            committed_patch = str(merged.get("patch") or "")
+            committed_truncated = bool(merged.get("patch_truncated"))
+            branch = branch or str(merged.get("branch") or "")
+            repo_root = repo_root or str(merged.get("repo_root") or "")
+
+    # Nothing to show and no live worktree — the workspace was cleaned up and no
+    # matching merge exists in history.
+    if result is None and not committed_patch.strip() and not uncommitted_patch.strip():
         raise ApiError(
             "WORKSPACE_NOT_FOUND",
-            f"no worktree found for agent {agent_id!r} (it may have been cleaned up)",
+            f"no worktree or merged history found for agent {agent_id!r} "
+            "(it may have been cleaned up)",
             status_code=404,
         )
-    base_branch = str(result.get("base_branch") or "")
+
     return PendingMergeDiffView(
         agent_id=agent_id,
-        branch=str(result.get("branch") or item.get("branch_name") or ""),
+        branch=branch,
         base_branch=base_branch,
         # No merge target at a checkpoint — the diff is purely "vs baseline", so
         # the header reads "<branch> (base: <base>) → <base>".
         target_branch=base_branch or DEFAULT_TARGET_BRANCH,
-        repo_root=str(result.get("repo_root") or ""),
-        patch=str(result.get("patch") or ""),
-        patch_truncated=bool(result.get("patch_truncated")),
-        uncommitted_patch=str(result.get("uncommitted_patch") or ""),
-        uncommitted_truncated=bool(result.get("uncommitted_truncated")),
-        base_ahead=int(result.get("base_ahead") or 0),
-        branch_ahead=int(result.get("branch_ahead") or 0),
+        repo_root=repo_root,
+        patch=committed_patch,
+        patch_truncated=committed_truncated,
+        uncommitted_patch=uncommitted_patch,
+        uncommitted_truncated=uncommitted_truncated,
+        base_ahead=int(wt.get("base_ahead") or 0),
+        branch_ahead=int(wt.get("branch_ahead") or 0),
     )
 
 

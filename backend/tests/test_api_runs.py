@@ -1307,12 +1307,84 @@ def test_checkpoint_item_diff_workspace_not_found_404(
             del team, agent, repo, kw
             return None
 
+        async def run_merged_agent_patch(self, *, team, agent, repo, **kw):
+            del team, agent, repo, kw
+            return None
+
     from app.api import runs as runs_mod
     monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
 
     r = app_client.get(f"/api/runs/{run.id}/checkpoint/items/t1/diff")
     assert r.status_code == 404
     assert r.json()["error"] == "WORKSPACE_NOT_FOUND"
+
+
+def test_checkpoint_item_diff_auto_merge_uses_merge_history(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-merge sub-tasks already merged their branch into the baseline, so the
+    live worktree three-dot diff is empty — the endpoint must reconstruct the
+    contribution from merge history."""
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
+
+    class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "t2", "items": [{
+                "task_id": "t1",
+                "owner_agent_id": "alice",
+                "branch_name": "clawteam/csflow-test/alice",
+                "base_branch": "main",
+                "decision": "pending",
+            }]}
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
+
+    captured: dict[str, Any] = {}
+
+    class _FakeCli:
+        async def workspace_agent_patch(self, *, team, agent, repo, **kw):
+            # Branch already merged into base → empty committed diff, no scratch.
+            return {
+                "repo_root": "/tmp/r",
+                "branch": "clawteam/csflow-test/alice",
+                "base_branch": "main",
+                "patch": "",
+                "patch_truncated": False,
+                "uncommitted_patch": "",
+                "uncommitted_truncated": False,
+                "base_ahead": 3,
+                "branch_ahead": 0,
+            }
+
+        async def run_merged_agent_patch(self, *, team, agent, repo, include_patch=True, **kw):
+            captured["merged_team"] = team
+            captured["merged_agent"] = agent
+            captured["include_patch"] = include_patch
+            return {
+                "repo_root": "/tmp/r",
+                "branch": "clawteam/csflow-test/alice",
+                "merge_count": 1,
+                "commit_count": 2,
+                "files_changed": 1,
+                "insertions": 5,
+                "deletions": 1,
+                "patch": "diff --git a/y b/y\n+merged-line\n",
+                "patch_truncated": False,
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/checkpoint/items/t1/diff")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["agentId"] == "alice"
+    # Committed patch comes from the reconstructed merge history, not the worktree.
+    assert "+merged-line" in body["patch"]
+    assert captured["merged_agent"] == "alice"
+    assert captured["include_patch"] is True
 
 
 def test_merge_calls_perform_manual_merge(

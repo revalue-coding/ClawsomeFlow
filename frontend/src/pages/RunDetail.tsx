@@ -2364,7 +2364,15 @@ function CheckpointDiffButton({
         title={t("runDetail.diffModalTitle", { agent: agentId })}
         width="max-w-5xl"
       >
-        <PendingMergeDiffBody loading={loading} error={error} data={data} />
+        {/* hideBaseAhead: this is a review checkpoint, not a merge action — the
+            "base moved on, merge may need reconcile" warning is irrelevant here,
+            and for auto-merged sub-tasks the branch is already on the base. */}
+        <PendingMergeDiffBody
+          loading={loading}
+          error={error}
+          data={data}
+          hideBaseAhead
+        />
       </Modal>
     </>
   );
