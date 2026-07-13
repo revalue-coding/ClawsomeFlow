@@ -118,9 +118,9 @@ class DispatchContext:
     # True when THIS task must self-merge its worktree branch into the baseline
     # branch in-task (resolved per task by app/flow_modes.py::task_self_merges —
     # easy mode, dev-mode auto-merge tasks, OpenClaw under dev mode, and every
-    # task of a scheduled normal run). When set, the dispatch adds the self-merge
-    # block and tells the worker to cite post-merge baseline absolute paths
-    # (the worktree is deleted at run end).
+    # task of an unattended normal run — timed schedule or MCP/--unattended).
+    # When set, the dispatch adds the self-merge block and tells the worker to
+    # cite post-merge baseline absolute paths (the worktree is deleted at run end).
     self_merge: bool = False
 
     # True in dev/easy modes only (flow_modes.merge_reference_enabled): inject the
@@ -343,16 +343,17 @@ def _task_block(ctx: DispatchContext) -> str:
     )
 
 
-def _scheduled_self_merge_steps(
+def _unattended_self_merge_steps(
     ctx: DispatchContext, start_no: int,
 ) -> tuple[list[str], int]:
-    """Self-merge + post-merge-path steps for scheduled runs (whole block).
+    """Self-merge + post-merge-path steps for unattended runs (whole block).
 
-    Scheduled runs are unattended: there is no user merge-review or complaint
-    phase, so every task must merge its own worktree branch into the baseline
-    branch itself, and must reference deliverables by their post-merge absolute
-    path under the baseline workspace (not the worktree). Inserted as one
-    cohesive block so it never tangles with the non-scheduled wording.
+    Unattended runs (timed schedule OR MCP / ``--unattended``) have no user
+    merge-review or complaint phase, so every task must merge its own worktree
+    branch into the baseline branch itself, and must reference deliverables by
+    their post-merge absolute path under the baseline workspace (not the
+    worktree). Inserted as one cohesive block so it never tangles with the
+    attended (review) wording.
     """
     wt = ctx.worktree.worktree_path if ctx.worktree else "<worktree-path>"
     repo_root = ctx.worktree.repo_root if ctx.worktree else "<baseline-workspace>"
@@ -362,7 +363,7 @@ def _scheduled_self_merge_steps(
         repo_root=repo_root,
         base_branch=base,
         feature_branch=branch,
-        merge_message=f"csflow: scheduled merge {branch}",
+        merge_message=f"csflow: unattended merge {branch}",
     )
     steps = [
         f"{start_no}. **Self-merge:** {merge_line}",
@@ -419,7 +420,7 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
     next_no += 1
 
     if ctx.self_merge:
-        merge_steps, next_no = _scheduled_self_merge_steps(ctx, next_no)
+        merge_steps, next_no = _unattended_self_merge_steps(ctx, next_no)
         steps.extend(merge_steps)
 
     if not ctx.task.is_leader_summary:
@@ -622,7 +623,7 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     next_no = 3
 
     if ctx.self_merge:
-        merge_steps, next_no = _scheduled_self_merge_steps(ctx, next_no)
+        merge_steps, next_no = _unattended_self_merge_steps(ctx, next_no)
         steps.extend(merge_steps)
 
     if ctx.self_merge:

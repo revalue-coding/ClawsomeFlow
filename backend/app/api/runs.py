@@ -86,10 +86,12 @@ from app.scheduler.run_metadata import (
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
     REVERTED_MERGE_AGENT_IDS_KEY,
+    UNATTENDED_KEY,
 )
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
 from app.services.run_notify import NOTIFIED_MARKER_KEY
+from app.services.run_report import extract_leader_report
 from app.storage import StorageBackend, get_storage
 from app.worktree.lookup import WorktreeLookup, get_worktree_lookup
 
@@ -298,12 +300,30 @@ class ClearRunHistoryResponse(_CamelModel):
 class RunCreatePayload(_CamelModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     runtime_prompt: str | None = None
+    # When True, mark the run "unattended": the scheduler skips the human
+    # merge-review, complaint and checkpoint phases and drives straight to a
+    # terminal status (same behaviour as a timed-schedule run; execution mode
+    # normal/easy/dev is preserved). Used by MCP-triggered runs and
+    # ``csflow runs start --unattended``. Trigger still returns immediately.
+    unattended: bool = False
 
 
 class RunCreateResponse(_CamelModel):
     id: str
     status: str
     team_name: str
+
+
+class RunResultView(_CamelModel):
+    """Status + leader work report for a run (for MCP / CLI result queries)."""
+
+    run_id: str
+    status: str
+    terminal: bool
+    success: bool
+    report: str | None = None
+    reason: str | None = None
+    finished_at: str | None = None
 
 
 class RunScheduleItemView(_CamelModel):
@@ -814,12 +834,20 @@ async def trigger_run(
     # mutable scheduler fields, never team_name).
     from app.models import _new_id
     run_id = _new_id("run")
+    # Unattended flag rides as an internal ``_csflow_*`` marker in run.inputs
+    # (stripped from public "Execution Parameters" by _public_run_inputs and not
+    # shown to agents — the runtime prompt is built from payload.inputs, which
+    # never carries the marker). ``is_scheduled`` stays False: it means literally
+    # "timed trigger" (run_schedules.py only). run_is_unattended() unions both.
+    run_inputs: dict[str, Any] = dict(payload.inputs or {})
+    if payload.unattended:
+        run_inputs[UNATTENDED_KEY] = "true"
     run = FlowRun(
         id=run_id,
         flow_id=flow.id, flow_version=flow.version,
         team_name=team_name_for_run(run_id),
         status=RunStatus.pending,
-        inputs=payload.inputs or {},
+        inputs=run_inputs,
         user=user,
         is_scheduled=False,
     )
@@ -1313,6 +1341,71 @@ def list_events(
     items = [_to_event_view(e) for e in rows]
     next_since = items[-1].id if items else since_id
     return EventListResponse(items=items, next_since_id=next_since)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Result (status + leader work report) — for MCP / CLI result queries
+# ──────────────────────────────────────────────────────────────────────
+
+
+_SUCCESS_RUN_STATUSES: frozenset[RunStatus] = frozenset({
+    RunStatus.completed,
+    RunStatus.completed_with_conflicts,
+})
+
+
+@router.get("/runs/{run_id}/result", response_model=RunResultView)
+def get_run_result(
+    run_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunResultView:
+    """Status + leader work report for one run (non-blocking, always safe to poll).
+
+    ``report`` is the leader's final work report, extracted from the run's
+    ``run_terminal_execution_log`` event; it is ``None`` until the run reaches a
+    terminal status. ``terminal``/``success`` classify the current status.
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    status_val = run.status if isinstance(run.status, RunStatus) else RunStatus(run.status)
+    is_terminal = status_val in TERMINAL_RUN_STATUSES
+    report: str | None = None
+    reason: str | None = None
+    if is_terminal:
+        rows = storage.event_list(run_id=run.id, since_id=None, limit=500)
+        report = extract_leader_report(rows)
+        if status_val not in _SUCCESS_RUN_STATUSES:
+            reason = _terminal_reason_from_events(rows)
+    return RunResultView(
+        run_id=run.id,
+        status=_status_str(status_val),
+        terminal=is_terminal,
+        success=status_val in _SUCCESS_RUN_STATUSES,
+        report=report,
+        reason=reason,
+        finished_at=iso_utc(run.finished_at) if run.finished_at else None,
+    )
+
+
+def _terminal_reason_from_events(events: list[RunEvent]) -> str | None:
+    """Best-effort short failure reason for a non-success terminal run.
+
+    Reads the ``detail`` field of the latest ``run_terminal_execution_log`` (or a
+    ``run_finalize_failed`` event). Returns None when nothing usable is present.
+    """
+    wanted = {"run_terminal_execution_log", "run_finalize_failed"}
+    for ev in reversed(events):
+        if getattr(ev, "type", None) not in wanted:
+            continue
+        payload = getattr(ev, "payload", None) or {}
+        for key in ("detail", "reason", "error", "trigger"):
+            val = str(payload.get(key) or "").strip()
+            if val:
+                return val
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────

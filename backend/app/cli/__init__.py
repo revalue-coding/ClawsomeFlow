@@ -99,7 +99,9 @@ from app.cli import (  # noqa: E402,F401  (side-effect imports)
 from app.cli.ops import flows as _flows_mod  # noqa: E402
 from app.cli.ops import runs as _runs_mod  # noqa: E402
 from app.cli.ops import agents as _agents_mod  # noqa: E402
+from app.cli import mcp as _mcp_mod  # noqa: E402
 
 app.add_typer(_flows_mod.app, name="flows", help="Flow CRUD shortcuts.")
 app.add_typer(_runs_mod.app, name="runs", help="Run trigger / inspect / abort.")
 app.add_typer(_agents_mod.app, name="agents", help="OpenClaw agent management.")
+app.add_typer(_mcp_mod.app, name="mcp", help="MCP server: serve + register with agents.")

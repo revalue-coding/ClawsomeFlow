@@ -1466,6 +1466,33 @@ def upsert_mcp_server(
       edit that only changes the URL never wipes existing (masked) secrets.
     """
     aid = _validate_agent_id(agent_id)
+    server_name = _apply_mcp_server_entry(
+        _read_profile_config_dict(aid), name=name, transport=transport, url=url,
+        command=command, args=args, environment=environment, persist=lambda cfg: _write_profile_config_dict(aid, cfg),
+    )
+    for item in list_mcp_servers(aid):
+        if item["name"] == server_name:
+            return item
+    raise ProfileOpFailed(f"failed to persist MCP server {server_name!r}")
+
+
+def _apply_mcp_server_entry(
+    cfg: dict[str, Any],
+    *,
+    name: str,
+    transport: str,
+    url: str,
+    command: str = "",
+    args: list[str] | None = None,
+    environment: str | None = "",
+    persist,
+) -> str:
+    """Mutate *cfg*'s ``mcp_servers`` with one server entry, then ``persist(cfg)``.
+
+    Single source of the entry shape shared by profile-scoped
+    (:func:`upsert_mcp_server`) and default-profile
+    (:func:`upsert_default_profile_mcp_server`) writes. Returns the server name.
+    """
     server_name = _validate_mcp_server_name(name)
     mode = (transport or "http_sse").strip().lower()
     if mode == "stdio":
@@ -1482,7 +1509,6 @@ def upsert_mcp_server(
     if mode != "local" and not endpoint:
         raise AgentIdInvalid("MCP server URL is required")
 
-    cfg = _read_profile_config_dict(aid)
     mcp_servers = cfg.get("mcp_servers")
     if not isinstance(mcp_servers, dict):
         mcp_servers = {}
@@ -1517,11 +1543,72 @@ def upsert_mcp_server(
         entry["enabled"] = True
     mcp_servers[server_name] = entry
     cfg["mcp_servers"] = mcp_servers
-    _write_profile_config_dict(aid, cfg)
-    for item in list_mcp_servers(aid):
-        if item["name"] == server_name:
-            return item
-    raise ProfileOpFailed(f"failed to persist MCP server {server_name!r}")
+    persist(cfg)
+    return server_name
+
+
+def default_profile_config_path() -> Path:
+    """Config path of the profile ``hermes`` uses **without** ``-p`` — the
+    operator's active profile (``~/.hermes/active_profile``) or the root profile
+    (``~/.hermes``). This is the "default profile" targeted when no agent id is
+    given (e.g. ``csflow mcp install --platform hermes`` with no ``--agent``)."""
+    return _active_profile_root() / "config.yaml"
+
+
+def _read_config_dict_at(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _write_config_dict_at(path: Path, cfg: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(cfg, sort_keys=False, allow_unicode=False) or "{}\n",
+        encoding="utf-8",
+    )
+
+
+def upsert_default_profile_mcp_server(
+    *,
+    name: str,
+    transport: str,
+    url: str,
+    command: str = "",
+    args: list[str] | None = None,
+    environment: str | None = "",
+) -> str:
+    """Upsert an MCP server into the **default** profile config (no ``-p``).
+
+    Returns the server name. Same entry shape as :func:`upsert_mcp_server`.
+    """
+    path = default_profile_config_path()
+    return _apply_mcp_server_entry(
+        _read_config_dict_at(path), name=name, transport=transport, url=url,
+        command=command, args=args, environment=environment,
+        persist=lambda cfg: _write_config_dict_at(path, cfg),
+    )
+
+
+def delete_default_profile_mcp_server(name: str) -> bool:
+    """Remove *name* from the default profile's ``mcp_servers``. True if removed."""
+    server_name = _validate_mcp_server_name(name)
+    path = default_profile_config_path()
+    cfg = _read_config_dict_at(path)
+    mcp_servers = cfg.get("mcp_servers")
+    if not isinstance(mcp_servers, dict) or server_name not in mcp_servers:
+        return False
+    del mcp_servers[server_name]
+    if mcp_servers:
+        cfg["mcp_servers"] = mcp_servers
+    else:
+        cfg.pop("mcp_servers", None)
+    _write_config_dict_at(path, cfg)
+    return True
 
 
 def delete_mcp_server(agent_id: str, name: str) -> None:

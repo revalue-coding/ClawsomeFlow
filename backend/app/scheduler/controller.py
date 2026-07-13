@@ -92,7 +92,7 @@ from app.scheduler.finalize import (
     finalize_run,
     run_terminal_tail_cleanup,
 )
-from app.scheduler.run_metadata import POST_COMPLAINT_STATUS_KEY
+from app.scheduler.run_metadata import POST_COMPLAINT_STATUS_KEY, run_is_unattended
 from app.scheduler.naming import openclaw_session_id_for_run, team_name_for_run
 from app.repo_merge_lock import self_merge_instruction
 from app.scheduler.providers import DispatchClock
@@ -1077,6 +1077,11 @@ class RunController:
         if task.is_leader_summary:
             return False
         if not bool(getattr(task, "requires_human_checkpoint", False)):
+            return False
+        # Unattended runs (timed schedule OR MCP / --unattended) have no human in
+        # the loop to approve a checkpoint, so the run would stall forever at
+        # awaiting_user_checkpoint. Bypass the gate and dispatch the task.
+        if run_is_unattended(self.run):
             return False
         return True
 
@@ -3513,7 +3518,7 @@ class RunController:
         mode = self._flow_mode()
         self_merge = task_self_merges(
             mode=mode,
-            run_is_scheduled=bool(getattr(self.run, "is_scheduled", False)),
+            run_is_scheduled=run_is_unattended(self.run),
             task=task,
             agent=agent,
         )

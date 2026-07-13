@@ -49,6 +49,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from app.logging_setup import get_logger
 from app.models import TERMINAL_RUN_STATUSES, RunStatus, iso_utc
+from app.services.run_report import extract_leader_report
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from app.models import FlowRun
@@ -481,36 +482,9 @@ def post_webhook(
     return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
 
 
-def _extract_leader_report(events: list[Any]) -> str | None:
-    """Leader's final report text from the ``run_terminal_execution_log``
-    event's ``worker_report_history`` (mirrors the WebUI's extractLeaderReply).
-
-    Scans newest event first; within it, the latest report whose summary
-    starts with the ``leader final reply:`` marker wins, else the last
-    non-empty summary. Best-effort — returns None on any shape mismatch.
-    """
-    needle = "leader final reply:"
-    for ev in reversed(events):
-        if getattr(ev, "type", None) != "run_terminal_execution_log":
-            continue
-        history = (getattr(ev, "payload", None) or {}).get("worker_report_history")
-        if not isinstance(history, list):
-            continue
-        fallback: str | None = None
-        for item in reversed(history):
-            if not isinstance(item, dict):
-                continue
-            raw = str(item.get("summary") or "").strip()
-            if not raw:
-                continue
-            if raw.lower().startswith(needle):
-                stripped = raw[len(needle):].strip()
-                return stripped or raw
-            if fallback is None:
-                fallback = raw
-        if fallback:
-            return fallback
-    return None
+# Single implementation lives in app.services.run_report; kept as a private
+# alias because this module historically exposed it.
+_extract_leader_report = extract_leader_report
 
 
 def _extract_checkpoint_output(events: list[Any]) -> str | None:

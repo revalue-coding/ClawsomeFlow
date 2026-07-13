@@ -66,6 +66,7 @@ from app.scheduler.run_metadata import (
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
+    run_is_unattended,
 )
 from app.storage import StorageBackend
 from app.user_context import get_request_user, set_request_user
@@ -177,14 +178,16 @@ async def finalize_run(
             )
             return out
 
-        # Scheduled (unattended) runs: every task self-merges into the baseline
-        # branch in-task (see scheduler/prompts.py). There is no human in the
-        # loop, so skip both the user merge-review (awaiting_user_review) and the
-        # user complaint (awaiting_user_complaint) phases entirely and go straight
-        # to terminal ``completed``.
-        if getattr(ipt.run, "is_scheduled", False):
+        # Unattended runs (timed schedule OR explicitly flagged, e.g. MCP-triggered):
+        # every task self-merges into the baseline branch in-task (see
+        # scheduler/prompts.py). There is no human in the loop, so skip both the
+        # user merge-review (awaiting_user_review) and the user complaint
+        # (awaiting_user_complaint) phases entirely and go straight to terminal
+        # ``completed``. Execution *mode* (normal/easy/dev) is untouched — a dev
+        # unattended run still merges per-task and records dev_pending_pr below.
+        if run_is_unattended(ipt.run):
             out.final_status = RunStatus.completed
-            out.detail = "scheduled run: in-task self-merge; review + complaint skipped"
+            out.detail = "unattended run: in-task self-merge; review + complaint skipped"
             ipt.run.status = RunStatus.completed
             ipt.run.pending_merges = None
             merged_inputs = dict(ipt.run.inputs or {})
@@ -211,9 +214,10 @@ async def finalize_run(
             )
             out.team_cleaned = tail_out.team_cleaned
             logger.info(
-                "finalize_run_scheduled_autocomplete",
+                "finalize_run_unattended_autocomplete",
                 run_id=ipt.run.id,
                 team=ipt.run.team_name,
+                is_scheduled=bool(getattr(ipt.run, "is_scheduled", False)),
                 team_cleaned=out.team_cleaned,
             )
             return out
@@ -909,7 +913,7 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
             continue
         if task_self_merges(
             mode="dev",
-            run_is_scheduled=bool(getattr(run, "is_scheduled", False)),
+            run_is_scheduled=run_is_unattended(run),
             task=task,
             agent=agent,
         ):

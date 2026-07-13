@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json as jsonlib
 import re
 import shutil
 import sys
 from datetime import datetime, timedelta, timezone
-import json as jsonlib
 
 import typer
 from rich.console import Console
@@ -102,6 +102,12 @@ def start_run(
         False, "--no-prompt",
         help="Don't prompt for missing parameter fields; error instead.",
     ),
+    unattended: bool = typer.Option(
+        False, "--unattended",
+        help="Run without a human in the loop: skip merge-review / complaint / "
+             "checkpoint phases and drive straight to a terminal status "
+             "(execution mode normal/easy/dev is preserved).",
+    ),
 ) -> None:
     """Trigger a Run for a flow, supplying its user-defined parameter fields.
 
@@ -109,6 +115,9 @@ def start_run(
     are taken from ``--input name=value``. Any field still missing is prompted
     for interactively; with ``--no-prompt`` (or no terminal) a missing required
     field is an error instead.
+
+    Returns immediately with the new run id (never blocks). Use ``csflow runs
+    result <run_id>`` to fetch the status and leader work report afterwards.
     """
     values = _parse_kv(inputs)
     flow = get(f"/api/flows/{flow_id}")
@@ -130,10 +139,14 @@ def start_run(
                 f"{', '.join(missing)}. Provide via --input name=value."
             )
 
-    data = post(f"/api/flows/{flow_id}/runs", {"inputs": values})
+    body: dict = {"inputs": values}
+    if unattended:
+        body["unattended"] = True
+    data = post(f"/api/flows/{flow_id}/runs", body)
     console.print(
         f"[green]✓[/green] run [bold]{data['id']}[/bold] "
         f"team=[dim]{data['teamName']}[/dim] status={data['status']}"
+        + ("  [dim](unattended)[/dim]" if unattended else "")
     )
 
 
@@ -170,6 +183,37 @@ def show_run(
                 f"  [dim]{e['ts']}[/dim] [bold]{e['type']}[/bold] "
                 f"agent={e.get('agentId') or '—'} task={e.get('taskId') or '—'}"
             )
+
+
+@app.command("result")
+def run_result(
+    run_id: str = typer.Argument(...),
+    json: bool = typer.Option(False, "--json", help="Emit raw JSON."),
+) -> None:
+    """Show a Run's status and the leader's work report.
+
+    Non-blocking — safe to call at any time. ``report`` is empty until the run
+    reaches a terminal status.
+    """
+    data = get(f"/api/runs/{run_id}/result")
+    if json:
+        typer.echo(jsonlib.dumps(data, ensure_ascii=False, indent=2))
+        return
+    status = data.get("status")
+    tag = "[green]✓[/green]" if data.get("success") else (
+        "[yellow]…[/yellow]" if not data.get("terminal") else "[red]✗[/red]"
+    )
+    console.print(f"{tag} run [bold]{data['runId']}[/bold] status=[bold]{status}[/bold]")
+    if data.get("reason"):
+        console.print(f"  [red]reason:[/red] {data['reason']}")
+    report = data.get("report")
+    if report:
+        console.print("\n[bold]Leader work report:[/bold]")
+        console.print(report)
+    elif data.get("terminal"):
+        console.print("[dim](no leader report captured)[/dim]")
+    else:
+        console.print("[dim](run not finished yet)[/dim]")
 
 
 @app.command("abort")

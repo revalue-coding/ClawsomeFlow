@@ -500,6 +500,37 @@ async def test_scheduled_run_skips_review_and_complaint_completes_directly() -> 
 
 
 @pytest.mark.asyncio
+async def test_unattended_marker_run_skips_review_and_complaint_like_scheduled() -> None:
+    """An unattended-flagged MANUAL run (is_scheduled=False + _csflow_unattended
+    marker, e.g. MCP-triggered) behaves exactly like a scheduled run: self-merge
+    in-task → straight to completed, no review, no complaint."""
+    run, flow, spec = _make_run_and_spec(agents_kw=[
+        {"id": "alice", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": False, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+        {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": True, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+    ])
+    # NOT a timed schedule — the unattended marker rides in run.inputs.
+    assert run.is_scheduled is False
+    run.inputs = {**(run.inputs or {}), "_csflow_unattended": "true"}
+    cli = _StubCli()
+    mcp = _StubMcp(diffs={"alice": {"files": 3}})
+    out = await fin.finalize_run(
+        fin.FinalizeInput(run=run, flow=flow, agents=spec.agents,
+                          leader_agent_id="leader", has_failed_tasks=False),
+        storage=get_storage(), cli=cli, mcp=mcp,
+        worktree_lookup=_StubLookup(items=[_wt("alice")]),
+    )
+    assert out.final_status == RunStatus.completed
+    assert run.status == RunStatus.completed
+    assert run.pending_merges is None
+    assert cli.merge_calls == []
+    assert run.finished_at is not None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode_key", ["csflow.easy_mode", "csflow.dev_mode"])
 async def test_easy_or_dev_manual_skips_review_enters_complaint(mode_key: str) -> None:
     """Easy / developer mode on a MANUAL run (is_scheduled=False): tasks

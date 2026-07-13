@@ -180,6 +180,68 @@ def test_trigger_without_easy_mode_run_not_scheduled(
     assert run_row.is_scheduled is False
 
 
+def test_trigger_unattended_marks_run_and_hidden_from_public_inputs(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """unattended=true rides as a _csflow_ marker in run.inputs (drives
+    run_is_unattended) and is NOT exposed in the run's public Execution
+    Parameters. is_scheduled stays False."""
+    flow = _make_flow(owner="alice")
+    _stub_start_run(monkeypatch)
+
+    r = app_client.post(
+        f"/api/flows/{flow.id}/runs",
+        json={"inputs": {"goal": "x"}, "unattended": True},
+    )
+    assert r.status_code == 202, r.text
+    run_id = r.json()["id"]
+
+    run_row = get_storage().run_get(run_id)
+    assert run_row is not None
+    assert run_row.is_scheduled is False
+    assert run_row.inputs.get("_csflow_unattended") == "true"
+
+    # Public detail view hides the internal marker but keeps user inputs.
+    detail = app_client.get(f"/api/runs/{run_id}").json()
+    assert detail["inputs"] == {"goal": "x"}
+
+
+def test_run_result_endpoint_extracts_leader_report(
+    app_client: TestClient,
+) -> None:
+    """GET /runs/{id}/result returns terminal/success + the leader report from
+    the run_terminal_execution_log event."""
+    flow = _make_flow(owner="alice")
+    storage = get_storage()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+    storage.event_append(RunEvent(
+        run_id=run.id,
+        type="run_terminal_execution_log",
+        payload={"worker_report_history": [
+            {"from_agent": "leader", "summary": "leader final reply: shipped it — see /repo/out.txt"},
+        ]},
+    ))
+
+    r = app_client.get(f"/api/runs/{run.id}/result")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["runId"] == run.id
+    assert body["terminal"] is True
+    assert body["success"] is True
+    assert body["report"] == "shipped it — see /repo/out.txt"
+
+
+def test_run_result_endpoint_pending_has_no_report(
+    app_client: TestClient,
+) -> None:
+    flow = _make_flow(owner="alice")
+    run = _make_run(flow_id=flow.id, status=RunStatus.running)
+    body = app_client.get(f"/api/runs/{run.id}/result").json()
+    assert body["terminal"] is False
+    assert body["success"] is False
+    assert body["report"] is None
+
+
 def test_trigger_backfills_flow_cleanup_policy(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

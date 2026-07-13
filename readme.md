@@ -226,16 +226,77 @@ csflow uninstall --purge-data              # full wipe: type PURGE to confirm (i
 # Flow / Run
 csflow flows list
 csflow runs start <flow-id> --input k=v    # trigger a run with parameter fields
+csflow runs start <flow-id> --unattended   # run to completion with no human review/approval
 csflow runs list
+csflow runs result <run-id>                # status + the leader's final work report
 csflow runs abort <run-id>
 
 # Agent governance
 csflow agents list
 # Creating agents and chatting with them is done in the Web UI ("My Team"),
 # not the CLI.
+
+# MCP: let an agent drive Flows remotely (via its own channels, e.g. Telegram)
+csflow mcp serve                           # stdio MCP server (agents spawn this)
+csflow mcp list-platforms
+csflow mcp install --platform hermes --agent <id>   # per-agent (Hermes; omit --agent for the default profile)
+csflow mcp install --platform codex                 # global (codex/claude/cursor/gemini/opencode)
+csflow mcp print-config --platform openclaw         # snippet to paste for unsupported platforms
 ```
 
 Every command accepts `--help`. Full CLI reference: <https://clawsomeflow.com/docs/>
+
+---
+
+## 🔌 MCP: drive Flows from an agent (remote control)
+
+`csflow mcp serve` exposes ClawsomeFlow as a stdio **MCP server**. Point one of your agents at it and — through that agent's own channels (Feishu, Telegram, …) — the agent can discover Flows, organize the inputs itself, trigger a run, and read back the **leader's final work report**. A typical loop: *user sends a file + a request over Telegram → the agent picks the right Flow and runs it → reads the leader report → replies over Telegram*.
+
+**Tools the agent gets:** `list_flows`, `describe_flow` (shows a Flow's input fields), `run_flow` (triggers unattended — returns a run id immediately, skips human review/approval/checkpoints, runs to a terminal state), `get_run_status`, `get_run_result` (status + leader work report), `list_runs`, `abort_run`.
+
+### Register it with your agent
+
+```bash
+csflow mcp list-platforms                              # see all supported platforms
+csflow mcp install --platform hermes                   # Hermes: default profile
+csflow mcp install --platform hermes --agent <id>      # Hermes: a specific agent profile
+csflow mcp install --platform codex                    # global platforms (see table)
+csflow mcp uninstall --platform codex                  # remove it again
+```
+
+| Platform | Scope | Config written |
+|---|---|---|
+| `hermes` | per-agent (`--agent <id>`; omit → **default profile**) | `~/.hermes/…/config.yaml` `mcp_servers` |
+| `claude` | global | `~/.claude.json` `mcpServers` |
+| `cursor` | global | `~/.cursor/mcp.json` `mcpServers` |
+| `gemini` | global | `~/.gemini/settings.json` `mcpServers` |
+| `codex` | global | `~/.codex/config.toml` `[mcp_servers.*]` |
+| `opencode` | global | `~/.config/opencode/opencode.json` `mcp` |
+| `openclaw`, `kimi`, `qwen`, `nanobot` | manual | print-config only (paste into the platform's own MCP config) |
+
+Writes are **non-destructive** (existing servers and other keys are preserved) and **idempotent**. `install` skips a platform whose CLI isn't on `PATH` unless you pass `--force`.
+
+### Manual configuration
+
+For any platform (including the manual-only ones above), print a ready-to-paste snippet instead of writing files:
+
+```bash
+csflow mcp print-config --platform claude     # JSON: { "mcpServers": { "clawsomeflow": … } }
+csflow mcp print-config --platform codex      # TOML: [mcp_servers.clawsomeflow]
+csflow mcp print-config --platform hermes     # YAML: mcp_servers: …
+```
+
+The server entry is always the same command — register it manually if your platform isn't listed:
+
+```json
+{
+  "mcpServers": {
+    "clawsomeflow": { "command": "csflow", "args": ["mcp", "serve"] }
+  }
+}
+```
+
+The MCP server talks to your local ClawsomeFlow service over loopback (using the auto-generated api token), so the service must be running (`csflow start`).
 
 ---
 
