@@ -57,10 +57,16 @@ def test_detail_view_extracts_mode_and_param_fields() -> None:
 
 
 def test_summary_view_mode_from_booleans() -> None:
-    # GET /api/flows returns summaries with easyMode/devMode (no spec).
+    # GET /api/flows returns summaries with easyMode/devMode + paramFields (no spec).
     assert srv._summary_view({"id": "f1", "easyMode": True})["mode"] == "easy"
     assert srv._summary_view({"id": "f1", "devMode": True})["mode"] == "dev"
     assert srv._summary_view({"id": "f1"})["mode"] == "normal"
+
+
+def test_summary_view_includes_param_fields() -> None:
+    v = srv._summary_view({"id": "f1", "paramFields": ["topic", "url"]})
+    assert v["param_fields"] == ["topic", "url"]
+    assert srv._summary_view({"id": "f1"})["param_fields"] == []
 
 
 def test_run_flow_sends_unattended_and_returns_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,7 +103,8 @@ def test_get_run_result_maps_report(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_list_flows_maps_items(monkeypatch: pytest.MonkeyPatch) -> None:
     # Real GET /api/flows returns FlowSummary items (easyMode/devMode, no spec).
     monkeypatch.setattr(srv, "_request", lambda *a, **k: {"items": [
-        {"id": "f1", "name": "A", "description": "", "easyMode": True},
+        {"id": "f1", "name": "A", "description": "", "easyMode": True,
+         "paramFields": ["topic"]},
     ]})
     mcp = srv.build_server()
     payload = _tool_json(asyncio.run(mcp.call_tool("list_flows", {})))
@@ -105,3 +112,4 @@ def test_list_flows_maps_items(monkeypatch: pytest.MonkeyPatch) -> None:
     flows = payload["result"] if isinstance(payload, dict) and "result" in payload else payload
     assert isinstance(flows, list)
     assert flows[0]["id"] == "f1"
+    assert flows[0]["param_fields"] == ["topic"]

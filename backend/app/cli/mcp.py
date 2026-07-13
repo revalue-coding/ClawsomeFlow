@@ -15,23 +15,28 @@ app = typer.Typer(no_args_is_help=True)
 console = Console()
 
 
-@app.command("serve")
+@app.command("serve", hidden=True)
 def serve() -> None:
     """Run the ClawsomeFlow MCP server over stdio (blocks).
 
-    Agents launch this as a local (stdio) MCP server; it exposes tools to list
-    Flows, trigger runs, and read run status / the leader work report. It talks
-    to the local backend over loopback using the configured api_token, so the
-    backend service (``csflow start``) must be running.
+    Not a user-facing command: the agent platform spawns it via the MCP config
+    written by ``csflow mcp install`` (``command: csflow, args: [mcp, serve]``).
+    Hidden from help for that reason, but remains invokable so that config works.
+    It talks to the local backend over loopback using the configured api_token,
+    so the backend service (``csflow start``) must be running.
     """
     from app.mcp.server import serve as _serve
 
     _serve()
 
 
-@app.command("list-platforms")
+@app.command("list-platforms", hidden=True)
 def list_platforms() -> None:
-    """List agent platforms this command can register the MCP server with."""
+    """List agent platforms this command can register the MCP server with.
+
+    Hidden from help (the supported platforms are documented in the README /
+    ``csflow mcp install --help``); kept as a convenience command.
+    """
     from app.services import mcp_install
 
     for pid in mcp_install.supported_platforms():

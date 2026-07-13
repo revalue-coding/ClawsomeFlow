@@ -27,10 +27,14 @@ SERVER_NAME = "clawsomeflow"
 
 _INSTRUCTIONS = (
     "ClawsomeFlow orchestration tools. Use these to discover DAG-based Flows, "
-    "trigger a Flow run (returns a run id immediately), and read a run's status "
-    "and the leader's final work report. Runs triggered via run_flow are "
-    "unattended: they skip human review/approval and drive straight to a "
-    "terminal status, so their result can be read back without any UI action."
+    "trigger a Flow run, and (only when asked) read a run's status and the "
+    "leader's final work report. Runs triggered via run_flow are unattended: "
+    "they skip human review/approval and drive straight to a terminal status.\n\n"
+    "IMPORTANT — do not wait for results unless the user asks: run_flow returns "
+    "immediately with a run id and the run continues on its own, possibly for a "
+    "long time. After dispatching, report the run id to the user and stop. Do "
+    "NOT poll or block waiting for the run to finish. Call get_run_status / "
+    "get_run_result ONLY when the user explicitly asks about the outcome."
 )
 
 # HTTP timeout for local API calls (seconds). Generous for list/describe; all
@@ -65,8 +69,8 @@ def _request(method: str, path: str, *, json: Any | None = None, params: dict | 
 
 
 def _summary_view(flow: dict) -> dict:
-    """Compact view from a Flow list item (GET /api/flows — no spec, but carries
-    easyMode/devMode booleans)."""
+    """Compact view from a Flow list item (GET /api/flows — no full spec, but
+    carries easyMode/devMode + paramFields)."""
     if flow.get("devMode"):
         mode = "dev"
     elif flow.get("easyMode"):
@@ -78,6 +82,7 @@ def _summary_view(flow: dict) -> dict:
         "name": flow.get("name"),
         "description": flow.get("description") or "",
         "mode": mode,
+        "param_fields": flow.get("paramFields") or [],
     }
 
 
@@ -102,7 +107,7 @@ def build_server() -> Any:
 
     @mcp.tool()
     def list_flows() -> list[dict]:
-        """List the Flows you can run.
+        """List the Flows you can run, with the input fields each one expects.
 
         Takes no arguments.
 
@@ -111,9 +116,8 @@ def build_server() -> Any:
           - name (str): human-readable Flow name.
           - description (str): what the Flow does.
           - mode (str): execution mode, one of "normal" | "easy" | "dev".
-
-        The input parameter fields a Flow expects are returned by describe_flow,
-        not here.
+          - param_fields (list[str]): names of the input fields this Flow
+            expects; use these as keys in run_flow's `inputs` (empty = no inputs).
         """
         flows = _request("GET", "/api/flows")
         items = flows.get("items", flows) if isinstance(flows, dict) else flows
@@ -173,6 +177,11 @@ def build_server() -> Any:
         complaint and checkpoint phases and drives straight to a terminal status
         (the Flow's own execution mode — normal/easy/dev — is preserved). This
         call does NOT wait for the run to finish.
+
+        Do not wait for the result: after this returns, report the run id to the
+        user and stop. Do not poll get_run_status/get_run_result unless the user
+        explicitly asks how the run turned out — the run may take a long time and
+        finishes on its own.
 
         Parameters:
           - flow_id (str, required): the Flow id.

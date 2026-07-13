@@ -226,9 +226,7 @@ csflow uninstall --purge-data              # full wipe: type PURGE to confirm (i
 # Flow / Run
 csflow flows list
 csflow runs start <flow-id> --input k=v    # trigger a run with parameter fields
-csflow runs start <flow-id> --unattended   # run to completion with no human review/approval
 csflow runs list
-csflow runs result <run-id>                # status + the leader's final work report
 csflow runs abort <run-id>
 
 # Agent governance
@@ -237,8 +235,6 @@ csflow agents list
 # not the CLI.
 
 # MCP: let an agent drive Flows remotely (via its own channels, e.g. Telegram)
-csflow mcp serve                           # stdio MCP server (agents spawn this)
-csflow mcp list-platforms
 csflow mcp install --platform hermes --agent <id>   # per-agent (Hermes; omit --agent for the default profile)
 csflow mcp install --platform codex                 # global (codex/claude/cursor/gemini/opencode)
 csflow mcp print-config --platform openclaw         # snippet to paste for unsupported platforms
@@ -250,14 +246,24 @@ Every command accepts `--help`. Full CLI reference: <https://clawsomeflow.com/do
 
 ## 🔌 MCP: drive Flows from an agent (remote control)
 
-`csflow mcp serve` exposes ClawsomeFlow as a stdio **MCP server**. Point one of your agents at it and — through that agent's own channels (Feishu, Telegram, …) — the agent can discover Flows, organize the inputs itself, trigger a run, and read back the **leader's final work report**. A typical loop: *user sends a file + a request over Telegram → the agent picks the right Flow and runs it → reads the leader report → replies over Telegram*.
+ClawsomeFlow can run as an **MCP server**. Point one of your agents at it and — through that agent's own channels (Feishu, Telegram, …) — you can, in plain language, ask which Flows exist, run one, and get the **leader's final work report** back. A typical loop: *you send a file + a request over Telegram → the agent picks the right Flow and runs it → reads the leader report → replies over Telegram*.
 
-**Tools the agent gets:** `list_flows`, `describe_flow` (shows a Flow's input fields), `run_flow` (triggers unattended — returns a run id immediately, skips human review/approval/checkpoints, runs to a terminal state), `get_run_status`, `get_run_result` (status + leader work report), `list_runs`, `abort_run`.
+**Tools the agent gets:** `list_flows` (available Flows + the input fields each expects), `describe_flow`, `run_flow` (triggers unattended — returns a run id immediately, skips human review/approval/checkpoints, runs to a terminal state), `get_run_status`, `get_run_result` (status + leader work report), `list_runs`, `abort_run`.
+
+### Talking to your agent (examples)
+
+Once the MCP server is registered (below), just talk to the agent in your channel, in plain language — for example:
+
+- "What ClawsomeFlow flows can I run?"
+- "Run the competitor-research flow on https://example.com"
+- "How did that run turn out? / Show me the result."
+- "Cancel that run."
+
+The agent organizes the inputs itself from your request, so you rarely name fields explicitly — describe the task and let it map your words onto the Flow's parameters. When you ask it to run something it dispatches the Flow and **replies right away with a run id** — it won't sit and wait for the run to finish. Ask it for the result whenever you want it.
 
 ### Register it with your agent
 
 ```bash
-csflow mcp list-platforms                              # see all supported platforms
 csflow mcp install --platform hermes                   # Hermes: default profile
 csflow mcp install --platform hermes --agent <id>      # Hermes: a specific agent profile
 csflow mcp install --platform codex                    # global platforms (see table)

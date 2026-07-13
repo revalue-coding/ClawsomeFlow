@@ -595,7 +595,7 @@ const en = {
   scheduledFlows: {
     title: "Timed Flows",
     description:
-      "Timed runs are unattended: by default the agent merges all changes and the run finishes directly without a user complaint phase. If the Flow has developer mode on, each subtask follows its own auto-merge setting and the run still finishes directly. Human checkpoints in the flow are still reviewed by you.",
+      "Timed runs are unattended: by default the agent merges all changes and the run finishes directly without a user complaint phase. If the Flow has developer mode on, each subtask follows its own auto-merge setting and the run still finishes directly. Human checkpoints inserted in the flow are ignored.",
     createButton: "+ Timed Task",
     createTitle: "Create Timed Task",
     editTitle: "Edit Timed Task",

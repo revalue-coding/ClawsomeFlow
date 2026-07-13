@@ -13,6 +13,8 @@ on success. Mismatch returns ``409 VERSION_CONFLICT``.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Path, Query
@@ -71,6 +73,10 @@ class FlowSummary(_CamelModel):
     # (spec.variables[csflow.notify_webhooks]). >0 → the list UI highlights
     # the notification button. 0 → no notifications for this Flow.
     notify_channel_count: int = 0
+    # User-defined run parameter field names (spec.variables[csflow.runtime.param_fields]).
+    # Exposed on the summary so a caller (e.g. the MCP list_flows tool) can see
+    # which inputs a Flow expects without fetching the full spec.
+    param_fields: list[str] = []
 
 
 class FlowDetail(_CamelModel):
@@ -108,7 +114,7 @@ class FlowUpdatePayload(_CamelModel):
 class FlowCreateResponse(_CamelModel):
     id: str
     version: int
-    warnings: list["FlowSaveWarning"] = Field(default_factory=list)
+    warnings: list[FlowSaveWarning] = Field(default_factory=list)
 
 
 class FlowSaveWarning(_CamelModel):
@@ -212,6 +218,46 @@ def _spec_dev_mode(flow: Flow) -> bool:
         return False
 
 
+_PARAM_FIELDS_KEY = "csflow.runtime.param_fields"
+_LEGACY_REQUIREMENT_KEY = "csflow.runtime.requirement"
+
+
+def _spec_param_fields(flow: Flow) -> list[str]:
+    """User-defined run parameter field names for the flow list view.
+
+    Mirrors the WebUI run dialog / ``cli/ops/runs._extract_param_fields``: a JSON
+    array in ``spec.variables[csflow.runtime.param_fields]``, with comma/newline
+    and legacy single-requirement fallbacks. De-duplicated, order preserved.
+    """
+    try:
+        variables = (flow.spec or {}).get("variables") or {}
+        if not isinstance(variables, dict):
+            return []
+        raw = variables.get(_PARAM_FIELDS_KEY)
+        fields: list[str] = []
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    fields = [str(x) for x in parsed]
+            except Exception:
+                fields = re.split(r"[\r\n,]+", raw)
+        if not fields:
+            legacy = variables.get(_LEGACY_REQUIREMENT_KEY)
+            if isinstance(legacy, str) and legacy.strip():
+                fields = [legacy]
+        seen: set[str] = set()
+        out: list[str] = []
+        for f in fields:
+            c = (f or "").strip()
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
+    except Exception:
+        return []
+
+
 def _spec_notify_channel_count(flow: Flow) -> int:
     try:
         from app.services.run_notify import parse_flow_channels
@@ -266,6 +312,7 @@ def _to_summary(flow: Flow) -> FlowSummary:
         easy_mode=_spec_easy_mode(flow),
         dev_mode=_spec_dev_mode(flow),
         notify_channel_count=_spec_notify_channel_count(flow),
+        param_fields=_spec_param_fields(flow),
     )
 
 

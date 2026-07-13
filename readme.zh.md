@@ -230,9 +230,76 @@ csflow runs abort <run-id>
 # Agent 治理
 csflow agents list
 # Agent 的创建与对话请在 Web UI（“我的团队”）中完成，不通过 CLI。
+
+# MCP：让 Agent 通过自带渠道（如 Telegram）远程驱动 Flow
+csflow mcp install --platform hermes --agent <id>   # 按 agent（Hermes；省略 --agent 则写默认 profile）
+csflow mcp install --platform codex                 # 全局（codex/claude/cursor/gemini/opencode）
+csflow mcp print-config --platform openclaw         # 不支持自动配置的平台：打印片段手动粘贴
 ```
 
 每个命令都支持 `--help`。完整 CLI 文档：<https://clawsomeflow.com/docs/>
+
+---
+
+## 🔌 MCP：从 Agent 驱动 Flow（远程控制）
+
+ClawsomeFlow 可以作为 **MCP server** 运行。把你的某个 Agent 接上它，就能通过该 Agent 自带的渠道（飞书、Telegram 等）用自然语言询问有哪些 Flow、执行某个 Flow，并拿回 **leader 的最终工作汇报**。典型闭环：*你在 Telegram 发一个文件 + 一句需求 → Agent 选中合适的 Flow 并执行 → 读取 leader 汇报 → 通过 Telegram 回复你*。
+
+**Agent 会获得的工具：** `list_flows`（可用 Flow 及各自所需的输入字段）、`describe_flow`、`run_flow`（无人值守触发——立即返回 run id，跳过人工审查/审批/检查点，直接跑到终态）、`get_run_status`、`get_run_result`（状态 + leader 工作汇报）、`list_runs`、`abort_run`。
+
+### 与 Agent 对话（示例）
+
+注册完成后（见下），直接在渠道里用自然语言跟 Agent 说即可，例如：
+
+- “当前有哪些可用的 ClawsomeFlow 执行流？”
+- “用竞品调研流程执行这个任务：https://example.com”
+- “那次运行结果怎么样？给我看看结果。”
+- “停掉那个任务。”
+
+Agent 会从你的需求里自行组织参数，因此你很少需要显式点名字段——描述任务即可，它会把你的话映射到 Flow 的参数上。当你让它执行时，它会派发 Flow 并**立即回复一个 run id**，不会坐等运行结束；想看结果时再问它即可。
+
+### 注册到 Agent
+
+```bash
+csflow mcp install --platform hermes                   # Hermes：默认 profile
+csflow mcp install --platform hermes --agent <id>      # Hermes：指定某个 agent profile
+csflow mcp install --platform codex                    # 全局平台（见下表）
+csflow mcp uninstall --platform codex                  # 移除
+```
+
+| 平台 | 范围 | 写入位置 |
+|---|---|---|
+| `hermes` | 按 agent（`--agent <id>`；省略 → **默认 profile**） | `~/.hermes/…/config.yaml` 的 `mcp_servers` |
+| `claude` | 全局 | `~/.claude.json` 的 `mcpServers` |
+| `cursor` | 全局 | `~/.cursor/mcp.json` 的 `mcpServers` |
+| `gemini` | 全局 | `~/.gemini/settings.json` 的 `mcpServers` |
+| `codex` | 全局 | `~/.codex/config.toml` 的 `[mcp_servers.*]` |
+| `opencode` | 全局 | `~/.config/opencode/opencode.json` 的 `mcp` |
+| `openclaw`、`kimi`、`qwen`、`nanobot` | 手动 | 仅 print-config（粘贴到平台自己的 MCP 配置） |
+
+写入是**非破坏式**（保留已有 server 与其他键）且**幂等**的。若平台 CLI 不在 `PATH` 中，`install` 会跳过，除非加 `--force`。
+
+### 手动配置
+
+也可为任意平台打印可直接粘贴的片段，而不写文件：
+
+```bash
+csflow mcp print-config --platform claude     # JSON：{ "mcpServers": { "clawsomeflow": … } }
+csflow mcp print-config --platform codex      # TOML：[mcp_servers.clawsomeflow]
+csflow mcp print-config --platform hermes     # YAML：mcp_servers: …
+```
+
+服务器条目始终是同一条命令——若你的平台不在上表中，手动注册它即可：
+
+```json
+{
+  "mcpServers": {
+    "clawsomeflow": { "command": "csflow", "args": ["mcp", "serve"] }
+  }
+}
+```
+
+MCP server 通过 loopback（使用自动生成的 api token）与本地 ClawsomeFlow 服务通信，因此该服务必须处于运行状态（`csflow start`）。
 
 ---
 

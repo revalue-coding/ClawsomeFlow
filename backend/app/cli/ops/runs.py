@@ -104,6 +104,7 @@ def start_run(
     ),
     unattended: bool = typer.Option(
         False, "--unattended",
+        hidden=True,  # agent-facing mechanism (MCP run_flow); not a user command
         help="Run without a human in the loop: skip merge-review / complaint / "
              "checkpoint phases and drive straight to a terminal status "
              "(execution mode normal/easy/dev is preserved).",
@@ -185,15 +186,16 @@ def show_run(
             )
 
 
-@app.command("result")
+@app.command("result", hidden=True)
 def run_result(
     run_id: str = typer.Argument(...),
     json: bool = typer.Option(False, "--json", help="Emit raw JSON."),
 ) -> None:
     """Show a Run's status and the leader's work report.
 
-    Non-blocking — safe to call at any time. ``report`` is empty until the run
-    reaches a terminal status.
+    Agent-facing (the MCP get_run_result tool); hidden from user help. Non-blocking
+    — safe to call at any time. ``report`` is empty until the run reaches a
+    terminal status.
     """
     data = get(f"/api/runs/{run_id}/result")
     if json:
