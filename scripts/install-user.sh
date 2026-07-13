@@ -573,15 +573,16 @@ start_user_service() {
 }
 
 health_check() {
-  local url="http://127.0.0.1:${CSFLOW_PORT}/health"
+  local app_url="http://127.0.0.1:${CSFLOW_PORT}"
+  local health_url="${app_url}/health"
   # First boot after an upgrade runs init/migration before uvicorn starts
   # listening, which can take well over a few seconds on a busy host. Give it
   # a generous window so a slow-but-successful start is not reported as a
   # failure.
   local attempts=60 i
   for ((i = 1; i <= attempts; i++)); do
-    if curl -fsS "${url}" >/dev/null 2>&1; then
-      say "✅ ClawsomeFlow is running in background: ${url}"
+    if curl -fsS "${health_url}" >/dev/null 2>&1; then
+      say "✅ ClawsomeFlow is running in background: ${app_url}"
       return
     fi
     if (( i == 10 )); then
@@ -593,7 +594,7 @@ health_check() {
   if [[ "${IS_MACOS}" != "1" ]] && command -v journalctl >/dev/null; then
     journalctl --user -u csflow -n 30 --no-pager 2>/dev/null || true
   fi
-  fail "Service started but health check failed after ${attempts}s: ${url}
+  fail "Service started but health check failed after ${attempts}s: ${health_url}
 Hint: run '${VENV_BIN}/csflow doctor' and inspect logs with:
   journalctl --user -u csflow -n 50 --no-pager"
 }

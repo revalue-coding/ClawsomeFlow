@@ -195,7 +195,8 @@ PY
 )"
 fi
 csflow_port="${csflow_port:-17017}"
-health_url="http://127.0.0.1:${csflow_port}/health"
+app_url="http://127.0.0.1:${csflow_port}"
+health_url="${app_url}/health"
 health_ok=0
 for ((i = 1; i <= 60; i++)); do
   if curl -fsS "${health_url}" >/dev/null 2>&1; then
@@ -205,7 +206,7 @@ for ((i = 1; i <= 60; i++)); do
   sleep 1
 done
 if [[ "${health_ok}" == "1" ]]; then
-  say "✅ Upgrade complete → ${installed_version} (service healthy: ${health_url})"
+  say "✅ Upgrade complete → ${installed_version} (ClawsomeFlow is running: ${app_url})"
 else
   warn "Upgrade finished (${installed_version}) but the health check did not pass within 60s: ${health_url}"
   warn "Inspect with: ${VENV_BIN}/csflow doctor   /   ${VENV_BIN}/csflow logs tail -f"

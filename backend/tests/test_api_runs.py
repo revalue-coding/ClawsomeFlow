@@ -1198,6 +1198,123 @@ def test_pending_merge_diff_workspace_not_found_404(
     assert r.json()["error"] == "WORKSPACE_NOT_FOUND"
 
 
+def test_checkpoint_item_diff_returns_patch(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
+
+    class _Controller:
+        def checkpoint_snapshot(self):
+            return {
+                "downstream_task_id": "t2",
+                "items": [{
+                    "task_id": "t1",
+                    "owner_agent_id": "alice",
+                    "branch_name": "clawteam/csflow-test/alice",
+                    "base_branch": "main",
+                    "decision": "pending",
+                }],
+            }
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
+
+    captured: dict[str, Any] = {}
+
+    class _FakeCli:
+        async def workspace_agent_patch(self, *, team, agent, repo, **kw):
+            captured["team"] = team
+            captured["agent"] = agent
+            return {
+                "repo_root": "/tmp/r",
+                "worktree_path": "/tmp/wt/alice",
+                "branch": "clawteam/csflow-test/alice",
+                "base_branch": "main",
+                "patch": "diff --git a/x b/x\n+added\n",
+                "patch_truncated": False,
+                "uncommitted_patch": "@@\n+scratch\n",
+                "uncommitted_truncated": False,
+                "base_ahead": 0,
+                "branch_ahead": 2,
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/checkpoint/items/t1/diff")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["agentId"] == "alice"
+    assert body["baseBranch"] == "main"
+    # No merge target at a checkpoint → target falls back to the base branch.
+    assert body["targetBranch"] == "main"
+    assert "+added" in body["patch"]
+    assert "+scratch" in body["uncommittedPatch"]
+    assert body["branchAhead"] == 2
+    assert captured["team"] == "csflow-test"
+    assert captured["agent"] == "alice"
+
+
+def test_checkpoint_item_diff_controller_absent_409(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: None)
+    r = app_client.get(f"/api/runs/{run.id}/checkpoint/items/t1/diff")
+    assert r.status_code == 409
+    assert r.json()["error"] == "CHECKPOINT_UNAVAILABLE"
+
+
+def test_checkpoint_item_diff_unknown_item_404(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
+
+    class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "t2", "items": [
+                {"task_id": "t1", "owner_agent_id": "alice", "decision": "pending"},
+            ]}
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
+    r = app_client.get(f"/api/runs/{run.id}/checkpoint/items/ghost/diff")
+    assert r.status_code == 404
+    assert r.json()["error"] == "CHECKPOINT_ITEM_NOT_FOUND"
+
+
+def test_checkpoint_item_diff_workspace_not_found_404(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
+
+    class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "t2", "items": [
+                {"task_id": "t1", "owner_agent_id": "alice", "decision": "pending"},
+            ]}
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
+
+    class _FakeCli:
+        async def workspace_agent_patch(self, *, team, agent, repo, **kw):
+            del team, agent, repo, kw
+            return None
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/checkpoint/items/t1/diff")
+    assert r.status_code == 404
+    assert r.json()["error"] == "WORKSPACE_NOT_FOUND"
+
+
 def test_merge_calls_perform_manual_merge(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

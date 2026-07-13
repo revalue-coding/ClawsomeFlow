@@ -1422,6 +1422,95 @@ async def get_pending_merge_diff(
     )
 
 
+@router.get(
+    "/runs/{run_id}/checkpoint/items/{task_id}/diff",
+    response_model=PendingMergeDiffView,
+)
+async def get_checkpoint_item_diff(
+    run_id: Annotated[str, Path()],
+    task_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> PendingMergeDiffView:
+    """Return the full worktree diff (vs baseline) for one manual-checkpoint item.
+
+    Powers the "View changes" modal in the awaiting-checkpoint UI: shows every
+    modification the item's owner agent has made in its worktree *so far* —
+    committed content (``base...branch``) plus not-yet-committed working-tree
+    changes. The checkpoint fires mid-run, so the worktree still exists. Read
+    only (no checkout / no lock), reusing the same primitive as the pending-merge
+    diff. The active checkpoint lives only on the live controller, so this 409s
+    when no controller is attached (same as ``GET .../checkpoint``).
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    controller = get_scheduler().get_controller(run.id)
+    snapshot = controller.checkpoint_snapshot() if controller is not None else None
+    if snapshot is None:
+        raise ApiError(
+            "CHECKPOINT_UNAVAILABLE",
+            "run is not awaiting a manual checkpoint",
+            status_code=409,
+        )
+    item = next(
+        (it for it in (snapshot.get("items") or []) if it.get("task_id") == task_id),
+        None,
+    )
+    if item is None:
+        raise ApiError(
+            "CHECKPOINT_ITEM_NOT_FOUND",
+            f"checkpoint item {task_id!r} not found",
+            status_code=404,
+        )
+    agent_id = str(item.get("owner_agent_id") or "").strip()
+    if not agent_id:
+        raise ApiError(
+            "CHECKPOINT_ITEM_NOT_FOUND",
+            f"checkpoint item {task_id!r} has no owner agent",
+            status_code=404,
+        )
+    repo = _resolve_agent_repo_for_run(run=run, agent_id=agent_id, storage=storage)
+    cli = get_clawteam_cli()
+    try:
+        result = await cli.workspace_agent_patch(
+            team=run.team_name, agent=agent_id, repo=repo,
+        )
+    except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
+        logger.warning(
+            "checkpoint_diff_failed",
+            run_id=run.id, agent_id=agent_id, error=str(exc),
+        )
+        raise ApiError(
+            "DIFF_UNAVAILABLE",
+            f"failed to compute diff for agent {agent_id!r}",
+            status_code=502,
+        ) from exc
+    if result is None:
+        raise ApiError(
+            "WORKSPACE_NOT_FOUND",
+            f"no worktree found for agent {agent_id!r} (it may have been cleaned up)",
+            status_code=404,
+        )
+    base_branch = str(result.get("base_branch") or "")
+    return PendingMergeDiffView(
+        agent_id=agent_id,
+        branch=str(result.get("branch") or item.get("branch_name") or ""),
+        base_branch=base_branch,
+        # No merge target at a checkpoint — the diff is purely "vs baseline", so
+        # the header reads "<branch> (base: <base>) → <base>".
+        target_branch=base_branch or DEFAULT_TARGET_BRANCH,
+        repo_root=str(result.get("repo_root") or ""),
+        patch=str(result.get("patch") or ""),
+        patch_truncated=bool(result.get("patch_truncated")),
+        uncommitted_patch=str(result.get("uncommitted_patch") or ""),
+        uncommitted_truncated=bool(result.get("uncommitted_truncated")),
+        base_ahead=int(result.get("base_ahead") or 0),
+        branch_ahead=int(result.get("branch_ahead") or 0),
+    )
+
+
 def _run_diff_agents(run: FlowRun, storage: StorageBackend) -> list[FlowAgent]:
     """Non-OpenClaw agents of *run*'s flow, in spec order.
 

@@ -762,6 +762,34 @@ def _ensure_agent_sessions_dir(
     return True
 
 
+def _agent_runtime_home(*, agent_id: str, config: Config) -> Path:
+    """OpenClaw's per-agent runtime home ``~/.openclaw/agents/{id}/``.
+
+    Holds the agent runtime dir (``agent/``, incl. seeded ``auth-profiles.json``)
+    and ``sessions/`` (conversation history + session state). Created at
+    :func:`commit_agent` time by :func:`_seed_portable_static_auth_profiles`
+    and :func:`_ensure_agent_sessions_dir`. Lives in OpenClaw's global state
+    tree keyed by agent id — like the cron store, removing the agent from
+    ``openclaw.json`` does NOT cascade to it, so a purge must delete it
+    explicitly or it leaks (stale sessions + credentials) forever.
+    """
+    return config.openclaw_home_path / "agents" / agent_id
+
+
+def _purge_agent_runtime_home(*, agent_id: str, config: Config) -> bool:
+    """Best-effort removal of the per-agent OpenClaw runtime home on purge.
+
+    Only used on the permanent (``purge``) path — ``unregister`` keeps it so a
+    later restore retains session history. Returns whether the dir existed.
+    """
+    home = _agent_runtime_home(agent_id=agent_id, config=config)
+    existed = home.exists()
+    _safe_rmtree(home)
+    if existed:
+        logger.info("openclaw_agent_runtime_home_purged", agent_id=agent_id, path=str(home))
+    return existed
+
+
 def _install_user_skills(workspace: Path, extra: tuple[str, ...]) -> list[str]:
     """Install dynamically discovered common skills plus extras."""
     source_root = seed_skills_source()  # idempotent
@@ -1316,6 +1344,50 @@ def _capture_custom_cron_backup(
             fallback_entries=len(fallback_backup),
         )
         return fallback_backup, False
+
+
+def _remove_all_agent_cron_jobs(*, agent_id: str, config: Config) -> tuple[int, int]:
+    """Best-effort removal of EVERY runtime cron job owned by ``agent_id``.
+
+    Both the system (entropy) job and workspace-custom jobs are removed so that
+    an unregistered or purged agent leaves no scheduled jobs firing in
+    OpenClaw's cron store. That store lives outside ``openclaw.json`` and is
+    NOT touched by :func:`remove_managed_agent`, so without this the cron jobs
+    would keep firing against an agent that is no longer in the runtime.
+
+    Custom jobs are backed up into the DB snapshot beforehand (unregister) and
+    replayed by :func:`restore_agent_registration`; the entropy job is
+    re-scheduled on restore. Never raises — cron residue cleanup must not block
+    agent removal. Returns ``(removed, failed)`` counts.
+    """
+    jobs = _list_agent_cron_jobs(agent_id=agent_id, config=config)
+    removed = 0
+    failed = 0
+    for job in jobs:
+        job_id = str(job.get("id") or "").strip()
+        if not job_id:
+            continue
+        proc = _run_openclaw_cli(args=["cron", "rm", job_id, "--json"], config=config)
+        if proc is not None and proc.returncode == 0:
+            removed += 1
+            continue
+        failed += 1
+        logger.warning(
+            "openclaw_agent_cron_remove_failed",
+            agent_id=agent_id,
+            job_id=job_id,
+            detail=(
+                _cli_detail(proc)[:500] if proc is not None else "openclaw CLI unavailable"
+            ),
+        )
+    if removed or failed:
+        logger.info(
+            "openclaw_agent_cron_jobs_removed",
+            agent_id=agent_id,
+            removed=removed,
+            failed=failed,
+        )
+    return removed, failed
 
 
 def _upsert_custom_cron_job_from_backup_entry(
@@ -2480,12 +2552,18 @@ async def delete_agent(
                 f"agent {aid!r} is used by existing Flows and cannot be removed",
                 details=blocked,
             )
+        # Drop any residual cron jobs before removing the runtime entry — the
+        # cron store is keyed by agent id independently of openclaw.json.
+        orphan_cron_removed, orphan_cron_remove_failed = await asyncio.to_thread(
+            _remove_all_agent_cron_jobs, agent_id=aid, config=cfg
+        )
         if oj.has_managed_agent(aid, cfg):
             try:
                 await oj.remove_managed_agent(aid, config=cfg)
             except oj.OpenclawJsonError as exc:
                 raise AgentUnmanaged(str(exc)) from exc
         await asyncio.to_thread(_safe_rmtree, workspace.parent)
+        await asyncio.to_thread(_purge_agent_runtime_home, agent_id=aid, config=cfg)
         logger.info(
             "openclaw_agent_deleted",
             agent_id=aid,
@@ -2493,6 +2571,8 @@ async def delete_agent(
             purged=True,
             removed_from_json=False,
             workspace_orphan=True,
+            cron_jobs_removed=orphan_cron_removed,
+            cron_remove_failed=orphan_cron_remove_failed,
         )
         return
 
@@ -2532,6 +2612,15 @@ async def delete_agent(
         row = storage.openclaw_update(row)
         backup_entries_count = len(backup_entries)
 
+    # Remove ALL runtime cron jobs (system entropy + custom) for both unregister
+    # and purge, so neither leaves cron jobs firing in OpenClaw. Custom jobs were
+    # just backed up (unregister) and are replayed on restore; the entropy job is
+    # re-scheduled on restore. Done while the agent still exists in openclaw.json
+    # (safest for the cron CLI). Best-effort — must not block removal.
+    cron_removed, cron_remove_failed = await asyncio.to_thread(
+        _remove_all_agent_cron_jobs, agent_id=aid, config=cfg
+    )
+
     removed_from_json = False
     if oj.has_managed_agent(aid, cfg):
         # Managed runtime entries are removable. Already-unregistered agents are
@@ -2544,6 +2633,10 @@ async def delete_agent(
     if mode == _DELETE_MODE_PURGE:
         storage.openclaw_delete(aid)
         await asyncio.to_thread(_safe_rmtree, Path(row.workspace_path).parent)
+        # Also drop OpenClaw's own per-agent runtime home (sessions + seeded
+        # auth-profiles) — it lives under ~/.openclaw and is NOT removed by
+        # remove_managed_agent, so a purge without this leaks it forever.
+        await asyncio.to_thread(_purge_agent_runtime_home, agent_id=aid, config=cfg)
 
     logger.info(
         "openclaw_agent_deleted",
@@ -2553,6 +2646,8 @@ async def delete_agent(
         removed_from_json=removed_from_json,
         cron_backup_entries=backup_entries_count,
         cron_backup_captured=backup_captured,
+        cron_jobs_removed=cron_removed,
+        cron_remove_failed=cron_remove_failed,
     )
 
 

@@ -982,6 +982,8 @@ async def test_delete_unregister_backs_up_custom_cron_jobs_in_snapshot(
 
     storage = get_storage()
 
+    removed_job_ids: list[str] = []
+
     def _fake_run_openclaw_cli(*, args, config):
         del config
         if args[:2] == ["cron", "list"]:
@@ -1013,6 +1015,9 @@ async def test_delete_unregister_backs_up_custom_cron_jobs_in_snapshot(
                 stdout=json.dumps(payload),
                 stderr="",
             )
+        if args[:2] == ["cron", "rm"]:
+            removed_job_ids.append(args[2])
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
         raise AssertionError(f"unexpected openclaw CLI call: {args}")
 
     monkeypatch.setattr(svc, "_run_openclaw_cli", _fake_run_openclaw_cli)
@@ -1026,6 +1031,104 @@ async def test_delete_unregister_backs_up_custom_cron_jobs_in_snapshot(
     assert isinstance(backup_jobs, list)
     assert [item["name"] for item in backup_jobs] == ["daily-review"]
     assert snapshot.get(svc._CRON_BACKUP_CAPTURED_AT_KEY)
+    # Every runtime cron job (system entropy + custom) must be removed so the
+    # unregistered agent leaves no cron residue firing in OpenClaw.
+    assert sorted(removed_job_ids) == ["custom-job-1", "system-entropy"]
+
+
+@pytest.mark.asyncio
+async def test_delete_purge_removes_all_agent_cron_jobs(
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    created = await svc.commit_agent(
+        svc.CommitInput(id="purge-cron", name="Purge Cron"),
+        user="u",
+    )
+    from app.storage import get_storage
+
+    storage = get_storage()
+
+    removed_job_ids: list[str] = []
+
+    def _fake_run_openclaw_cli(*, args, config):
+        del config
+        if args[:2] == ["cron", "list"]:
+            payload = {
+                "jobs": [
+                    {
+                        "id": "system-entropy",
+                        "agentId": created.id,
+                        "name": f"{svc._ENTROPY_CRON_NAME_PREFIX}-{created.id}",
+                        "source": "system",
+                        "schedule": {"expr": "0 3 * * 1", "tz": "UTC"},
+                        "payload": {"message": "system entropy"},
+                    },
+                    {
+                        "id": "custom-job-1",
+                        "agentId": created.id,
+                        "name": "daily-review",
+                        "source": "workspace-custom",
+                        "schedule": {"expr": "0 9 * * *", "tz": "Asia/Shanghai"},
+                        "payload": {"message": "请执行日报复盘"},
+                    },
+                ]
+            }
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps(payload), stderr=""
+            )
+        if args[:2] == ["cron", "rm"]:
+            removed_job_ids.append(args[2])
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
+        raise AssertionError(f"unexpected openclaw CLI call: {args}")
+
+    monkeypatch.setattr(svc, "_run_openclaw_cli", _fake_run_openclaw_cli)
+
+    await svc.delete_agent("purge-cron", mode="purge", storage=storage)
+
+    # DB row gone AND both runtime cron jobs removed — no dangling schedule.
+    assert storage.openclaw_get("purge-cron") is None
+    assert sorted(removed_job_ids) == ["custom-job-1", "system-entropy"]
+
+
+@pytest.mark.asyncio
+async def test_unregister_keeps_but_purge_removes_openclaw_runtime_home(
+    fake_openclaw_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not _has_git():
+        pytest.skip("git not available")
+    from app.config import load_config
+    from app.storage import get_storage
+
+    # Keep cron CLI calls inert so the test doesn't depend on a real binary.
+    monkeypatch.setattr(
+        svc,
+        "_run_openclaw_cli",
+        lambda *, args, config: subprocess.CompletedProcess(
+            args=args, returncode=0, stdout='{"jobs": []}', stderr=""
+        ),
+    )
+    created = await svc.commit_agent(
+        svc.CommitInput(id="home-lifecycle", name="Home Lifecycle"), user="u"
+    )
+    storage = get_storage()
+    cfg = load_config()
+    home = svc._agent_runtime_home(agent_id=created.id, config=cfg)
+    # commit creates OpenClaw's per-agent runtime home (sessions dir at least).
+    assert home.exists()
+
+    # unregister is restorable → the runtime home (sessions + seeded auth) is kept.
+    await svc.delete_agent(created.id, mode="unregister", storage=storage)
+    assert storage.openclaw_get(created.id) is not None
+    assert home.exists()
+
+    # purge is permanent → the runtime home is removed, leaving no residue.
+    await svc.delete_agent(created.id, mode="purge", storage=storage)
+    assert storage.openclaw_get(created.id) is None
+    assert not home.exists()
 
 
 @pytest.mark.asyncio

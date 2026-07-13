@@ -1097,6 +1097,11 @@ export const api = {
       "POST",
       `/api/runs/${id}/checkpoint/items/${taskId}/mark-read`,
     ),
+  getCheckpointItemDiff: (id: string, taskId: string) =>
+    request<PendingMergeDiff>(
+      "GET",
+      `/api/runs/${id}/checkpoint/items/${taskId}/diff`,
+    ),
   listRunSchedules: () =>
     request<{ items: RunScheduleSummary[]; total: number }>(
       "GET",

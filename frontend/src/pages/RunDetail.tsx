@@ -845,6 +845,11 @@ export function RunDetail() {
                       </div>
                     )}
                     <div className="mt-3 flex items-center justify-end gap-2">
+                      <CheckpointDiffButton
+                        runId={run.id}
+                        taskId={item.taskId}
+                        agentId={item.ownerAgentId}
+                      />
                       <button
                         type="button"
                         className="btn-outline"
@@ -2312,6 +2317,56 @@ function PendingMergeDiffBody({
         </>
       )}
     </div>
+  );
+}
+
+
+/** "View changes" button for one manual-checkpoint item: opens a modal with the
+ *  full worktree diff (committed + uncommitted, vs baseline) of the item's owner
+ *  agent, so the reviewer can inspect all changes so far before approving. */
+function CheckpointDiffButton({
+  runId,
+  taskId,
+  agentId,
+}: {
+  runId: string;
+  taskId: string;
+  agentId: string;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<PendingMergeDiff | null>(null);
+
+  const openDiff = useCallback(async () => {
+    setOpen(true);
+    setLoading(true);
+    setError(null);
+    setData(null);
+    try {
+      setData(await api.getCheckpointItemDiff(runId, taskId));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [runId, taskId]);
+
+  return (
+    <>
+      <button type="button" className="btn-outline" onClick={() => void openDiff()}>
+        {t("runDetail.viewDiff")}
+      </button>
+      <Modal
+        open={open}
+        onClose={() => setOpen(false)}
+        title={t("runDetail.diffModalTitle", { agent: agentId })}
+        width="max-w-5xl"
+      >
+        <PendingMergeDiffBody loading={loading} error={error} data={data} />
+      </Modal>
+    </>
   );
 }
 
