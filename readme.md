@@ -244,22 +244,18 @@ Every command accepts `--help`. Full CLI reference: <https://clawsomeflow.com/do
 
 ---
 
-## 🔌 MCP: drive Flows from an agent (remote control)
+## 🔌 MCP: drive Flows from an agent
 
-ClawsomeFlow can run as an **MCP server**. Point one of your agents at it and — through that agent's own channels (Feishu, Telegram, …) — you can, in plain language, ask which Flows exist, run one, and get the **leader's final work report** back. A typical loop: *you send a file + a request over Telegram → the agent picks the right Flow and runs it → reads the leader report → replies over Telegram*.
-
-**Tools the agent gets:** `list_flows` (available Flows + the input fields each expects), `describe_flow`, `run_flow` (triggers unattended — returns a run id immediately, skips human review/approval/checkpoints, runs to a terminal state), `get_run_status`, `get_run_result` (status + leader work report), `list_runs`, `abort_run`.
+Run ClawsomeFlow as an **MCP server**. Point one of your agents at it and — through that agent's own channels (Feishu, Telegram, …) — you can, in plain language, ask which Flows exist, run one, and get the **leader's final work report** back. A typical loop: *you send a file + a request over Telegram → the agent picks the right Flow and runs it → reads the leader report → replies over Telegram*.
 
 ### Talking to your agent (examples)
 
-Once the MCP server is registered (below), just talk to the agent in your channel, in plain language — for example:
-
 - "What ClawsomeFlow flows can I run?"
-- "Run the competitor-research flow on https://example.com"
-- "How did that run turn out? / Show me the result."
-- "Cancel that run."
+- "Run the XXXX task."
+- "Show me the run result."
+- "Cancel the XXX run."
 
-The agent organizes the inputs itself from your request, so you rarely name fields explicitly — describe the task and let it map your words onto the Flow's parameters. When you ask it to run something it dispatches the Flow and **replies right away with a run id** — it won't sit and wait for the run to finish. Ask it for the result whenever you want it.
+The agent organizes the inputs itself from your request, so you rarely name fields explicitly — describe the task and let it map your words onto the Flow's parameters.
 
 ### Register it with your agent
 
@@ -284,7 +280,7 @@ Writes are **non-destructive** (existing servers and other keys are preserved) a
 
 ### Manual configuration
 
-For any platform (including the manual-only ones above), print a ready-to-paste snippet instead of writing files:
+For any platform, print a ready-to-paste snippet instead of writing files:
 
 ```bash
 csflow mcp print-config --platform claude     # JSON: { "mcpServers": { "clawsomeflow": … } }
@@ -302,7 +298,7 @@ The server entry is always the same command — register it manually if your pla
 }
 ```
 
-The MCP server talks to your local ClawsomeFlow service over loopback (using the auto-generated api token), so the service must be running (`csflow start`).
+Note: the ClawsomeFlow service must be running (`csflow start`) to use MCP.
 
 ---
 
