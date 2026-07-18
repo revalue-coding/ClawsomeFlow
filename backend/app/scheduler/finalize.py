@@ -138,8 +138,12 @@ async def finalize_run(
 
         # Merge review applies to every non-OpenClaw agent (leader included).
         # OpenClaw remains self-merge / in-task merge per runtime policy.
+        # External execution nodes own no worktree/branch (merge_strategy is
+        # forced to ``skip`` at the model level) — exclude them outright so
+        # they never even hit the per-agent diff/worktree probes.
         non_openclaw_agents = [
-            a for a in ipt.agents if a.kind != AgentKind.openclaw
+            a for a in ipt.agents
+            if a.kind not in (AgentKind.openclaw, AgentKind.external)
         ]
         out = FinalizeOutcome(final_status=RunStatus.completed)
 

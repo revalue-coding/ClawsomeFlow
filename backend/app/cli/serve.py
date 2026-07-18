@@ -36,6 +36,12 @@ def serve(
     """Start the FastAPI backend (assumes ``csflow init`` already ran)."""
     cfg = cfg_mod.load_config()
     actual_port = port or cfg.csflow_port
+    # External-node cross-machine collaboration: when the user opted in
+    # (csflow external expose on), widen the bind so /api/external/* is
+    # reachable remotely. The API guard still rejects non-loopback Hosts on
+    # every other /api path, so the main surface stays loopback-only.
+    if host == "127.0.0.1" and getattr(cfg, "external_api_expose", False):
+        host = "0.0.0.0"
 
     write_pid()
     try:

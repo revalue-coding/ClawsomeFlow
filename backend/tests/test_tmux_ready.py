@@ -389,6 +389,53 @@ async def test_wait_tui_ready_skips_startup_handling_without_platform() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_tui_ready_succeeds_on_pi_composer() -> None:
+    """pi has no ``pi>`` prompt — detect its real composer (captured from v0.80.7).
+
+    pi is not a ClawTeam trust-handled platform (trust_platform=None) and has no
+    startup gate, so the composer must be recognised directly.
+    """
+    pane = (
+        " pi v0.80.7\n"
+        " escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more\n"
+        " Press ctrl+o to show full startup help and loaded resources.\n"
+        "[Context]\n"
+        "  AGENTS.md\n"
+        "────────────────────────────────────────\n"
+        "\n"
+        "────────────────────────────────────────\n"
+        "/repo/worktree (main)\n"
+        "0.0%/200k (auto)                       claude-haiku-4-5 • medium\n"
+    )
+    capture = lambda target: _async_return(pane)
+    result = await tmux_ready.wait_tui_ready(
+        "x:y", trust_platform=None, timeout_sec=1.0, poll_interval=0.01,
+        capture=capture,
+    )
+    assert result.ok is True
+    assert result.reason_code == "composer_ready"
+
+
+@pytest.mark.asyncio
+async def test_wait_tui_ready_succeeds_on_pi_status_footer_only() -> None:
+    """Even with the startup banner suppressed (quietStartup), the status footer
+    ``<pct>%/<ctx> (auto)`` must still be recognised as composer-ready."""
+    pane = (
+        "────────────────────────────────────────\n"
+        "\n"
+        "────────────────────────────────────────\n"
+        "/repo/worktree (main)\n"
+        "0.0%/0 (auto)                          gpt-5.4 • medium\n"
+    )
+    capture = lambda target: _async_return(pane)
+    result = await tmux_ready.wait_tui_ready(
+        "x:y", trust_platform=None, timeout_sec=1.0, poll_interval=0.01,
+        capture=capture,
+    )
+    assert result.ok is True
+
+
+@pytest.mark.asyncio
 async def test_wait_tui_ready_dismisses_gemini_trust_prompt() -> None:
     trust_pane = "Please trust folder before continuing\n trust parent folder \n"
     ready_pane = "loading\ngemini> "

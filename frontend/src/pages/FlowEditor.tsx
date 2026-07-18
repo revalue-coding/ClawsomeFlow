@@ -25,6 +25,7 @@ import {
   ApiError,
   AgentKind,
   DecomposeStatus,
+  ExternalChannel,
   FlowAgent,
   FlowDetail,
   FlowSaveWarning,
@@ -70,12 +71,16 @@ type NonOpenclawOwnerKind =
   | "kimi"
   | "qwen"
   | "opencode"
+  | "pi"
   | "qoder"
   | "codebuddy"
   | "hermes";
-type OwnerKind = "openclaw" | NonOpenclawOwnerKind;
+// "external" = external execution node (human / webhook / remote ClawsomeFlow):
+// no local process, no repo/branch, reached via its own owner-source category.
+type OwnerKind = "openclaw" | "external" | NonOpenclawOwnerKind;
 type OwnerKindDraft = OwnerKind | "";
-type OwnerMode = "existing" | "new";
+type OwnerMode = "existing" | "new" | "external";
+type ExternalChannelDraft = "" | "human" | "webhook" | "remote_csflow";
 type DeploymentMode = "local" | "server";
 
 interface ExistingOwnerOption {
@@ -105,6 +110,13 @@ interface TaskRow {
    *  source), false when it references a persistent/managed agent ("existing"
    *  source). Drives backend FlowAgent.is_temporary. */
   ownerIsTemporary: boolean;
+  /** External execution node (ownerKind="external") channel configuration. */
+  externalChannel: ExternalChannelDraft;
+  externalEndpointUrl: string;
+  externalBaseUrl: string;
+  externalFlowId: string;
+  externalPairTokenRef: string;
+  externalAssignee: string;
   dependsOn: string[];
   isLeaderSummary: boolean;
   timeoutSeconds: number;
@@ -145,6 +157,12 @@ interface ValidationMessages {
   /** Per-task: a persistent Hermes owner no longer exists in the user's Hermes
    *  agent list (deleted elsewhere / pulled from another user). */
   hermesAgentMissing: (subject: string, agentId: string) => string;
+  /** External node: a channel must be picked. */
+  externalChannelRequired: (subject: string) => string;
+  /** External node webhook channel: endpoint URL required. */
+  externalEndpointRequired: (subject: string) => string;
+  /** External node remote_csflow channel: baseUrl/flowId/pairTokenRef required. */
+  externalRemoteFieldsRequired: (subject: string) => string;
 }
 
 interface FlowSavePayload {
@@ -213,6 +231,12 @@ function blankRow(): TaskRow {
     ownerTargetBranch: "",
     // Blank rows default to the "new" source → a temporary agent.
     ownerIsTemporary: true,
+    externalChannel: "",
+    externalEndpointUrl: "",
+    externalBaseUrl: "",
+    externalFlowId: "",
+    externalPairTokenRef: "",
+    externalAssignee: "",
     dependsOn: [],
     isLeaderSummary: false,
     timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
@@ -243,6 +267,7 @@ const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = [
   "kimi",
   "qwen",
   "opencode",
+  "pi",
   "qoder",
   "codebuddy",
   "hermes",
@@ -256,12 +281,16 @@ function isOpenclawKind(kind: OwnerKindDraft): kind is "openclaw" {
   return kind === "openclaw";
 }
 
+function isExternalKind(kind: OwnerKindDraft): kind is "external" {
+  return kind === "external";
+}
+
 function isNonOpenclawKind(kind: OwnerKindDraft): kind is NonOpenclawOwnerKind {
-  return kind !== "" && kind !== "openclaw";
+  return kind !== "" && kind !== "openclaw" && kind !== "external";
 }
 
 function needsRepoBranchFields(kind: OwnerKindDraft): boolean {
-  return !isOpenclawKind(kind);
+  return !isOpenclawKind(kind) && !isExternalKind(kind);
 }
 
 /** Repo/branch binding carried by the leader summary task row, if any. */
@@ -416,6 +445,7 @@ function ownerKey(
   row: Pick<TaskRow, "ownerKind" | "ownerId" | "ownerRepo" | "ownerTargetBranch">,
 ) {
   if (isOpenclawKind(row.ownerKind)) return `openclaw:${row.ownerId.trim()}`;
+  if (isExternalKind(row.ownerKind)) return `external:${row.ownerId.trim()}`;
   if (!isOwnerKind(row.ownerKind)) return `unset:${row.ownerId.trim()}`;
   return `${row.ownerKind}:${normalizeRepoPathForCompare(row.ownerRepo)}:${row.ownerTargetBranch.trim()}:${row.ownerId.trim()}`;
 }
@@ -433,6 +463,14 @@ function normalizedOwnerBinding(
   if (isOpenclawKind(row.ownerKind)) {
     return {
       ownerKind: "openclaw",
+      ownerRepo: "",
+      ownerTargetBranch: "",
+      ownerIsTemporary: false,
+    };
+  }
+  if (isExternalKind(row.ownerKind)) {
+    return {
+      ownerKind: "external",
       ownerRepo: "",
       ownerTargetBranch: "",
       ownerIsTemporary: false,
@@ -573,9 +611,11 @@ function ownerKindLabel(
   if (kind === "kimi") return t("flowEditor.taskFields.ownerKindKimi");
   if (kind === "qwen") return t("flowEditor.taskFields.ownerKindQwen");
   if (kind === "opencode") return t("flowEditor.taskFields.ownerKindOpencode");
+  if (kind === "pi") return t("flowEditor.taskFields.ownerKindPi");
   if (kind === "qoder") return t("flowEditor.taskFields.ownerKindQoder");
   if (kind === "codebuddy") return t("flowEditor.taskFields.ownerKindCodebuddy");
   if (kind === "hermes") return t("flowEditor.taskFields.ownerKindHermes");
+  if (kind === "external") return t("flowEditor.taskFields.ownerKindExternal");
   return t("flowEditor.taskFields.ownerKindClaude");
 }
 
@@ -583,6 +623,7 @@ function ownerKindLabel(
 // backend/proposal `kind` string into a known OwnerKind (unknown → "claude").
 const ALL_OWNER_KINDS: readonly OwnerKind[] = [
   "openclaw",
+  "external",
   ...NEW_OWNER_KINDS,
 ];
 
@@ -661,6 +702,8 @@ function ownerKindAvailableForSource(
   availability: OwnerKindsAvailability,
 ): boolean {
   if (!isOwnerKind(kind)) return false;
+  // External execution nodes have no platform dependency — always available.
+  if (isExternalKind(kind)) return true;
   if (isTemporary) {
     return isNonOpenclawKind(kind) && availability.temporaryKinds.includes(kind);
   }
@@ -1381,6 +1424,12 @@ export function FlowEditor() {
         t("flowEditor.validation.openclawAgentMissing", { subject, agentId }),
       hermesAgentMissing: (subject: string, agentId: string) =>
         t("flowEditor.validation.hermesAgentMissing", { subject, agentId }),
+      externalChannelRequired: (subject: string) =>
+        t("flowEditor.validation.externalChannelRequired", { subject }),
+      externalEndpointRequired: (subject: string) =>
+        t("flowEditor.validation.externalEndpointRequired", { subject }),
+      externalRemoteFieldsRequired: (subject: string) =>
+        t("flowEditor.validation.externalRemoteFieldsRequired", { subject }),
     }),
     [t],
   );
@@ -3097,7 +3146,9 @@ function TaskEditModal({
   const readOnly = mode === "view";
   const isSummary = draft.isLeaderSummary;
   const [ownerMode, setOwnerMode] = useState<OwnerMode>(() =>
-    initialRow.ownerKind !== "openclaw" && initialRow.ownerIsTemporary
+    initialRow.ownerKind === "external"
+      ? "external"
+      : initialRow.ownerKind !== "openclaw" && initialRow.ownerIsTemporary
       ? "new"
       : "existing",
   );
@@ -3381,7 +3432,16 @@ function TaskEditModal({
         onOwnerModeChange={(nextMode) => {
           setOwnerMode(nextMode);
           // Switching source clears kind+id so user re-picks explicitly.
-          if (nextMode === "new") {
+          if (nextMode === "external") {
+            // External nodes have exactly one kind; no repo/branch.
+            patch({
+              ownerKind: "external",
+              ownerId: "",
+              ownerIsTemporary: false,
+              ownerRepo: "",
+              ownerTargetBranch: "",
+            });
+          } else if (nextMode === "new") {
             patch({ ownerKind: "", ownerId: "", ownerIsTemporary: true });
           } else {
             patch({ ownerKind: "", ownerId: "", ownerIsTemporary: false });
@@ -3463,9 +3523,10 @@ function TaskFormBody({
   const ownerLocked = readOnly || isSummary;
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
-  const ownerShowsRepoFields = !ownerIsOpenclaw;
+  const ownerIsExternal = ownerMode === "external" || isExternalKind(row.ownerKind);
+  const ownerShowsRepoFields = !ownerIsOpenclaw && !ownerIsExternal;
   const ownerIsNew = ownerMode === "new";
-  const ownerKindEditable = !ownerLocked;
+  const ownerKindEditable = !ownerLocked && !ownerIsExternal;
   const branchHelperText = branchEditable
     ? t("flowEditor.taskBranchCheck.editableHint")
     : "";
@@ -3650,6 +3711,10 @@ function TaskFormBody({
         >
           <option value="existing">{t("flowEditor.taskFields.ownerSourceExisting")}</option>
           <option value="new">{t("flowEditor.taskFields.ownerSourceNew")}</option>
+          {/* External execution node — never selectable for the leader summary. */}
+          {!isSummary && (
+            <option value="external">{t("flowEditor.taskFields.ownerSourceExternal")}</option>
+          )}
         </select>
       </div>
 
@@ -3707,7 +3772,16 @@ function TaskFormBody({
             ? t("flowEditor.taskFields.newAgentName")
             : t("flowEditor.taskFields.existingAgent")}
         </label>
-        {!ownerKindSelected ? (
+        {ownerIsExternal ? (
+          // External node: free-typed node name (the FlowAgent id in the DAG).
+          <input
+            className="input"
+            value={row.ownerId}
+            readOnly={ownerLocked}
+            placeholder={t("flowEditor.taskFields.externalNamePlaceholder")}
+            onChange={(e) => onChange({ ownerId: e.target.value })}
+          />
+        ) : !ownerKindSelected ? (
           <input
             className="input"
             value={row.ownerId}
@@ -3845,6 +3919,96 @@ function TaskFormBody({
           </>
         )}
       </div>
+
+      {ownerIsExternal && (
+        <div className="md:col-span-2">
+          <div className="grid gap-2 md:grid-cols-2">
+            <div>
+              <label className="label">{t("flowEditor.taskFields.externalChannel")}</label>
+              <select
+                className="select"
+                value={row.externalChannel}
+                disabled={ownerLocked}
+                onChange={(e) =>
+                  onChange({ externalChannel: e.target.value as ExternalChannelDraft })
+                }
+              >
+                <option value="">{t("flowEditor.taskFields.externalChannelPlaceholder")}</option>
+                <option value="human">{t("flowEditor.taskFields.externalChannelHuman")}</option>
+                <option value="webhook">{t("flowEditor.taskFields.externalChannelWebhook")}</option>
+                <option value="remote_csflow">
+                  {t("flowEditor.taskFields.externalChannelRemoteCsflow")}
+                </option>
+              </select>
+            </div>
+            {row.externalChannel === "human" && (
+              <div>
+                <label className="label">{t("flowEditor.taskFields.externalAssignee")}</label>
+                <input
+                  className="input"
+                  value={row.externalAssignee}
+                  readOnly={ownerLocked}
+                  placeholder={t("flowEditor.taskFields.externalAssigneePlaceholder")}
+                  onChange={(e) => onChange({ externalAssignee: e.target.value })}
+                />
+              </div>
+            )}
+            {row.externalChannel === "webhook" && (
+              <div>
+                <label className="label">{t("flowEditor.taskFields.externalEndpointUrl")}</label>
+                <input
+                  className="input"
+                  value={row.externalEndpointUrl}
+                  readOnly={ownerLocked}
+                  placeholder="https://example.com/csflow-tasks"
+                  onChange={(e) => onChange({ externalEndpointUrl: e.target.value })}
+                />
+              </div>
+            )}
+            {row.externalChannel === "remote_csflow" && (
+              <>
+                <div>
+                  <label className="label">{t("flowEditor.taskFields.externalBaseUrl")}</label>
+                  <input
+                    className="input"
+                    value={row.externalBaseUrl}
+                    readOnly={ownerLocked}
+                    placeholder="http://remote-host:17017"
+                    onChange={(e) => onChange({ externalBaseUrl: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">{t("flowEditor.taskFields.externalFlowId")}</label>
+                  <input
+                    className="input"
+                    value={row.externalFlowId}
+                    readOnly={ownerLocked}
+                    placeholder="flow-xxxxxxxxxxxx"
+                    onChange={(e) => onChange({ externalFlowId: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">{t("flowEditor.taskFields.externalPairTokenRef")}</label>
+                  <input
+                    className="input"
+                    value={row.externalPairTokenRef}
+                    readOnly={ownerLocked}
+                    placeholder={t("flowEditor.taskFields.externalPairTokenRefPlaceholder")}
+                    onChange={(e) => onChange({ externalPairTokenRef: e.target.value })}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+          <div className="text-xs text-ink-500 mt-1">
+            {row.externalChannel === "webhook"
+              ? t("flowEditor.taskFields.externalWebhookHint")
+              : row.externalChannel === "remote_csflow"
+              ? t("flowEditor.taskFields.externalRemoteHint")
+              : t("flowEditor.taskFields.externalHumanHint")}
+          </div>
+        </div>
+      )}
 
       {ownerShowsRepoFields && (
         <div className="md:col-span-2">
@@ -4766,7 +4930,11 @@ function validate(
       issues.push({ rowKey: r.rowKey, message: messages.ownerKindRequired });
       continue;
     }
-    if (r.ownerIsTemporary && !isNonOpenclawKind(r.ownerKind)) {
+    if (
+      !isExternalKind(r.ownerKind)
+      && r.ownerIsTemporary
+      && !isNonOpenclawKind(r.ownerKind)
+    ) {
       issues.push({
         rowKey: r.rowKey,
         message: messages.ownerKindUnavailable({
@@ -4776,7 +4944,11 @@ function validate(
       });
       continue;
     }
-    if (!r.ownerIsTemporary && !isPersistentOwnerKind(r.ownerKind)) {
+    if (
+      !isExternalKind(r.ownerKind)
+      && !r.ownerIsTemporary
+      && !isPersistentOwnerKind(r.ownerKind)
+    ) {
       issues.push({
         rowKey: r.rowKey,
         message: messages.ownerKindUnavailable({
@@ -4785,6 +4957,31 @@ function validate(
         }),
       });
       continue;
+    }
+    if (isExternalKind(r.ownerKind)) {
+      if (!r.externalChannel) {
+        issues.push({
+          rowKey: r.rowKey,
+          message: messages.externalChannelRequired(subjectLabel),
+        });
+      } else if (r.externalChannel === "webhook" && !r.externalEndpointUrl.trim()) {
+        issues.push({
+          rowKey: r.rowKey,
+          message: messages.externalEndpointRequired(subjectLabel),
+        });
+      } else if (
+        r.externalChannel === "remote_csflow"
+        && (
+          !r.externalBaseUrl.trim()
+          || !r.externalFlowId.trim()
+          || !r.externalPairTokenRef.trim()
+        )
+      ) {
+        issues.push({
+          rowKey: r.rowKey,
+          message: messages.externalRemoteFieldsRequired(subjectLabel),
+        });
+      }
     }
     if (!r.ownerId.trim()) {
       issues.push({
@@ -4937,6 +5134,24 @@ function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
             targetBranch: null,
             // OpenClaw is always a persistent agent.
             isTemporary: false,
+          }
+        : r.ownerKind === "external"
+        ? {
+            id: r.ownerId.trim(),
+            kind: "external" as AgentKind,
+            // External nodes can never lead; no worktree/branch either.
+            isLeader: false,
+            repo: null,
+            targetBranch: null,
+            isTemporary: false,
+            external: {
+              channel: (r.externalChannel || "human") as ExternalChannel,
+              endpointUrl: r.externalEndpointUrl.trim() || null,
+              baseUrl: r.externalBaseUrl.trim() || null,
+              flowId: r.externalFlowId.trim() || null,
+              pairTokenRef: r.externalPairTokenRef.trim() || null,
+              assignee: r.externalAssignee.trim() || null,
+            },
           }
         : {
             id: r.ownerId.trim(),
@@ -5549,6 +5764,13 @@ function proposalToRows(
         ? meta.targetBranch
         : "",
       ownerIsTemporary: meta.kind !== "openclaw" && meta.isTemporary,
+      // The AI decomposer never proposes external execution nodes.
+      externalChannel: "" as ExternalChannelDraft,
+      externalEndpointUrl: "",
+      externalBaseUrl: "",
+      externalFlowId: "",
+      externalPairTokenRef: "",
+      externalAssignee: "",
       dependsOn,
       isLeaderSummary: !!(tk.isLeaderSummary ?? tk.is_leader_summary),
       timeoutSeconds: Number(
@@ -5584,7 +5806,18 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       // proposalToRows — so an unregistered legacy agent renders as a text input
       // instead of a blank managed dropdown. The 0.1.13b7 upgrade migration
       // backfills explicit values, so this only matters before that runs.
-      ownerIsTemporary: ownerKind !== "openclaw" && (a?.isTemporary ?? true),
+      ownerIsTemporary:
+        ownerKind !== "openclaw"
+        && ownerKind !== "external"
+        && (a?.isTemporary ?? true),
+      externalChannel: (
+        ownerKind === "external" ? a?.external?.channel ?? "" : ""
+      ) as ExternalChannelDraft,
+      externalEndpointUrl: a?.external?.endpointUrl ?? "",
+      externalBaseUrl: a?.external?.baseUrl ?? "",
+      externalFlowId: a?.external?.flowId ?? "",
+      externalPairTokenRef: a?.external?.pairTokenRef ?? "",
+      externalAssignee: a?.external?.assignee ?? "",
       dependsOn: tk.dependsOn ?? [],
       isLeaderSummary: !!tk.isLeaderSummary,
       timeoutSeconds: tk.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,

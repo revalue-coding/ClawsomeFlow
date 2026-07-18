@@ -680,6 +680,70 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     )
 
 
+# ── External execution nodes (AgentKind.external) ────────────────────
+
+
+def build_external_task_text(ctx: DispatchContext) -> str:
+    """Human-readable task sheet for an external executor.
+
+    Unlike the worker/leader builders this contains NO ClawTeam protocol
+    steps (an external executor never talks to ClawTeam — the completion
+    round-trip happens through the /api/external receipt endpoint or the
+    WebUI card). Upstream summaries are included so the executor has the
+    same first-level context a local worker would get; worktree paths are
+    kept (meaningful for a human on the same machine, harmless remotely).
+    """
+    blocks = [
+        (
+            "## ClawsomeFlow External Task\n"
+            "This task is part of a ClawsomeFlow run and is assigned to an "
+            "external executor (you). Complete the work described below, then "
+            "submit the result back to ClawsomeFlow (WebUI task card, or the "
+            "callback API for integrated systems).\n"
+            f"Run ID: `{ctx.run_id}`  ·  Team: `{ctx.team_name}`"
+        ),
+        _flow_goal_block(ctx),
+        _upstream_outputs_block(ctx),
+        _task_block(ctx),
+        (
+            "## Result Submission\n"
+            "- Provide a concise completion summary (include absolute paths / "
+            "links to any deliverables).\n"
+            "- If the task cannot be completed, submit a failure with the "
+            "blocking reason instead of leaving it open."
+        ),
+    ]
+    return "\n\n".join(b for b in blocks if b).strip() + "\n"
+
+
+def build_external_task_package(ctx: DispatchContext) -> dict[str, object]:
+    """Structured fields for the outbound dispatch package + dispatch event.
+
+    ``clawteamTaskId`` / ``leaderAgentId`` are recorded so the receipt path
+    (services/external_tasks.complete_external_task) can push the result into
+    ClawTeam without needing a live controller lookup.
+    """
+    return {
+        "subject": ctx.task.subject,
+        "description": ctx.task.description,
+        "flowDescription": ctx.flow_description,
+        "runtimeInputs": _public_flow_inputs(ctx.flow_inputs),
+        "leaderAgentId": ctx.leader_agent_id,
+        "clawteamTaskId": ctx.clawteam_task_id,
+        "timeoutSeconds": ctx.task.timeout_seconds,
+        "upstreamOutputs": [
+            {
+                "taskId": u.task_id,
+                "subject": u.subject,
+                "fromAgent": u.from_agent,
+                "summary": u.summary,
+                "worktreePath": u.worktree_path,
+            }
+            for u in ctx.upstream_outputs
+        ],
+    }
+
+
 # ── OpenClaw self-merge specific ──────────────────────────────────────
 
 
@@ -727,6 +791,8 @@ __all__ = [
     "DispatchContext",
     "UpstreamOutput",
     "WorkerReport",
+    "build_external_task_package",
+    "build_external_task_text",
     "build_leader_dispatch",
     "build_openclaw_self_merge",
     "build_worker_dispatch",

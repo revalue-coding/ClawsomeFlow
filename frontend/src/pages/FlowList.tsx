@@ -835,6 +835,8 @@ function LeaderCell({
         return "bg-indigo-50 text-indigo-700 border-indigo-200";
       case "opencode":
         return "bg-teal-50 text-teal-700 border-teal-200";
+      case "pi":
+        return "bg-lime-50 text-lime-700 border-lime-200";
       case "qoder":
         return "bg-cyan-50 text-cyan-700 border-cyan-200";
       case "codebuddy":

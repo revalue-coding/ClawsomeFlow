@@ -2775,6 +2775,73 @@ async def retry_task(
     return _to_summary(run)
 
 
+class ExternalTaskCompletePayload(_CamelModel):
+    status: str = "success"  # "success" | "failed"
+    summary: str = ""
+
+
+@router.post(
+    "/runs/{run_id}/external-tasks/{task_id}/complete",
+    response_model=RunSummary,
+)
+async def complete_external_task_webui(
+    run_id: Annotated[str, Path()],
+    task_id: Annotated[str, Path()],
+    payload: Annotated[ExternalTaskCompletePayload, Body()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunSummary:
+    """Submit an external-node task result from the WebUI (human channel).
+
+    Same-origin trusted path: the run owner needs no ticket — the latest
+    outstanding dispatch nonce is looked up server-side and the shared
+    completion service (``services/external_tasks``) does the rest
+    (mailbox_send + task_update, idempotent per dispatch attempt).
+    """
+    from app.services.external_tasks import (
+        ExternalTaskError,
+        complete_external_task,
+        latest_dispatch_event,
+    )
+
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if run.status in _TERMINAL:
+        raise ApiError(
+            "EXTERNAL_RUN_NOT_ACTIVE",
+            "external task completion requires the run to still be active",
+            status_code=409,
+        )
+    if payload.status not in ("success", "failed"):
+        raise ApiError(
+            "INVALID_PAYLOAD", "status must be 'success' or 'failed'",
+            status_code=400,
+        )
+    dispatch_ev = latest_dispatch_event(storage, run_id=run.id, task_id=task_id)
+    if dispatch_ev is None:
+        raise ApiError(
+            "EXTERNAL_TASK_NOT_DISPATCHED",
+            f"task {task_id!r} has no outstanding external dispatch",
+            status_code=409,
+        )
+    nonce = str((dispatch_ev.payload or {}).get("nonce") or "")
+    try:
+        await complete_external_task(
+            storage=storage,
+            run=run,
+            task_id=task_id,
+            nonce=nonce,
+            ok=(payload.status == "success"),
+            summary=payload.summary,
+            source="webui",
+        )
+    except ExternalTaskError as exc:
+        raise ApiError(exc.code, exc.message, status_code=exc.status_code) from exc
+    return _to_summary(run)
+
+
 @router.post(
     "/runs/{run_id}/checkpoint/items/{task_id}/approve",
     response_model=RunSummary,

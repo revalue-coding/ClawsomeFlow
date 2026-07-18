@@ -33,7 +33,7 @@ import {
   StatusPill,
 } from "@/components/ui";
 import { useDialog } from "@/components/dialog";
-import { DEFAULT_TARGET_BRANCH } from "@/lib/flowRuntime";
+import { DEFAULT_TARGET_BRANCH, getDevMode } from "@/lib/flowRuntime";
 import { useSessionBackedState } from "@/lib/sessionState";
 import { RunWsEvent, eventViewToWs, openRunStream } from "@/lib/ws";
 
@@ -896,6 +896,11 @@ export function RunDetail() {
         </Card>
       )}
 
+      {/* External execution node tasks (human todo cards / channel waiting state) */}
+      {!TERMINAL.has(run.status) && (
+        <ExternalTasksCard runId={run.id} events={events} />
+      )}
+
       {mergeFailures.length > 0 && (
         <Card className="border-rose-200">
           <CardTitle hint={t("runDetail.mergeFailureHint")}>
@@ -1048,6 +1053,7 @@ export function RunDetail() {
           runId={run.id}
           runStatus={run.status}
           refreshToken={runDiffRefresh}
+          devMode={getDevMode(run.specSnapshot)}
         />
       )}
 
@@ -2426,14 +2432,23 @@ function RunDiffCard({
   runId,
   runStatus,
   refreshToken = 0,
+  devMode = false,
 }: {
   runId: string;
   runStatus: string;
   refreshToken?: number;
+  devMode?: boolean;
 }) {
   const { t } = useTranslation();
   const { confirm, alert } = useDialog();
   const actionsBlocked = runStatus === "complaint_processing";
+  const revertLabelKey = devMode ? "runDetail.runDiffRevert" : "runDetail.runDiffRevertPlain";
+  const revertTitleKey = devMode
+    ? "runDetail.runDiffRevertConfirmTitle"
+    : "runDetail.runDiffRevertConfirmTitlePlain";
+  const revertBodyKey = devMode
+    ? "runDetail.runDiffRevertConfirmBody"
+    : "runDetail.runDiffRevertConfirmBodyPlain";
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [agents, setAgents] = useState<RunDiffAgent[]>([]);
@@ -2466,9 +2481,9 @@ function RunDiffCard({
         return;
       }
       const ok = await confirm(
-        t("runDetail.runDiffRevertConfirmBody", { agent: agentId }),
+        t(revertBodyKey, { agent: agentId }),
         {
-          title: t("runDetail.runDiffRevertConfirmTitle"),
+          title: t(revertTitleKey),
           okText: t("runDetail.runDiffRevertConfirmOk"),
           danger: true,
         },
@@ -2486,7 +2501,7 @@ function RunDiffCard({
         setRevertingId(null);
       }
     },
-    [runId, confirm, alert, t, load, actionsBlocked],
+    [runId, confirm, alert, t, load, actionsBlocked, revertBodyKey, revertTitleKey],
   );
 
   return (
@@ -2542,7 +2557,7 @@ function RunDiffCard({
                 >
                   {revertingId === a.agentId
                     ? t("runDetail.runDiffReverting")
-                    : t("runDetail.runDiffRevert")}
+                    : t(revertLabelKey)}
                 </button>
               </div>
             </div>
@@ -2886,6 +2901,172 @@ function eventTypePillClass(type: string): string {
     return "pill-warning";
   }
   return "pill-default";
+}
+
+// ── External execution node cards ───────────────────────────────────
+
+type ExternalTaskItem = {
+  taskId: string;
+  agentId: string;
+  channel: string;
+  assignee: string;
+  subject: string;
+  message: string;
+  nonce: string;
+};
+
+/** Outstanding external-node dispatches: latest dispatch per task, minus
+ *  those already completed (matching completion nonce) or whose ClawTeam
+ *  task already went completed. */
+function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
+  const ordered = [...events].sort((a, b) => a.id - b.id);
+  const latest = new Map<string, ExternalTaskItem>();
+  const completedNonces = new Set<string>();
+  const completedTasks = new Set<string>();
+  for (const e of ordered) {
+    const tid = typeof e.taskId === "string" ? e.taskId : "";
+    if (!tid) continue;
+    const payload = (e.payload ?? {}) as Record<string, unknown>;
+    if (e.type === "external_task_dispatched") {
+      latest.set(tid, {
+        taskId: tid,
+        agentId: e.agentId ?? "",
+        channel: String(payload.channel ?? ""),
+        assignee: String(payload.assignee ?? ""),
+        subject: String(payload.subject ?? ""),
+        message: String(payload.message ?? ""),
+        nonce: String(payload.nonce ?? ""),
+      });
+    } else if (e.type === "external_task_completed") {
+      completedNonces.add(`${tid}:${String(payload.nonce ?? "")}`);
+    } else if (e.type === "task_completed") {
+      completedTasks.add(tid);
+    }
+  }
+  return [...latest.values()].filter(
+    (it) =>
+      !completedTasks.has(it.taskId)
+      && !completedNonces.has(`${it.taskId}:${it.nonce}`),
+  );
+}
+
+function ExternalTasksCard({
+  runId,
+  events,
+}: {
+  runId: string;
+  events: RunWsEvent[];
+}) {
+  const { t } = useTranslation();
+  const { alert } = useDialog();
+  const items = useMemo(() => collectExternalTasks(events), [events]);
+  const [summaries, setSummaries] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState<string | null>(null);
+  if (items.length === 0) return null;
+
+  async function submit(taskId: string, status: "success" | "failed") {
+    setSubmitting(taskId);
+    try {
+      await api.completeExternalTask(runId, taskId, status, summaries[taskId] ?? "");
+    } catch (e) {
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setSubmitting(null);
+    }
+  }
+
+  const channelLabel = (channel: string) =>
+    channel === "human"
+      ? t("runDetail.external.channelHuman")
+      : channel === "webhook"
+      ? t("runDetail.external.channelWebhook")
+      : channel === "remote_csflow"
+      ? t("runDetail.external.channelRemoteCsflow")
+      : channel;
+
+  return (
+    <Card className="border-violet-200">
+      <CardTitle hint={t("runDetail.external.hint")}>
+        {t("runDetail.external.title")} ({items.length})
+      </CardTitle>
+      <div className="space-y-3">
+        {items.map((item) => (
+          <div
+            key={`external-${item.taskId}-${item.nonce}`}
+            className="rounded-md border border-violet-200 bg-violet-50/30 px-4 py-3"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-medium text-ink-900">
+                <span className="font-mono">{item.taskId}</span>
+                {item.subject ? ` · ${item.subject}` : ""}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="pill-default">{channelLabel(item.channel)}</span>
+                {item.assignee && (
+                  <span className="pill-info">
+                    {t("runDetail.external.assignee")}: {item.assignee}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="mt-1 text-xs text-ink-500">
+              {t("runDetail.external.nodeLabel")}:{" "}
+              <span className="font-mono">{item.agentId}</span>
+            </div>
+            {item.message && (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-xs text-ink-600">
+                  {t("runDetail.external.showTaskSheet")}
+                </summary>
+                <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2 text-xs text-ink-700">
+                  {item.message}
+                </pre>
+              </details>
+            )}
+            {item.channel !== "human" && (
+              <div className="mt-2 text-xs text-ink-600">
+                {item.channel === "webhook"
+                  ? t("runDetail.external.waitingWebhook")
+                  : t("runDetail.external.waitingRemote")}
+              </div>
+            )}
+            {/* Manual submission — the primary path for the human channel and
+                an operator override for webhook / remote channels. */}
+            <div className="mt-3 space-y-2">
+              <textarea
+                className="textarea h-20"
+                placeholder={t("runDetail.external.summaryPlaceholder")}
+                value={summaries[item.taskId] ?? ""}
+                onChange={(e) =>
+                  setSummaries((prev) => ({ ...prev, [item.taskId]: e.target.value }))
+                }
+              />
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  className="btn-outline"
+                  disabled={submitting === item.taskId}
+                  onClick={() => void submit(item.taskId, "failed")}
+                >
+                  {t("runDetail.external.submitFailed")}
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={submitting === item.taskId}
+                  onClick={() => void submit(item.taskId, "success")}
+                >
+                  {submitting === item.taskId
+                    ? t("runDetail.external.submitting")
+                    : t("runDetail.external.submitSuccess")}
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
 }
 
 function EventTable({ events }: { events: RunWsEvent[] }) {

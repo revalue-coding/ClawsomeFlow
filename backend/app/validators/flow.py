@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.models import AgentKind, FlowSpec
+from app.models import AgentKind, ExternalChannel, FlowSpec
 
 if TYPE_CHECKING:  # avoid circular import; storage layer pulls models
     from app.storage import StorageBackend
@@ -40,6 +40,7 @@ ERROR_DUPLICATE_TASK_ID = "DUPLICATE_TASK_ID"
 ERROR_TASK_OWNS_NOTHING = "TASK_OWNS_NOTHING"
 ERROR_LEADER_OWNS_WORKER_TASK = "LEADER_OWNS_WORKER_TASK"
 ERROR_SUMMARY_NO_DEPENDENCY = "SUMMARY_NO_DEPENDENCY"
+ERROR_EXTERNAL_PAIR_TOKEN_NOT_FOUND = "EXTERNAL_PAIR_TOKEN_NOT_FOUND"
 
 
 @dataclass(slots=True)
@@ -301,6 +302,27 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
                     "registered in the OpenClaw runtime (restore it first)",
                     {"agent_id": a.id},
                 )
+        elif a.kind == AgentKind.external:
+            # External execution nodes own no worktree/branch → no repo checks.
+            # The only storage-aware reference is the outbound pairing
+            # credential for the remote_csflow channel: the spec stores a NAME
+            # (pair_token_ref); the secret lives in config.external_remote_targets.
+            cfg_ext = a.external
+            if (
+                cfg_ext is not None
+                and cfg_ext.channel == ExternalChannel.remote_csflow
+            ):
+                from app.config import load_config
+
+                ref = (cfg_ext.pair_token_ref or "").strip()
+                if ref not in load_config().external_remote_targets:
+                    raise FlowValidationError(
+                        ERROR_EXTERNAL_PAIR_TOKEN_NOT_FOUND,
+                        f"agent {a.id!r}: pair_token_ref {ref!r} not found in "
+                        "config.external_remote_targets — register the remote "
+                        "target first (csflow external add-remote)",
+                        {"agent_id": a.id, "pair_token_ref": ref},
+                    )
         else:
             # Temporary (ad-hoc) agents are not registered in any managed store,
             # so skip the existence lookups for them — they still need a valid
@@ -391,9 +413,12 @@ def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
 
 
 def _validate_non_openclaw_target_branches_nonempty(spec: FlowSpec) -> None:
-    """Every non-OpenClaw agent must have a non-empty target branch."""
+    """Every non-OpenClaw agent must have a non-empty target branch.
+
+    External execution nodes are exempt too — they own no worktree/branch.
+    """
     for agent in spec.agents:
-        if agent.kind == AgentKind.openclaw:
+        if agent.kind in (AgentKind.openclaw, AgentKind.external):
             continue
         if not (agent.target_branch or "").strip():
             raise FlowValidationError(

@@ -1,0 +1,359 @@
+"""/api/external surface + the WebUI human completion endpoint + guard rules."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.config import load_config, save_config
+from app.main import create_app
+from app.models import (
+    AgentKind,
+    ExternalChannel,
+    ExternalNodeConfig,
+    Flow,
+    FlowAgent,
+    FlowRun,
+    FlowSpec,
+    FlowTask,
+    RunEvent,
+    RunStatus,
+)
+from app.scheduler import engine as engine_mod
+from app.scheduler.run_metadata import EXTERNAL_CALLBACK_KEY, UNATTENDED_KEY
+from app.services.external_tasks import (
+    EXTERNAL_TASK_DISPATCHED_EVENT,
+    mint_ticket,
+)
+from app.storage import get_storage
+
+
+@pytest.fixture
+def app_client(tmp_path: Path):
+    cfg = load_config()
+    save_config(cfg.model_copy(update={"default_user": "alice"}))
+    # /api/external enforces a loopback-Host rule even when the api_token
+    # guard is inactive, so tests must present a loopback Host (the default
+    # "testserver" base_url would be rejected with HOST_NOT_ALLOWED).
+    with TestClient(create_app(), base_url="http://127.0.0.1:17017") as c:
+        yield c
+
+
+class _FakeMcp:
+    def __init__(self) -> None:
+        self.mailbox_calls: list[dict[str, Any]] = []
+        self.task_updates: list[dict[str, Any]] = []
+
+    async def mailbox_send(self, **kw: Any) -> None:
+        self.mailbox_calls.append(kw)
+
+    async def task_update(self, **kw: Any) -> dict[str, Any]:
+        self.task_updates.append(kw)
+        return {}
+
+
+def _fake_mcp(monkeypatch: pytest.MonkeyPatch) -> _FakeMcp:
+    from app.integrations import clawteam_mcp as mcp_mod
+
+    fake = _FakeMcp()
+
+    async def fake_get(**kw: Any) -> _FakeMcp:
+        return fake
+
+    monkeypatch.setattr(mcp_mod, "get_mcp_client", fake_get)
+    return fake
+
+
+def _mk_flow(owner: str = "alice") -> Flow:
+    storage = get_storage()
+    spec = FlowSpec(agents=[
+        FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/r", is_leader=True),
+        FlowAgent(id="ext-node", kind=AgentKind.external,
+                  external=ExternalNodeConfig(channel=ExternalChannel.human)),
+    ], tasks=[
+        FlowTask(id="t1", owner_agent_id="ext-node", subject="s"),
+        FlowTask(id="ts", owner_agent_id="leader", subject="sum",
+                 depends_on=["t1"], is_leader_summary=True),
+    ])
+    return storage.flow_create(
+        Flow(name="f", owner_user=owner).with_spec(spec),
+    )
+
+
+def _mk_run_with_dispatch(
+    *, nonce: str = "n-1", status: RunStatus = RunStatus.running,
+) -> FlowRun:
+    storage = get_storage()
+    flow = _mk_flow()
+    run = storage.run_create(FlowRun(
+        flow_id=flow.id, flow_version=1, team_name=f"csflow-{nonce}",
+        status=status, inputs={}, user="alice",
+    ))
+    storage.event_append(RunEvent(
+        run_id=run.id, type=EXTERNAL_TASK_DISPATCHED_EVENT,
+        agent_id="ext-node", task_id="t1",
+        payload={
+            "channel": "human", "nonce": nonce,
+            "clawteamTaskId": "CT-77", "leaderAgentId": "leader",
+            "subject": "s",
+        },
+    ))
+    return run
+
+
+# ── ticket completion endpoint ──────────────────────────────────────────
+
+
+def test_complete_requires_ticket(app_client: TestClient) -> None:
+    run = _mk_run_with_dispatch()
+    r = app_client.post(
+        f"/api/external/tasks/{run.id}/t1/complete",
+        json={"status": "success", "summary": "done"},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"] == "EXTERNAL_TICKET_MISSING"
+
+
+def test_complete_rejects_bad_ticket(app_client: TestClient) -> None:
+    run = _mk_run_with_dispatch()
+    r = app_client.post(
+        f"/api/external/tasks/{run.id}/t1/complete",
+        json={"status": "success", "summary": "done", "token": "nope.bad"},
+        headers={},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"] == "EXTERNAL_TICKET_INVALID"
+
+
+def test_complete_success_roundtrip(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch()
+    ticket = mint_ticket(run.id, "t1", "n-1")
+    r = app_client.post(
+        f"/api/external/tasks/{run.id}/t1/complete",
+        json={"status": "success", "summary": "external work done"},
+        headers={"Authorization": f"Bearer {ticket}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "recorded"
+    assert fake.task_updates[0]["task_id"] == "CT-77"
+    assert fake.mailbox_calls[0]["content"] == "task t1 done: external work done"
+    # Idempotent: replaying the same ticket is a 200 no-op.
+    r2 = app_client.post(
+        f"/api/external/tasks/{run.id}/t1/complete",
+        json={"status": "success", "summary": "dup", "token": ticket},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "already_recorded"
+    assert len(fake.task_updates) == 1
+
+
+def test_complete_stale_ticket_conflict(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch(nonce="n-latest")
+    stale = mint_ticket(run.id, "t1", "n-old")  # valid signature, old attempt
+    r = app_client.post(
+        f"/api/external/tasks/{run.id}/t1/complete",
+        json={"status": "success", "summary": "late", "token": stale},
+    )
+    assert r.status_code == 409
+    assert r.json()["error"] == "EXTERNAL_TICKET_STALE"
+
+
+def test_complete_rejected_on_terminal_run(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch(nonce="n-t", status=RunStatus.completed)
+    ticket = mint_ticket(run.id, "t1", "n-t")
+    r = app_client.post(
+        f"/api/external/tasks/{run.id}/t1/complete",
+        json={"status": "success", "summary": "late", "token": ticket},
+    )
+    assert r.status_code == 409
+    assert r.json()["error"] == "EXTERNAL_RUN_NOT_ACTIVE"
+
+
+# ── WebUI human path (main /api guard, no ticket) ───────────────────────
+
+
+def test_webui_complete_no_ticket_needed(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch(nonce="n-web")
+    r = app_client.post(
+        f"/api/runs/{run.id}/external-tasks/t1/complete",
+        json={"status": "success", "summary": "human did it"},
+    )
+    assert r.status_code == 200, r.text
+    assert fake.mailbox_calls[0]["content"] == "task t1 done: human did it"
+
+
+def test_webui_complete_failed_reports_failure(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch(nonce="n-web2")
+    r = app_client.post(
+        f"/api/runs/{run.id}/external-tasks/t1/complete",
+        json={"status": "failed", "summary": "cannot access lab"},
+    )
+    assert r.status_code == 200, r.text
+    assert fake.mailbox_calls[0]["content"] == "FAILED: t1: cannot access lab"
+    assert fake.task_updates == []
+
+
+def test_webui_complete_requires_outstanding_dispatch(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_mcp(monkeypatch)
+    storage = get_storage()
+    flow = _mk_flow()
+    run = storage.run_create(FlowRun(
+        flow_id=flow.id, flow_version=1, team_name="csflow-nodispatch",
+        status=RunStatus.running, inputs={}, user="alice",
+    ))
+    r = app_client.post(
+        f"/api/runs/{run.id}/external-tasks/t1/complete",
+        json={"status": "success", "summary": "x"},
+    )
+    assert r.status_code == 409
+    assert r.json()["error"] == "EXTERNAL_TASK_NOT_DISPATCHED"
+
+
+# ── delegate endpoint ───────────────────────────────────────────────────
+
+
+def _stub_start_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def fake_start_run(self, *, run, spec, flow=None, **kw):
+        captured["run_id"] = run.id
+        from app.scheduler.controller import RunController
+        return RunController(run=run, spec=spec)
+
+    monkeypatch.setattr(engine_mod.FlowScheduler, "start_run", fake_start_run)
+    return captured
+
+
+def test_delegate_requires_pair_token(app_client: TestClient) -> None:
+    flow = _mk_flow()
+    body = {
+        "flowId": flow.id, "callbackUrl": "http://origin/cb",
+        "callbackToken": "tok",
+    }
+    r = app_client.post("/api/external/delegate", json=body)
+    assert r.status_code == 401
+    assert r.json()["error"] == "EXTERNAL_PAIR_TOKEN_MISSING"
+    r2 = app_client.post(
+        "/api/external/delegate", json=body,
+        headers={"Authorization": "Bearer wrong-secret"},
+    )
+    assert r2.status_code == 401
+    assert r2.json()["error"] == "EXTERNAL_PAIR_TOKEN_INVALID"
+
+
+def test_delegate_triggers_unattended_run_with_callback_marker(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _stub_start_run(monkeypatch)
+    cfg = load_config()
+    save_config(cfg.model_copy(
+        update={"external_pair_tokens": {"machine-a": "s3cret"}},
+    ))
+    flow = _mk_flow()
+    r = app_client.post(
+        "/api/external/delegate",
+        json={
+            "flowId": flow.id,
+            "runtimePrompt": "delegated task sheet",
+            "callbackUrl": "http://origin/api/external/tasks/r/t/complete",
+            "callbackToken": "tok-123",
+            "sourceRunId": "run-remote", "sourceTaskId": "t-remote",
+        },
+        headers={"Authorization": "Bearer s3cret"},
+    )
+    assert r.status_code == 202, r.text
+    run_id = r.json()["id"]
+    assert captured["run_id"] == run_id
+    row = get_storage().run_get(run_id)
+    assert row is not None
+    # Unattended contract + callback marker stamped in run.inputs.
+    assert row.inputs[UNATTENDED_KEY] == "true"
+    import json as _json
+    marker = _json.loads(row.inputs[EXTERNAL_CALLBACK_KEY])
+    assert marker["url"].endswith("/complete")
+    assert marker["token"] == "tok-123"
+    assert row.is_scheduled is False  # is_scheduled stays "timed trigger" only
+
+
+def test_delegate_unknown_flow_404(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = load_config()
+    save_config(cfg.model_copy(
+        update={"external_pair_tokens": {"machine-a": "s3cret"}},
+    ))
+    r = app_client.post(
+        "/api/external/delegate",
+        json={"flowId": "missing", "callbackUrl": "u", "callbackToken": "t"},
+        headers={"Authorization": "Bearer s3cret"},
+    )
+    assert r.status_code == 404
+
+
+# ── guard: /api/external Host rule ──────────────────────────────────────
+
+
+def test_external_prefix_blocked_for_remote_host_by_default() -> None:
+    # Non-loopback Host + expose OFF → 403 before reaching the endpoint.
+    with TestClient(create_app(), base_url="http://203.0.113.5:17017") as c:
+        r = c.post(
+            "/api/external/tasks/r1/t1/complete",
+            json={"status": "success", "summary": "x", "token": "a.b"},
+        )
+        assert r.status_code == 403
+        assert r.json()["error"] == "HOST_NOT_ALLOWED"
+
+
+def test_external_prefix_allows_remote_host_when_exposed() -> None:
+    cfg = load_config()
+    save_config(cfg.model_copy(update={"external_api_expose": True}))
+    try:
+        with TestClient(create_app(), base_url="http://203.0.113.5:17017") as c:
+            r = c.post(
+                "/api/external/tasks/r1/t1/complete",
+                json={"status": "success", "summary": "x", "token": "a.b"},
+            )
+            # Passed the Host gate; rejected by the endpoint's own ticket auth.
+            assert r.status_code == 401
+            assert r.json()["error"] == "EXTERNAL_TICKET_INVALID"
+    finally:
+        save_config(load_config().model_copy(
+            update={"external_api_expose": False},
+        ))
+
+
+def test_main_api_still_loopback_only_when_exposed() -> None:
+    # Widening /api/external must NOT loosen the main /api surface.
+    cfg = load_config()
+    save_config(cfg.model_copy(
+        update={"external_api_expose": True, "api_token": "tok-guard"},
+    ))
+    try:
+        with TestClient(create_app(), base_url="http://203.0.113.5:17017") as c:
+            r = c.get("/api/flows")
+            assert r.status_code == 403
+            assert r.json()["error"] == "HOST_NOT_ALLOWED"
+    finally:
+        save_config(load_config().model_copy(
+            update={"external_api_expose": False, "api_token": None},
+        ))

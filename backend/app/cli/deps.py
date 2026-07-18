@@ -255,6 +255,12 @@ def _agent_runtime_setup_hint(kind: str) -> str:
             "Install CodeBuddy Code (`npm i -g @tencent-ai/codebuddy-code`), then "
             "run `codebuddy` once to log in, and verify with `codebuddy --version`."
         )
+    if kind == "pi":
+        return (
+            "Install Pi (`npm i -g @earendil-works/pi-coding-agent`), then configure "
+            "a provider (run `pi` and use `/login`, or set e.g. `ANTHROPIC_API_KEY` / "
+            "`OPENAI_API_KEY`), and verify with `pi --version`."
+        )
     return "Install the CLI and verify it with `<tool> --version`."
 
 
@@ -581,6 +587,7 @@ _NON_OPENCLAW_AGENT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ("kimi", "Kimi CLI", "kimi"),
     ("qwen", "Qwen Code", "qwen"),
     ("opencode", "OpenCode", "opencode"),
+    ("pi", "Pi Coding Agent", "pi"),
     ("qoder", "Qoder CLI", "qodercli"),
     ("codebuddy", "CodeBuddy Code", "codebuddy"),
     # nanobot intentionally omitted — temporarily not user-exposed.

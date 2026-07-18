@@ -29,6 +29,13 @@ must import the constants from here.
   by ``services/run_schedules.py``); behavioural decisions consult the union of
   the two via :func:`run_is_unattended`, so a run's execution *mode*
   (normal / easy / dev) is untouched — an unattended dev run still runs as dev.
+* :data:`EXTERNAL_CALLBACK_KEY` — set by ``POST /api/external/delegate`` on a
+  run this instance executes on behalf of a remote ClawsomeFlow. Value is a
+  JSON string ``{"url": ..., "token": ...}``; when the run reaches a terminal
+  status the storage ``run_update`` hook POSTs the leader report back to that
+  URL (see ``app.services.external_tasks.prepare_delegate_callback``).
+* :data:`EXTERNAL_CALLBACK_SENT_KEY` — ISO timestamp dedupe marker stamped
+  when the delegate callback fired (same pattern as the run-notify marker).
 
 NOTE: the string values are a persisted on-disk contract (existing user DBs
 contain them) — never rename the values, only the Python symbols.
@@ -44,6 +51,8 @@ PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
 REVERTED_MERGE_AGENT_IDS_KEY = "_csflow_reverted_merge_agent_ids"
 DEV_PENDING_PR_AGENT_IDS_KEY = "_csflow_dev_pending_pr_agent_ids"
 UNATTENDED_KEY = "_csflow_unattended"
+EXTERNAL_CALLBACK_KEY = "_csflow_external_callback"
+EXTERNAL_CALLBACK_SENT_KEY = "_csflow_external_callback_sent_at"
 
 
 def run_is_unattended(run: Any) -> bool:
@@ -66,6 +75,8 @@ def run_is_unattended(run: Any) -> bool:
 
 __all__ = [
     "DEV_PENDING_PR_AGENT_IDS_KEY",
+    "EXTERNAL_CALLBACK_KEY",
+    "EXTERNAL_CALLBACK_SENT_KEY",
     "POST_COMPLAINT_STATUS_KEY",
     "POST_REVIEW_TERMINAL_STATUS_KEY",
     "PRESERVE_WORKTREE_AGENT_IDS_KEY",

@@ -89,7 +89,12 @@ _AGENT_PROMPT_PATTERNS = [
     re.compile(r"^agent>", re.M),       # cursor agent
     re.compile(r"^>\s*$", re.M),        # cursor agent (minimal prompt)
     re.compile(r"gemini>"),             # gemini
-    re.compile(r"^pi>", re.M),          # pi
+    # pi renders a boxed composer, NOT a ``pi>`` prompt. Match two stable markers
+    # (verified against pi v0.80.7): the startup keybind hint (shown by default —
+    # quietStartup defaults to false) and the persistent status footer
+    # ``<pct>%/<ctx> (auto)`` (survives even if the banner is suppressed).
+    re.compile(r"·\s*!\s*bash\b"),      # pi startup hint: "· ! bash · ctrl+o more"
+    re.compile(r"%/\d\S*\s*\(auto\)"),  # pi status footer: "0.0%/200k (auto)"
     re.compile(r"^kimi>", re.M),        # kimi
     re.compile(r"^qwen>", re.M),        # qwen
     re.compile(r"opencode\s*>"),        # opencode

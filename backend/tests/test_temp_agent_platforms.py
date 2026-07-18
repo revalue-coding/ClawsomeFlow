@@ -13,6 +13,10 @@ versions, verified against the installed binaries:
 * kimi    → ``--yolo``; resume ``--continue``.
 * opencode→ no permission flag (ClawTeam's ``--yolo`` is REJECTED → spawn fails;
             interactive auto-approval is config-only); resume ``--continue``.
+* pi      → no tool-permission popup at all (read/bash/edit/write auto-execute);
+            carry only ``-a/--approve`` (trust project-local files); resume
+            ``--continue``. ClawTeam natively special-cases ``pi`` to inject
+            nothing, so self-control is the only correct path.
 * nanobot → ``nanobot agent`` + a stable per-agent ``-s`` (isolation + resume).
 """
 
@@ -39,6 +43,7 @@ _NEW_KINDS = [
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
+    AgentKind.pi,
     AgentKind.qoder,
     AgentKind.codebuddy,
     AgentKind.nanobot,
@@ -50,6 +55,7 @@ _USER_EXPOSED_KINDS = [
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
+    AgentKind.pi,
     AgentKind.qoder,
     AgentKind.codebuddy,
 ]
@@ -72,6 +78,11 @@ def test_kind_to_cmd_spawn_and_resume() -> None:
     assert _KIND_TO_CMD[AgentKind.opencode] == (
         ["opencode"],
         ["opencode", "--continue"],
+    )
+    # pi: only `-a/--approve` (no tool-permission popup exists); resume `--continue`.
+    assert _KIND_TO_CMD[AgentKind.pi] == (
+        ["pi", "-a"],
+        ["pi", "-a", "--continue"],
     )
     assert _KIND_TO_CMD[AgentKind.nanobot] == (
         ["nanobot", "agent"],
@@ -162,6 +173,9 @@ def test_new_platform_headless_dispatch_commands() -> None:
     ]
     assert _non_openclaw_dispatch_argv(kind=AgentKind.opencode, message="m") == [
         "opencode", "run", "--dangerously-skip-permissions", "m",
+    ]
+    assert _non_openclaw_dispatch_argv(kind=AgentKind.pi, message="m") == [
+        "pi", "-a", "-p", "m",
     ]
     assert _non_openclaw_dispatch_argv(kind=AgentKind.nanobot, message="m") == [
         "nanobot", "agent", "-m", "m",

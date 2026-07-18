@@ -101,6 +101,17 @@ _CODEX_TUI_OVERRIDES: tuple[str, ...] = (
 #                     would exit 1); interactive auto-approval is config-only
 #                     (``"permission": "allow"`` written by opencode_config), so we
 #                     carry no flag. Resume ``--continue``.
+#       pi 0.80     → has NO tool-permission popup at all (read/bash/edit/write
+#                     auto-execute by design); there is no ``--yolo``/``--dangerously``
+#                     flag and passing one would exit 1. The only trust gate is over
+#                     *project-local files* (extensions/skills/config discovered in the
+#                     worktree), default ``defaultProjectTrust=ask``; ``-a/--approve``
+#                     pre-trusts them for the run so a repo carrying ``.pi/`` resources
+#                     can never stall startup. Resume ``--continue`` (sessions are keyed
+#                     by cwd and each agent owns its worktree, so "most recent" is this
+#                     agent's session). Verified against the installed binary (v0.80.7):
+#                     ClawTeam's NativeCliAdapter already special-cases ``pi`` to inject
+#                     NOTHING, so self-control is the only correct path.
 #       nanobot     → ``nanobot agent``; no permission flag (auto-executes). No
 #                     ``--continue``; resumed via a stable ``-s`` (injected per
 #                     agent in __init__) which also isolates each agent's session
@@ -128,7 +139,9 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
     ),
     AgentKind.kimi:     (["kimi", "--yolo"], ["kimi", "--yolo", "--continue"]),
     AgentKind.opencode: (["opencode"], ["opencode", "--continue"]),
-    AgentKind.pi:       (["pi"],       ["pi", "--continue"]),
+    # pi: ``-a/--approve`` = trust project-local files for this run (pi's only
+    # trust gate; it has no tool-permission popup). Resume adds ``--continue``.
+    AgentKind.pi:       (["pi", "-a"], ["pi", "-a", "--continue"]),
     # nanobot: runtime mapping kept ready, but the platform is temporarily NOT
     # exposed to users (absent from the Flow editor + AI decomposer + deps probe).
     AgentKind.nanobot:  (["nanobot", "agent"], ["nanobot", "agent"]),
@@ -158,6 +171,7 @@ _SELF_PERMISSION_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.qwen,
     AgentKind.kimi,
     AgentKind.opencode,
+    AgentKind.pi,
     AgentKind.nanobot,
     AgentKind.qoder,
     AgentKind.codebuddy,

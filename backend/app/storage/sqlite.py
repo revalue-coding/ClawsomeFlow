@@ -259,6 +259,10 @@ class SqliteStorage:
         # here — and the actual POST fires on a daemon thread afterwards.
         # Full no-op unless the Flow has webhook channels configured
         # (spec.variables[csflow.notify_webhooks]).
+        from app.services.external_tasks import (
+            prepare_delegate_callback,
+            send_delegate_callback,
+        )
         from app.services.run_notify import (
             flow_channels_for_run,
             prepare_checkpoint_notification,
@@ -286,6 +290,14 @@ class SqliteStorage:
         except Exception as exc:  # pragma: no cover — defensive
             self._log_notify_guard(exc)
             notification = None
+        # Delegated-run result callback (external execution nodes): decision +
+        # dedupe marker land in the same commit, POST fires on a daemon thread
+        # after — exactly the run_notify pattern (same single choke point).
+        try:
+            delegate_callback = prepare_delegate_callback(run)
+        except Exception as exc:  # pragma: no cover — defensive
+            self._log_notify_guard(exc)
+            delegate_callback = None
         with self._session() as s:
             current = s.get(FlowRun, run.id)
             if current is None:
@@ -308,6 +320,11 @@ class SqliteStorage:
         if notification is not None:
             try:
                 send_run_notification(notification)
+            except Exception as exc:  # pragma: no cover — defensive
+                self._log_notify_guard(exc)
+        if delegate_callback is not None:
+            try:
+                send_delegate_callback(delegate_callback)
             except Exception as exc:  # pragma: no cover — defensive
                 self._log_notify_guard(exc)
         return current

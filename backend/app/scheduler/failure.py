@@ -25,7 +25,7 @@ from enum import Enum
 from typing import Any, Iterable
 
 from app.logging_setup import failure_detected, get_logger
-from app.models import FlowAgent, FlowTask, OnFailure
+from app.models import AgentKind, FlowAgent, FlowTask, OnFailure
 
 logger = get_logger("scheduler.failure")
 
@@ -95,11 +95,18 @@ def detect_failures(
     leader_agent_id: str,
     leader_inbox_messages: list[str] | None = None,
     now: float | None = None,
+    agents: dict[str, FlowAgent] | None = None,
 ) -> list[FailureRecord]:
     """Apply failure signals to *snapshots* and return all failures found.
 
     Signals are evaluated in the order listed in the module docstring; the
     first matching signal "wins" per task (we don't double-count).
+
+    *agents* (owner_agent_id → FlowAgent, optional) refines the timeout
+    signal for **external execution nodes**: their tasks are exempt from the
+    4h floor (an explicit small timeout is honoured as-is) and
+    ``timeout_seconds=0`` disables the timeout entirely (a human executor may
+    legitimately take days).
     """
     # Kept in signature for call-site compatibility / future expansion.
     del team_name, leader_agent_id
@@ -127,9 +134,21 @@ def detect_failures(
             and snap.dispatched_at_epoch is not None
             and snap.status in ("pending", "in_progress")
         ):
+            owner = (agents or {}).get(ftask.owner_agent_id)
+            owner_is_external = (
+                owner is not None and owner.kind == AgentKind.external
+            )
+            if owner_is_external and int(ftask.timeout_seconds) <= 0:
+                # External node with timeout disabled — wait indefinitely.
+                continue
             elapsed = now - snap.dispatched_at_epoch
             configured_timeout = max(int(ftask.timeout_seconds), 1)
-            effective_timeout = max(configured_timeout, _MIN_TASK_TIMEOUT_SECONDS)
+            if owner_is_external:
+                # No 4h floor for external executors: the configured value is
+                # an explicit expectation set by the Flow author.
+                effective_timeout = configured_timeout
+            else:
+                effective_timeout = max(configured_timeout, _MIN_TASK_TIMEOUT_SECONDS)
             if elapsed > effective_timeout:
                 out.append(_record(
                     snap, FailureReason.timeout,

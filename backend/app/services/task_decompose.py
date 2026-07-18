@@ -91,6 +91,7 @@ _NON_OPENCLAW_SUPPORTED_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
+    AgentKind.pi,
     AgentKind.qoder,
     AgentKind.codebuddy,
     AgentKind.hermes,
@@ -115,6 +116,7 @@ _TEMP_AGENT_PLATFORM_BINARIES: tuple[tuple[AgentKind, str], ...] = (
     (AgentKind.kimi, "kimi"),
     (AgentKind.qwen, "qwen"),
     (AgentKind.opencode, "opencode"),
+    (AgentKind.pi, "pi"),
     (AgentKind.qoder, "qodercli"),
     (AgentKind.codebuddy, "codebuddy"),
     # nanobot intentionally omitted — temporarily not user-exposed.
@@ -760,6 +762,11 @@ def _non_openclaw_dispatch_argv(
     # (available on the `run` subcommand) auto-approves every tool call.
     if kind == AgentKind.opencode:
         return ["opencode", "run", "--dangerously-skip-permissions", message]
+    # pi: `-p <prompt>` is the non-interactive one-shot mode (auto-executes its
+    # read/bash/edit/write tools — pi has no permission popup by design). `-a`
+    # trusts project-local files so a repo carrying `.pi/` resources never stalls.
+    if kind == AgentKind.pi:
+        return ["pi", "-a", "-p", message]
     # nanobot: `nanobot agent -m <prompt>` runs one-shot (no permission flag —
     # nanobot auto-executes).
     if kind == AgentKind.nanobot:

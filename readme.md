@@ -132,7 +132,35 @@ Developer mode offers **software-development collaboration projects** a more fle
 | **Qwen Code** | `qwen` | TUI | Testing |
 | **Qoder CLI** | `qoder` | TUI | Testing |
 | **CodeBuddy Code** | `codebuddy` | TUI | Testing |
+| **Pi** | `pi` | TUI | Testing |
 | **nanobot** | `nanobot` | TUI | Testing |
+| **External executor** | `external` | Human / Webhook / Remote ClawsomeFlow | ✅ Full support |
+
+---
+
+## 🌐 External Execution Nodes — humans, black-box systems, and remote machines in one DAG
+
+A large project can never be 100% agent-executed — some steps need a human hand (sign a contract, inspect hardware, make a judgment call), and some belong to another system or another machine. **External execution nodes** open up the definition of "executor": a task in your DAG can be owned by
+
+- **🙋 A human** — the task shows up as a todo card on the Run page (optionally pushed to Feishu / Telegram / Slack via the Flow's notify webhooks); the person does the work and submits the result right there.
+- **📦 Any system of yours (generic interface)** — ClawsomeFlow POSTs the task package (with upstream outputs and a one-time signed callback ticket) to your endpoint; your black box does whatever it does, then calls back with the result. Two JSON messages — that's the whole integration.
+- **🖥️ A remote ClawsomeFlow** — delegate the task to a Flow on another machine; its leader report comes back as this node's output. Two machines' DAGs stitched together through one node.
+
+External nodes spawn no process and own no worktree or branch — but they sit in the same dependency graph with the same completion semantics: downstream tasks unblock on their completion and automatically receive their result summaries as upstream context. Timeouts are fully configurable (including "no timeout" for human tasks that take days), and failures flow through the same retry/skip/abort policies as any agent.
+
+Set it up in the Flow editor (owner source → "External executor"), and for cross-machine collaboration pair the two instances once:
+
+```bash
+# On the machine that ACCEPTS delegations:
+csflow external pair-token machine-a     # generate the inbound credential
+csflow external expose on                # allow remote callers on /api/external only
+
+# On the machine that DELEGATES:
+csflow external add-remote machine-b <secret-from-above>
+csflow external callback-url http://this-host:17017
+```
+
+Only the narrow `/api/external/*` surface is ever exposed — the main API stays loopback-only, and every inbound call carries its own one-time, single-task credential.
 
 ---
 

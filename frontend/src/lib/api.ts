@@ -192,7 +192,25 @@ export type AgentKind =
   | "qoder"
   | "codebuddy"
   | "hermes"
-  | "custom";
+  | "custom"
+  | "external";
+
+export type ExternalChannel = "human" | "webhook" | "remote_csflow";
+
+/** Channel configuration for kind=external agents (external execution nodes). */
+export interface ExternalNodeConfig {
+  channel: ExternalChannel;
+  /** webhook channel: outbound dispatch endpoint. */
+  endpointUrl?: string | null;
+  /** remote_csflow channel: remote instance base URL. */
+  baseUrl?: string | null;
+  /** remote_csflow channel: remote Flow id to delegate. */
+  flowId?: string | null;
+  /** remote_csflow channel: outbound credential name in local config. */
+  pairTokenRef?: string | null;
+  /** human channel: display-only assignee hint. */
+  assignee?: string | null;
+}
 
 export type MergeStrategy = "manual" | "auto" | "skip" | "agent_self";
 export type OnFailure = "retry" | "skip" | "abort";
@@ -227,6 +245,8 @@ export interface FlowAgent {
   onFailure?: OnFailure;
   maxRetries?: number;
   disposeAfterDone?: boolean;
+  /** Channel config for kind=external (required for that kind). */
+  external?: ExternalNodeConfig | null;
 }
 
 export interface FlowTask {
@@ -1096,6 +1116,17 @@ export const api = {
     request<RunSummary>(
       "POST",
       `/api/runs/${id}/checkpoint/items/${taskId}/mark-read`,
+    ),
+  completeExternalTask: (
+    id: string,
+    taskId: string,
+    status: "success" | "failed",
+    summary: string,
+  ) =>
+    request<RunSummary>(
+      "POST",
+      `/api/runs/${id}/external-tasks/${taskId}/complete`,
+      { status, summary },
     ),
   getCheckpointItemDiff: (id: string, taskId: string) =>
     request<PendingMergeDiff>(

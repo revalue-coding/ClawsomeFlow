@@ -111,6 +111,52 @@ class Config(BaseModel):
         ),
     )
 
+    # ── External execution nodes (/api/external surface) ────────────────
+    # All default to None/False/empty → upgrade-only users need no migration
+    # and the feature is fully opt-in (zero regression when unused).
+
+    external_api_expose: bool = Field(
+        default=False,
+        description=(
+            "When True the /api/external/* prefix accepts non-loopback Hosts "
+            "(the service must also be bound to a non-loopback interface). "
+            "Every other /api/* path keeps the loopback-only rule. Requires "
+            "api_token to be initialised (refused otherwise at guard level)."
+        ),
+    )
+    external_callback_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL remote executors should use to call back into this "
+            "instance (e.g. 'http://my-host:17017'). Used to build the "
+            "callback_url embedded in outbound external-task dispatches. "
+            "When None, outbound packages carry a relative callback path only."
+        ),
+    )
+    external_pair_tokens: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Named pairing credentials for the /api/external/delegate surface "
+            "(name -> secret). A remote ClawsomeFlow that wants to delegate "
+            "Flows to this instance must present one of these secrets; "
+            "locally, a Flow's remote_csflow node references the credential "
+            "for the REMOTE side by name via ExternalNodeConfig.pair_token_ref "
+            "in external_remote_targets. Generated via 'csflow external "
+            "pair-token' — opt-in, never auto-created at init/upgrade."
+        ),
+    )
+    external_remote_targets: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Outbound pairing credentials (name -> secret) used when THIS "
+            "instance delegates to a remote ClawsomeFlow: "
+            "ExternalNodeConfig.pair_token_ref names an entry here. The "
+            "secret is whatever the remote side generated into its "
+            "external_pair_tokens. Kept out of Flow specs so specs stay "
+            "shareable without leaking credentials."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_mode(self) -> "Config":
         if self.deployment_mode == "local":

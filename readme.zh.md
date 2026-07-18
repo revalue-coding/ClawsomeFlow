@@ -133,7 +133,35 @@ ClawsomeFlow 继承了 ClawTeam 的如下底座能力：
 | **Qwen Code** | `qwen` | TUI | 🧪 测试中 |
 | **Qoder CLI** | `qoder` | TUI | 🧪 测试中 |
 | **CodeBuddy Code** | `codebuddy` | TUI | 🧪 测试中 |
+| **Pi** | `pi` | TUI | 🧪 测试中 |
 | **nanobot** | `nanobot` | TUI | 🧪 测试中 |
+| **外部执行人** | `external` | 真人 / Webhook / 远端 ClawsomeFlow | ✅ 完整支持 |
+
+---
+
+## 🌐 外部执行节点 —— 真人、黑箱系统、跨机器,统统进同一张 DAG
+
+一个大型项目不可能 100% 由 agent 执行——总有环节需要真人介入(签合同、验硬件、拍板决策),也总有子任务属于另一个系统或另一台机器。**外部执行节点**把「执行人」的定义彻底打开:DAG 里的任务可以由以下任何一方认领:
+
+- **🙋 真人** —— 任务以待办卡片出现在 Run 详情页(可选经 Flow 的通知 webhook 推送到飞书 / Telegram / Slack 等);人完成工作后就地提交结果。
+- **📦 你的任意系统(通用接口)** —— ClawsomeFlow 把任务包(含上游产出与一次性签名回执票据)POST 到你的端点;黑箱内部怎么执行完全不设限,做完带票据回调即可。两个 JSON 消息,就是完整的对接协议。
+- **🖥️ 远端 ClawsomeFlow** —— 把任务委托给另一台机器上的某条 Flow,其 leader 工作报告回传后自动成为本节点的产出。两台机器的两张 DAG 经由一个节点缝合起来。
+
+外部节点不启动任何进程、不占有 worktree 与分支——但它们与普通 agent 遵守同一套依赖图与完成语义:下游任务在其完成后解锁,并自动拿到它的结果摘要作为上游上下文。超时完全可配(真人任务可设为「永不超时」,跨天也没问题),失败同样走 retry / skip / abort 策略。
+
+在 Flow 编辑器中把 Owner 来源切到「外部执行人」即可使用;跨机器协作只需两台实例配对一次:
+
+```bash
+# 在【受理委托】的机器上:
+csflow external pair-token machine-a     # 生成入站配对凭证
+csflow external expose on                # 仅对 /api/external 放行远程访问
+
+# 在【发起委托】的机器上:
+csflow external add-remote machine-b <上一步生成的密钥>
+csflow external callback-url http://this-host:17017
+```
+
+对外暴露的永远只有窄小的 `/api/external/*` 面——主 API 保持仅本机可达,且每个入站请求都携带自己的一次性、单任务凭证。
 
 ---
 
@@ -193,6 +221,11 @@ ClawsomeFlow 构建在 **ClawTeam** 之上。
 > Qoder 设置 `export QODER_PERSONAL_ACCESS_TOKEN=…`（或 `qodercli` → `/login`）。
 > ClawsomeFlow 会自动写入二者的目录信任配置（`trustAll` / `trustDirectories`），
 > 使无人值守运行不会卡在「是否信任此文件夹」提示——这部分无需手动处理。
+>
+> **Pi**（`npm i -g @earendil-works/pi-coding-agent`）需先配置一个模型提供商：
+> 运行 `pi` 后用 `/login`，或设置 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` 等环境变量。
+> Pi 默认自动执行工具（无放权弹窗），spawn 时 ClawsomeFlow 追加 `-a`（信任项目本地文件），
+> 因此携带 `.pi/` 扩展的仓库也不会卡在信任提示。
 
 
 ### 安装

@@ -17,6 +17,7 @@ from app.api import errors  # noqa: F401 — registers exception handlers
 from app.api import (
     agent_store,
     clawteam_board,
+    external,
     flows,
     hermes_agents,
     openclaw_agents,
@@ -37,6 +38,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(openclaw_agents.router, prefix="/api")
     app.include_router(hermes_agents.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
+    app.include_router(external.router, prefix="/api")  # /api/external/*
     app.include_router(profiles.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
     app.include_router(operations.router, prefix="/api")

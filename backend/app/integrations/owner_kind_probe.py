@@ -142,6 +142,7 @@ _TEMP_PROBES: tuple[tuple[str, Callable[[], bool]], ...] = (
     ("kimi", lambda: probe_binary_installed("kimi")),
     ("qwen", lambda: probe_binary_installed("qwen")),
     ("opencode", lambda: probe_binary_installed("opencode")),
+    ("pi", lambda: probe_binary_installed("pi")),
     ("qoder", lambda: probe_binary_installed("qodercli", "qoder")),
     ("codebuddy", lambda: probe_binary_installed("codebuddy")),
     ("hermes", lambda: probe_binary_installed("hermes")),

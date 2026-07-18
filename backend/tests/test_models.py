@@ -71,8 +71,14 @@ class TestFlowTask:
             FlowTask(id="../escape", owner_agent_id="alice", subject="x")
 
     def test_negative_timeout(self) -> None:
-        with pytest.raises(ValidationError, match="timeout_seconds must be positive"):
-            FlowTask(id="t1", owner_agent_id="alice", subject="x", timeout_seconds=0)
+        # 0 is allowed and means "no timeout" — only honoured for tasks owned
+        # by an external execution node (scheduler/failure.py); regular agents
+        # keep the 4h floor regardless.
+        assert FlowTask(
+            id="t1", owner_agent_id="alice", subject="x", timeout_seconds=0,
+        ).timeout_seconds == 0
+        with pytest.raises(ValidationError, match="timeout_seconds must be >= 0"):
+            FlowTask(id="t1", owner_agent_id="alice", subject="x", timeout_seconds=-1)
 
     def test_summary_task_cannot_enable_human_checkpoint(self) -> None:
         with pytest.raises(

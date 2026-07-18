@@ -76,6 +76,8 @@ from app.scheduler.prompts import (
     DispatchContext,
     UpstreamOutput,
     WorkerReport,
+    build_external_task_package,
+    build_external_task_text,
     build_leader_dispatch,
     build_openclaw_self_merge,
     build_worker_dispatch,
@@ -102,6 +104,7 @@ from app.scheduler.sessions.base import (
     SessionState,
     WorkerSession,
 )
+from app.scheduler.sessions.external import ExternalNodeSession
 from app.scheduler.sessions.openclaw_tmux import OpenClawTmuxSession
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane, wait_shell_ready
 from app.scheduler.sessions.tmux_live import (
@@ -969,6 +972,7 @@ class RunController:
                 snapshots=snapshots,
                 leader_agent_id=self._leader_id,
                 leader_inbox_messages=inbox,
+                agents=self._agents,
             )
             if failures:
                 activity = True
@@ -2542,6 +2546,10 @@ class RunController:
 
     async def _refresh_worktree(self, sess: WorkerSession) -> None:
         """Update sess.worktree from ClawTeam after a fresh / resume spawn."""
+        if sess.agent.kind == AgentKind.external:
+            # External nodes own no worktree — nothing to look up.
+            sess.worktree = None
+            return
         repo = sess.agent.repo or self._openclaw_main_repo(sess.agent)
         wt = await self.worktree_lookup.get(
             self.team_name, sess.agent.id, repo=repo, force=True,
@@ -2558,9 +2566,27 @@ class RunController:
                 agent=agent, team_name=self.team_name, run_id=self.run.id,
                 agent_main_repo=self._openclaw_main_repo(agent),
             )
+        if agent.kind == AgentKind.external:
+            return ExternalNodeSession(
+                agent=agent, team_name=self.team_name, run_id=self.run.id,
+                storage=self.storage,
+                package_provider=self._compose_external_package,
+            )
         return TmuxLiveSession(
             agent=agent, team_name=self.team_name, run_id=self.run.id,
         )
+
+    async def _compose_external_package(self, task_id: str) -> dict[str, Any]:
+        """Structured outbound package for an external-node dispatch.
+
+        Recomposes the DispatchContext (the leader-inbox peek is memoised per
+        tick, so this costs no extra RPC within the dispatching tick)."""
+        book = self._tasks.get(task_id)
+        if book is None:
+            raise RuntimeError(f"external package: unknown task {task_id!r}")
+        agent = self._agents[book.task.owner_agent_id]
+        ctx = await self._compose_dispatch_context(agent, book.task)
+        return build_external_task_package(ctx)
 
     async def _dispatch_complaint_task(
         self,
@@ -3404,6 +3430,10 @@ class RunController:
         execution requirements are byte-for-byte identical to the first dispatch
         (DEV.md invariant: rerun == initial dispatch + feedback preamble).
         """
+        if agent.kind == AgentKind.external:
+            # External executors never talk to ClawTeam — the sheet carries
+            # no protocol steps (completion goes through the receipt API).
+            return build_external_task_text(ctx)
         if agent.is_leader and task.is_leader_summary:
             return build_leader_dispatch(ctx)
         return build_worker_dispatch(ctx)

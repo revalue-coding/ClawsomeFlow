@@ -162,10 +162,24 @@ class AgentKind(str, Enum):
     codebuddy = "codebuddy"
     hermes = "hermes"
     custom = "custom"
+    # External execution node: a human, a remote ClawsomeFlow instance, or an
+    # arbitrary developer system reached over HTTP. Never spawns a local
+    # process, never owns a worktree/branch — the task result comes back via
+    # the /api/external receipt endpoint (or the same-origin WebUI for the
+    # "human" channel). See ExternalNodeConfig.
+    external = "external"
 
 
 # Agents that don't have a long-lived TUI session (special-cased in scheduler).
-NON_TUI_KINDS: frozenset[AgentKind] = frozenset({AgentKind.openclaw})
+NON_TUI_KINDS: frozenset[AgentKind] = frozenset({AgentKind.openclaw, AgentKind.external})
+
+
+class ExternalChannel(str, Enum):
+    """How an ``AgentKind.external`` node is reached and how it reports back."""
+
+    human = "human"                  # todo card in the local WebUI
+    webhook = "webhook"              # outbound POST of the task package; inbound callback
+    remote_csflow = "remote_csflow"  # delegate a Flow on a remote ClawsomeFlow instance
 
 
 class MergeStrategy(str, Enum):
@@ -298,6 +312,52 @@ class _ApiBase(BaseModel):
     )
 
 
+class ExternalNodeConfig(_ApiBase):
+    """Channel configuration for an ``AgentKind.external`` Flow agent.
+
+    Exactly one of three channels:
+
+    * ``human`` — the task shows up as a todo card in the local WebUI; a person
+      submits the result there (same-origin, no ticket needed). ``assignee``
+      is a free-form display hint only.
+    * ``webhook`` — the scheduler POSTs the task package to ``endpoint_url``
+      (outbound) together with a one-time signed callback ticket; the external
+      system later calls ``POST /api/external/tasks/.../complete``.
+    * ``remote_csflow`` — the scheduler POSTs a delegation request to
+      ``{base_url}/api/external/delegate`` on the remote ClawsomeFlow, which
+      runs ``flow_id`` unattended and calls back with the leader report.
+      ``pair_token_ref`` names an entry in the local
+      ``Config.external_pair_tokens`` table (the secret itself never lives in
+      the Flow spec).
+    """
+
+    channel: ExternalChannel
+    # webhook channel
+    endpoint_url: str | None = None
+    # remote_csflow channel
+    base_url: str | None = None
+    flow_id: str | None = None
+    pair_token_ref: str | None = None
+    # human channel (display hint only)
+    assignee: str | None = None
+
+    @model_validator(mode="after")
+    def _check_channel_fields(self) -> ExternalNodeConfig:
+        if self.channel == ExternalChannel.webhook:
+            if not (self.endpoint_url or "").strip():
+                raise ValueError("external webhook channel requires 'endpoint_url'")
+        elif self.channel == ExternalChannel.remote_csflow:
+            if not (self.base_url or "").strip():
+                raise ValueError("external remote_csflow channel requires 'base_url'")
+            if not (self.flow_id or "").strip():
+                raise ValueError("external remote_csflow channel requires 'flow_id'")
+            if not (self.pair_token_ref or "").strip():
+                raise ValueError(
+                    "external remote_csflow channel requires 'pair_token_ref'"
+                )
+        return self
+
+
 class FlowAgent(_ApiBase):
     """One agent within a Flow (= a long-lived session, see plan §7).
 
@@ -332,6 +392,9 @@ class FlowAgent(_ApiBase):
     # Additive with a safe default → old specs load unchanged. OpenClaw cannot
     # be temporary (it always references a persistent OpenClaw agent).
     is_temporary: bool = False
+    # Channel config for kind=external (required for that kind, forbidden
+    # otherwise). Safe default None → old specs load unchanged.
+    external: ExternalNodeConfig | None = None
 
     @field_validator("id")
     @classmethod
@@ -359,13 +422,44 @@ class FlowAgent(_ApiBase):
     def _resolve_defaults(self) -> FlowAgent:
         # Default merge_strategy depends on kind.
         if self.merge_strategy is None:
-            self.merge_strategy = (
-                MergeStrategy.agent_self
-                if self.kind == AgentKind.openclaw
-                else MergeStrategy.manual
-            )
+            if self.kind == AgentKind.openclaw:
+                self.merge_strategy = MergeStrategy.agent_self
+            elif self.kind == AgentKind.external:
+                self.merge_strategy = MergeStrategy.skip
+            else:
+                self.merge_strategy = MergeStrategy.manual
         # Compatibility check (TUI cannot use agent_self; OpenClaw cannot use manual/auto).
         _validate_merge_strategy(self.kind, self.merge_strategy)
+        # External execution nodes: no local process, no worktree, no branch.
+        if self.kind == AgentKind.external:
+            if self.external is None:
+                raise ValueError(
+                    f"agent {self.id!r}: kind=external requires an 'external' "
+                    "channel configuration"
+                )
+            if self.is_leader:
+                raise ValueError(
+                    f"agent {self.id!r}: kind=external cannot be the leader"
+                )
+            for fld in ("repo", "target_branch", "profile"):
+                if getattr(self, fld) not in (None, ""):
+                    raise ValueError(
+                        f"agent {self.id!r}: kind=external must NOT set {fld!r} "
+                        "(external nodes own no worktree/branch)"
+                    )
+            if self.command:
+                raise ValueError(
+                    f"agent {self.id!r}: kind=external must NOT set 'command'"
+                )
+            if self.is_temporary:
+                raise ValueError(
+                    f"agent {self.id!r}: kind=external cannot be a temporary agent"
+                )
+        elif self.external is not None:
+            raise ValueError(
+                f"agent {self.id!r}: 'external' config is only allowed when "
+                "kind=external"
+            )
         # OpenClaw always references a persistent OpenClaw agent — it can never
         # be a temporary/ad-hoc agent.
         if self.is_temporary and self.kind == AgentKind.openclaw:
@@ -382,7 +476,10 @@ class FlowAgent(_ApiBase):
             raise ValueError(
                 f"agent {self.id!r}: kind=openclaw must NOT set 'target_branch'"
             )
-        if self.kind != AgentKind.openclaw and self.target_branch is None:
+        if (
+            self.kind not in (AgentKind.openclaw, AgentKind.external)
+            and self.target_branch is None
+        ):
             self.target_branch = DEFAULT_TARGET_BRANCH
         # Custom kind requires a command.
         if self.kind == AgentKind.custom and not self.command:
@@ -394,6 +491,13 @@ class FlowAgent(_ApiBase):
 
 def _validate_merge_strategy(kind: AgentKind, strategy: MergeStrategy) -> None:
     """Reject incompatible merge_strategy / kind combinations."""
+    if kind == AgentKind.external:
+        if strategy != MergeStrategy.skip:
+            raise ValueError(
+                f"External agent cannot use merge_strategy={strategy.value!r} "
+                "(external nodes own no worktree — only 'skip')"
+            )
+        return
     if kind == AgentKind.openclaw:
         if strategy in (MergeStrategy.manual, MergeStrategy.auto):
             raise ValueError(
@@ -445,8 +549,11 @@ class FlowTask(_ApiBase):
     @field_validator("timeout_seconds")
     @classmethod
     def _timeout_positive(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("timeout_seconds must be positive")
+        # 0 = "no timeout". Only honoured for tasks owned by an external
+        # execution node (a human may take days); for regular agents the
+        # scheduler's 4h floor applies regardless (failure.py).
+        if v < 0:
+            raise ValueError("timeout_seconds must be >= 0 (0 = no timeout)")
         return v
 
     @model_validator(mode="after")
@@ -780,8 +887,10 @@ __all__ = [
     "AgentStoreAcquisitionMode",
     "AgentStoreOrderStatus",
     "TaskDecomposeStatus",
+    "ExternalChannel",
     "NON_TUI_KINDS",
     # nested
+    "ExternalNodeConfig",
     "FlowAgent",
     "FlowTask",
     "FlowSpec",

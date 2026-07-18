@@ -113,9 +113,37 @@ def evaluate(request: Request, api_token: str) -> Response | None:
     )
 
 
+# External-execution collaboration surface: its endpoints carry their own
+# per-task ticket / pairing-credential auth (see app.api.external), so the
+# global bearer/same-origin rules do NOT apply here — only the Host rule,
+# which is relaxed iff the user opted in via Config.external_api_expose.
+_EXTERNAL_PREFIX = "/api/external/"
+
+
 def _is_guarded_path(path: str) -> bool:
-    # Gate the public API only; /api/internal/* has its own minted-token auth.
-    return path.startswith("/api/") and not path.startswith("/api/internal/")
+    # Gate the public API only; /api/internal/* has its own minted-token auth
+    # and /api/external/* has its own ticket auth + dedicated Host rule.
+    return (
+        path.startswith("/api/")
+        and not path.startswith("/api/internal/")
+        and not path.startswith(_EXTERNAL_PREFIX)
+    )
+
+
+def evaluate_external(request: Request, *, expose_enabled: bool) -> Response | None:
+    """Host rule for ``/api/external/*``: loopback always allowed; a
+    non-loopback Host is allowed only when the operator explicitly exposed
+    the surface (``Config.external_api_expose``). Token verification is the
+    endpoint's own job (one-time ticket / pairing credential)."""
+    host = _hostname_of_host_header(request.headers.get("host", ""))
+    if host and host not in _LOOPBACK_HOSTS and not expose_enabled:
+        return _deny(
+            "HOST_NOT_ALLOWED",
+            "external API surface is not exposed "
+            "(enable config.external_api_expose to accept remote callers)",
+            403,
+        )
+    return None
 
 
 class ApiTokenGuardMiddleware:
@@ -125,7 +153,25 @@ class ApiTokenGuardMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope.get("type") != "http" or not _is_guarded_path(scope.get("path", "")):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+
+        if path.startswith(_EXTERNAL_PREFIX):
+            cfg = load_config()
+            request = Request(scope, receive=receive)
+            denied = evaluate_external(
+                request,
+                expose_enabled=bool(getattr(cfg, "external_api_expose", False)),
+            )
+            if denied is not None:
+                await denied(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+
+        if not _is_guarded_path(path):
             await self.app(scope, receive, send)
             return
 
@@ -143,4 +189,4 @@ class ApiTokenGuardMiddleware:
         await self.app(scope, receive, send)
 
 
-__all__ = ["ApiTokenGuardMiddleware", "evaluate"]
+__all__ = ["ApiTokenGuardMiddleware", "evaluate", "evaluate_external"]
