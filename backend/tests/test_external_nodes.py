@@ -275,6 +275,28 @@ def test_build_external_task_text_has_no_clawteam_protocol() -> None:
     assert "worktree:" not in text
     assert "base branch" not in text
     assert "no shared worktree path" in text.lower() or "no shared" in text.lower()
+    # Human channel must NOT get the webhook-only remote-path notes.
+    assert "do not open or fetch them locally" not in text
+
+
+def test_build_external_task_text_webhook_includes_remote_notes() -> None:
+    import dataclasses
+
+    from app.scheduler.prompts import WEBHOOK_REMOTE_NOTES
+
+    ctx = dataclasses.replace(
+        _ctx(),
+        agent=FlowAgent(
+            id="ext-node", kind=AgentKind.external,
+            external=ExternalNodeConfig(
+                channel=ExternalChannel.webhook,
+                endpoint_url="https://partner.example/tasks",
+            ),
+        ),
+    )
+    text = build_external_task_text(ctx)
+    assert WEBHOOK_REMOTE_NOTES in text
+    assert "Notes for remote executors" in text
 
 
 def test_build_external_task_package_fields() -> None:
@@ -563,6 +585,8 @@ def test_dispatch_webhook_outbound_includes_callback_contract(
     assert body["callback"]["url"] == body["callbackUrl"]
     assert body["callback"]["bodyExample"]["status"] == "success | failed"
     assert body["callbackToken"].count(".") == 1
+    from app.scheduler.prompts import WEBHOOK_REMOTE_NOTES
+    assert body["notes"] == WEBHOOK_REMOTE_NOTES
 
 
 def test_dispatch_remote_csflow_forwards_configured_inputs(

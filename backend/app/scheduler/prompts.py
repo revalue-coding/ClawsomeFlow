@@ -58,12 +58,10 @@ class UpstreamOutput:
     downstream worker in its dispatch prompt.
 
     Only first-level ``depends_on`` parents are passed through — never
-    transitively further upstream. The downstream worker is expected to
-    treat the upstream worker's worktree as its source of truth (via
-    ``git log`` / ``git diff``) if it needs to read changes; the
-    ``summary`` is the strict-match upstream completion message for this
-    task id (sender + task_id both match). If absent, downstream should
-    inspect the upstream worktree history directly.
+    transitively further upstream. For local-agent upstreams the worker may
+    treat the upstream worktree as its source of truth (via ``git log`` /
+    ``git diff``). External-node upstreams own no worktree — never invent
+    paths for them; the ``summary`` is the only hand-off.
     """
 
     task_id: str
@@ -74,6 +72,8 @@ class UpstreamOutput:
     base_branch: str | None
     summary: str | None  # strict-match upstream completion summary, if known
     repo_root: str | None = None  # baseline repo path (shown only when merge_reference)
+    #: True when the upstream owner is ``AgentKind.external`` (no worktree).
+    is_external: bool = False
 
 
 @dataclass(frozen=True)
@@ -297,7 +297,11 @@ def _upstream_outputs_block(ctx: DispatchContext) -> str:
         lines.append(
             f"- task `{u.task_id}` \"{u.subject}\" by agent `{u.from_agent}`"
         )
-        if u.worktree_path:
+        # External upstreams own no worktree/branch — never invent paths for
+        # the downstream (would be empty or misleading).
+        if u.is_external:
+            pass
+        elif u.worktree_path:
             quals: list[str] = []
             if u.branch_name:
                 quals.append(f"branch `{u.branch_name}`")
@@ -313,6 +317,11 @@ def _upstream_outputs_block(ctx: DispatchContext) -> str:
             lines.append("  - worktree: _(unknown — agent session may have been disposed)_")
         if u.summary:
             lines.append(f"  - completion summary: {u.summary}")
+        elif u.is_external:
+            lines.append(
+                "  - completion summary: _(missing — wait for the external "
+                "executor's result)_"
+            )
         else:
             lines.append("  - completion summary: _(missing; inspect upstream worktree git history)_")
 
@@ -683,6 +692,16 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
 # ── External execution nodes (AgentKind.external) ────────────────────
 
 
+#: Injected into webhook outbound packages + task sheets only. Reminds a
+#: partner system that upstream absolute paths are foreign to its host.
+WEBHOOK_REMOTE_NOTES = (
+    "This is a remote task. Absolute paths mentioned in upstream outputs "
+    "may not exist on your machine — do not open or fetch them locally. "
+    "In your callback summary, do not include local file paths; describe "
+    "necessary results in plain text (links or references are fine)."
+)
+
+
 def _upstream_outputs_block_external(ctx: DispatchContext) -> str:
     """Upstream hand-offs for an external executor (human / webhook / remote).
 
@@ -721,7 +740,12 @@ def build_external_task_text(ctx: DispatchContext) -> str:
     round-trip happens through the /api/external receipt endpoint or the
     WebUI card). Upstream summaries are included without worktree/branch
     paths — external nodes do not own a local workspace.
+
+    Webhook channel additionally gets :data:`WEBHOOK_REMOTE_NOTES` so a
+    partner host does not chase foreign absolute paths.
     """
+    from app.models import ExternalChannel
+
     blocks = [
         (
             "## ClawsomeFlow External Task\n"
@@ -742,6 +766,9 @@ def build_external_task_text(ctx: DispatchContext) -> str:
             "blocking reason instead of leaving it open."
         ),
     ]
+    ext = getattr(ctx.agent, "external", None)
+    if ext is not None and ext.channel == ExternalChannel.webhook:
+        blocks.append(f"## Notes for remote executors\n{WEBHOOK_REMOTE_NOTES}")
     return "\n\n".join(b for b in blocks if b).strip() + "\n"
 
 
@@ -829,6 +856,7 @@ def _self_merge_completion_steps(ctx: DispatchContext) -> str:
 __all__ = [
     "DispatchContext",
     "UpstreamOutput",
+    "WEBHOOK_REMOTE_NOTES",
     "WorkerReport",
     "build_external_task_package",
     "build_external_task_text",

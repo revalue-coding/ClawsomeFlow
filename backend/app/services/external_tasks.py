@@ -275,6 +275,12 @@ async def dispatch_external_task(
         },
         **package,
     }
+    # Webhook partners run on a different host — remind them not to chase
+    # foreign absolute paths or echo local paths back in the summary.
+    if ext.channel == ExternalChannel.webhook:
+        from app.scheduler.prompts import WEBHOOK_REMOTE_NOTES
+
+        outbound_package["notes"] = WEBHOOK_REMOTE_NOTES
 
     # The dispatch event is BOTH the UI's todo-card source and the ticket
     # validity record (its nonce is the only currently-valid one), so it must

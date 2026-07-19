@@ -134,59 +134,56 @@ Developer mode offers **software-development collaboration projects** a more fle
 
 ## 🌐 External Execution Nodes
 
-Real projects always leave the “AI-only” box: a person must inspect hardware, approve a payment, or decide under ambiguity; another team’s system must run a black-box step; another machine already hosts the right Flow. **External nodes** make those executors first-class citizens in your DAG — no local process, no worktree, same unblock / upstream-summary semantics as any agent.
+Real work always leaves the “AI-only” box: a person must inspect hardware, approve a payment, or decide under ambiguity; another system must run a black-box step; another machine already hosts the right Flow. **External nodes** put those executors in the same DAG as your agents — same dependencies, same hand-off of completion summaries.
 
-Three owner kinds (Flow editor → Owner source → **External execution**):
+In the Flow editor: Owner source → **External execution**, then pick an owner kind:
 
 | Owner kind | Who runs it | How the result returns |
 |---|---|---|
-| **Human** | A person on the Run page (optional chat notify) | Submit result on the todo card |
-| **Remote ClawsomeFlow** | A Flow on another ClawsomeFlow instance | Peer runs unattended; leader report callbacks |
-| **Generic interface (webhook)** | Any HTTP service you own | POST task package → your system callbacks |
+| **Human** | A person on the Run page | Submit on the todo card |
+| **Remote ClawsomeFlow** | A Flow on another machine | Peer finishes → result comes back |
+| **Generic interface (webhook)** | Your HTTP service | Receive task package → callback when done |
 
-Open the Flow editor to copy the **Flow ID** — remote peers need it when configuring a Remote ClawsomeFlow node.
+Copy the **Flow ID** from the editor header when configuring a remote peer.
 
-### Remote ClawsomeFlow — what to configure
+### Remote ClawsomeFlow
 
-**On the machine that ACCEPTS work (peer):**
+**Peer (accepts work):**
 
 ```bash
-csflow external pair-token peer-a          # inbound credential (print once)
-csflow external expose on                  # allow non-loopback /api/external only
-# Share the secret + this host’s base URL + the target Flow ID with the origin.
+csflow external pair-token peer-a
+csflow external expose on
+# Share the secret, this host’s URL, and the target Flow ID with the origin.
 ```
 
-**On the machine that DELEGATES (origin):**
+**Origin (delegates):**
 
 ```bash
 csflow external add-remote peer-a <secret-from-peer>
-csflow external callback-url http://<origin-host>:17017   # absolute URL peer can reach
+csflow external callback-url http://<origin-host>:17017
 ```
 
-In the Flow editor, pick **Remote ClawsomeFlow**, set peer base URL, Flow ID, and credential name (`peer-a`). When the node runs, origin POSTs `/api/external/delegate`; when the peer finishes, it POSTs back to origin’s one-time receipt URL.
+In the editor, pick **Remote ClawsomeFlow** and fill peer URL, Flow ID, and credential name (`peer-a`).
 
-### Generic interface (webhook) — what to configure
+### Generic interface (webhook)
 
-**On ClawsomeFlow (origin):** in the editor, pick **Generic interface (webhook)** and set your endpoint URL. Optionally set:
+**On ClawsomeFlow:** pick **Generic interface (webhook)** and set your endpoint URL. If the partner must reach you from another host:
 
 ```bash
 csflow external callback-url http://<origin-host>:17017
-csflow external expose on    # only if the partner must reach /api/external from outside
+csflow external expose on
 ```
 
-**On your system:** accept `POST` JSON (`schemaVersion: 1`, `event: external_task_dispatch`) containing the task sheet, `upstreamOutputs`, and a self-describing `callback` block. When done:
+**On your system:** accept the task `POST`, then when done:
 
 ```http
 POST {callbackUrl}
 Authorization: Bearer {callbackToken}
-Content-Type: application/json
 
-{"status": "success", "summary": "what you delivered (links/refs welcome)"}
+{"status": "success", "summary": "what you delivered"}
 ```
 
-That is the whole integration — two JSON messages. Unknown fields are ignored; additive fields may appear in later releases without bumping `schemaVersion`.
-
-Only `/api/external/*` is ever exposed for this collaboration surface. The main API stays loopback-only; every receipt uses a one-time, single-task ticket.
+Two JSON messages — that’s the whole integration.
 
 ## 🤔 Why ClawsomeFlow?
 

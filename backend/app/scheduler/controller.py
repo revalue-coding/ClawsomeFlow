@@ -3610,15 +3610,33 @@ class RunController:
                         owner_agent_id=dep_owner_id,
                         task_id=dep_id,
                     )
+                # External upstreams own no worktree — never pass path/branch
+                # fields downstream (would be empty or misleading).
+                dep_is_external = (
+                    dep_owner is not None and dep_owner.kind == AgentKind.external
+                )
                 upstream_outputs.append(UpstreamOutput(
                     task_id=dep_id,
                     subject=dep_task.subject,
                     from_agent=dep_owner_id,
-                    worktree_path=str(wt_info.worktree_path) if wt_info else None,
-                    branch_name=wt_info.branch_name if wt_info else None,
-                    base_branch=wt_info.base_branch if wt_info else None,
-                    repo_root=wt_info.repo_root if wt_info else None,
+                    worktree_path=(
+                        None if dep_is_external
+                        else (str(wt_info.worktree_path) if wt_info else None)
+                    ),
+                    branch_name=(
+                        None if dep_is_external
+                        else (wt_info.branch_name if wt_info else None)
+                    ),
+                    base_branch=(
+                        None if dep_is_external
+                        else (wt_info.base_branch if wt_info else None)
+                    ),
+                    repo_root=(
+                        None if dep_is_external
+                        else (wt_info.repo_root if wt_info else None)
+                    ),
                     summary=summary_bundle,
+                    is_external=dep_is_external,
                 ))
 
         # Translate the FlowTask.id into the ClawTeam-side id the worker

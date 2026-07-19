@@ -471,6 +471,25 @@ def test_upstream_block_handles_missing_worktree() -> None:
     assert "_(unknown — agent session may have been disposed)_" in msg
 
 
+def test_upstream_block_omits_worktree_for_external_upstream() -> None:
+    """External-node upstreams own no worktree — never invent path/branch lines."""
+    upstreams = [
+        prompts.UpstreamOutput(
+            task_id="t-ext", subject="Human review", from_agent="reviewer",
+            worktree_path=None, branch_name=None, base_branch=None,
+            summary="approved on paper", is_external=True,
+        ),
+    ]
+    msg = prompts.build_worker_dispatch(_ctx(
+        task=_task(id="t-down", deps=("t-ext",)),
+        upstream_outputs=upstreams,
+    ))
+    assert "task `t-ext`" in msg
+    assert "approved on paper" in msg
+    assert "worktree:" not in msg
+    assert "inspect upstream worktree" not in msg
+
+
 def test_upstream_block_renders_multiple_dependencies() -> None:
     upstreams = [
         _upstream(task_id="t-a", from_agent="alice", path="/tmp/wt/alice",
