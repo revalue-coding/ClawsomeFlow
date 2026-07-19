@@ -3460,7 +3460,22 @@ function TaskEditModal({
     }
     setRepoChecking(true);
     try {
-      const next = await ensureNonOpenclawRepoReady(draft);
+      // remote_csflow: parse the pasted call-info blob and register the
+      // outbound credential here (on "保存子任务") — no separate button.
+      let working = draft;
+      if (
+        isExternalKind(working.ownerKind)
+        && working.externalChannel === "remote_csflow"
+      ) {
+        const registered = await registerRemoteCallInfoOnSave(working, t);
+        if (!registered.ok) {
+          setSaveError(registered.error);
+          return;
+        }
+        working = registered.row;
+        setDraft(working);
+      }
+      const next = await ensureNonOpenclawRepoReady(working);
       if (!next) return;
       onSave(enforceOpenclawAutoMerge(next));
     } finally {
@@ -3591,7 +3606,6 @@ function TaskFormBody({
   const { t } = useTranslation();
   const { alert } = useDialog();
   const [pickingRepo, setPickingRepo] = useState(false);
-  const [registeringRemote, setRegisteringRemote] = useState(false);
   const ownerLocked = readOnly || isSummary;
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
@@ -4058,85 +4072,32 @@ function TaskFormBody({
                       onChange({ externalRemoteCallInfo: e.target.value })
                     }
                   />
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      className="btn-outline !px-2 !py-0.5 text-xs"
-                      disabled={ownerLocked || registeringRemote}
-                      onClick={() => {
-                        void (async () => {
-                          const raw = row.externalRemoteCallInfo.trim();
-                          if (!raw) {
-                            void alert(
-                              t("flowEditor.taskFields.externalRemoteCallInfoEmpty"),
-                            );
-                            return;
-                          }
-                          let parsed: RemoteCallInfo;
-                          try {
-                            parsed = JSON.parse(raw) as RemoteCallInfo;
-                          } catch {
-                            void alert(
-                              t("flowEditor.taskFields.externalRemoteCallInfoInvalid"),
-                            );
-                            return;
-                          }
-                          setRegisteringRemote(true);
-                          try {
-                            const res = await api.registerRemoteTarget(parsed);
-                            onChange({
-                              externalBaseUrl: res.baseUrl,
-                              externalFlowId: res.flowId,
-                              externalPairTokenRef: res.pairTokenRef,
-                              externalRemoteParamFields: res.paramFields,
-                            });
-                            void alert(
-                              t("flowEditor.taskFields.externalRemoteRegistered", {
-                                flowName: res.flowName || res.flowId,
-                                fields:
-                                  res.paramFields.join("、") ||
-                                  t("flowEditor.taskFields.externalRemoteNoParams"),
-                              }),
-                            );
-                          } catch (e) {
-                            void alert(
-                              e instanceof ApiError ? e.message : String(e),
-                            );
-                          } finally {
-                            setRegisteringRemote(false);
-                          }
-                        })();
-                      }}
-                    >
-                      {registeringRemote
-                        ? t("flowEditor.taskFields.externalRemoteRegistering")
-                        : t("flowEditor.taskFields.externalRemoteRegister")}
-                    </button>
-                    {row.externalFlowId && (
-                      <span className="text-xs text-ink-500">
-                        {t("flowEditor.taskFields.externalRemoteConfigured", {
-                          flowId: row.externalFlowId,
-                          fields:
-                            row.externalRemoteParamFields.join("、") ||
-                            t("flowEditor.taskFields.externalRemoteNoParams"),
-                        })}
-                      </span>
-                    )}
-                  </div>
+                  {row.externalFlowId && (
+                    <div className="text-xs text-ink-500 mt-1">
+                      {t("flowEditor.taskFields.externalRemoteConfigured", {
+                        flowId: row.externalFlowId,
+                        fields:
+                          row.externalRemoteParamFields.join("、") ||
+                          t("flowEditor.taskFields.externalRemoteNoParams"),
+                      })}
+                    </div>
+                  )}
                 </div>
-                <div className="md:col-span-2">
-                  <label className="label">{t("flowEditor.taskFields.externalInputs")}</label>
-                  <textarea
-                    className="textarea h-20 font-mono text-xs"
-                    value={row.externalInputs}
-                    readOnly={ownerLocked}
-                    placeholder={'{\n  "需求描述": "…",\n  "目标目录": "/abs/path"\n}'}
-                    onChange={(e) => onChange({ externalInputs: e.target.value })}
-                  />
-                  <div className="text-xs text-ink-500 mt-1">
-                    {t("flowEditor.taskFields.externalInputsHint")}
+                {row.externalRemoteParamFields.length > 0 && (
+                  <div className="md:col-span-2">
+                    <label className="label">{t("flowEditor.taskFields.externalInputs")}</label>
+                    <textarea
+                      className="textarea h-20 font-mono text-xs"
+                      value={row.externalInputs}
+                      readOnly={ownerLocked}
+                      placeholder={'{\n  "需求描述": "…",\n  "目标目录": "/abs/path"\n}'}
+                      onChange={(e) => onChange({ externalInputs: e.target.value })}
+                    />
+                    <div className="text-xs text-ink-500 mt-1">
+                      {t("flowEditor.taskFields.externalInputsHint")}
+                    </div>
                   </div>
-                </div>
+                )}
               </>
             )}
           </div>
@@ -4145,7 +4106,11 @@ function TaskFormBody({
               {row.externalChannel === "webhook"
                 ? t("flowEditor.taskFields.externalWebhookHint")
                 : row.externalChannel === "remote_csflow"
-                ? t("flowEditor.taskFields.externalRemoteHint")
+                ? (
+                  row.externalRemoteParamFields.length > 0
+                    ? t("flowEditor.taskFields.externalRemoteHintWithParams")
+                    : t("flowEditor.taskFields.externalRemoteHint")
+                )
                 : t("flowEditor.taskFields.externalHumanHint")}
             </div>
           )}
@@ -5080,12 +5045,11 @@ function validate(
         });
       } else if (
         r.externalChannel === "remote_csflow"
-        && (
-          !r.externalBaseUrl.trim()
-          || !r.externalFlowId.trim()
-          || !r.externalPairTokenRef.trim()
-        )
+        && !remoteCsflowConfigured(r)
+        && !r.externalRemoteCallInfo.trim()
       ) {
+        // Not yet wired: need a pasted call-info blob (registered on
+        // "保存子任务"). Already-wired rows keep baseUrl/flowId/pairTokenRef.
         issues.push({
           rowKey: r.rowKey,
           message: messages.externalRemoteFieldsRequired(subjectLabel),
@@ -5233,6 +5197,88 @@ function detectTaskCycle(rows: TaskRow[]): string[] {
 
 // ── rowsToSpec / specToRows ──────────────────────────────────────────
 
+
+/** Placeholder stamped into the reconstructed call-info blob when reloading
+ *  an already-wired remote_csflow node. Must NOT be re-posted to
+ *  /api/flows/remote-targets (would overwrite the real secret). */
+const REMOTE_CALL_INFO_SECRET_PLACEHOLDER =
+  "(已注册，如需更新请粘贴新的调用信息)";
+
+function remoteCsflowConfigured(row: TaskRow): boolean {
+  return !!(
+    row.externalBaseUrl.trim()
+    && row.externalFlowId.trim()
+    && row.externalPairTokenRef.trim()
+  );
+}
+
+function isPlaceholderPairSecret(secret: string | undefined | null): boolean {
+  const s = (secret || "").trim();
+  if (!s) return true;
+  if (s === REMOTE_CALL_INFO_SECRET_PLACEHOLDER) return true;
+  // Reconstructed / display-only secrets are wrapped in parentheses.
+  return s.startsWith("(") && s.endsWith(")");
+}
+
+/**
+ * On "保存子任务": if the operator pasted a fresh remote-call-info blob,
+ * register the outbound credential and fill baseUrl/flowId/pairTokenRef/
+ * remoteParamFields. Already-wired rows with a placeholder secret are left
+ * alone (no re-register). Returns the updated row, or an error message.
+ */
+async function registerRemoteCallInfoOnSave(
+  row: TaskRow,
+  t: (key: string, opts?: Record<string, string>) => string,
+): Promise<{ ok: true; row: TaskRow } | { ok: false; error: string }> {
+  const raw = row.externalRemoteCallInfo.trim();
+  if (!raw) {
+    if (remoteCsflowConfigured(row)) return { ok: true, row };
+    return {
+      ok: false,
+      error: t("flowEditor.taskFields.externalRemoteCallInfoEmpty"),
+    };
+  }
+  let parsed: RemoteCallInfo;
+  try {
+    parsed = JSON.parse(raw) as RemoteCallInfo;
+  } catch {
+    return {
+      ok: false,
+      error: t("flowEditor.taskFields.externalRemoteCallInfoInvalid"),
+    };
+  }
+  if (isPlaceholderPairSecret(parsed.pairSecret)) {
+    // Display-only blob from a previous save — keep the already-registered
+    // wiring. If somehow nothing is configured yet, ask for a fresh paste.
+    if (remoteCsflowConfigured(row)) return { ok: true, row };
+    return {
+      ok: false,
+      error: t("flowEditor.taskFields.externalRemoteCallInfoEmpty"),
+    };
+  }
+  try {
+    const res = await api.registerRemoteTarget(parsed);
+    // Target Flow with no param fields → clear any leftover manual inputs;
+    // the param hand-off UI/protocol is skipped entirely in that case.
+    const fields = res.paramFields || [];
+    return {
+      ok: true,
+      row: {
+        ...row,
+        externalBaseUrl: res.baseUrl,
+        externalFlowId: res.flowId,
+        externalPairTokenRef: res.pairTokenRef,
+        externalRemoteParamFields: fields,
+        externalInputs: fields.length > 0 ? row.externalInputs : "",
+      },
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof ApiError ? e.message : String(e),
+    };
+  }
+}
 
 /** Parse the remote-csflow params draft (JSON object text) into the
  *  FlowAgent.external.inputs dict. Invalid / non-object JSON → null (save
@@ -5980,7 +6026,7 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       externalPairTokenRef: a?.external?.pairTokenRef ?? "",
       // Reconstruct a (secret-free) display blob from the saved node so the
       // operator can see what's wired without re-pasting; a new paste
-      // re-registers with a fresh secret.
+      // re-registers with a fresh secret on "保存子任务".
       externalRemoteCallInfo:
         ownerKind === "external"
         && a?.external?.channel === "remote_csflow"
@@ -5992,7 +6038,7 @@ function specToRows(spec: FlowSpec): TaskRow[] {
                 flowId: a?.external?.flowId ?? "",
                 paramFields: a?.external?.remoteParamFields ?? [],
                 pairTokenName: a?.external?.pairTokenRef ?? "",
-                pairSecret: "(已注册，如需更新请粘贴新的调用信息)",
+                pairSecret: REMOTE_CALL_INFO_SECRET_PLACEHOLDER,
               },
               null,
               2,

@@ -144,13 +144,13 @@ class DispatchContext:
     # see ``RunController._compose_dispatch_context``. **First-level only.**
     upstream_outputs: list[UpstreamOutput] = field(default_factory=list)
 
-    # Non-empty when THIS task has a downstream ``remote_csflow`` node that
-    # depends on it: the union of that remote Flow's declared param-field
-    # names. The dispatch then asks this executor to emit a SECOND inbox
-    # message (``csflow-remote-params: <task_id>`` + JSON) reporting values
-    # for these fields, so the scheduler can fill the remote delegation's
-    # inputs. Empty tuple → no extra block is rendered. See prompts module
-    # header (REMOTE_PARAMS_HEADER).
+    # Non-empty ONLY when THIS task has a downstream ``remote_csflow`` node
+    # whose target Flow actually declares param fields (union of those
+    # names). Empty — including "downstream is remote_csflow but the target
+    # Flow has zero param fields" — means no special hand-off: do not ask
+    # the executor for a second inbox / appended params JSON. When non-empty,
+    # the dispatch asks for ``csflow-remote-params: <task_id>`` + JSON so the
+    # scheduler can fill the remote delegation's inputs.
     remote_param_fields: tuple[str, ...] = ()
 
     # True when THIS task must self-merge its worktree branch into the baseline

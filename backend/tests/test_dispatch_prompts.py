@@ -651,3 +651,21 @@ def test_external_task_text_without_remote_downstream_has_no_param_block() -> No
     ctx = _ctx(agent=ext_agent, worktree=None, task=_task(id="tx", owner="human-1"))
     msg = prompts.build_external_task_text(ctx)
     assert "Remote Parameter Report" not in msg
+
+
+def test_empty_remote_param_fields_means_no_special_handling() -> None:
+    """Downstream remote_csflow with zero declared param fields must NOT
+    ask the upstream executor for a second params message."""
+    msg = prompts.build_worker_dispatch(_ctx(remote_param_fields=()))
+    assert "Remote Parameter Report" not in msg
+    assert prompts.REMOTE_PARAMS_HEADER not in msg
+    ext_agent = FlowAgent(
+        id="human-1", kind=AgentKind.external,
+        external={"channel": "human"},
+    )
+    ext_msg = prompts.build_external_task_text(_ctx(
+        agent=ext_agent, worktree=None,
+        task=_task(id="tx", owner="human-1"),
+        remote_param_fields=(),
+    ))
+    assert "Remote Parameter Report" not in ext_msg

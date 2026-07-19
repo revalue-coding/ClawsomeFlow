@@ -2736,10 +2736,11 @@ class RunController:
         """Compute the ``inputs`` dict delegated to a remote_csflow Flow.
 
         Precedence (per field): user-typed override (``external.inputs``) >
-        union of upstream-reported values > headless-leader fill (only when an
-        upstream is itself a remote_csflow whose returned content might hold
-        it) > the literal placeholder ``参数为空``. Non-declared user keys are
-        passed through verbatim so a purely-static config keeps working.
+        union of upstream-reported values > headless-leader fill (any leader
+        kind; only when an upstream is itself a remote_csflow whose returned
+        content might hold it) > the literal placeholder ``参数为空``.
+        Non-declared user keys are passed through verbatim so a purely-static
+        config keeps working.
         """
         ext = agent.external
         assert ext is not None  # caller guarantees remote_csflow
@@ -2794,7 +2795,8 @@ class RunController:
                 resolved[f] = union[f]
 
         # 3) Headless-leader fallback for still-empty fields when a remote
-        #    upstream might hold them (best-effort; never blocks the run).
+        #    upstream might hold them. Any leader kind can fill (best-effort;
+        #    never blocks the run).
         missing = [f for f in fields if not str(resolved.get(f, "")).strip()]
         if missing and remote_upstream_summaries:
             try:
@@ -2864,16 +2866,16 @@ class RunController:
         """Best-effort: ask the leader, in a FRESH headless turn (no history),
         to derive param values from a remote node's returned content.
 
-        Supported only for OpenClaw/Hermes leaders (they have a capture-able
-        headless mode). Any other leader kind → {} (fields stay placeholder).
-        Never raises into the dispatch loop.
+        Any leader agent kind is supported (OpenClaw / Hermes / Claude / Codex /
+        … / custom) via the same headless CLI argv table used by AI decompose.
+        Failure → {} (fields stay placeholder). Never raises into the dispatch
+        loop.
         """
         leader = self._agents.get(self._leader_id)
-        if leader is None or leader.kind not in (AgentKind.openclaw, AgentKind.hermes):
+        if leader is None:
             logger.info(
-                "remote_param_headless_fill_unsupported",
+                "remote_param_headless_fill_no_leader",
                 run_id=self.run.id, task_id=task_id,
-                leader_kind=(leader.kind.value if leader else None),
             )
             return {}
         schema = ", ".join(f'"{f}": "<value or empty string>"' for f in fields)
@@ -2895,7 +2897,8 @@ class RunController:
         except Exception as exc:
             logger.warning(
                 "remote_param_headless_capture_failed",
-                run_id=self.run.id, task_id=task_id, error=str(exc),
+                run_id=self.run.id, task_id=task_id,
+                leader_kind=leader.kind.value, error=str(exc),
             )
             return {}
         parsed = _extract_first_json_object(output)
@@ -2906,37 +2909,56 @@ class RunController:
     async def _headless_capture_leader(
         self, leader: FlowAgent, prompt: str,
     ) -> str:
-        """Run the leader once headless and return combined stdout/stderr."""
+        """Run the leader once headless (fresh turn) and return stdout+stderr.
+
+        Dispatches by kind:
+        * OpenClaw → ``openclaw agent --local … --message`` (dedicated session-id)
+        * Hermes / every TUI kind → :func:`_non_openclaw_dispatch_argv` (same
+          table as AI decompose — Claude/Codex/Gemini/…)
+        * custom → ``agent.command + [prompt]``
+        """
+        from app.services.task_decompose import _non_openclaw_dispatch_argv
+
         if leader.kind == AgentKind.openclaw:
             executable = self._resolve_openclaw_executable()
             if not executable:
                 raise RuntimeError("openclaw CLI not available")
             cwd, _ = await self._openclaw_dispatch_cwd(leader)
-            session_id = openclaw_session_id_for_run(self.team_name, leader.id) + "-paramfill"
+            session_id = (
+                openclaw_session_id_for_run(self.team_name, leader.id) + "-paramfill"
+            )
             argv = [
                 executable, "agent", "--local", "--agent", leader.id,
                 "--session-id", session_id, "--message", prompt,
             ]
-        else:  # hermes
-            executable = shutil.which("hermes")
-            if not executable:
-                raise RuntimeError("hermes CLI not available")
+        elif leader.kind == AgentKind.custom:
+            if not leader.command:
+                raise RuntimeError("custom leader has empty command")
             cwd, _ = await self._hermes_dispatch_cwd(leader)
-            argv = [executable, "chat", "--yolo", "-Q", "-q", prompt]
-            if not leader.is_temporary:
-                argv = [
-                    executable, "-p", leader.id, "chat", "--yolo", "-Q", "-q", prompt,
-                ]
+            argv = list(leader.command) + [prompt]
+        else:
+            # Hermes + every TUI platform (claude/codex/gemini/…).
+            cwd, _ = await self._hermes_dispatch_cwd(leader)
+            argv = _non_openclaw_dispatch_argv(
+                kind=leader.kind,
+                message=prompt,
+                profile=None if leader.is_temporary else leader.id,
+            )
         env = os.environ.copy()
         env.update({
             "CLAWTEAM_AGENT_NAME": leader.id,
             "CLAWTEAM_TEAM_NAME": self.team_name,
         })
-        proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd, env=env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, cwd=cwd, env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"{leader.kind.value} CLI is not available in PATH: {argv[0]}",
+            ) from exc
         subprocess_registry.register(proc)
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
@@ -3998,8 +4020,15 @@ class RunController:
         """Union of remote-Flow param field names requested by downstream
         ``remote_csflow`` nodes that depend on ``task_id``.
 
-        Empty when no downstream remote node consumes this task — the
-        dispatch then renders no remote-parameter-report block.
+        Returns empty when:
+        * no downstream ``remote_csflow`` depends on this task, OR
+        * every such downstream has an empty ``remote_param_fields`` (the
+          target Flow declared no param fields).
+
+        Empty → dispatch renders NO remote-parameter-report block and does
+        not ask the executor for a second inbox / appended params JSON.
+        The special param hand-off only kicks in when the target Flow
+        actually has param fields.
         """
         fields: list[str] = []
         seen: set[str] = set()
@@ -4015,6 +4044,7 @@ class RunController:
                 or owner.external.channel != ExternalChannel.remote_csflow
             ):
                 continue
+            # Target Flow with zero param fields → skip (no special handling).
             for name in owner.external.remote_param_fields or []:
                 key = str(name).strip()
                 if key and key not in seen:
