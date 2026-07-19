@@ -574,3 +574,71 @@ def test_remote_csflow_loopback_delegate_then_callback_complete(
     assert fake.mailbox_calls, "origin never received the peer callback"
     assert "peer done" in fake.mailbox_calls[0]["content"]
     assert fake.task_updates[0]["task_id"] == "CT-rem"
+
+
+# ── remote-node one-click wiring (remote-call-info / register-remote) ──
+
+
+def _mk_flow_with_params(owner: str = "alice") -> Flow:
+    storage = get_storage()
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/r", is_leader=True),
+        ],
+        tasks=[
+            FlowTask(id="ts", owner_agent_id="leader", subject="sum",
+                     is_leader_summary=True),
+        ],
+        variables={"csflow.runtime.param_fields": '["需求描述", "目标目录"]'},
+    )
+    return storage.flow_create(Flow(name="target", owner_user=owner).with_spec(spec))
+
+
+def test_remote_call_info_mints_token_and_returns_param_fields(app_client) -> None:
+    flow = _mk_flow_with_params()
+    resp = app_client.post(f"/api/flows/{flow.id}/remote-call-info")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["flowId"] == flow.id
+    assert body["paramFields"] == ["需求描述", "目标目录"]
+    assert body["pairTokenName"] == f"remote-{flow.id}"
+    assert body["pairSecret"]
+    assert body["baseUrl"].startswith("http")
+    # The inbound pairing credential is now stored in config (idempotent).
+    cfg = load_config()
+    assert cfg.external_pair_tokens.get(f"remote-{flow.id}") == body["pairSecret"]
+    # Second call reuses the same secret (idempotent).
+    resp2 = app_client.post(f"/api/flows/{flow.id}/remote-call-info")
+    assert resp2.json()["pairSecret"] == body["pairSecret"]
+
+
+def test_register_remote_target_stores_secret_off_spec(app_client) -> None:
+    info = {
+        "kind": "csflow.remote_call_info",
+        "baseUrl": "http://peer-host:17017/",
+        "flowId": "flow-remote-1",
+        "flowName": "Peer Flow",
+        "paramFields": ["需求描述", "目标目录"],
+        "pairTokenName": "remote-flow-remote-1",
+        "pairSecret": "s3cr3t-value",
+    }
+    resp = app_client.post("/api/flows/remote-targets", json=info)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["baseUrl"] == "http://peer-host:17017"  # trailing slash trimmed
+    assert body["flowId"] == "flow-remote-1"
+    assert body["paramFields"] == ["需求描述", "目标目录"]
+    assert body["pairTokenRef"] == "remote-flow-remote-1"
+    # Secret lands in config.external_remote_targets, never returned back.
+    assert "pairSecret" not in body and "s3cr3t-value" not in resp.text
+    cfg = load_config()
+    assert cfg.external_remote_targets.get("remote-flow-remote-1") == "s3cr3t-value"
+
+
+def test_register_remote_target_rejects_incomplete_info(app_client) -> None:
+    resp = app_client.post(
+        "/api/flows/remote-targets",
+        json={"baseUrl": "", "flowId": "", "pairTokenName": "x", "pairSecret": ""},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "INVALID_PAYLOAD"

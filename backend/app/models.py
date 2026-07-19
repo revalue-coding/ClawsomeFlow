@@ -349,11 +349,20 @@ class ExternalNodeConfig(_ApiBase):
     flow_id: str | None = None
     pair_token_ref: str | None = None
     # remote_csflow only: static run-input params for the remote Flow (its
-    # param fields / `csflow.runtime.param_fields`). Sent as the delegate
-    # request's ``inputs`` and become the remote run's ``run.inputs``; the
-    # rendered task sheet always travels separately as ``runtimePrompt``.
-    # Optional with a safe default → old specs load unchanged.
+    # param fields / `csflow.runtime.param_fields`). These are the user's
+    # OWN overrides (typed in the editor); at dispatch time the scheduler
+    # merges the union of upstream-provided param values under them (user
+    # wins). Sent as the delegate request's ``inputs`` and become the remote
+    # run's ``run.inputs``; the rendered task sheet always travels separately
+    # as ``runtimePrompt``. Optional with a safe default → old specs load
+    # unchanged.
     inputs: dict[str, str] | None = None
+    # remote_csflow only: the declared param-field NAMES of the remote Flow
+    # (captured from its "remote call info" blob at configure time). The
+    # scheduler uses them to (a) tell upstream executors which fields to
+    # report and (b) know which keys to union/fill before delegating. Names
+    # only — never secrets. Safe default None → old specs load unchanged.
+    remote_param_fields: list[str] | None = None
     # human channel (display hint only)
     assignee: str | None = None
 

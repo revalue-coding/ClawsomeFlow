@@ -144,26 +144,14 @@ In the Flow editor: Owner source → **External execution**, then pick an owner 
 | **Remote ClawsomeFlow** | A Flow on another machine | Peer finishes → result comes back |
 | **Generic interface (webhook)** | Your HTTP service | Receive task package → callback when done |
 
-Copy the **Flow ID** from the editor header when configuring a remote peer.
+### Remote ClawsomeFlow (copy-paste wiring — no hand-typed CLI)
 
-### Remote ClawsomeFlow
+1. **Peer**: open the target Flow's editor and click **Copy remote call info** next to the title — you get a JSON blob (base URL, Flow ID, param fields, pairing credential). Send it to the origin.
+2. **Origin**: in the subtask pick **Remote ClawsomeFlow**, paste the blob into **Remote Flow call info** and click **Parse & register** — base URL / Flow ID / credential are wired automatically; the secret is stored locally, never in the Flow spec.
 
-**Peer (accepts work):**
+Across machines the peer must first run `csflow external expose on` to allow non-loopback access (this changes the service bind, so it stays a CLI step).
 
-```bash
-csflow external pair-token peer-a
-csflow external expose on
-# Share the secret, this host’s URL, and the target Flow ID with the origin.
-```
-
-**Origin (delegates):**
-
-```bash
-csflow external add-remote peer-a <secret-from-peer>
-csflow external callback-url http://<origin-host>:17017
-```
-
-In the editor, pick **Remote ClawsomeFlow** and fill peer URL, Flow ID, and credential name (`peer-a`).
+**Params flow automatically**: if the remote Flow declares param fields, its upstream tasks are asked to report values for them; you may also type known values on the node (they override upstream). Unfilled fields take the union of upstream reports; anything still empty is sent as `参数为空`.
 
 ### Generic interface (webhook)
 

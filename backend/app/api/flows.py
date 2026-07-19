@@ -17,7 +17,7 @@ import json
 import re
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Path, Query
+from fastapi import APIRouter, Body, Depends, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from sqlalchemy.exc import IntegrityError
@@ -496,6 +496,144 @@ def export_flow(
         raise ApiError("NOT_FOUND", f"flow {flow_id!r} not found", status_code=404)
     _ensure_owner(flow, user)
     return FlowTemplate(flow=_to_template_entry(flow))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Remote-node one-click wiring (no CLI for the operator)
+#
+# A downstream ``remote_csflow`` node needs FOUR things about the target
+# Flow on the PEER instance: where it lives (baseUrl), which Flow (flowId),
+# which run-input params it accepts (paramFields), and a credential to call
+# it (pairing secret). Rather than making the operator run
+# ``csflow external pair-token`` / ``add-remote`` by hand, the peer's Flow
+# editor produces a self-contained "remote call info" JSON blob (this
+# endpoint) that the operator pastes into the origin's node config; the
+# origin registers the outbound secret server-side (register-remote below).
+# The pairing SECRET travels inside this blob but is stripped out of the
+# Flow spec on the origin — it lives only in that instance's config.json.
+# ──────────────────────────────────────────────────────────────────────
+
+_REMOTE_CALL_INFO_KIND = "csflow.remote_call_info"
+_REMOTE_CALL_INFO_SCHEMA_VERSION = 1
+
+
+class RemoteCallInfo(_CamelModel):
+    """Self-contained blob the operator copies from a peer Flow's editor."""
+
+    schema_version: int = _REMOTE_CALL_INFO_SCHEMA_VERSION
+    kind: str = _REMOTE_CALL_INFO_KIND
+    base_url: str = ""
+    flow_id: str = ""
+    flow_name: str = ""
+    param_fields: list[str] = []
+    pair_token_name: str = ""
+    pair_secret: str = ""
+
+
+def _derive_base_url(request: Request) -> str:
+    """Best-effort reachable base URL for callbacks, from the request Host."""
+    host = (request.headers.get("host") or "").strip()
+    scheme = request.url.scheme or "http"
+    if host:
+        return f"{scheme}://{host}".rstrip("/")
+    from app.config import load_config as _lc
+
+    port = getattr(_lc(), "csflow_port", 17017)
+    return f"http://127.0.0.1:{port}"
+
+
+@router.post("/{flow_id}/remote-call-info", response_model=RemoteCallInfo)
+def remote_call_info(
+    flow_id: Annotated[str, Path()],
+    request: Request,
+    user: UserDep,
+    storage: StorageDep,
+) -> RemoteCallInfo:
+    """Produce the paste-able "remote call info" for THIS Flow (peer side).
+
+    Idempotently mints an inbound pairing credential named ``remote-{flowId}``
+    and (if unset) records a callback base URL derived from the request Host,
+    so a remote origin can be wired up entirely by copy-paste — no CLI.
+    """
+    from app.config import load_config, save_config
+
+    flow = storage.flow_get(flow_id)
+    if flow is None:
+        raise ApiError("NOT_FOUND", f"flow {flow_id!r} not found", status_code=404)
+    _ensure_owner(flow, user)
+
+    cfg = load_config()
+    updates: dict[str, Any] = {}
+    token_name = f"remote-{flow.id}"
+    tokens = dict(cfg.external_pair_tokens or {})
+    secret = tokens.get(token_name)
+    if not secret:
+        import secrets as _secrets
+
+        secret = _secrets.token_urlsafe(32)
+        tokens[token_name] = secret
+        updates["external_pair_tokens"] = tokens
+    base_url = (cfg.external_callback_base_url or "").strip()
+    if not base_url:
+        base_url = _derive_base_url(request)
+        updates["external_callback_base_url"] = base_url
+    if updates:
+        save_config(cfg.model_copy(update=updates))
+    logger.info(
+        "remote_call_info_issued",
+        flow_id=flow.id, pair_token_name=token_name, base_url=base_url,
+    )
+    return RemoteCallInfo(
+        base_url=base_url,
+        flow_id=flow.id,
+        flow_name=flow.name,
+        param_fields=_spec_param_fields(flow),
+        pair_token_name=token_name,
+        pair_secret=secret,
+    )
+
+
+class RegisterRemoteResponse(_CamelModel):
+    base_url: str
+    flow_id: str
+    flow_name: str
+    param_fields: list[str] = []
+    pair_token_ref: str
+
+
+@router.post("/remote-targets", response_model=RegisterRemoteResponse)
+def register_remote_target(
+    info: Annotated[RemoteCallInfo, Body()],
+    user: UserDep,
+) -> RegisterRemoteResponse:
+    """Register an outbound remote target from a pasted "remote call info"
+    blob (origin side). Stores the pairing secret in this instance's config
+    (never in any Flow spec) and returns the non-secret fields the editor
+    needs to populate the node. Same-origin authenticated (WebUI)."""
+    from app.config import load_config, save_config
+
+    if not info.base_url.strip() or not info.flow_id.strip() or not info.pair_secret.strip():
+        raise ApiError(
+            "INVALID_PAYLOAD",
+            "remote call info requires baseUrl, flowId and pairSecret",
+            status_code=400,
+        )
+    ref = (info.pair_token_name or "").strip() or f"remote-{info.flow_id.strip()}"
+    cfg = load_config()
+    targets = dict(cfg.external_remote_targets or {})
+    targets[ref] = info.pair_secret.strip()
+    save_config(cfg.model_copy(update={"external_remote_targets": targets}))
+    logger.info(
+        "remote_target_registered",
+        user=user, flow_id=info.flow_id.strip(), pair_token_ref=ref,
+    )
+    return RegisterRemoteResponse(
+        base_url=info.base_url.strip().rstrip("/"),
+        flow_id=info.flow_id.strip(),
+        flow_name=info.flow_name,
+        param_fields=[str(f).strip() for f in (info.param_fields or []) if str(f).strip()],
+        pair_token_ref=ref,
+    )
 
 
 def _import_one(

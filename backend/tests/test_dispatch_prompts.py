@@ -602,3 +602,52 @@ def test_upstream_repo_root_shown_only_when_merge_reference() -> None:
     on = prompts.build_worker_dispatch(_ctx(merge_reference=True, **base))
     assert "repo root (merge target): `/tmp/main`" not in off
     assert "repo root (merge target): `/tmp/main`" in on
+
+
+# ── remote-node parameter hand-off (double-inbox) ----------------------
+
+
+def test_worker_dispatch_omits_remote_param_block_by_default() -> None:
+    msg = prompts.build_worker_dispatch(_ctx())
+    assert "Remote Parameter Report" not in msg
+    assert prompts.REMOTE_PARAMS_HEADER not in msg
+
+
+def test_worker_dispatch_injects_remote_param_report_block() -> None:
+    """When a downstream remote node depends on this task, ask for a 2nd
+    inbox message with the params JSON — separate from the normal summary."""
+    msg = prompts.build_worker_dispatch(
+        _ctx(remote_param_fields=("需求描述", "目标目录"))
+    )
+    assert "## Remote Parameter Report" in msg
+    assert f"{prompts.REMOTE_PARAMS_HEADER}: t1" in msg
+    assert "`需求描述`" in msg and "`目标目录`" in msg
+    # The normal completion message MUST still be present (unchanged).
+    assert "task t1 done:" in msg
+
+
+def test_external_task_text_injects_remote_param_report_block() -> None:
+    """External upstreams append the params block into their result summary."""
+    ext_agent = FlowAgent(
+        id="human-1", kind=AgentKind.external,
+        external={"channel": "human"},
+    )
+    ctx = _ctx(
+        agent=ext_agent, worktree=None,
+        task=_task(id="tx", owner="human-1"),
+        remote_param_fields=("field_a",),
+    )
+    msg = prompts.build_external_task_text(ctx)
+    assert "## Remote Parameter Report" in msg
+    assert f"{prompts.REMOTE_PARAMS_HEADER}: tx" in msg
+    assert "`field_a`" in msg
+
+
+def test_external_task_text_without_remote_downstream_has_no_param_block() -> None:
+    ext_agent = FlowAgent(
+        id="human-1", kind=AgentKind.external,
+        external={"channel": "human"},
+    )
+    ctx = _ctx(agent=ext_agent, worktree=None, task=_task(id="tx", owner="human-1"))
+    msg = prompts.build_external_task_text(ctx)
+    assert "Remote Parameter Report" not in msg

@@ -61,6 +61,7 @@ from app.config import load_config
 from app.flow_modes import flow_mode, merge_reference_enabled, task_self_merges
 from app.models import (
     AgentKind,
+    ExternalChannel,
     Flow,
     FlowAgent,
     FlowRun,
@@ -73,6 +74,9 @@ from app.models import (
 )
 from app.scheduler.compiler import CompileResult
 from app.scheduler.prompts import (
+    EMPTY_PARAM_PLACEHOLDER,
+    REMOTE_ORIGIN_NOTE,
+    REMOTE_PARAMS_HEADER,
     DispatchContext,
     UpstreamOutput,
     WorkerReport,
@@ -123,6 +127,68 @@ _TASK_PREFIX_RE = re.compile(
     r"^\s*task\s+([A-Za-z0-9._-]+)\s+done\s*:",
     re.IGNORECASE,
 )
+
+
+def _extract_first_json_object(text: str) -> Any:
+    """Return the first balanced ``{...}`` JSON object parsed out of *text*.
+
+    Tolerant of surrounding prose / code fences (agents often wrap JSON in
+    ``` blocks or add commentary). Returns ``None`` when no parseable object
+    is found."""
+    if not text:
+        return None
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except (ValueError, TypeError):
+                        break
+        start = text.find("{", start + 1)
+    return None
+
+
+def _extract_remote_params_block(text: str, task_id: str) -> dict[str, str] | None:
+    """Parse a ``csflow-remote-params: <task_id>`` message body into a dict.
+
+    Matches the header (from prompts.REMOTE_PARAMS_HEADER) followed by the
+    task id, then extracts the first JSON object after it. Returns ``None``
+    when the header for this task id is absent, ``{}`` when present but the
+    JSON can't be parsed."""
+    if not text:
+        return None
+    wanted = str(task_id).strip()
+    header_re = re.compile(
+        rf"{re.escape(REMOTE_PARAMS_HEADER)}\s*:\s*{re.escape(wanted)}\b",
+        re.IGNORECASE,
+    )
+    m = header_re.search(text)
+    if not m:
+        return None
+    obj = _extract_first_json_object(text[m.end():])
+    if not isinstance(obj, dict):
+        return {}
+    return {str(k): ("" if v is None else str(v)) for k, v in obj.items()}
 _LEADER_COMPLAINT_RELAY_RE = re.compile(
     r"^\s*\[csflow-complaint-relay:(?P<relay_task_id>[A-Za-z0-9._-]+):"
     r"(?P<target_agent_id>[A-Za-z0-9._-]+)\]\s*(?P<body>.*)$",
@@ -2649,7 +2715,247 @@ class RunController:
             raise RuntimeError(f"external package: unknown task {task_id!r}")
         agent = self._agents[book.task.owner_agent_id]
         ctx = await self._compose_dispatch_context(agent, book.task)
-        return build_external_task_package(ctx)
+        package = build_external_task_package(ctx)
+        # remote_csflow nodes delegate a remote Flow: resolve its run-input
+        # param values now (union of upstream reports + user overrides +
+        # headless-leader fallback + placeholder) so _post_delegate can send
+        # them as the remote run's inputs. Other channels never carry inputs.
+        if (
+            agent.kind == AgentKind.external
+            and agent.external is not None
+            and agent.external.channel == ExternalChannel.remote_csflow
+        ):
+            package["inputs"] = await self._resolve_remote_delegate_inputs(
+                agent, book.task,
+            )
+        return package
+
+    async def _resolve_remote_delegate_inputs(
+        self, agent: FlowAgent, task: FlowTask,
+    ) -> dict[str, str]:
+        """Compute the ``inputs`` dict delegated to a remote_csflow Flow.
+
+        Precedence (per field): user-typed override (``external.inputs``) >
+        union of upstream-reported values > headless-leader fill (only when an
+        upstream is itself a remote_csflow whose returned content might hold
+        it) > the literal placeholder ``参数为空``. Non-declared user keys are
+        passed through verbatim so a purely-static config keeps working.
+        """
+        ext = agent.external
+        assert ext is not None  # caller guarantees remote_csflow
+        user_inputs: dict[str, str] = {
+            str(k): str(v) for k, v in (ext.inputs or {}).items()
+        }
+        fields = [str(f).strip() for f in (ext.remote_param_fields or []) if str(f).strip()]
+        if not fields:
+            # No declared param schema → legacy behaviour: send static inputs.
+            return user_inputs
+
+        # 1) Union of upstream-reported param values (local 2nd-inbox message
+        #    or external completion summary carrying the header block).
+        inbox = await self._fetch_leader_inbox_structured()
+        union: dict[str, str] = {}
+        remote_upstream_summaries: list[str] = []
+        for dep_id in task.depends_on:
+            dep_book = self._tasks.get(dep_id)
+            if dep_book is None:
+                continue
+            dep_owner = self._agents.get(dep_book.task.owner_agent_id)
+            dep_owner_id = dep_owner.id if dep_owner else dep_book.task.owner_agent_id
+            reported = self._collect_remote_param_report(
+                inbox, owner_agent_id=dep_owner_id, task_id=dep_id,
+            )
+            for key, val in reported.items():
+                k = str(key).strip()
+                v = str(val).strip()
+                if k in fields and v and not union.get(k):
+                    union[k] = v
+            # Remember remote_csflow upstream summaries for the headless
+            # fallback (they cannot self-report the params block).
+            if (
+                dep_owner is not None
+                and dep_owner.kind == AgentKind.external
+                and dep_owner.external is not None
+                and dep_owner.external.channel == ExternalChannel.remote_csflow
+            ):
+                summary = self._collect_upstream_task_report(
+                    inbox, owner_agent_id=dep_owner_id, task_id=dep_id,
+                )
+                if summary:
+                    remote_upstream_summaries.append(summary)
+
+        # 2) Assemble in precedence order: union first, user overrides on top.
+        resolved: dict[str, str] = dict(user_inputs)
+        for f in fields:
+            user_val = str(user_inputs.get(f, "")).strip()
+            if user_val:
+                resolved[f] = user_val
+            elif union.get(f):
+                resolved[f] = union[f]
+
+        # 3) Headless-leader fallback for still-empty fields when a remote
+        #    upstream might hold them (best-effort; never blocks the run).
+        missing = [f for f in fields if not str(resolved.get(f, "")).strip()]
+        if missing and remote_upstream_summaries:
+            try:
+                filled = await self._headless_leader_fill_params(
+                    fields=missing,
+                    context_summaries=remote_upstream_summaries,
+                    task_id=task.id,
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "remote_param_headless_fill_failed",
+                    run_id=self.run.id, task_id=task.id, error=str(exc),
+                )
+                filled = {}
+            for f in missing:
+                v = str(filled.get(f, "")).strip()
+                if v:
+                    resolved[f] = v
+
+        # 4) Anything still empty → explicit placeholder.
+        for f in fields:
+            if not str(resolved.get(f, "")).strip():
+                resolved[f] = EMPTY_PARAM_PLACEHOLDER
+
+        logger.info(
+            "remote_delegate_inputs_resolved",
+            run_id=self.run.id,
+            task_id=task.id,
+            agent_id=agent.id,
+            fields=fields,
+            from_upstream=sorted(union.keys()),
+            from_user=sorted(k for k in fields if str(user_inputs.get(k, "")).strip()),
+            placeholders=sorted(
+                f for f in fields if resolved.get(f) == EMPTY_PARAM_PLACEHOLDER
+            ),
+        )
+        return resolved
+
+    def _collect_remote_param_report(
+        self,
+        reports: list[WorkerReport],
+        *,
+        owner_agent_id: str,
+        task_id: str,
+    ) -> dict[str, str]:
+        """Parse the latest ``csflow-remote-params: <task_id>`` JSON block from
+        the given upstream owner's inbox messages. Returns {} if absent."""
+        wanted = str(task_id).strip()
+        matches = [
+            r for r in reports
+            if r.from_agent == owner_agent_id
+            and _extract_remote_params_block(r.summary or "", wanted) is not None
+        ]
+        if not matches:
+            return {}
+        ordered = self._reports_chronological(matches)
+        parsed = _extract_remote_params_block(ordered[-1].summary or "", wanted)
+        return parsed or {}
+
+    async def _headless_leader_fill_params(
+        self,
+        *,
+        fields: list[str],
+        context_summaries: list[str],
+        task_id: str,
+    ) -> dict[str, str]:
+        """Best-effort: ask the leader, in a FRESH headless turn (no history),
+        to derive param values from a remote node's returned content.
+
+        Supported only for OpenClaw/Hermes leaders (they have a capture-able
+        headless mode). Any other leader kind → {} (fields stay placeholder).
+        Never raises into the dispatch loop.
+        """
+        leader = self._agents.get(self._leader_id)
+        if leader is None or leader.kind not in (AgentKind.openclaw, AgentKind.hermes):
+            logger.info(
+                "remote_param_headless_fill_unsupported",
+                run_id=self.run.id, task_id=task_id,
+                leader_kind=(leader.kind.value if leader else None),
+            )
+            return {}
+        schema = ", ".join(f'"{f}": "<value or empty string>"' for f in fields)
+        joined = "\n\n".join(f"- {s}" for s in context_summaries)
+        prompt = (
+            "## ClawsomeFlow Remote Parameter Fill (fresh turn — no prior history)\n"
+            "A downstream remote ClawsomeFlow needs values for these parameter "
+            f"fields: {', '.join(fields)}.\n"
+            "Below is the content returned by an upstream remote node. Extract "
+            "the values you can justify from it; leave a field as an empty "
+            "string if the content does not provide it. Do NOT invent values, "
+            "do NOT include local absolute paths.\n\n"
+            f"### Upstream remote content\n{joined}\n\n"
+            "### Reply format (STRICT)\n"
+            f"Reply with ONLY a single JSON object: {{{schema}}}"
+        )
+        try:
+            output = await self._headless_capture_leader(leader, prompt)
+        except Exception as exc:
+            logger.warning(
+                "remote_param_headless_capture_failed",
+                run_id=self.run.id, task_id=task_id, error=str(exc),
+            )
+            return {}
+        parsed = _extract_first_json_object(output)
+        if not isinstance(parsed, dict):
+            return {}
+        return {str(k): str(v) for k, v in parsed.items()}
+
+    async def _headless_capture_leader(
+        self, leader: FlowAgent, prompt: str,
+    ) -> str:
+        """Run the leader once headless and return combined stdout/stderr."""
+        if leader.kind == AgentKind.openclaw:
+            executable = self._resolve_openclaw_executable()
+            if not executable:
+                raise RuntimeError("openclaw CLI not available")
+            cwd, _ = await self._openclaw_dispatch_cwd(leader)
+            session_id = openclaw_session_id_for_run(self.team_name, leader.id) + "-paramfill"
+            argv = [
+                executable, "agent", "--local", "--agent", leader.id,
+                "--session-id", session_id, "--message", prompt,
+            ]
+        else:  # hermes
+            executable = shutil.which("hermes")
+            if not executable:
+                raise RuntimeError("hermes CLI not available")
+            cwd, _ = await self._hermes_dispatch_cwd(leader)
+            argv = [executable, "chat", "--yolo", "-Q", "-q", prompt]
+            if not leader.is_temporary:
+                argv = [
+                    executable, "-p", leader.id, "chat", "--yolo", "-Q", "-q", prompt,
+                ]
+        env = os.environ.copy()
+        env.update({
+            "CLAWTEAM_AGENT_NAME": leader.id,
+            "CLAWTEAM_TEAM_NAME": self.team_name,
+        })
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=cwd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        subprocess_registry.register(proc)
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=_OPENCLAW_HEADLESS_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError as exc:
+            subprocess_registry.kill_group(proc)
+            await proc.communicate()
+            raise RuntimeError("headless param-fill timeout") from exc
+        except asyncio.CancelledError:
+            subprocess_registry.kill_group(proc)
+            raise
+        finally:
+            subprocess_registry.unregister(proc)
+        return (
+            stdout_b.decode("utf-8", errors="replace")
+            + "\n"
+            + stderr_b.decode("utf-8", errors="replace")
+        )
 
     async def _dispatch_complaint_task(
         self,
@@ -3615,6 +3921,20 @@ class RunController:
                 dep_is_external = (
                     dep_owner is not None and dep_owner.kind == AgentKind.external
                 )
+                # A summary that came from a REMOTE executor (webhook / remote
+                # ClawsomeFlow) may reference foreign absolute paths — annotate
+                # just this one segment before handing it to a local worker.
+                if (
+                    summary_bundle
+                    and dep_is_external
+                    and dep_owner is not None
+                    and dep_owner.external is not None
+                    and dep_owner.external.channel in (
+                        ExternalChannel.webhook,
+                        ExternalChannel.remote_csflow,
+                    )
+                ):
+                    summary_bundle = f"{REMOTE_ORIGIN_NOTE} {summary_bundle}"
                 upstream_outputs.append(UpstreamOutput(
                     task_id=dep_id,
                     subject=dep_task.subject,
@@ -3671,7 +3991,36 @@ class RunController:
             upstream_outputs=upstream_outputs,
             self_merge=self_merge,
             merge_reference=merge_reference_enabled(mode=mode),
+            remote_param_fields=self._downstream_remote_param_fields(task.id),
         )
+
+    def _downstream_remote_param_fields(self, task_id: str) -> tuple[str, ...]:
+        """Union of remote-Flow param field names requested by downstream
+        ``remote_csflow`` nodes that depend on ``task_id``.
+
+        Empty when no downstream remote node consumes this task — the
+        dispatch then renders no remote-parameter-report block.
+        """
+        fields: list[str] = []
+        seen: set[str] = set()
+        for book in self._tasks.values():
+            dep_task = book.task
+            if task_id not in (dep_task.depends_on or []):
+                continue
+            owner = self._agents.get(dep_task.owner_agent_id)
+            if (
+                owner is None
+                or owner.kind != AgentKind.external
+                or owner.external is None
+                or owner.external.channel != ExternalChannel.remote_csflow
+            ):
+                continue
+            for name in owner.external.remote_param_fields or []:
+                key = str(name).strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    fields.append(key)
+        return tuple(fields)
 
     def _render_report_summary(self, report: WorkerReport | None) -> str | None:
         if report is None:

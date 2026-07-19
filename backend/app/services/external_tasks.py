@@ -367,10 +367,16 @@ async def _post_delegate(
         "sourceRunId": outbound_package["runId"],
         "sourceTaskId": outbound_package["taskId"],
     }
-    # Static param-field values for the remote Flow (its run-input fields),
-    # configured on the external node. The remote delegate endpoint stores
-    # them as the run's inputs — exactly like a local "参数字段" form fill.
-    if getattr(ext, "inputs", None):
+    # Param-field values for the remote Flow (its run-input fields). The
+    # scheduler resolves these at dispatch time (union of upstream reports +
+    # user overrides + placeholder) and stamps them onto the package as
+    # ``inputs``; fall back to the node's static ``external.inputs`` for a
+    # purely-static config. The remote delegate endpoint stores them as the
+    # run's inputs — exactly like a local "参数字段" form fill.
+    computed_inputs = outbound_package.get("inputs")
+    if isinstance(computed_inputs, dict) and computed_inputs:
+        body["inputs"] = dict(computed_inputs)
+    elif getattr(ext, "inputs", None):
         body["inputs"] = dict(ext.inputs)
     async with httpx.AsyncClient(timeout=_OUTBOUND_TIMEOUT_SEC) as client:
         resp = await client.post(

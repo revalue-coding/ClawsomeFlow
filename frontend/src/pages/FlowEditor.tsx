@@ -34,6 +34,7 @@ import {
   FlowTask,
   HermesAgentSummary,
   OpenclawAgentSummary,
+  RemoteCallInfo,
   api,
 } from "@/lib/api";
 import { Card, CardTitle, ErrorBox, Loading, Modal, StatusPill } from "@/components/ui";
@@ -111,12 +112,23 @@ interface TaskRow {
   /** External execution node (ownerKind="external") channel configuration. */
   externalChannel: ExternalChannelDraft;
   externalEndpointUrl: string;
+  /** remote_csflow: base_url / flow_id / pair_token_ref are populated by the
+   *  backend when the operator pastes the target Flow's "remote call info"
+   *  (see externalRemoteCallInfo). Hidden from the form. */
   externalBaseUrl: string;
   externalFlowId: string;
   externalPairTokenRef: string;
-  /** remote_csflow only: JSON object text of static run-input params for the
-   *  remote Flow (its 参数字段). Kept as raw text in the draft; validated and
-   *  parsed into FlowAgent.external.inputs on save. */
+  /** remote_csflow only: the pasted "remote call info" JSON text (produced by
+   *  the target Flow's "复制远程调用信息" button). Parsed + registered server-side
+   *  which fills base_url/flow_id/pair_token_ref/remoteParamFields. */
+  externalRemoteCallInfo: string;
+  /** remote_csflow only: the remote Flow's declared param-field names,
+   *  captured from the pasted info. Guides externalInputs + drives the
+   *  upstream param-report protocol. */
+  externalRemoteParamFields: string[];
+  /** remote_csflow only: JSON object text of the operator's OWN param values
+   *  for the remote Flow (its 参数字段). Optional — upstream reports fill the
+   *  rest. Parsed into FlowAgent.external.inputs on save. */
   externalInputs: string;
   externalAssignee: string;
   dependsOn: string[];
@@ -240,6 +252,8 @@ function blankRow(): TaskRow {
     externalBaseUrl: "",
     externalFlowId: "",
     externalPairTokenRef: "",
+    externalRemoteCallInfo: "",
+    externalRemoteParamFields: [],
     externalInputs: "",
     externalAssignee: "",
     dependsOn: [],
@@ -2171,14 +2185,26 @@ export function FlowEditor() {
                 type="button"
                 className="btn-outline !px-2 !py-0.5 text-xs"
                 onClick={() => {
-                  void navigator.clipboard.writeText(id).then(
-                    () => undefined,
-                    () => undefined,
-                  );
+                  void (async () => {
+                    try {
+                      const info = await api.remoteCallInfo(id);
+                      await navigator.clipboard.writeText(
+                        JSON.stringify(info, null, 2),
+                      );
+                      alert(t("flowEditor.remoteCallInfoCopied"), {
+                        title: t("flowEditor.remoteCallInfoTitle"),
+                      });
+                    } catch (e) {
+                      alert(
+                        e instanceof ApiError ? e.message : String(e),
+                        { title: t("flowEditor.remoteCallInfoTitle") },
+                      );
+                    }
+                  })();
                 }}
-                title={t("flowEditor.flowIdCopy")}
+                title={t("flowEditor.remoteCallInfoCopy")}
               >
-                {t("common.copy")}
+                {t("flowEditor.remoteCallInfoCopy")}
               </button>
             </div>
           )}
@@ -3565,6 +3591,7 @@ function TaskFormBody({
   const { t } = useTranslation();
   const { alert } = useDialog();
   const [pickingRepo, setPickingRepo] = useState(false);
+  const [registeringRemote, setRegisteringRemote] = useState(false);
   const ownerLocked = readOnly || isSummary;
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
@@ -4016,35 +4043,86 @@ function TaskFormBody({
             )}
             {row.externalChannel === "remote_csflow" && (
               <>
-                <div>
-                  <label className="label">{t("flowEditor.taskFields.externalBaseUrl")}</label>
-                  <input
-                    className="input"
-                    value={row.externalBaseUrl}
+                <div className="md:col-span-2">
+                  <label className="label">
+                    {t("flowEditor.taskFields.externalRemoteCallInfo")}
+                  </label>
+                  <textarea
+                    className="textarea h-28 font-mono text-xs"
+                    value={row.externalRemoteCallInfo}
                     readOnly={ownerLocked}
-                    placeholder="http://remote-host:17017"
-                    onChange={(e) => onChange({ externalBaseUrl: e.target.value })}
+                    placeholder={t(
+                      "flowEditor.taskFields.externalRemoteCallInfoPlaceholder",
+                    )}
+                    onChange={(e) =>
+                      onChange({ externalRemoteCallInfo: e.target.value })
+                    }
                   />
-                </div>
-                <div>
-                  <label className="label">{t("flowEditor.taskFields.externalFlowId")}</label>
-                  <input
-                    className="input"
-                    value={row.externalFlowId}
-                    readOnly={ownerLocked}
-                    placeholder="flow-xxxxxxxxxxxx"
-                    onChange={(e) => onChange({ externalFlowId: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="label">{t("flowEditor.taskFields.externalPairTokenRef")}</label>
-                  <input
-                    className="input"
-                    value={row.externalPairTokenRef}
-                    readOnly={ownerLocked}
-                    placeholder={t("flowEditor.taskFields.externalPairTokenRefPlaceholder")}
-                    onChange={(e) => onChange({ externalPairTokenRef: e.target.value })}
-                  />
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="btn-outline !px-2 !py-0.5 text-xs"
+                      disabled={ownerLocked || registeringRemote}
+                      onClick={() => {
+                        void (async () => {
+                          const raw = row.externalRemoteCallInfo.trim();
+                          if (!raw) {
+                            void alert(
+                              t("flowEditor.taskFields.externalRemoteCallInfoEmpty"),
+                            );
+                            return;
+                          }
+                          let parsed: RemoteCallInfo;
+                          try {
+                            parsed = JSON.parse(raw) as RemoteCallInfo;
+                          } catch {
+                            void alert(
+                              t("flowEditor.taskFields.externalRemoteCallInfoInvalid"),
+                            );
+                            return;
+                          }
+                          setRegisteringRemote(true);
+                          try {
+                            const res = await api.registerRemoteTarget(parsed);
+                            onChange({
+                              externalBaseUrl: res.baseUrl,
+                              externalFlowId: res.flowId,
+                              externalPairTokenRef: res.pairTokenRef,
+                              externalRemoteParamFields: res.paramFields,
+                            });
+                            void alert(
+                              t("flowEditor.taskFields.externalRemoteRegistered", {
+                                flowName: res.flowName || res.flowId,
+                                fields:
+                                  res.paramFields.join("、") ||
+                                  t("flowEditor.taskFields.externalRemoteNoParams"),
+                              }),
+                            );
+                          } catch (e) {
+                            void alert(
+                              e instanceof ApiError ? e.message : String(e),
+                            );
+                          } finally {
+                            setRegisteringRemote(false);
+                          }
+                        })();
+                      }}
+                    >
+                      {registeringRemote
+                        ? t("flowEditor.taskFields.externalRemoteRegistering")
+                        : t("flowEditor.taskFields.externalRemoteRegister")}
+                    </button>
+                    {row.externalFlowId && (
+                      <span className="text-xs text-ink-500">
+                        {t("flowEditor.taskFields.externalRemoteConfigured", {
+                          flowId: row.externalFlowId,
+                          fields:
+                            row.externalRemoteParamFields.join("、") ||
+                            t("flowEditor.taskFields.externalRemoteNoParams"),
+                        })}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="md:col-span-2">
                   <label className="label">{t("flowEditor.taskFields.externalInputs")}</label>
@@ -5215,6 +5293,11 @@ function rowsToSpec(
               flowId: r.externalFlowId.trim() || null,
               pairTokenRef: r.externalPairTokenRef.trim() || null,
               inputs: parseExternalInputs(r.externalInputs),
+              remoteParamFields:
+                r.externalChannel === "remote_csflow"
+                && r.externalRemoteParamFields.length > 0
+                  ? r.externalRemoteParamFields
+                  : null,
               assignee: r.externalAssignee.trim() || null,
             },
           }
@@ -5845,6 +5928,8 @@ function proposalToRows(
       externalBaseUrl: "",
       externalFlowId: "",
       externalPairTokenRef: "",
+      externalRemoteCallInfo: "",
+      externalRemoteParamFields: [],
       externalInputs: "",
       externalAssignee: "",
       dependsOn,
@@ -5893,6 +5978,27 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       externalBaseUrl: a?.external?.baseUrl ?? "",
       externalFlowId: a?.external?.flowId ?? "",
       externalPairTokenRef: a?.external?.pairTokenRef ?? "",
+      // Reconstruct a (secret-free) display blob from the saved node so the
+      // operator can see what's wired without re-pasting; a new paste
+      // re-registers with a fresh secret.
+      externalRemoteCallInfo:
+        ownerKind === "external"
+        && a?.external?.channel === "remote_csflow"
+        && (a?.external?.baseUrl || a?.external?.flowId)
+          ? JSON.stringify(
+              {
+                kind: "csflow.remote_call_info",
+                baseUrl: a?.external?.baseUrl ?? "",
+                flowId: a?.external?.flowId ?? "",
+                paramFields: a?.external?.remoteParamFields ?? [],
+                pairTokenName: a?.external?.pairTokenRef ?? "",
+                pairSecret: "(已注册，如需更新请粘贴新的调用信息)",
+              },
+              null,
+              2,
+            )
+          : "",
+      externalRemoteParamFields: a?.external?.remoteParamFields ?? [],
       externalInputs: a?.external?.inputs
         ? JSON.stringify(a.external.inputs, null, 2)
         : "",

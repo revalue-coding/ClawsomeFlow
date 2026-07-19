@@ -208,11 +208,36 @@ export interface ExternalNodeConfig {
   flowId?: string | null;
   /** remote_csflow channel: outbound credential name in local config. */
   pairTokenRef?: string | null;
-  /** remote_csflow channel: static run-input params for the remote Flow
-   *  (its param fields); sent as the delegate request's `inputs`. */
+  /** remote_csflow channel: user-typed run-input params for the remote Flow
+   *  (its param fields); merged (user wins) over upstream-reported values at
+   *  dispatch time and sent as the delegate request's `inputs`. */
   inputs?: Record<string, string> | null;
+  /** remote_csflow channel: the remote Flow's declared param-field NAMES,
+   *  captured from its "remote call info". Names only — never secrets. */
+  remoteParamFields?: string[] | null;
   /** human channel: display-only assignee hint. */
   assignee?: string | null;
+}
+
+/** Paste-able "remote call info" produced by a peer Flow's editor. */
+export interface RemoteCallInfo {
+  schemaVersion?: number;
+  kind?: string;
+  baseUrl: string;
+  flowId: string;
+  flowName: string;
+  paramFields: string[];
+  pairTokenName: string;
+  pairSecret: string;
+}
+
+/** Origin-side registration result (secret stripped, non-secret fields only). */
+export interface RegisterRemoteResponse {
+  baseUrl: string;
+  flowId: string;
+  flowName: string;
+  paramFields: string[];
+  pairTokenRef: string;
 }
 
 export type MergeStrategy = "manual" | "auto" | "skip" | "agent_self";
@@ -982,6 +1007,12 @@ export const api = {
   ) =>
     request<FlowSaveResult>("PUT", `/api/flows/${id}`, payload),
   deleteFlow: (id: string) => request<void>("DELETE", `/api/flows/${id}`),
+
+  // External remote-node one-click wiring
+  remoteCallInfo: (id: string) =>
+    request<RemoteCallInfo>("POST", `/api/flows/${id}/remote-call-info`, {}),
+  registerRemoteTarget: (info: RemoteCallInfo) =>
+    request<RegisterRemoteResponse>("POST", "/api/flows/remote-targets", info),
 
   // Runs
   triggerRun: (

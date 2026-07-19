@@ -36,6 +36,35 @@ from app.worktree.lookup import WorktreeInfo
 # Canonical anti-loop header used by all scheduler dispatch messages.
 _CONTEXT_HEADER = "## ClawsomeFlow Dispatch Context"
 
+# ── Remote-node parameter hand-off protocol (on-disk / wire contract) ───
+# When a task's downstream includes a ``remote_csflow`` external node, that
+# node needs concrete values for the REMOTE Flow's param fields. We collect
+# them from the upstream executors via a SECOND, dedicated inbox message so
+# the normal ``task <id> done:`` completion summary stays untouched (any
+# non-remote downstream keeps consuming it verbatim). The message shape:
+#
+#     csflow-remote-params: <task_id>
+#     {"<field>": "<value or empty>", ...}
+#
+# The header line MUST start with this literal prefix; the body MUST be a
+# single JSON object mapping each requested field to a string (empty string
+# for "I cannot provide this"). Never rename the prefix — the scheduler
+# parser and the dispatch prompts both key off it.
+REMOTE_PARAMS_HEADER = "csflow-remote-params"
+
+#: Prepended (only) to a summary that originated from a remote executor
+#: (webhook / remote ClawsomeFlow) before it is handed to a LOCAL downstream
+#: worker, so the worker does not mistake foreign absolute paths for local
+#: ones. Kept short — it wraps just that one upstream's summary segment.
+REMOTE_ORIGIN_NOTE = (
+    "[来自远端执行方的产出；其中提到的绝对路径可能位于远端、在本机不存在，"
+    "请勿据此直接访问本地文件]"
+)
+
+#: Value written for a remote param field that no upstream / user / leader
+#: could fill. Sent verbatim so the remote Flow sees an explicit "unknown".
+EMPTY_PARAM_PLACEHOLDER = "参数为空"
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Inputs (snapshots, not live objects)
@@ -115,6 +144,15 @@ class DispatchContext:
     # see ``RunController._compose_dispatch_context``. **First-level only.**
     upstream_outputs: list[UpstreamOutput] = field(default_factory=list)
 
+    # Non-empty when THIS task has a downstream ``remote_csflow`` node that
+    # depends on it: the union of that remote Flow's declared param-field
+    # names. The dispatch then asks this executor to emit a SECOND inbox
+    # message (``csflow-remote-params: <task_id>`` + JSON) reporting values
+    # for these fields, so the scheduler can fill the remote delegation's
+    # inputs. Empty tuple → no extra block is rendered. See prompts module
+    # header (REMOTE_PARAMS_HEADER).
+    remote_param_fields: tuple[str, ...] = ()
+
     # True when THIS task must self-merge its worktree branch into the baseline
     # branch in-task (resolved per task by app/flow_modes.py::task_self_merges —
     # easy mode, dev-mode auto-merge tasks, OpenClaw under dev mode, and every
@@ -159,6 +197,7 @@ def build_worker_dispatch(ctx: DispatchContext) -> str:
         _upstream_outputs_block(ctx),
         _git_merge_reference_block(ctx),
         _task_block(ctx),
+        _remote_param_collection_block(ctx),
         _worker_completion_steps(ctx),
     ]
     # Drop empty blocks (e.g. _upstream_outputs_block returns "" when no parents).
@@ -326,6 +365,41 @@ def _upstream_outputs_block(ctx: DispatchContext) -> str:
             lines.append("  - completion summary: _(missing; inspect upstream worktree git history)_")
 
     return "\n".join(lines)
+
+
+def _remote_param_collection_block(ctx: DispatchContext) -> str:
+    """Ask a LOCAL worker to emit a second inbox message with remote params.
+
+    Rendered only when a downstream ``remote_csflow`` node depends on this
+    task (``ctx.remote_param_fields`` non-empty). The worker keeps sending its
+    normal ``task <id> done:`` completion message unchanged; this is an
+    ADDITIONAL, separate message so downstream non-remote consumers are not
+    disturbed. Returns ``""`` (dropped by the block join) otherwise.
+    """
+    fields = ctx.remote_param_fields
+    if not fields:
+        return ""
+    leader = ctx.leader_agent_id
+    team = ctx.team_name
+    task_id = ctx.task.id
+    schema = ", ".join(f'"{f}": "<value or empty>"' for f in fields)
+    field_list = ", ".join(f"`{f}`" for f in fields)
+    return (
+        "## Remote Parameter Report (extra message — do NOT skip)\n"
+        "A downstream node hands your result to a remote ClawsomeFlow that "
+        "needs concrete values for its parameter fields: "
+        f"{field_list}.\n"
+        "AFTER sending your normal completion message above, send ONE more "
+        "inbox message to the leader whose FIRST line is exactly "
+        f"`{REMOTE_PARAMS_HEADER}: {task_id}` and whose remaining content is a "
+        "single JSON object mapping each field to a plain-text value you can "
+        "provide. Use an empty string for any field you cannot fill — never "
+        "invent values, never include local absolute paths.\n"
+        f"Command: `clawteam inbox send {team} {leader} "
+        f"\"{REMOTE_PARAMS_HEADER}: {task_id}\n"
+        f"{{{schema}}}\"` "
+        "(this is separate from and in addition to your completion message)."
+    )
 
 
 def _git_merge_reference_block(ctx: DispatchContext) -> str:
@@ -769,7 +843,38 @@ def build_external_task_text(ctx: DispatchContext) -> str:
     ext = getattr(ctx.agent, "external", None)
     if ext is not None and ext.channel == ExternalChannel.webhook:
         blocks.append(f"## Notes for remote executors\n{WEBHOOK_REMOTE_NOTES}")
+    remote_block = _remote_param_report_block_external(ctx)
+    if remote_block:
+        blocks.append(remote_block)
     return "\n\n".join(b for b in blocks if b).strip() + "\n"
+
+
+def _remote_param_report_block_external(ctx: DispatchContext) -> str:
+    """Ask an EXTERNAL executor to append a remote-params section to its result.
+
+    External executors report a single free-text completion summary (via the
+    receipt API / WebUI card), so unlike a local worker they cannot send a
+    second inbox message. Instead we ask them to append the params block INTO
+    that summary; the scheduler parses the same ``csflow-remote-params:``
+    header out of the completion text. Rendered only when a downstream
+    remote_csflow node depends on this external task.
+    """
+    fields = ctx.remote_param_fields
+    if not fields:
+        return ""
+    schema = ", ".join(f'"{f}": "<value or empty>"' for f in fields)
+    field_list = ", ".join(f"`{f}`" for f in fields)
+    return (
+        "## Remote Parameter Report (include in your result)\n"
+        "A downstream step forwards your result to a remote ClawsomeFlow that "
+        f"needs values for these parameter fields: {field_list}.\n"
+        "At the END of your completion summary, append a line that starts "
+        f"exactly with `{REMOTE_PARAMS_HEADER}: {ctx.task.id}` followed by a "
+        "single JSON object mapping each field to a plain-text value. Use an "
+        "empty string for any field you cannot provide; do not invent values "
+        "or include local absolute paths.\n"
+        f"Example:\n`{REMOTE_PARAMS_HEADER}: {ctx.task.id}` `{{{schema}}}`"
+    )
 
 
 def build_external_task_package(ctx: DispatchContext) -> dict[str, object]:
@@ -855,6 +960,9 @@ def _self_merge_completion_steps(ctx: DispatchContext) -> str:
 
 __all__ = [
     "DispatchContext",
+    "EMPTY_PARAM_PLACEHOLDER",
+    "REMOTE_ORIGIN_NOTE",
+    "REMOTE_PARAMS_HEADER",
     "UpstreamOutput",
     "WEBHOOK_REMOTE_NOTES",
     "WorkerReport",

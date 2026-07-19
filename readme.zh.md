@@ -144,26 +144,14 @@ Flow 编辑：Owner 来源 → **外部执行**，再选 Owner 类型：
 | **远程ClawsomeFlow** | 另一台机器上的某条 Flow | 对端跑完后结果回传 |
 | **通用接口（webhook）** | 你自有的 HTTP 服务 | 收任务包 → 完成后回调 |
 
-配置远程委派时，从编辑页标题旁复制 **Flow ID**。
+### 远程ClawsomeFlow（复制粘贴接线，免手敲 CLI）
 
-### 远程ClawsomeFlow
+1. **受理方**：打开目标 Flow 的编辑页，点标题旁的「复制远程调用信息」，得到一段 JSON（含地址、Flow ID、参数字段、配对凭证），发给发起方。
+2. **发起方**：在子任务里选 **远程ClawsomeFlow**，把 JSON 粘进「远端 Flow调用信息」并点「解析并注册」——地址 / Flow ID / 凭证由后台自动配置，凭证只存本机、不写进 Flow。
 
-**受理方（peer）：**
+跨机器时，受理方需先 `csflow external expose on` 放开非本机访问（这步会改变服务绑定，仍走 CLI）。
 
-```bash
-csflow external pair-token peer-a
-csflow external expose on
-# 把密钥、本机地址、目标 Flow ID 发给发起方
-```
-
-**发起方（origin）：**
-
-```bash
-csflow external add-remote peer-a <peer 给的密钥>
-csflow external callback-url http://<origin-host>:17017
-```
-
-编辑器选 **远程ClawsomeFlow**，填写对端地址、Flow ID、凭证名称（`peer-a`）。
+**参数自动流转**：若远端 Flow 有参数字段，其上游任务会被自动要求回报这些字段的值；你也可在节点里手填已知值（覆盖上游）。未覆盖的字段取上游并集，仍为空则发「参数为空」。
 
 ### 通用接口（webhook）
 
