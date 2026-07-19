@@ -75,7 +75,6 @@ const zh = {
         serverNoGui:
           "ClawsomeFlow 运行在无图形桌面的主机上（常见于无界面服务器，或通过 SSH 访问且服务器端无 DISPLAY）。" +
           "此处无法弹出目录选择框。请手动粘贴该服务器上的绝对路径（例如 /home/you/project）。",
-        serverMode: "当前为 server 部署模式，原生目录选择器已禁用。请手动粘贴路径。",
         clientNotColocated:
           "当前通过远程端口转发访问，例如 SSH -L 或 VS Code/Cursor Remote（浏览器地址为 localhost，但浏览器实际运行在另一台机器上）。" +
           "目录选择框会弹在服务器本机桌面上，您看不到。请手动粘贴服务器上的绝对路径（例如 /home/you/project）。",
@@ -87,7 +86,6 @@ const zh = {
         serverNoGui:
           "ClawsomeFlow 运行在无图形桌面的主机上，无法从当前浏览器会话打开文件管理器。" +
           "请 SSH 登录服务器操作，或手动粘贴路径。",
-        serverMode: "当前为 server 部署模式，无法在文件管理器中打开文件夹。",
         clientNotColocated:
           "当前通过远程端口转发访问，例如 SSH -L 或 VS Code/Cursor Remote（浏览器地址为 localhost，但浏览器实际运行在另一台机器上）。" +
           "文件管理器会在服务器本机打开，您看不到。请 SSH 登录服务器操作，或手动粘贴路径。",
@@ -484,9 +482,6 @@ const zh = {
       claudeRepoPlaceholder: "git 仓库的绝对路径",
       claudeRepoPickerHint:
         "目录通过本地后端弹出的原生目录选择框获取，此处不支持手动输入。",
-      claudeRepoServerPlaceholder: "— 选择服务端已录入的工作目录 —",
-      claudeRepoServerHint: "该列表会枚举服务端已录入的工作目录。",
-      claudeRepoServerEmpty: "服务端尚未录入可选的工作目录。",
       pickDirTitle: "选择 Workspace 仓库目录",
       pickDirButton: "选择目录",
       dependsOn: "依赖任务（多选）",

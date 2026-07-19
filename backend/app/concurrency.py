@@ -1,8 +1,8 @@
-"""Lock manager abstraction (local asyncio + future Redis).
+"""Lock manager abstraction (in-process asyncio locks).
 
 Public API:
 * :class:`LockManager` — acquire a named async lock; ``async with mgr.lock(key)``.
-* :func:`get_lock_manager` — lazy singleton (mode resolved from :class:`Config`).
+* :func:`get_lock_manager` — lazy singleton.
 * :func:`reset_lock_manager` — used by tests.
 
 Lock-key naming convention (DEV.md §8):
@@ -12,8 +12,6 @@ Lock-key naming convention (DEV.md §8):
   agents using ``Flow.repo`` and OpenClaw agents using their own main repo).
 * ``team_spawn:{team_name}`` — serialise per-team spawn calls to avoid
   tmux session/window creation races.
-* ``run:{run_id}:owner`` — server-mode RunController master election
-  (Redis SETNX + TTL; not used in local mode).
 """
 
 from __future__ import annotations
@@ -22,7 +20,7 @@ import asyncio
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Callable, Protocol
+from typing import AsyncIterator, Protocol
 
 from app import logging_setup
 from app.config import Config, load_config
@@ -123,26 +121,8 @@ class _AsyncioBackend:
             self._locks.pop(key, None)
 
 
-class _RedisBackend:  # pragma: no cover — server mode, exercised in integration tests
-    """Server-mode backend using Redis SETNX + TTL.
-
-    Stub implementation; wired in Phase 9 when server mode lands.
-    Documented here so the shape is clear from day one.
-    """
-
-    def __init__(self, url: str) -> None:
-        self._url = url
-        self._client = None  # lazy connect
-
-    async def acquire(self, key: str, timeout: float) -> None:
-        raise NotImplementedError("Redis lock backend is not yet implemented (P1).")
-
-    async def release(self, key: str) -> None:
-        raise NotImplementedError("Redis lock backend is not yet implemented (P1).")
-
-
 class LockManager:
-    """Acquire / release named locks; backend chosen by deployment mode."""
+    """Acquire / release named locks over the in-process asyncio backend."""
 
     def __init__(self, backend: LockBackend):
         self._backend = backend
@@ -172,32 +152,14 @@ class LockManager:
 _singleton: LockManager | None = None
 
 
-def _create_local_lock_backend(_config: Config) -> LockBackend:
-    return _AsyncioBackend()
-
-
-def _create_server_lock_backend(config: Config) -> LockBackend:
-    from app.concurrency_server import create_server_lock_backend  # server-only module
-    return create_server_lock_backend(config)
-
-
-_BACKEND_FACTORY_BY_MODE: dict[str, Callable[[Config], LockBackend]] = {
-    "local": _create_local_lock_backend,
-    "server": _create_server_lock_backend,
-}
-
-
 def get_lock_manager(config: Config | None = None) -> LockManager:
     """Return the process-wide :class:`LockManager`, creating it on demand."""
     global _singleton
     if _singleton is not None:
         return _singleton
-    cfg = config or load_config()
-    factory = _BACKEND_FACTORY_BY_MODE.get(cfg.deployment_mode)
-    if factory is None:  # pragma: no cover - defensive
-        raise RuntimeError(f"unsupported deployment mode: {cfg.deployment_mode!r}")
-    backend = factory(cfg)
-    _singleton = LockManager(backend)
+    if config is None:
+        load_config()  # keep the config-file bootstrap side effect
+    _singleton = LockManager(_AsyncioBackend())
     return _singleton
 
 

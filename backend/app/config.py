@@ -2,14 +2,17 @@
 
 Public API:
 * :class:`Config` — Pydantic model describing the full ``config.json`` shape.
-* :class:`StorageConfig` / :class:`BrokerConfig` / :class:`AuthConfig` — nested.
+* :class:`StorageConfig` — nested storage section.
 * :func:`load_config` — load + cache the active configuration (created on first call).
 * :func:`save_config` — atomically persist a modified config.
 * :func:`reset_config_cache` — clear the cached singleton (used by tests).
 
-The default config matches the **local mode** described in plan §11.1 and is
-created on first read. Environment variable ``CSFLOW_HOME`` overrides the
-data root (see :mod:`app.paths`).
+ClawsomeFlow is a single-user local deployment (SQLite + in-process locks).
+The former "server" deployment mode was removed; configs written by older
+versions may still contain ``deployment_mode`` / ``broker`` / ``auth`` keys —
+Pydantic ignores unknown keys, so those files keep loading unchanged.
+Environment variable ``CSFLOW_HOME`` overrides the data root (see
+:mod:`app.paths`).
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import os
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from app import paths
 from app.fileutil import atomic_write_json, file_locked
@@ -33,38 +36,19 @@ DEFAULT_CLAWTEAM_BOARD_PORT = 17018
 
 
 class StorageConfig(BaseModel):
-    """Backing store for ClawsomeFlow's own data."""
+    """Backing store for ClawsomeFlow's own data (SQLite only).
 
-    kind: Literal["sqlite", "postgres"] = "sqlite"
-    url: str | None = None  # required when kind == "postgres"
+    ``url`` is retained solely so historical config.json files that carried
+    it keep loading; it is never read.
+    """
 
-    @model_validator(mode="after")
-    def _validate(self) -> "StorageConfig":
-        if self.kind == "postgres" and not self.url:
-            raise ValueError("storage.url is required when storage.kind == 'postgres'")
-        return self
-
-
-class BrokerConfig(BaseModel):
-    """Optional message broker (server mode only)."""
-
-    kind: Literal["redis"]
-    url: str
-
-
-class AuthConfig(BaseModel):
-    """Authentication (server mode). ``None`` means local OS-user auth."""
-
-    kind: Literal["oauth2"]
-    issuer: str
-    client_id: str | None = None
-    audience: str | None = None
+    kind: Literal["sqlite"] = "sqlite"
+    url: str | None = None
 
 
 class Config(BaseModel):
     """Top-level ClawsomeFlow configuration."""
 
-    deployment_mode: Literal["local", "server"] = "local"
     csflow_port: int = DEFAULT_PORT
     clawteam_board_port: int = DEFAULT_CLAWTEAM_BOARD_PORT
     default_user: str = Field(default_factory=lambda: getpass.getuser() or "csflow")
@@ -87,8 +71,6 @@ class Config(BaseModel):
     notify_webhook_format: str | None = None
 
     storage: StorageConfig = Field(default_factory=StorageConfig)
-    broker: BrokerConfig | None = None
-    auth: AuthConfig | None = None
 
     internal_token_secret: str | None = Field(
         default=None,
@@ -156,22 +138,6 @@ class Config(BaseModel):
             "shareable without leaking credentials."
         ),
     )
-
-    @model_validator(mode="after")
-    def _validate_mode(self) -> "Config":
-        if self.deployment_mode == "local":
-            if self.storage.kind != "sqlite":
-                raise ValueError("local mode requires storage.kind == 'sqlite'")
-            if self.broker is not None:
-                raise ValueError("local mode does not use 'broker'")
-            if self.auth is not None:
-                raise ValueError("local mode does not use 'auth'")
-        if self.deployment_mode == "server":
-            if self.broker is None:
-                raise ValueError("server mode requires 'broker' to be configured")
-            if self.storage.kind != "postgres":
-                raise ValueError("server mode requires storage.kind == 'postgres'")
-        return self
 
     @property
     def openclaw_home_path(self) -> Path:

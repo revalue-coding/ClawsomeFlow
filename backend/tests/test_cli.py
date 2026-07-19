@@ -137,4 +137,4 @@ def test_status_command_runs() -> None:
     # Phase 9 status renders a Rich table — sanity check on the headers.
     assert "ClawsomeFlow status" in result.stdout
     assert "version" in result.stdout
-    assert "deployment_mode" in result.stdout
+    assert "default_user" in result.stdout

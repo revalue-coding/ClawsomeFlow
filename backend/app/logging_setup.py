@@ -9,7 +9,7 @@ Public API:
 * :func:`spawn_cmd_built` and friends — small wrappers that emit the
   standard events listed in DEV.md §7 with the agreed field names.
 
-All output is JSON-encoded (file in local mode, stdout in server mode).
+All output is JSON-encoded (written to ~/.clawsomeflow/.logs/ files).
 """
 
 from __future__ import annotations

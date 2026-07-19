@@ -24,7 +24,6 @@ from fastapi import FastAPI
 from app import __version__, bootstrap, logging_setup
 from app import config as cfg_mod
 from app.concurrency import get_lock_manager
-from app.deployment import get_deployment_capabilities
 from app.runtime_bins import resolve_binary
 from app.storage import get_storage
 
@@ -71,7 +70,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     log = logging_setup.get_logger("main")
 
     cfg = cfg_mod.load_config()
-    caps = get_deployment_capabilities(cfg)
     cfg_mod.patch_env_from_config(cfg)
     get_lock_manager(cfg)
     get_storage(cfg)  # also runs init_schema()
@@ -98,10 +96,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("run_schedule_worker_init_failed", error=str(exc))
 
-    if (
-        caps.auto_spawn_board_proxy
-        and os.environ.get("CSFLOW_DISABLE_CLAWTEAM_STACK_CHECK") != "1"
-    ):
+    if os.environ.get("CSFLOW_DISABLE_CLAWTEAM_STACK_CHECK") != "1":
         runtime_ok, runtime_detail = _probe_clawteam_runtime()
         if not runtime_ok:
             log.error("clawteam_runtime_required_check_failed", error=runtime_detail)
@@ -115,9 +110,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "clawteam mcp readiness check failed: " + mcp_detail
             )
 
-    # Phase 9: spawn `clawteam board serve` for local-mode iframe.
-    # Skipped when CSFLOW_DISABLE_BOARD=1 (test isolation, server mode).
-    if caps.auto_spawn_board_proxy and os.environ.get("CSFLOW_DISABLE_BOARD") != "1":
+    # Spawn `clawteam board serve` for the WebUI iframe.
+    # Skipped when CSFLOW_DISABLE_BOARD=1 (test isolation).
+    if os.environ.get("CSFLOW_DISABLE_BOARD") != "1":
         from app.board_proxy import get_board_proxy
 
         board = get_board_proxy(cfg)
@@ -159,7 +154,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info(
         "app_started",
         version=__version__,
-        deployment_mode=cfg.deployment_mode,
         port=cfg.csflow_port,
     )
     try:

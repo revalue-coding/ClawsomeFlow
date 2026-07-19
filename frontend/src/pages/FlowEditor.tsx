@@ -81,8 +81,6 @@ type OwnerKind = "openclaw" | "external" | NonOpenclawOwnerKind;
 type OwnerKindDraft = OwnerKind | "";
 type OwnerMode = "existing" | "new" | "external";
 type ExternalChannelDraft = "" | "human" | "webhook" | "remote_csflow";
-type DeploymentMode = "local" | "server";
-
 interface ExistingOwnerOption {
   key: string;
   id: string;
@@ -1106,8 +1104,6 @@ export function FlowEditor() {
   const [detectedOwnerKinds, setDetectedOwnerKinds] = useState<OwnerKindsAvailability>(
     EMPTY_OWNER_KINDS,
   );
-  const [deploymentMode, setDeploymentMode] = useState<DeploymentMode>("local");
-  const [workspaceDirOptions, setWorkspaceDirOptions] = useState<string[]>([]);
   const ownerKindsFetchRef = useRef<Promise<OwnerKindsAvailability> | null>(null);
   const detectedOwnerKindsRef = useRef<OwnerKindsAvailability>(EMPTY_OWNER_KINDS);
   const [error, setError] = useState<string | null>(null);
@@ -1218,13 +1214,6 @@ export function FlowEditor() {
     api
       .listHermesAgents("fast")
       .then((r) => setHermesOptions(r.items))
-      .catch(() => {});
-    api
-      .listWorkspaceDirectories()
-      .then((r) => {
-        setDeploymentMode(r.deploymentMode);
-        setWorkspaceDirOptions(r.items);
-      })
       .catch(() => {});
     void refreshOwnerKindsFast({ silent: true });
   }, []);
@@ -2459,69 +2448,34 @@ export function FlowEditor() {
               <div className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
                 <div>
                   <label className="label">{t("flowEditor.leaderRepoLabel")}</label>
-                  {deploymentMode === "server" ? (
-                    <>
-                      <select
-                        className="select"
-                        value={leaderRepo}
-                        onChange={(e) => {
-                          snapshotLeaderRepoBeforeEdit();
-                          const next = e.target.value;
-                          setLeaderRepo(next);
-                          setLeaderBranchOptions([]);
-                          setLeaderBranchEditable(false);
-                          commitLeaderRepoCheck(next);
-                        }}
-                      >
-                        <option value="">
-                          {t("flowEditor.taskFields.claudeRepoServerPlaceholder")}
-                        </option>
-                        {leaderRepo &&
-                          !workspaceDirOptions.includes(leaderRepo) && (
-                          <option value={leaderRepo}>{leaderRepo}</option>
-                        )}
-                        {workspaceDirOptions.map((p) => (
-                          <option key={p} value={p}>
-                            {p}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="text-xs text-ink-500 mt-1">
-                        {workspaceDirOptions.length === 0
-                          ? t("flowEditor.taskFields.claudeRepoServerEmpty")
-                          : t("flowEditor.taskFields.claudeRepoServerHint")}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="flex gap-2">
-                      <input
-                        className="input flex-1"
-                        value={leaderRepo}
-                        placeholder={t("flowEditor.taskFields.claudeRepoPlaceholder")}
-                        onChange={(e) => {
-                          setLeaderRepo(e.target.value);
-                          setLeaderBranchOptions([]);
-                          setLeaderBranchEditable(false);
-                        }}
-                        onFocus={snapshotLeaderRepoBeforeEdit}
-                        onBlur={(e) => commitLeaderRepoCheck(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            (e.target as HTMLInputElement).blur();
-                          }
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="btn-outline whitespace-nowrap"
-                        onClick={() => void onPickLeaderRepo()}
-                        disabled={leaderPickingRepo}
-                      >
-                        {t("flowEditor.taskFields.pickDirButton")}
-                      </button>
-                    </div>
-                  )}
+                  <div className="flex gap-2">
+                    <input
+                      className="input flex-1"
+                      value={leaderRepo}
+                      placeholder={t("flowEditor.taskFields.claudeRepoPlaceholder")}
+                      onChange={(e) => {
+                        setLeaderRepo(e.target.value);
+                        setLeaderBranchOptions([]);
+                        setLeaderBranchEditable(false);
+                      }}
+                      onFocus={snapshotLeaderRepoBeforeEdit}
+                      onBlur={(e) => commitLeaderRepoCheck(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn-outline whitespace-nowrap"
+                      onClick={() => void onPickLeaderRepo()}
+                      disabled={leaderPickingRepo}
+                    >
+                      {t("flowEditor.taskFields.pickDirButton")}
+                    </button>
+                  </div>
                 </div>
                 <div>
                   <label className="label">{t("flowEditor.leaderTargetBranchLabel")}</label>
@@ -2840,8 +2794,6 @@ export function FlowEditor() {
           leaderRepo={leaderRepo.trim()}
           leaderTargetBranch={leaderTargetBranch.trim()}
           runInputFields={runInputFields}
-          deploymentMode={deploymentMode}
-          workspaceDirOptions={workspaceDirOptions}
           onRefreshOwnerKinds={() => refreshOwnerKindsFast({ silent: true })}
           onSave={(row) => {
             if (editing.mode === "create") commitNewTask(row);
@@ -3145,8 +3097,6 @@ function TaskEditModal({
   leaderRepo,
   leaderTargetBranch,
   runInputFields,
-  deploymentMode,
-  workspaceDirOptions,
   onRefreshOwnerKinds,
   onSave,
   onCancel,
@@ -3169,8 +3119,6 @@ function TaskEditModal({
   leaderRepo: string;
   leaderTargetBranch: string;
   runInputFields: string[];
-  deploymentMode: DeploymentMode;
-  workspaceDirOptions: string[];
   onRefreshOwnerKinds: () => Promise<OwnerKindsAvailability>;
   onSave: (row: TaskRow) => void;
   onCancel: () => void;
@@ -3485,8 +3433,6 @@ function TaskEditModal({
         hermesOptions={hermesOptions}
         persistentOwnerKinds={persistentOwnerKinds}
         temporaryOwnerKinds={temporaryOwnerKinds}
-        deploymentMode={deploymentMode}
-        workspaceDirOptions={workspaceDirOptions}
         branchOptions={branchOptions}
         branchEditable={branchEditable}
         branchLoading={branchLoading}
@@ -3564,8 +3510,6 @@ function TaskFormBody({
   hermesOptions,
   persistentOwnerKinds,
   temporaryOwnerKinds,
-  deploymentMode,
-  workspaceDirOptions,
   branchOptions,
   branchEditable,
   branchLoading,
@@ -3586,8 +3530,6 @@ function TaskFormBody({
   hermesOptions: HermesAgentSummary[];
   persistentOwnerKinds: OwnerKind[];
   temporaryOwnerKinds: NonOpenclawOwnerKind[];
-  deploymentMode: DeploymentMode;
-  workspaceDirOptions: string[];
   branchOptions: string[];
   branchEditable: boolean;
   branchLoading: boolean;
@@ -4116,64 +4058,31 @@ function TaskFormBody({
               <label className="label">
                 {t("flowEditor.taskFields.claudeRepoPath")}
               </label>
-              {deploymentMode === "server" ? (
-                <>
-                  <select
-                    className="select"
-                    value={row.ownerRepo}
-                    disabled={ownerLocked}
-                    onChange={(e) => {
-                      onRepoPathEditStart();
-                      patchOwnerRepo(e.target.value);
-                      commitRepoPath(e.target.value);
-                    }}
-                  >
-                    <option value="">
-                      {t("flowEditor.taskFields.claudeRepoServerPlaceholder")}
-                    </option>
-                    {row.ownerRepo &&
-                      !workspaceDirOptions.includes(row.ownerRepo) && (
-                      <option value={row.ownerRepo}>{row.ownerRepo}</option>
-                    )}
-                    {workspaceDirOptions.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
-                      </option>
-                    ))}
-                  </select>
-                  <div className="text-xs text-ink-500 mt-1">
-                    {workspaceDirOptions.length === 0
-                      ? t("flowEditor.taskFields.claudeRepoServerEmpty")
-                      : t("flowEditor.taskFields.claudeRepoServerHint")}
-                  </div>
-                </>
-              ) : (
-                <div className="flex gap-2">
-                  <input
-                    className="input flex-1"
-                    placeholder={t("flowEditor.taskFields.claudeRepoPlaceholder")}
-                    value={row.ownerRepo}
-                    readOnly={ownerLocked}
-                    onChange={(e) => patchOwnerRepo(e.target.value)}
-                    onFocus={onRepoPathEditStart}
-                    onBlur={(e) => commitRepoPath(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        (e.target as HTMLInputElement).blur();
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn-outline whitespace-nowrap"
-                    onClick={onPickRepo}
-                    disabled={pickingRepo || ownerLocked}
-                  >
-                    {t("flowEditor.taskFields.pickDirButton")}
-                  </button>
-                </div>
-              )}
+              <div className="flex gap-2">
+                <input
+                  className="input flex-1"
+                  placeholder={t("flowEditor.taskFields.claudeRepoPlaceholder")}
+                  value={row.ownerRepo}
+                  readOnly={ownerLocked}
+                  onChange={(e) => patchOwnerRepo(e.target.value)}
+                  onFocus={onRepoPathEditStart}
+                  onBlur={(e) => commitRepoPath(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn-outline whitespace-nowrap"
+                  onClick={onPickRepo}
+                  disabled={pickingRepo || ownerLocked}
+                >
+                  {t("flowEditor.taskFields.pickDirButton")}
+                </button>
+              </div>
             </div>
             <div>
               <label className="label">

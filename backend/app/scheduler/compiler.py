@@ -21,7 +21,7 @@ Returned :class:`CompileResult` carries the **task-id mapping**:
 
 We also stamp ``metadata.csflow_task_id = FlowTask.id`` on every ClawTeam
 task so a snapshot can recover the mapping even when our in-memory state
-is gone (e.g. server-mode failover).
+is gone (e.g. a service restart).
 """
 
 from __future__ import annotations

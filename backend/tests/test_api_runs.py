@@ -787,21 +787,6 @@ def test_list_runs_all_users_query(app_client: TestClient) -> None:
     assert teams == {"csflow-A", "csflow-B"}
 
 
-def test_list_runs_all_users_forbidden_in_server_mode(
-    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    flow = _make_flow(owner="alice")
-    _make_run(flow_id=flow.id, user="alice", team_name="csflow-A")
-    _make_run(flow_id=flow.id, user="bob", team_name="csflow-B")
-    monkeypatch.setattr(
-        "app.api.runs.load_config",
-        lambda: load_config().model_copy(update={"deployment_mode": "server"}),
-    )
-    r = app_client.get("/api/runs?allUsers=true")
-    assert r.status_code == 403
-    assert r.json()["error"] == "FORBIDDEN"
-
-
 def test_get_run_detail_includes_pending_merges_and_board_url(
     app_client: TestClient,
 ) -> None:

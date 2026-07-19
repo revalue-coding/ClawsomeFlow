@@ -39,7 +39,6 @@ from typing import Optional
 
 from app import paths
 from app.config import Config, load_config
-from app.deployment import get_deployment_capabilities
 from app.logging_setup import get_logger
 from app.runtime_bins import resolve_binary
 
@@ -72,11 +71,6 @@ class BoardProxyManager:
         self._last_error = None
         if self.is_running():
             return True
-        # Server mode reverse-proxies through nginx and shouldn't spawn here.
-        if not get_deployment_capabilities(self._cfg).auto_spawn_board_proxy:
-            logger.debug("board_proxy_skip_server_mode")
-            self._last_error = "board proxy disabled in server mode"
-            return False
         self._clawteam_bin = resolve_binary("clawteam")
         if not self._clawteam_bin:
             self._last_error = "`clawteam` binary not found in PATH"

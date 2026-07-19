@@ -94,7 +94,6 @@ def _config_table(cfg) -> Table:
     t = Table(title="ClawsomeFlow config", show_header=False)
     t.add_column("k", style="bold")
     t.add_column("v")
-    t.add_row("deployment_mode", cfg.deployment_mode)
     t.add_row("csflow_port", str(cfg.csflow_port))
     t.add_row("clawteam_board_port", str(cfg.clawteam_board_port))
     t.add_row("default_user", cfg.default_user)

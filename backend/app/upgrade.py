@@ -739,7 +739,7 @@ def run_upgrade(
                 sync_common_cron_jobs_for_all,
             )
         except Exception as exc:
-            # Most likely cause: storage not yet ready (server mode w/ no PG).
+            # Most likely cause: storage not yet ready.
             # Don't fail the whole upgrade — warn.
             report.repair_warnings.append(f"agent runtime refresh unavailable: {exc}")
             logger.warning("upgrade_user_runtime_refresh_skipped", error=str(exc))

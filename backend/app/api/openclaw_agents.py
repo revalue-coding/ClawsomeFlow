@@ -40,7 +40,6 @@ from app import paths as app_paths
 from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.config import load_config
-from app.deployment import get_deployment_capabilities
 from app.integrations import openclaw_json as oj
 from app.integrations.openclaw_agent_source import (
     AGENTS_USER_CUSTOM_SECTION_END,
@@ -1849,14 +1848,6 @@ def list_agents(
     storage: StorageDep,
     all_users: Annotated[bool, Query(alias="allUsers")] = False,
 ) -> OpenclawAgentListResponse:
-    cfg = load_config()
-    caps = get_deployment_capabilities(cfg)
-    if all_users and not caps.allow_all_users_query:
-        raise ApiError(
-            "FORBIDDEN",
-            "allUsers=true is disabled in server mode until RBAC is enabled",
-            status_code=403,
-        )
     items = svc.list_agents(
         user=None if all_users else user,
         storage=storage,

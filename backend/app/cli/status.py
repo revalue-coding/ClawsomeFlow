@@ -30,7 +30,6 @@ def status() -> None:
         f"[green]yes[/green] (pid={pid})" if running else "[yellow]no[/yellow]",
     )
     t.add_row("pid file", str(pid_file()))
-    t.add_row("deployment_mode", cfg.deployment_mode)
     t.add_row("port", str(cfg.csflow_port))
     t.add_row("clawteam_board_port", str(cfg.clawteam_board_port))
     t.add_row("default_user", cfg.default_user)

@@ -1,11 +1,9 @@
 """In-process Run-event broadcaster.
 
-ClawsomeFlow's WebSocket layer (Phase 7) needs to push every
-:class:`RunEvent` the controller / finalizer emits to all clients
-subscribed to that Run. We keep the broker in-process for local mode (one
-``asyncio.Queue`` per subscriber, fanout via :meth:`publish`) and design
-the public surface so the server-mode (Phase 9) can swap it for a Redis
-pub/sub backend without touching call sites.
+ClawsomeFlow's WebSocket layer needs to push every :class:`RunEvent` the
+controller / finalizer emits to all clients subscribed to that Run. The
+broker is in-process (one ``asyncio.Queue`` per subscriber, fanout via
+:meth:`publish`).
 
 Usage::
 

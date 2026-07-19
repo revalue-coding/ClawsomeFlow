@@ -52,7 +52,6 @@ from pydantic.alias_generators import to_camel
 from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.config import Config, load_config
-from app.deployment import get_deployment_capabilities
 from app.integrations.clawteam_cli import get_clawteam_cli
 from app.integrations.clawteam_mcp import get_mcp_client
 from app.logging_setup import get_logger
@@ -893,13 +892,7 @@ def list_runs(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> RunListResponse:
-    caps = get_deployment_capabilities(cfg)
-    if all_users and not caps.allow_all_users_query:
-        raise ApiError(
-            "FORBIDDEN",
-            "allUsers=true is disabled in server mode until RBAC is enabled",
-            status_code=403,
-        )
+    del cfg  # dependency kept for signature stability
     items, total = storage.run_list(
         flow_id=flow_id, status=status_q,
         user=None if all_users else user,

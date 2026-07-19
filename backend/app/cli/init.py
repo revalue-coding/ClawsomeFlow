@@ -1,10 +1,7 @@
 """``csflow init`` / ``csflow install`` — one-click install entrypoint.
 
-Deployment modes:
-
-* **local** (default) — single-user; SQLite + in-process locks. Zero
-  external infrastructure, just a `pip install`.
-* **server** — temporarily disabled for public users.
+Single-user local deployment: SQLite + in-process locks. Zero external
+infrastructure, just a `pip install`.
 
 Unified behavior:
 * first-time install (no ``~/.clawsomeflow``): run normal first-deploy flow
@@ -28,16 +25,11 @@ from app.cli._user_service import ServiceError, restart_and_enable
 from app.config import (
     DEFAULT_CLAWTEAM_BOARD_PORT,
     DEFAULT_PORT,
-    BrokerConfig,
     Config,
     StorageConfig,
 )
 
 console = Console()
-_SERVER_MODE_DISABLED_MSG = (
-    "--mode server is temporarily disabled and not open to users yet. "
-    "Please use --mode local."
-)
 
 
 @app.command(name="install")
@@ -50,19 +42,6 @@ def init(
     board_port: int = typer.Option(
         DEFAULT_CLAWTEAM_BOARD_PORT, "--board-port",
         help="Port for the bundled `clawteam board serve` subprocess.",
-    ),
-    mode: str = typer.Option(
-        "local", "--mode", "-m",
-        help="Deployment mode. Currently only 'local' is available; "
-             "'server' is temporarily disabled.",
-    ),
-    pg_url: str | None = typer.Option(
-        None, "--pg", "--postgres",
-        help="Reserved for future server mode (currently disabled).",
-    ),
-    redis_url: str | None = typer.Option(
-        None, "--redis",
-        help="Reserved for future server mode (currently disabled).",
     ),
     force: bool = typer.Option(
         False, "--force", help="Overwrite existing config.json.",
@@ -82,10 +61,6 @@ def init(
     ),
 ) -> None:
     """Initialise config, then run the unified upgrade pipeline."""
-    if mode not in ("local", "server"):
-        raise typer.BadParameter(f"--mode must be 'local' or 'server', got {mode!r}")
-    if mode == "server":
-        raise typer.BadParameter(_SERVER_MODE_DISABLED_MSG)
     if not skip_openclaw:
         ensure_openclaw_version_compatible_or_exit(
             action_label="install/init",
@@ -105,33 +80,22 @@ def init(
             "before upgrade.[/dim]"
         )
 
-    storage_cfg = (
-        StorageConfig(kind="postgres", url=pg_url) if mode == "server"
-        else StorageConfig(kind="sqlite", url=None)
-    )
-    broker_cfg = (
-        BrokerConfig(kind="redis", url=redis_url) if mode == "server"
-        else None
-    )
+    storage_cfg = StorageConfig(kind="sqlite", url=None)
 
     cfg: Config
     if cfg_path.exists() and not force:
         cfg = cfg_mod.load_config()
         cfg = cfg.model_copy(update={
-            "deployment_mode": mode,
             "csflow_port": port,
             "clawteam_board_port": board_port,
             "storage": storage_cfg,
-            "broker": broker_cfg,
             **({"default_user": user} if user else {}),
         })
     else:
         cfg = Config(
-            deployment_mode=mode,
             csflow_port=port,
             clawteam_board_port=board_port,
             storage=storage_cfg,
-            broker=broker_cfg,
             **({"default_user": user} if user else {}),
         )
     # Auto-provision the private secrets (HMAC secret for the internal-API
@@ -183,18 +147,11 @@ def init(
     console.print(
         f"[green]✓[/green] Data home: [dim]{home_path}[/dim]"
     )
-    storage_label = (
-        f"postgres → [dim]{pg_url}[/dim]" if mode == "server"
-        else "sqlite (local)"
-    )
-    broker_label = f"redis → [dim]{redis_url}[/dim]" if mode == "server" else "in-process"
     console.print(
-        f"  [dim]mode[/dim] {mode}   "
-        f"[dim]port[/dim] {cfg.csflow_port}   "
+        f"  [dim]port[/dim] {cfg.csflow_port}   "
         f"[dim]board[/dim] {cfg.clawteam_board_port}   "
         f"[dim]user[/dim] {cfg.default_user}\n"
-        f"  [dim]storage[/dim] {storage_label}\n"
-        f"  [dim]broker[/dim]  {broker_label}"
+        f"  [dim]storage[/dim] sqlite (local)"
     )
 
     from app import __version__, upgrade as upgrade_mod
@@ -244,13 +201,6 @@ def init(
         get_storage(cfg)
         console.print(
             f"[green]✓[/green] {storage_cfg.kind} schema ready"
-        )
-    except NotImplementedError as exc:
-        console.print(
-            f"[yellow]⚠[/yellow] Storage backend not yet implemented: {exc}"
-        )
-        console.print(
-            "  PostgreSQL backend lands in P1; for now run with --mode local."
         )
     except Exception as exc:
         console.print(f"[red]✗[/red] Storage init failed: {exc}")

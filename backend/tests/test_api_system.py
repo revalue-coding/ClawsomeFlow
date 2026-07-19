@@ -35,17 +35,6 @@ def test_pick_directory_cancel_returns_null(monkeypatch) -> None:
     assert r.json()["path"] is None
 
 
-def test_pick_directory_local_only(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="server"),
-    )
-    with TestClient(create_app()) as client:
-        r = client.post("/api/system/pick-directory", json={})
-    assert r.status_code == 409
-    assert r.json()["error"] == "DIRECTORY_PICKER_UNAVAILABLE"
-
-
 def test_pick_directory_runtime_error_mapped(monkeypatch) -> None:
     def _boom(**_):
         raise RuntimeError("no display")
@@ -119,19 +108,6 @@ def test_open_directory_success(monkeypatch, tmp_path: Path) -> None:
     assert opened["path"] == target.resolve()
 
 
-def test_open_directory_local_only(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="server"),
-    )
-    target = tmp_path / "my-desktop"
-    target.mkdir(parents=True, exist_ok=True)
-    with TestClient(create_app()) as client:
-        r = client.post("/api/system/open-directory", json={"path": str(target)})
-    assert r.status_code == 409
-    assert r.json()["error"] == "DIRECTORY_OPEN_UNAVAILABLE"
-
-
 def test_open_directory_rejects_relative_path() -> None:
     with TestClient(create_app()) as client:
         r = client.post("/api/system/open-directory", json={"path": "relative/path"})
@@ -160,17 +136,11 @@ def test_open_directory_runtime_error_mapped(monkeypatch, tmp_path: Path) -> Non
     assert r.json()["error"] == "DIRECTORY_OPEN_UNAVAILABLE"
 
 
-def test_ui_capabilities_local_default(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="local"),
-    )
+def test_ui_capabilities_local_default() -> None:
     with TestClient(create_app()) as client:
         r = client.get("/api/system/ui-capabilities")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["deploymentMode"] == "local"
-    assert body["allowNativeDirectoryPicker"] is True
     assert body["nativeDirectoryClientColocated"] is True
     assert body["userHomeDir"]
     assert Path(body["userHomeDir"]).is_dir()
@@ -207,10 +177,6 @@ def test_validate_directory_rejects_inaccessible(monkeypatch) -> None:
 
 def test_ui_capabilities_client_not_colocated_same_platform_ssh(monkeypatch) -> None:
     """Linux browser + Linux server over SSH -L must still be treated as remote."""
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="local"),
-    )
     monkeypatch.setattr("app.api.system.native_directory_ui_available", lambda: True)
     monkeypatch.setattr(
         "app.api.system.native_directory_client_colocated", lambda _request: False,
@@ -231,11 +197,7 @@ def test_ui_capabilities_client_not_colocated_same_platform_ssh(monkeypatch) -> 
     assert body["nativeDirectoryClientColocated"] is False
 
 
-def test_ui_capabilities_same_platform_without_ssh_forward(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="local"),
-    )
+def test_ui_capabilities_same_platform_without_ssh_forward() -> None:
     with TestClient(create_app()) as client:
         r = client.get(
             "/api/system/ui-capabilities",
@@ -251,10 +213,6 @@ def test_ui_capabilities_same_platform_without_ssh_forward(monkeypatch) -> None:
 
 
 def test_ui_capabilities_client_not_colocated_ssh_forward(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="local"),
-    )
     monkeypatch.setattr("app.api.system.native_directory_ui_available", lambda: True)
     monkeypatch.setattr(
         "app.api.system.native_directory_client_colocated", lambda _request: False,
@@ -266,10 +224,6 @@ def test_ui_capabilities_client_not_colocated_ssh_forward(monkeypatch) -> None:
 
 
 def test_pick_directory_blocked_when_client_not_colocated(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="local"),
-    )
     monkeypatch.setattr(
         "app.api.system.native_directory_client_colocated",
         lambda _request: False,
@@ -284,10 +238,6 @@ def test_open_directory_blocked_when_client_not_colocated(monkeypatch, tmp_path:
     target = tmp_path / "repo"
     target.mkdir()
     monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="local"),
-    )
-    monkeypatch.setattr(
         "app.api.system.native_directory_client_colocated",
         lambda _request: False,
     )
@@ -297,24 +247,7 @@ def test_open_directory_blocked_when_client_not_colocated(monkeypatch, tmp_path:
     assert r.json()["error"] == "DIRECTORY_OPEN_UNAVAILABLE"
 
 
-def test_ui_capabilities_server_mode_disables_native_picker(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="server"),
-    )
-    with TestClient(create_app()) as client:
-        r = client.get("/api/system/ui-capabilities")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["deploymentMode"] == "server"
-    assert body["allowNativeDirectoryPicker"] is False
-
-
 def test_ui_capabilities_native_ui_false_without_display(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="local"),
-    )
     monkeypatch.setattr("app.api.system.native_directory_ui_available", lambda: False)
     with TestClient(create_app()) as client:
         r = client.get("/api/system/ui-capabilities")
@@ -352,12 +285,8 @@ def test_owner_kinds_fast_empty_when_no_binary_found(monkeypatch) -> None:
     assert body["temporaryKinds"] == []
 
 
-def test_workspace_directories_local_scoped_to_current_user(monkeypatch) -> None:
+def test_workspace_directories_scoped_to_current_user(monkeypatch) -> None:
     monkeypatch.setenv("CSFLOW_USER", "alice")
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="local"),
-    )
     captured: dict[str, object] = {}
 
     def _fake_collect(*, owner_user: str | None) -> set[str]:
@@ -369,29 +298,8 @@ def test_workspace_directories_local_scoped_to_current_user(monkeypatch) -> None
         r = client.get("/api/system/workspace-directories")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["deploymentMode"] == "local"
     assert body["items"] == ["/srv/repo-a", "/srv/repo-b"]
     assert captured["owner_user"] == "alice"
-
-
-def test_workspace_directories_server_all_users(monkeypatch) -> None:
-    monkeypatch.setenv("CSFLOW_USER", "alice")
-    monkeypatch.setattr(
-        "app.api.system.load_config",
-        lambda: SimpleNamespace(deployment_mode="server"),
-    )
-    captured: dict[str, object] = {}
-
-    def _fake_collect(*, owner_user: str | None) -> set[str]:
-        captured["owner_user"] = owner_user
-        return {"/srv/shared/repo"}
-
-    monkeypatch.setattr("app.api.system._collect_workspace_dirs", _fake_collect)
-    with TestClient(create_app()) as client:
-        r = client.get("/api/system/workspace-directories?allUsers=true")
-    assert r.status_code == 403, r.text
-    assert r.json()["error"] == "FORBIDDEN"
-    assert captured.get("owner_user") is None
 
 
 def test_ensure_git_repo_creates_and_initializes(tmp_path: Path) -> None:

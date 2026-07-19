@@ -785,13 +785,10 @@ export interface DecomposeStatus {
 }
 
 export interface WorkspaceDirectoryList {
-  deploymentMode: "local" | "server";
   items: string[];
 }
 
 export interface UiCapabilities {
-  deploymentMode: "local" | "server";
-  allowNativeDirectoryPicker: boolean;
   nativeDirectoryUiAvailable: boolean;
   nativeDirectoryClientColocated: boolean;
   userHomeDir: string;

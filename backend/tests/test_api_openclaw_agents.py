@@ -149,18 +149,6 @@ async def test_list_all_users_query(client: TestClient, fake_openclaw_home: Path
     assert ids == {"a1", "b1"}
 
 
-def test_list_all_users_forbidden_in_server_mode(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "app.api.openclaw_agents.load_config",
-        lambda: load_config().model_copy(update={"deployment_mode": "server"}),
-    )
-    r = client.get("/api/openclaw/agents?allUsers=true")
-    assert r.status_code == 403
-    assert r.json()["error"] == "FORBIDDEN"
-
-
 @pytest.mark.asyncio
 async def test_import_external_agents_creates_csflow_clone_and_triggers_optimization(
     client: TestClient,

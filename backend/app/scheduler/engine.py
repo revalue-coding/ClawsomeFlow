@@ -1,8 +1,7 @@
 """FlowScheduler — the singleton that owns all RunControllers in this process.
 
-Local mode: this is a simple in-memory dict of run_id → RunController +
-asyncio.Task. Server mode (Phase 9) introduces Redis-based leader election
-so only one execution node owns the controller at any one time.
+A simple in-memory dict of run_id → RunController + asyncio.Task (the whole
+product is a single-process local deployment).
 
 Public API:
 

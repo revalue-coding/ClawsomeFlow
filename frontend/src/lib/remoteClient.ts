@@ -14,7 +14,6 @@ export function getUiCapabilities(): UiCapabilities | null {
 export type NativeDirectoryBlockReason =
   | "remoteHostname"
   | "serverNoGui"
-  | "serverMode"
   | "clientNotColocated";
 
 export type NativeDirectoryAction = "pick" | "open";
@@ -32,7 +31,6 @@ export function getNativeDirectoryBlockReason(
   if (isRemoteHostname()) return "remoteHostname";
   const resolved = caps !== undefined ? caps : cachedCaps;
   if (!resolved) return null;
-  if (!resolved.allowNativeDirectoryPicker) return "serverMode";
   if (!resolved.nativeDirectoryUiAvailable) return "serverNoGui";
   if (resolved.nativeDirectoryClientColocated === false) return "clientNotColocated";
   return null;
@@ -40,7 +38,7 @@ export function getNativeDirectoryBlockReason(
 
 /**
  * True when the browser should not offer native directory pick/open actions.
- * Combines hostname heuristics with server-reported deployment + GUI availability.
+ * Combines hostname heuristics with server-reported GUI availability.
  */
 export function isRemoteBrowser(caps?: UiCapabilities | null): boolean {
   return getNativeDirectoryBlockReason(caps) !== null;

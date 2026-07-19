@@ -20,7 +20,6 @@ from app import paths
 from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.config import load_config
-from app.deployment import get_deployment_capabilities
 from app.integrations import git_repo as git_repo_util
 from app.integrations.owner_kind_probe import (
     detect_persistent_owner_kinds,
@@ -62,13 +61,10 @@ class OpenDirectoryResponse(_CamelModel):
 
 
 class WorkspaceDirectoryListResponse(_CamelModel):
-    deployment_mode: Literal["local", "server"]
     items: list[str] = Field(default_factory=list)
 
 
 class UiCapabilitiesResponse(_CamelModel):
-    deployment_mode: Literal["local", "server"]
-    allow_native_directory_picker: bool
     native_directory_ui_available: bool
     native_directory_client_colocated: bool
     user_home_dir: str = ""
@@ -136,17 +132,10 @@ async def pick_directory(
 ) -> PickDirectoryResponse:
     """Open a native directory picker and return the chosen absolute path.
 
-    This is intentionally local-only: in server mode the backend host is not
-    the user's machine, so opening a native chooser there would be misleading.
+    Guarded by the colocation check: the browser must provably run on the
+    same desktop session as the backend (remote/forwarded clients are
+    rejected — a native chooser on the server host would be misleading).
     """
-    cfg = load_config()
-    caps = get_deployment_capabilities(cfg)
-    if not caps.allow_native_directory_picker:
-        raise ApiError(
-            "DIRECTORY_PICKER_UNAVAILABLE",
-            "Directory picker is available only in local mode.",
-            status_code=409,
-        )
     _ensure_native_directory_client_colocated(request, action="pick")
     try:
         selected = await asyncio.to_thread(
@@ -170,14 +159,6 @@ async def open_directory(
     _user: UserDep = "",
 ) -> OpenDirectoryResponse:
     """Open a local directory using the system default file manager."""
-    cfg = load_config()
-    caps = get_deployment_capabilities(cfg)
-    if not caps.allow_native_directory_picker:
-        raise ApiError(
-            "DIRECTORY_OPEN_UNAVAILABLE",
-            "Open directory is available only in local mode.",
-            status_code=409,
-        )
     raw = (payload.path or "").strip()
     if not raw:
         raise ApiError(
@@ -832,13 +813,9 @@ def _validate_existing_directory(path: str) -> Path:
 
 @router.get("/ui-capabilities", response_model=UiCapabilitiesResponse)
 def ui_capabilities(request: Request, _user: UserDep = "") -> UiCapabilitiesResponse:
-    """Expose deployment + native UI availability for frontend remote-client detection."""
-    cfg = load_config()
-    caps = get_deployment_capabilities(cfg)
+    """Expose native UI availability for frontend remote-client detection."""
     native_ui = native_directory_ui_available()
     return UiCapabilitiesResponse(
-        deployment_mode=cfg.deployment_mode,
-        allow_native_directory_picker=caps.allow_native_directory_picker,
         native_directory_ui_available=native_ui,
         native_directory_client_colocated=native_directory_client_colocated(request),
         user_home_dir=str(Path.home().resolve()),
@@ -860,26 +837,10 @@ def list_workspace_directories(
     user: UserDep,
     all_users: Annotated[bool, Query(alias="allUsers")] = False,
 ) -> WorkspaceDirectoryListResponse:
-    """List recorded workspace repo directories for Flow agents.
-
-    - In local mode: only current user's recorded directories.
-    - In server mode: default to current user; allUsers=true is currently
-      disabled until RBAC lands.
-    """
-    cfg = load_config()
-    caps = get_deployment_capabilities(cfg)
-    if all_users and not caps.allow_all_users_query:
-        raise ApiError(
-            "FORBIDDEN",
-            "allUsers=true is disabled in server mode until RBAC is enabled",
-            status_code=403,
-        )
+    """List recorded workspace repo directories for Flow agents."""
     owner_user = None if all_users else user
     dirs = _collect_workspace_dirs(owner_user=owner_user)
-    return WorkspaceDirectoryListResponse(
-        deployment_mode=cfg.deployment_mode,
-        items=sorted(dirs),
-    )
+    return WorkspaceDirectoryListResponse(items=sorted(dirs))
 
 
 def _collect_workspace_dirs(*, owner_user: str | None) -> set[str]:

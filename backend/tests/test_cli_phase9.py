@@ -439,20 +439,9 @@ def test_init_idempotent(runner: CliRunner) -> None:
     assert cfg["csflow_port"] == 17777
 
 
-def test_init_server_mode_temporarily_disabled(runner: CliRunner) -> None:
-    result = runner.invoke(
-        app,
-        ["init", "--mode", "server", "--pg", "postgres://localhost/x", "--redis", "redis://localhost:6379"],
-    )
-    assert result.exit_code == 2
-    assert not paths.config_path().exists()
-
-
-def test_install_server_mode_temporarily_disabled(runner: CliRunner) -> None:
-    result = runner.invoke(
-        app,
-        ["install", "--mode", "server", "--pg", "postgres://localhost/x", "--redis", "redis://localhost:6379"],
-    )
+def test_init_rejects_removed_mode_flag(runner: CliRunner) -> None:
+    """The server deployment mode was removed; the old --mode flag is gone."""
+    result = runner.invoke(app, ["init", "--mode", "server"])
     assert result.exit_code == 2
     assert not paths.config_path().exists()
 
@@ -1230,19 +1219,6 @@ def test_static_override_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
 
 
 # ── board proxy --------------------------------------------------------
-
-
-def test_board_proxy_skipped_in_server_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.board_proxy import BoardProxyManager
-    from app.config import Config
-    cfg = Config(deployment_mode="local")  # use base Config first then override
-    cfg = cfg.model_copy(update={
-        "deployment_mode": "server",
-        "broker": {"kind": "redis", "url": "redis://localhost:6379"},
-        "storage": {"kind": "postgres", "url": "postgres://localhost/x"},
-    })
-    mgr = BoardProxyManager(config=cfg)
-    assert mgr.start() is False  # server mode → no spawn
 
 
 def test_board_proxy_handles_missing_clawteam(

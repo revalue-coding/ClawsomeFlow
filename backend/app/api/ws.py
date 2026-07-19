@@ -12,11 +12,8 @@ Heartbeats:
 * Inactivity is detected client-side via the missing pong; on
   disconnection clients reconnect + replay events via the REST endpoint.
 
-Authorisation:
-* Local mode resolves the user from ``$CSFLOW_USER`` env / config default
-  (same as :mod:`app.api._auth`); we still enforce ``run.user == user``.
-* Server mode (Phase 9) will accept a ``token`` query string carrying the
-  OAuth bearer.
+Authorisation: the user resolves from ``$CSFLOW_USER`` env / config default
+(same as :mod:`app.api._auth`); we still enforce ``run.user == user``.
 """
 
 from __future__ import annotations
@@ -143,9 +140,8 @@ async def op_event_stream(
 
     Ownership cannot be enforced pre-accept (the op may not exist yet — a client
     can connect before ``start()`` runs), so we gate only via the snapshot's
-    owner check. In local single-user mode this matches the cancel-create
-    endpoint's stance. TODO(server-mode): include ``user`` in published frames
-    and filter per-frame for multi-tenant isolation.
+    owner check — matching the cancel-create endpoint's stance in this
+    single-user deployment.
     """
     try:
         user = resolve_current_user(websocket)

@@ -72,7 +72,6 @@ const en = {
         serverNoGui:
           "ClawsomeFlow is running on a host without a graphical desktop (typical headless server, or SSH without a display on the server). " +
           "No folder picker can be shown here. Paste the absolute path on that server manually (e.g. /home/you/project).",
-        serverMode: "The native folder picker is disabled in server deployment mode. Paste the path manually.",
         clientNotColocated:
           "You are viewing ClawsomeFlow through remote port forwarding, e.g. SSH -L or VS Code/Cursor Remote (the browser address shows localhost, but the browser runs on another machine). " +
           "The folder picker would open on the server's desktop, not yours. Paste the absolute path on the server manually (e.g. /home/you/project).",
@@ -85,8 +84,6 @@ const en = {
         serverNoGui:
           "ClawsomeFlow is running on a host without a graphical desktop. " +
           "The file manager cannot be opened from this browser session—use SSH on the server, or paste paths manually.",
-        serverMode:
-          "Opening folders in the file manager is disabled in server deployment mode.",
         clientNotColocated:
           "You are viewing ClawsomeFlow through remote port forwarding, e.g. SSH -L or VS Code/Cursor Remote (the browser address shows localhost, but the browser runs on another machine). " +
           "The file manager would open on the server's desktop, not yours. Use SSH on the server, or paste paths manually.",
@@ -490,11 +487,6 @@ const en = {
       claudeRepoPlaceholder: "Absolute path to a git repo",
       claudeRepoPickerHint:
         "Directory selection uses a native picker from the local backend; manual typing is disabled here.",
-      claudeRepoServerPlaceholder: "— choose a recorded server workspace directory —",
-      claudeRepoServerHint:
-        "This list is enumerated from workspace directories already recorded on the server.",
-      claudeRepoServerEmpty:
-        "No recorded workspace directories found on server yet.",
       pickDirTitle: "Choose workspace repo directory",
       pickDirButton: "Choose directory",
       dependsOn: "Depends on (multi)",

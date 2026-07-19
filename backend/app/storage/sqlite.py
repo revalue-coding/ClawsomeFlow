@@ -382,8 +382,7 @@ class SqliteStorage:
 
         Scans non-terminal runs and inspects spec.agents, loading each
         distinct Flow once (many runs share a flow — avoids the former
-        per-run ``s.get(Flow, ...)`` N+1). Server mode P1 introduces a
-        join table.
+        per-run ``s.get(Flow, ...)`` N+1).
         """
         with self._session() as s:
             stmt = (

@@ -396,7 +396,7 @@ bash scripts/stop-contributor.sh
 |---|---|---|
 | **P0** | **Agent Store** — a shareable marketplace for ready-made Agents, Teams and Flow templates: install, reuse, and contribute domain experts in one click. | 🚧 In progress |
 | **P1** | **Broader Agent platform support** — onboard more CLI Agent runtimes and keep pace with emerging ecosystems, so any Agent can join the same graph. | 🚧 In progress |
-| **P2** | **Mobile & server mode** — a mobile-friendly console plus multi-user server deployment, to monitor and intervene in Runs anywhere. | 💡 Exploring |
+| **P2** | **Mobile console** — a mobile-friendly console to monitor and intervene in Runs anywhere. | 💡 Exploring |
 | **P3** | **Cloud & SSH Agents** — drive Agents on remote / cloud hosts over SSH, scaling collaboration beyond a single machine. | 💡 Exploring |
 
 ---

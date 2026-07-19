@@ -2,11 +2,9 @@
 
 Public API:
 * :class:`StorageBackend` — Protocol describing every persistence operation
-  the application layer is allowed to perform. The concrete implementations
-  live alongside (:mod:`app.storage.sqlite` for local mode; :mod:`postgres`
-  in P1 for server mode).
-* :func:`get_storage` — lazy singleton (driver chosen from
-  :class:`Config.storage`).
+  the application layer is allowed to perform. The concrete implementation
+  lives alongside (:mod:`app.storage.sqlite`).
+* :func:`get_storage` — lazy singleton.
 * :func:`reset_storage` — used by tests.
 
 Why a Protocol (not a base class)?
@@ -19,7 +17,6 @@ Why a Protocol (not a base class)?
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -198,32 +195,16 @@ class StorageVersionConflict(Exception):
 _singleton: StorageBackend | None = None
 
 
-def _create_local_storage(_config: Config) -> StorageBackend:
-    from app.storage.sqlite import SqliteStorage  # local import -> break cycle
-    return SqliteStorage()
-
-
-def _create_server_storage(config: Config) -> StorageBackend:
-    from app.storage.server import create_server_storage  # local import -> server-only module
-    return create_server_storage(config)
-
-
-_STORAGE_FACTORY_BY_MODE: dict[str, Callable[[Config], StorageBackend]] = {
-    "local": _create_local_storage,
-    "server": _create_server_storage,
-}
-
-
 def get_storage(config: Config | None = None) -> StorageBackend:
     """Return the process-wide :class:`StorageBackend`, creating it on demand."""
     global _singleton
     if _singleton is not None:
         return _singleton
-    cfg = config or load_config()
-    factory = _STORAGE_FACTORY_BY_MODE.get(cfg.deployment_mode)
-    if factory is None:  # pragma: no cover - defensive
-        raise RuntimeError(f"unsupported deployment mode: {cfg.deployment_mode!r}")
-    _singleton = factory(cfg)
+    if config is None:
+        load_config()  # ensure the config file exists / cache is primed
+    from app.storage.sqlite import SqliteStorage  # local import -> break cycle
+
+    _singleton = SqliteStorage()
     _singleton.init_schema()
     return _singleton
 

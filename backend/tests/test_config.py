@@ -6,15 +6,13 @@ import json
 
 import pytest
 
+
 from app import config as cfg_mod
-from app.concurrency import get_lock_manager, reset_lock_manager
-from app.storage import get_storage, reset_storage
 
 
 class TestConfigDefaults:
     def test_creates_default_on_first_load(self) -> None:
         cfg = cfg_mod.load_config()
-        assert cfg.deployment_mode == "local"
         assert cfg.csflow_port == cfg_mod.DEFAULT_PORT == 17017
         assert cfg.clawteam_board_port == cfg_mod.DEFAULT_CLAWTEAM_BOARD_PORT == 17018
         assert cfg.openclaw_gateway_url.startswith("http://127.0.0.1")
@@ -24,7 +22,6 @@ class TestConfigDefaults:
         from app import paths
 
         data = json.loads(paths.config_path().read_text())
-        assert data["deployment_mode"] == "local"
         assert data["csflow_port"] == 17017
 
 
@@ -52,66 +49,28 @@ class TestConfigPersistence:
 
 
 class TestConfigValidation:
-    def test_local_mode_requires_sqlite(self) -> None:
-        with pytest.raises(ValueError, match="local mode requires storage.kind == 'sqlite'"):
-            cfg_mod.Config(
-                deployment_mode="local",
-                storage=cfg_mod.StorageConfig(kind="postgres", url="postgres://x"),
-            )
+    def test_storage_rejects_non_sqlite(self) -> None:
+        with pytest.raises(ValueError):
+            cfg_mod.StorageConfig(kind="postgres", url="postgres://x")
 
-    def test_local_mode_rejects_broker(self) -> None:
-        with pytest.raises(ValueError, match="local mode does not use 'broker'"):
-            cfg_mod.Config(
-                deployment_mode="local",
-                broker=cfg_mod.BrokerConfig(kind="redis", url="redis://localhost:6379"),
-            )
-
-    def test_local_mode_rejects_auth(self) -> None:
-        with pytest.raises(ValueError, match="local mode does not use 'auth'"):
-            cfg_mod.Config(
-                deployment_mode="local",
-                auth=cfg_mod.AuthConfig(kind="oauth2", issuer="https://issuer.example"),
-            )
-
-    def test_server_mode_requires_broker(self) -> None:
-        with pytest.raises(ValueError, match="broker"):
-            cfg_mod.Config(
-                deployment_mode="server",
-                storage=cfg_mod.StorageConfig(kind="postgres", url="postgres://x"),
-            )
-
-    def test_server_mode_requires_postgres(self) -> None:
-        with pytest.raises(ValueError, match="postgres"):
-            cfg_mod.Config(
-                deployment_mode="server",
-                broker=cfg_mod.BrokerConfig(kind="redis", url="redis://r"),
-            )
-
-    def test_storage_postgres_requires_url(self) -> None:
-        with pytest.raises(ValueError, match="storage.url"):
-            cfg_mod.StorageConfig(kind="postgres", url=None)
-
-    def test_server_mode_storage_backend_fail_fast(self) -> None:
-        reset_storage()
-        cfg = cfg_mod.Config(
-            deployment_mode="server",
-            broker=cfg_mod.BrokerConfig(kind="redis", url="redis://localhost:6379"),
-            storage=cfg_mod.StorageConfig(kind="postgres", url="postgres://localhost/x"),
-        )
-        with pytest.raises(RuntimeError, match="storage.kind='postgres'"):
-            get_storage(cfg)
-        reset_storage()
-
-    def test_server_mode_lock_backend_fail_fast(self) -> None:
-        reset_lock_manager()
-        cfg = cfg_mod.Config(
-            deployment_mode="server",
-            broker=cfg_mod.BrokerConfig(kind="redis", url="redis://localhost:6379"),
-            storage=cfg_mod.StorageConfig(kind="postgres", url="postgres://localhost/x"),
-        )
-        with pytest.raises(RuntimeError, match="Redis lock backend"):
-            get_lock_manager(cfg)
-        reset_lock_manager()
+    def test_legacy_server_mode_keys_still_load(self) -> None:
+        """Historical config.json files carried deployment_mode / broker /
+        auth (and storage.url). The fields are gone but the files must keep
+        loading — Pydantic ignores unknown keys (upgrade parity §3.7)."""
+        cfg = cfg_mod.Config.model_validate({
+            "deployment_mode": "local",
+            "broker": None,
+            "auth": None,
+            "storage": {"kind": "sqlite", "url": None},
+            "csflow_port": 17017,
+        })
+        assert cfg.csflow_port == 17017
+        assert cfg.storage.kind == "sqlite"
+        # Removed keys never round-trip back to disk.
+        dumped = cfg.model_dump(mode="json", exclude_none=True)
+        assert "deployment_mode" not in dumped
+        assert "broker" not in dumped
+        assert "auth" not in dumped
 
 
 class TestPatchEnv:
