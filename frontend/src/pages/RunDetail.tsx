@@ -149,6 +149,12 @@ type CheckpointItem = {
   taskId: string;
   subject: string;
   ownerAgentId: string;
+  /** Owner agent kind ("external" adapts the checkpoint actions: one-click
+   *  re-dispatch, no feedback input, no diff button). */
+  ownerKind: string;
+  /** External channel (human / webhook / remote_csflow) when ownerKind
+   *  is "external"; empty otherwise. */
+  externalChannel: string;
   summary: string | null;
   decision: CheckpointDecision;
   rerunCount: number;
@@ -512,6 +518,24 @@ export function RunDetail() {
     }
   }
 
+  /** One-click re-dispatch for EXTERNAL checkpoint items: no feedback modal
+   *  (the channel round-trip has no feedback slot) — the original task is
+   *  simply dispatched again with a fresh ticket. */
+  async function onRerunExternalCheckpointItem(taskId: string) {
+    if (!run) return;
+    beginCheckpointAction(taskId);
+    setRerunSubmitting(true);
+    try {
+      await api.rerunCheckpointItem(run.id, taskId, "");
+      await refreshRunAndCheckpoint(run.id);
+    } catch (e) {
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setRerunSubmitting(false);
+      endCheckpointAction(taskId);
+    }
+  }
+
   const loadRunTerminals = useCallback(async (mode: "initial" | "refresh") => {
     if (!id) return;
     if (mode === "initial") {
@@ -795,6 +819,14 @@ export function RunDetail() {
                   : t("runDetail.checkpoint.statePending");
                 const waitingForRerunOutput = item.decision === "rerun_requested";
                 const busy = checkpointActingTaskIds.includes(item.taskId);
+                const isExternal = item.ownerKind === "external";
+                const externalChannelLabel = item.externalChannel === "human"
+                  ? t("runDetail.external.channelHuman")
+                  : item.externalChannel === "webhook"
+                  ? t("runDetail.external.channelWebhook")
+                  : item.externalChannel === "remote_csflow"
+                  ? t("runDetail.external.channelRemoteCsflow")
+                  : item.externalChannel;
                 return (
                   <div
                     key={`checkpoint-item-${item.taskId}`}
@@ -811,6 +843,13 @@ export function RunDetail() {
                         · {item.subject || "—"}
                       </div>
                       <div className="flex items-center gap-2">
+                        {isExternal && (
+                          <span className="pill-info">
+                            {t("runDetail.checkpoint.externalItemBadge", {
+                              channel: externalChannelLabel,
+                            })}
+                          </span>
+                        )}
                         {item.hasUnreadUpdate && (
                           <span className="pill-warning">
                             {t("runDetail.checkpoint.outputUpdated")}
@@ -845,11 +884,15 @@ export function RunDetail() {
                       </div>
                     )}
                     <div className="mt-3 flex items-center justify-end gap-2">
-                      <CheckpointDiffButton
-                        runId={run.id}
-                        taskId={item.taskId}
-                        agentId={item.ownerAgentId}
-                      />
+                      {/* External items: no worktree → no diff to view; rerun is a
+                          one-click re-dispatch (feedback has no channel slot). */}
+                      {!isExternal && (
+                        <CheckpointDiffButton
+                          runId={run.id}
+                          taskId={item.taskId}
+                          agentId={item.ownerAgentId}
+                        />
+                      )}
                       <button
                         type="button"
                         className="btn-outline"
@@ -865,11 +908,17 @@ export function RunDetail() {
                         className="btn-primary"
                         disabled={busy || checkpointActionsLocked}
                         onClick={() => {
+                          if (isExternal) {
+                            void onRerunExternalCheckpointItem(item.taskId);
+                            return;
+                          }
                           setRerunModalTaskId(item.taskId);
                           setRerunFeedback(item.lastFeedback ?? "");
                         }}
                       >
-                        {t("runDetail.checkpoint.rerun")}
+                        {isExternal
+                          ? t("runDetail.checkpoint.redispatch")
+                          : t("runDetail.checkpoint.rerun")}
                       </button>
                     </div>
                   </div>
@@ -2046,10 +2095,17 @@ function parseCheckpointPayload(payload: Record<string, unknown>): ActiveCheckpo
     const hasUnreadUpdate = Boolean(
       row["has_unread_update"] ?? row["hasUnreadUpdate"],
     );
+    const ownerKind = firstNonEmptyString(row["owner_kind"], row["ownerKind"]) ?? "";
+    const externalChannel = firstNonEmptyString(
+      row["external_channel"],
+      row["externalChannel"],
+    ) ?? "";
     items.push({
       taskId,
       subject,
       ownerAgentId,
+      ownerKind,
+      externalChannel,
       summary,
       decision,
       rerunCount,
@@ -2995,19 +3051,25 @@ function ExternalTasksCard({
             key={`external-${item.taskId}-${item.nonce}`}
             className="rounded-md border border-violet-200 bg-violet-50/30 px-4 py-3"
           >
+            {/* Headline names the dispatch type (e.g. 外部任务 - 人工) so the
+                user immediately sees WHO this task went to. */}
             <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-medium text-ink-900">
-                <span className="font-mono">{item.taskId}</span>
-                {item.subject ? ` · ${item.subject}` : ""}
+              <div className="text-sm font-semibold text-ink-900">
+                {t("runDetail.external.itemTitle", {
+                  channel: channelLabel(item.channel),
+                })}
               </div>
               <div className="flex items-center gap-2">
-                <span className="pill-default">{channelLabel(item.channel)}</span>
                 {item.assignee && (
                   <span className="pill-info">
                     {t("runDetail.external.assignee")}: {item.assignee}
                   </span>
                 )}
               </div>
+            </div>
+            <div className="mt-1 text-sm font-medium text-ink-900">
+              <span className="font-mono">{item.taskId}</span>
+              {item.subject ? ` · ${item.subject}` : ""}
             </div>
             <div className="mt-1 text-xs text-ink-500">
               {t("runDetail.external.nodeLabel")}:{" "}

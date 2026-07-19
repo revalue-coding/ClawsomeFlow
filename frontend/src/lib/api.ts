@@ -208,6 +208,9 @@ export interface ExternalNodeConfig {
   flowId?: string | null;
   /** remote_csflow channel: outbound credential name in local config. */
   pairTokenRef?: string | null;
+  /** remote_csflow channel: static run-input params for the remote Flow
+   *  (its param fields); sent as the delegate request's `inputs`. */
+  inputs?: Record<string, string> | null;
   /** human channel: display-only assignee hint. */
   assignee?: string | null;
 }
@@ -219,6 +222,7 @@ export type RunStatus =
   | "pending"
   | "compiling"
   | "running"
+  | "awaiting_external"
   | "awaiting_user_checkpoint"
   | "awaiting_user_review"
   | "awaiting_user_complaint"

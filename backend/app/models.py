@@ -201,6 +201,14 @@ class RunStatus(str, Enum):
     pending = "pending"
     compiling = "compiling"
     running = "running"
+    # Every currently in-flight task is owned by an external execution node
+    # (human / webhook / remote ClawsomeFlow) — the run is blocked on results
+    # from outside the local agent stack. Behaviourally identical to
+    # ``running`` (same live RunController loop keeps polling); this status
+    # exists so lists/detail views can say "waiting for external results"
+    # instead of a misleading "running". Flips back to ``running`` as soon as
+    # a local task is dispatched or the external results arrive.
+    awaiting_external = "awaiting_external"
     awaiting_user_checkpoint = "awaiting_user_checkpoint"
     awaiting_user_review = "awaiting_user_review"
     awaiting_user_complaint = "awaiting_user_complaint"
@@ -246,6 +254,7 @@ ACTIVE_DRIVING_RUN_STATUSES: frozenset[RunStatus] = frozenset({
     RunStatus.pending,
     RunStatus.compiling,
     RunStatus.running,
+    RunStatus.awaiting_external,
     RunStatus.awaiting_user_checkpoint,
     RunStatus.complaint_processing,
 })
@@ -338,6 +347,12 @@ class ExternalNodeConfig(_ApiBase):
     base_url: str | None = None
     flow_id: str | None = None
     pair_token_ref: str | None = None
+    # remote_csflow only: static run-input params for the remote Flow (its
+    # param fields / `csflow.runtime.param_fields`). Sent as the delegate
+    # request's ``inputs`` and become the remote run's ``run.inputs``; the
+    # rendered task sheet always travels separately as ``runtimePrompt``.
+    # Optional with a safe default → old specs load unchanged.
+    inputs: dict[str, str] | None = None
     # human channel (display hint only)
     assignee: str | None = None
 

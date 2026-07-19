@@ -4438,3 +4438,310 @@ def test_headless_dispatch_timeout_matches_task_floor() -> None:
 
     assert _OPENCLAW_HEADLESS_TIMEOUT_SEC == MIN_TASK_TIMEOUT_SECONDS
     assert _OPENCLAW_HEADLESS_TIMEOUT_SEC >= 14400
+
+
+# ── external execution nodes: checkpoint + awaiting_external ─────────────
+
+
+def _make_external_checkpoint_spec() -> FlowSpec:
+    """t1 (external human node, requires checkpoint) → t2 (local) → ts."""
+    from app.models import ExternalChannel, ExternalNodeConfig
+
+    return FlowSpec(
+        agents=[
+            FlowAgent(
+                id="ext-node",
+                kind=AgentKind.external,
+                external=ExternalNodeConfig(
+                    channel=ExternalChannel.human, assignee="Alice",
+                ),
+            ),
+            FlowAgent(
+                id="bob",
+                kind=AgentKind.claude,
+                repo="/tmp/main",
+                is_leader=False,
+                merge_strategy=MergeStrategy.manual,
+            ),
+            FlowAgent(
+                id="leader",
+                kind=AgentKind.claude,
+                repo="/tmp/main",
+                is_leader=True,
+                merge_strategy=MergeStrategy.manual,
+            ),
+        ],
+        tasks=[
+            FlowTask(
+                id="t1",
+                owner_agent_id="ext-node",
+                subject="external upstream",
+                description="review the deliverable",
+                requires_human_checkpoint=True,
+            ),
+            FlowTask(
+                id="t2",
+                owner_agent_id="bob",
+                subject="downstream",
+                description="do downstream",
+                depends_on=["t1"],
+            ),
+            FlowTask(
+                id="ts",
+                owner_agent_id="leader",
+                subject="summary",
+                description="wrap up",
+                depends_on=["t2"],
+                is_leader_summary=True,
+            ),
+        ],
+    )
+
+
+def _external_checkpoint_snapshots() -> list[TaskSnapshot]:
+    return [
+        TaskSnapshot(task_id="t1", owner_agent_id="ext-node", status="completed",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="t2", owner_agent_id="bob", status="pending",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="ts", owner_agent_id="leader", status="blocked",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_external_item_one_click_redispatch(fake_lookup) -> None:
+    """External checkpoint items rerun WITHOUT feedback by re-dispatching the
+    ORIGINAL task (same task id — not a checkpoint-rerun-* custom task), and
+    the checkpoint payload exposes owner_kind / external_channel so the UI
+    can hide the feedback + diff affordances."""
+    spec = _make_external_checkpoint_spec()
+    run = _persist_flow_and_run(spec)
+    sessions: dict[str, _RecordingSession] = {}
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        s = _RecordingSession(agent=agent, team_name=run.team_name, run_id=run.id)
+        sessions[agent.id] = s
+        return s
+
+    snapshots = _external_checkpoint_snapshots()
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    async def inbox_provider() -> list[dict[str, str]]:
+        return []
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=factory,
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=inbox_provider,
+    )
+    await rc.tick()
+    assert run.status == RunStatus.awaiting_user_checkpoint
+
+    cp = rc.checkpoint_snapshot()
+    assert cp is not None
+    item = cp["items"][0]
+    assert item["task_id"] == "t1"
+    assert item["owner_kind"] == "external"
+    assert item["external_channel"] == "human"
+
+    # One-click rerun: empty feedback must be accepted for external items.
+    await rc.request_checkpoint_rerun(upstream_task_id="t1", feedback="")
+    cp = rc.checkpoint_snapshot()
+    assert cp is not None
+    assert cp["items"][0]["decision"] == "rerun_requested"
+
+    ext_sess = sessions.get("ext-node")
+    assert ext_sess is not None
+    assert ext_sess.dispatched
+    rerun_task_id, rerun_message = ext_sess.dispatched[-1]
+    # Original task id — the external session re-mints the ticket + re-sends
+    # the channel outbound for THIS task (fresh nonce invalidates the old one).
+    assert rerun_task_id == "t1"
+    assert "checkpoint-rerun" not in rerun_task_id
+    # The message is the external task sheet, not a feedback-preamble prompt.
+    assert "ClawsomeFlow External Task" in rerun_message
+    assert "ClawsomeFlow Manual Checkpoint Rerun" not in rerun_message
+
+    assert rc._tasks["t1"].state == _TaskState.in_progress
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_local_agent_rerun_still_requires_feedback(
+    fake_lookup,
+) -> None:
+    spec = _make_checkpoint_spec()
+    run = _persist_flow_and_run(spec)
+
+    snapshots = [
+        TaskSnapshot(task_id="t1", owner_agent_id="alice", status="completed",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="t2", owner_agent_id="bob", status="pending",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="ts", owner_agent_id="leader", status="blocked",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    async def inbox_provider() -> list[dict[str, str]]:
+        return []
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=inbox_provider,
+    )
+    await rc.tick()
+    assert run.status == RunStatus.awaiting_user_checkpoint
+    with pytest.raises(ValueError, match="feedback is required"):
+        await rc.request_checkpoint_rerun(upstream_task_id="t1", feedback="  ")
+
+
+@pytest.mark.asyncio
+async def test_tick_flips_awaiting_external_and_back(fake_lookup) -> None:
+    """While every in-flight task is external-owned the run shows
+    ``awaiting_external``; as soon as a local task is in flight it returns to
+    ``running``. Terminal/checkpoint statuses are never touched here."""
+    from app.models import ExternalChannel, ExternalNodeConfig
+
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(
+                id="ext-node",
+                kind=AgentKind.external,
+                external=ExternalNodeConfig(channel=ExternalChannel.human),
+            ),
+            FlowAgent(
+                id="bob", kind=AgentKind.claude, repo="/tmp/main",
+                merge_strategy=MergeStrategy.manual,
+            ),
+            FlowAgent(
+                id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                is_leader=True, merge_strategy=MergeStrategy.manual,
+            ),
+        ],
+        tasks=[
+            FlowTask(id="t1", owner_agent_id="ext-node", subject="external",
+                     description="external work"),
+            FlowTask(id="t2", owner_agent_id="bob", subject="local",
+                     description="local work", depends_on=["t1"]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="summary",
+                     description="wrap", depends_on=["t2"],
+                     is_leader_summary=True),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    run.status = RunStatus.running
+    sessions: dict[str, _RecordingSession] = {}
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        s = _RecordingSession(agent=agent, team_name=run.team_name, run_id=run.id)
+        sessions[agent.id] = s
+        return s
+
+    snapshots: list[TaskSnapshot] = [
+        TaskSnapshot(task_id="t1", owner_agent_id="ext-node", status="pending",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="t2", owner_agent_id="bob", status="blocked",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="ts", owner_agent_id="leader", status="blocked",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    async def inbox_provider() -> list[dict[str, str]]:
+        return []
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=factory,
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=inbox_provider,
+    )
+
+    # Tick 1: only the external task is dispatched → awaiting_external.
+    await rc.tick()
+    assert sessions["ext-node"].dispatched
+    assert run.status == RunStatus.awaiting_external
+
+    # External result arrives (t1 completed) → local t2 dispatches → running.
+    snapshots[0] = TaskSnapshot(
+        task_id="t1", owner_agent_id="ext-node", status="completed",
+        locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+    )
+    snapshots[1] = TaskSnapshot(
+        task_id="t2", owner_agent_id="bob", status="pending",
+        locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+    )
+    await rc.tick()
+    assert sessions["bob"].dispatched
+    assert run.status == RunStatus.running
+
+
+def test_awaiting_external_is_active_driving_status() -> None:
+    """awaiting_external requires a live RunController (poll loop) — it must
+    be classified as active-driving so drain/orphan sweeps treat it right."""
+    from app.models import ACTIVE_DRIVING_RUN_STATUSES
+
+    assert RunStatus.awaiting_external in ACTIVE_DRIVING_RUN_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_complaint_and_merge_targets_exclude_external(fake_lookup) -> None:
+    """External nodes must never enter the complaint phase or the
+    merge-requirement (auto-merge) target lists."""
+    from app.models import ExternalChannel, ExternalNodeConfig
+
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(
+                id="ext-node",
+                kind=AgentKind.external,
+                external=ExternalNodeConfig(channel=ExternalChannel.webhook,
+                                            endpoint_url="https://x.example/t"),
+            ),
+            FlowAgent(id="oc-worker", kind=AgentKind.openclaw),
+            FlowAgent(
+                id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                is_leader=True, merge_strategy=MergeStrategy.manual,
+            ),
+        ],
+        tasks=[
+            FlowTask(id="t1", owner_agent_id="ext-node", subject="ext",
+                     description="x"),
+            FlowTask(id="t2", owner_agent_id="oc-worker", subject="oc",
+                     description="y", depends_on=["t1"]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="summary",
+                     description="wrap", depends_on=["t2"],
+                     is_leader_summary=True),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots,
+        leader_inbox_provider=None,
+    )
+    complaint_ids = [a.id for a in rc._complaint_target_agents()]
+    assert "ext-node" not in complaint_ids
+    assert complaint_ids == ["oc-worker"]
+    merge_ids = [a.id for a in rc._merge_requirement_agents()]
+    assert "ext-node" not in merge_ids
+    assert merge_ids == ["oc-worker"]

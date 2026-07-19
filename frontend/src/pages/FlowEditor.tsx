@@ -116,6 +116,10 @@ interface TaskRow {
   externalBaseUrl: string;
   externalFlowId: string;
   externalPairTokenRef: string;
+  /** remote_csflow only: JSON object text of static run-input params for the
+   *  remote Flow (its 参数字段). Kept as raw text in the draft; validated and
+   *  parsed into FlowAgent.external.inputs on save. */
+  externalInputs: string;
   externalAssignee: string;
   dependsOn: string[];
   isLeaderSummary: boolean;
@@ -163,6 +167,8 @@ interface ValidationMessages {
   externalEndpointRequired: (subject: string) => string;
   /** External node remote_csflow channel: baseUrl/flowId/pairTokenRef required. */
   externalRemoteFieldsRequired: (subject: string) => string;
+  /** External node remote_csflow channel: params text is not a JSON object. */
+  externalInputsInvalid: (subject: string) => string;
 }
 
 interface FlowSavePayload {
@@ -236,6 +242,7 @@ function blankRow(): TaskRow {
     externalBaseUrl: "",
     externalFlowId: "",
     externalPairTokenRef: "",
+    externalInputs: "",
     externalAssignee: "",
     dependsOn: [],
     isLeaderSummary: false,
@@ -1061,6 +1068,14 @@ export function FlowEditor() {
     draftKey("runInputFields"),
     [],
   );
+  // Snapshot of the loaded Flow's spec.variables. Passed back through
+  // rowsToSpec on save so variables keys managed OUTSIDE this editor (e.g.
+  // the per-Flow notify-webhook config `csflow.notify_webhooks`) are never
+  // wiped by an editor save. Editor-owned keys are re-derived on top.
+  const [baseVariables, setBaseVariables] = useSessionBackedState<Record<string, string>>(
+    draftKey("baseVariables"),
+    {},
+  );
   // "省心模式" (easy mode) / "开发者模式" (developer mode): persisted in
   // spec.variables; default OFF; mutually exclusive (see toggle handlers).
   const [easyMode, setEasyModeState] = useSessionBackedState<boolean>(
@@ -1227,6 +1242,7 @@ export function FlowEditor() {
         setRunInputFieldsState(getRunInputFields(flow.spec));
         setEasyModeState(getEasyMode(flow.spec));
         setDevModeState(getDevMode(flow.spec));
+        setBaseVariables({ ...(flow.spec?.variables ?? {}) });
         setVersion(flow.version);
         const rows = specToRows(flow.spec);
         setTasks(rows);
@@ -1458,6 +1474,8 @@ export function FlowEditor() {
         t("flowEditor.validation.externalEndpointRequired", { subject }),
       externalRemoteFieldsRequired: (subject: string) =>
         t("flowEditor.validation.externalRemoteFieldsRequired", { subject }),
+      externalInputsInvalid: (subject: string) =>
+        t("flowEditor.validation.externalInputsInvalid", { subject }),
     }),
     [t],
   );
@@ -1789,7 +1807,7 @@ export function FlowEditor() {
       cleanupTeamOnFinish: true,
       spec: setDevMode(
         setEasyMode(
-          rowsToSpec(enforceOpenclawAutoMergeAll(tasks), runInputFields),
+          rowsToSpec(enforceOpenclawAutoMergeAll(tasks), runInputFields, baseVariables),
           easyMode,
         ),
         devMode,
@@ -2943,7 +2961,9 @@ function TaskListRow({
                   ⛳ {t("flowEditor.taskFields.requiresHumanCheckpointEnabledShort")}
                 </span>
               )}
-              {devMode && (() => {
+              {devMode && row.ownerKind !== "external" && (() => {
+                // External nodes own no worktree/branch — there is nothing to
+                // merge, so the auto-merge switch never renders for them.
                 const ownerIsOpenclaw = row.ownerKind === "openclaw";
                 // OpenClaw is forced to auto-merge regardless of stored value.
                 const autoMergeOn = ownerIsOpenclaw || row.autoMerge;
@@ -4061,6 +4081,19 @@ function TaskFormBody({
                     onChange={(e) => onChange({ externalPairTokenRef: e.target.value })}
                   />
                 </div>
+                <div className="md:col-span-2">
+                  <label className="label">{t("flowEditor.taskFields.externalInputs")}</label>
+                  <textarea
+                    className="textarea h-20 font-mono text-xs"
+                    value={row.externalInputs}
+                    readOnly={ownerLocked}
+                    placeholder={'{\n  "需求描述": "…",\n  "目标目录": "/abs/path"\n}'}
+                    onChange={(e) => onChange({ externalInputs: e.target.value })}
+                  />
+                  <div className="text-xs text-ink-500 mt-1">
+                    {t("flowEditor.taskFields.externalInputsHint")}
+                  </div>
+                </div>
               </>
             )}
           </div>
@@ -5047,6 +5080,15 @@ function validate(
           rowKey: r.rowKey,
           message: messages.externalRemoteFieldsRequired(subjectLabel),
         });
+      } else if (
+        r.externalChannel === "remote_csflow"
+        && r.externalInputs.trim()
+        && parseExternalInputs(r.externalInputs) === null
+      ) {
+        issues.push({
+          rowKey: r.rowKey,
+          message: messages.externalInputsInvalid(subjectLabel),
+        });
       }
     }
     if (!r.ownerId.trim()) {
@@ -5182,7 +5224,31 @@ function detectTaskCycle(rows: TaskRow[]): string[] {
 // ── rowsToSpec / specToRows ──────────────────────────────────────────
 
 
-function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
+/** Parse the remote-csflow params draft (JSON object text) into the
+ *  FlowAgent.external.inputs dict. Invalid / non-object JSON → null (save
+ *  validation reports it before this ever runs). */
+function parseExternalInputs(text: string): Record<string, string> | null {
+  const raw = (text || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!k.trim()) continue;
+      out[k] = typeof v === "string" ? v : JSON.stringify(v);
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+function rowsToSpec(
+  rows: TaskRow[],
+  runInputFields: string[] = [],
+  baseVariables: Record<string, string> = {},
+): FlowSpec {
   const byKey = new Map<string, FlowAgent>();
   for (const r of rows) {
     const k = r.ownerId.trim();
@@ -5216,6 +5282,7 @@ function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
               baseUrl: r.externalBaseUrl.trim() || null,
               flowId: r.externalFlowId.trim() || null,
               pairTokenRef: r.externalPairTokenRef.trim() || null,
+              inputs: parseExternalInputs(r.externalInputs),
               assignee: r.externalAssignee.trim() || null,
             },
           }
@@ -5244,15 +5311,25 @@ function rowsToSpec(rows: TaskRow[], runInputFields: string[] = []): FlowSpec {
     description: r.description,
     outputSummaryRequirement: r.outputSummaryRequirement.trim() || null,
     requiresHumanCheckpoint: !r.isLeaderSummary && !!r.requiresHumanCheckpoint,
-    // Developer-mode per-task auto-merge (default true). OpenClaw is forced on.
-    devAutoMerge: r.ownerKind === "openclaw" ? true : r.autoMerge !== false,
+    // Developer-mode per-task auto-merge (default true). OpenClaw is forced
+    // on; external nodes have no worktree so the flag is meaningless — keep
+    // it true so no "pending PR" style logic can ever consider them.
+    devAutoMerge:
+      r.ownerKind === "openclaw" || r.ownerKind === "external"
+        ? true
+        : r.autoMerge !== false,
     dependsOn: r.dependsOn,
     isLeaderSummary: r.isLeaderSummary,
     timeoutSeconds: r.timeoutSeconds || DEFAULT_TIMEOUT_SECONDS,
   }));
 
+  // Seed variables from the Flow's persisted spec so keys owned by OTHER
+  // surfaces survive an editor save (e.g. csflow.notify_webhooks written by
+  // the Flow-list notify dialog, or keys added by a newer backend). The
+  // editor-owned keys (param_fields / easy_mode / dev_mode) are re-derived on
+  // top by setRunInputFields / setEasyMode / setDevMode.
   return setRunInputFields(
-    { agents: Array.from(byKey.values()), tasks },
+    { agents: Array.from(byKey.values()), tasks, variables: { ...baseVariables } },
     runInputFields,
   );
 }
@@ -5836,6 +5913,7 @@ function proposalToRows(
       externalBaseUrl: "",
       externalFlowId: "",
       externalPairTokenRef: "",
+      externalInputs: "",
       externalAssignee: "",
       dependsOn,
       isLeaderSummary: !!(tk.isLeaderSummary ?? tk.is_leader_summary),
@@ -5883,6 +5961,9 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       externalBaseUrl: a?.external?.baseUrl ?? "",
       externalFlowId: a?.external?.flowId ?? "",
       externalPairTokenRef: a?.external?.pairTokenRef ?? "",
+      externalInputs: a?.external?.inputs
+        ? JSON.stringify(a.external.inputs, null, 2)
+        : "",
       externalAssignee: a?.external?.assignee ?? "",
       dependsOn: tk.dependsOn ?? [],
       isLeaderSummary: !!tk.isLeaderSummary,

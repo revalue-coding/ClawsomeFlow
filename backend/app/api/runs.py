@@ -2907,13 +2907,11 @@ async def rerun_checkpoint_item(
             f"run is not awaiting checkpoint (status={_status_str(run.status)})",
             status_code=409,
         )
+    # Feedback is required for local agents but OPTIONAL for external-node
+    # items (one-click re-dispatch has no feedback slot); the controller
+    # enforces the per-owner-kind rule and raises ValueError when a local
+    # agent rerun arrives without feedback.
     text = (payload.feedback or "").strip()
-    if not text:
-        raise ApiError(
-            "INVALID_CHECKPOINT_FEEDBACK",
-            "feedback cannot be empty",
-            status_code=400,
-        )
     sched = get_scheduler()
     controller = sched.get_controller(run.id)
     if controller is None:

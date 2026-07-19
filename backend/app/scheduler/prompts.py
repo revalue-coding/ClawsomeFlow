@@ -722,10 +722,18 @@ def build_external_task_package(ctx: DispatchContext) -> dict[str, object]:
     ``clawteamTaskId`` / ``leaderAgentId`` are recorded so the receipt path
     (services/external_tasks.complete_external_task) can push the result into
     ClawTeam without needing a live controller lookup.
+
+    ``description`` / ``outputRequirement`` are the two UI fields split back
+    out of the canonical merged description, so an integrated system gets the
+    task briefing and the expected deliverable shape as separate fields.
     """
+    from app.models import split_description
+
+    body, requirement = split_description(ctx.task.description)
     return {
         "subject": ctx.task.subject,
-        "description": ctx.task.description,
+        "description": body,
+        "outputRequirement": requirement,
         "flowDescription": ctx.flow_description,
         "runtimeInputs": _public_flow_inputs(ctx.flow_inputs),
         "leaderAgentId": ctx.leader_agent_id,

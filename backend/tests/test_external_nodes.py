@@ -281,6 +281,24 @@ def test_build_external_task_package_fields() -> None:
     assert pkg["upstreamOutputs"][0]["taskId"] == "t0"
 
 
+def test_build_external_task_package_splits_output_requirement() -> None:
+    """The canonical merged description is split back into the two UI fields
+    so integrated systems get the briefing and the deliverable shape apart."""
+    import dataclasses
+
+    ctx = dataclasses.replace(_ctx(), task=FlowTask(
+        id="t1", owner_agent_id="ext-node", subject="Review the PCB",
+        description="Check the physical board.",
+        output_summary_requirement="Return a pass/fail verdict per subsystem.",
+    ))
+    pkg = build_external_task_package(ctx)
+    assert pkg["description"] == "Check the physical board."
+    assert pkg["outputRequirement"] == "Return a pass/fail verdict per subsystem."
+    # No requirement → explicit None (field always present for the contract).
+    pkg_plain = build_external_task_package(_ctx())
+    assert pkg_plain["outputRequirement"] is None
+
+
 # ── ExternalNodeSession ─────────────────────────────────────────────────
 
 
@@ -475,6 +493,162 @@ def test_complete_rejects_stale_nonce_and_undispatched(
             ok=True, summary="x", source="test",
         ))
     assert exc2.value.code == "EXTERNAL_TASK_NOT_DISPATCHED"
+
+
+# ── dispatch: outbound contracts + human-channel notification ───────────
+
+
+def _mk_run_for_dispatch() -> FlowRun:
+    storage = get_storage()
+    flow = storage.flow_create(Flow(name="f-dispatch", owner_user="alice").with_spec(
+        FlowSpec(agents=[
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/r",
+                      is_leader=True),
+            FlowAgent(id="ext-node", kind=AgentKind.external,
+                      external=_human_cfg()),
+        ], tasks=[
+            FlowTask(id="t1", owner_agent_id="ext-node", subject="s"),
+            FlowTask(id="ts", owner_agent_id="leader", subject="sum",
+                     depends_on=["t1"], is_leader_summary=True),
+        ]),
+    ))
+    return storage.run_create(FlowRun(
+        flow_id=flow.id, flow_version=1, team_name="csflow-ext-disp",
+        status=RunStatus.running, inputs={}, user="alice",
+    ))
+
+
+def test_dispatch_webhook_outbound_includes_callback_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The webhook outbound package must be self-describing: split briefing
+    fields + an explicit completion-callback contract."""
+    run = _mk_run_for_dispatch()
+    agent = FlowAgent(
+        id="ext-node", kind=AgentKind.external,
+        external=ExternalNodeConfig(
+            channel=ExternalChannel.webhook,
+            endpoint_url="https://partner.example/tasks",
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_post(url: str, body: dict[str, Any]) -> None:
+        captured["url"] = url
+        captured["body"] = body
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+    asyncio.run(ext_svc.dispatch_external_task(
+        storage=get_storage(), run_id=run.id, team_name=run.team_name,
+        agent=agent, task_id="t1", message="sheet",
+        package={
+            "subject": "s", "description": "briefing",
+            "outputRequirement": "a verdict", "clawteamTaskId": "CT-1",
+        },
+    ))
+    body = captured["body"]
+    assert captured["url"] == "https://partner.example/tasks"
+    assert body["event"] == "external_task_dispatch"
+    assert body["description"] == "briefing"
+    assert body["outputRequirement"] == "a verdict"
+    # Self-describing completion contract (flat legacy fields kept too).
+    assert body["callback"]["method"] == "POST"
+    assert body["callback"]["url"] == body["callbackUrl"]
+    assert body["callback"]["bodyExample"]["status"] == "success | failed"
+    assert body["callbackToken"].count(".") == 1
+
+
+def test_dispatch_remote_csflow_forwards_configured_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """external.inputs (remote Flow param fields) travel in the delegate body."""
+    import httpx
+
+    cfg = load_config()
+    cfg.external_remote_targets = {"peer": "sec-123"}
+    save_config(cfg)
+
+    run = _mk_run_for_dispatch()
+    agent = FlowAgent(
+        id="ext-node", kind=AgentKind.external,
+        external=ExternalNodeConfig(
+            channel=ExternalChannel.remote_csflow,
+            base_url="http://remote:17017",
+            flow_id="flow-abc",
+            pair_token_ref="peer",
+            inputs={"需求描述": "抓取周报", "目标目录": "/data"},
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    class _FakeResp:
+        status_code = 202
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"id": "run-remote-1"}
+
+    class _FakeClient:
+        def __init__(self, **kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClient:
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+        async def post(self, url: str, **kw: Any) -> _FakeResp:
+            captured["url"] = url
+            captured["json"] = kw.get("json")
+            captured["headers"] = kw.get("headers")
+            return _FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    asyncio.run(ext_svc.dispatch_external_task(
+        storage=get_storage(), run_id=run.id, team_name=run.team_name,
+        agent=agent, task_id="t1", message="runtime prompt text",
+        package={"subject": "s", "clawteamTaskId": "CT-1"},
+    ))
+    assert captured["url"] == "http://remote:17017/api/external/delegate"
+    assert captured["headers"] == {"Authorization": "Bearer sec-123"}
+    body = captured["json"]
+    assert body["flowId"] == "flow-abc"
+    assert body["runtimePrompt"] == "runtime prompt text"
+    assert body["inputs"] == {"需求描述": "抓取周报", "目标目录": "/data"}
+
+
+def test_build_external_dispatch_notification_payload() -> None:
+    """The human-channel notify payload is a TASK notification: identity +
+    channel + full task sheet as content (never a 'run finished' body)."""
+    from app.services.external_tasks import build_external_dispatch_notification
+    from app.services.run_notify import render_message_text
+
+    run = _mk_run_for_dispatch()
+    payload = build_external_dispatch_notification(
+        run,
+        package={
+            "taskId": "t1", "subject": "Review the PCB",
+            "channel": "human", "assignee": "Alice",
+        },
+        message="## ClawsomeFlow External Task\ndo the review\n"
+                "## Output Summary Requirement\na verdict",
+        flow_name="Board bring-up",
+    )
+    assert payload["event"] == "run_external_task"
+    assert payload["taskId"] == "t1"
+    assert payload["taskSubject"] == "Review the PCB"
+    assert payload["channel"] == "human"
+    assert payload["assignee"] == "Alice"
+    assert payload["runUrl"].endswith(f"/runs/{run.id}")
+    assert "do the review" in payload["content"]
+
+    text = render_message_text(payload)
+    assert "external task dispatched" in text
+    assert "Human" in text
+    assert "run finished" not in text  # the old buggy headline
+    assert "Task briefing" in text
+    assert "Review the PCB" in text
 
 
 # ── delegate callback preparation ───────────────────────────────────────

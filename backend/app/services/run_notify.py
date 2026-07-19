@@ -215,11 +215,31 @@ def flow_channels_for_run(run: FlowRun) -> list[dict[str, Any]]:
         return []
 
 
+#: Channel value → human-readable label in external-dispatch notifications.
+_EXTERNAL_CHANNEL_LABELS = {
+    "human": "Human",
+    "webhook": "Generic interface (webhook)",
+    "remote_csflow": "Remote ClawsomeFlow",
+}
+
+
+def _external_channel_label(payload: dict[str, Any]) -> str:
+    channel = str(payload.get("channel") or "")
+    return _EXTERNAL_CHANNEL_LABELS.get(channel, channel or "external")
+
+
 def _headline(payload: dict[str, Any]) -> str:
     event = payload.get("event")
     status = str(payload.get("status") or "")
     if event == "run_checkpoint":
         return "⏸️ ClawsomeFlow run paused — action required"
+    if event == "run_external_task":
+        # An external task was dispatched — this is a TASK notification, not a
+        # run-terminal one (rendering it as "run finished" was a bug).
+        return (
+            "📤 ClawsomeFlow external task dispatched — "
+            f"{_external_channel_label(payload)}"
+        )
     if event == "run_terminal_test":
         return "🔔 ClawsomeFlow webhook test"
     icon = {
@@ -240,6 +260,9 @@ def _short_title(payload: dict[str, Any]) -> str:
     status = payload.get("status")
     if event == "run_checkpoint":
         return f"ClawsomeFlow: action required ({status})"
+    if event == "run_external_task":
+        channel = str(payload.get("channel") or "external")
+        return f"ClawsomeFlow: external task dispatched ({channel})"
     if event == "run_terminal_test":
         return "ClawsomeFlow: webhook test"
     return f"ClawsomeFlow: run {status}"
@@ -252,6 +275,7 @@ _CONTENT_MAX_CHARS = 3000
 
 def render_message_text(payload: dict[str, Any]) -> str:
     """Human-readable plain-text message shared by all chat formats."""
+    event = payload.get("event")
     lines = [_headline(payload)]
 
     def add(label: str, value: Any) -> None:
@@ -261,16 +285,27 @@ def render_message_text(payload: dict[str, Any]) -> str:
     add("Flow", payload.get("flowName") or payload.get("flowId"))
     add("Run", payload.get("runId"))
     add("Team", payload.get("teamName"))
-    add("Status", payload.get("status"))
-    if payload.get("isScheduled"):
-        lines.append("Trigger: scheduled")
-    add("Started", payload.get("startedAt"))
-    add("Finished", payload.get("finishedAt"))
+    if event == "run_external_task":
+        # Task-dispatch notification: identify the TASK (not the run status).
+        task_line = str(payload.get("taskSubject") or "").strip()
+        task_id = str(payload.get("taskId") or "").strip()
+        add("Task", f"{task_id} · {task_line}" if task_line else task_id)
+        add("Channel", _external_channel_label(payload))
+        add("Assignee", payload.get("assignee"))
+        add("Submit at", payload.get("runUrl"))
+    else:
+        add("Status", payload.get("status"))
+        if payload.get("isScheduled"):
+            lines.append("Trigger: scheduled")
+        add("Started", payload.get("startedAt"))
+        add("Finished", payload.get("finishedAt"))
     content = payload.get("content")
     if isinstance(content, str) and content.strip():
         label = (
             "Checkpoint output"
-            if payload.get("event") == "run_checkpoint"
+            if event == "run_checkpoint"
+            else "Task briefing"
+            if event == "run_external_task"
             else "Leader report"
         )
         lines.append("")

@@ -441,15 +441,31 @@ class RunController:
         upstream_task_id: str,
         feedback: str,
     ) -> dict[str, Any]:
-        """Request an upstream task rerun while staying in checkpoint mode."""
+        """Request an upstream task rerun while staying in checkpoint mode.
+
+        External-node items (owner ``kind=external``) take a one-click
+        re-dispatch path: *feedback* is optional and ignored (the channel
+        round-trip has no place to inject review feedback) and the ORIGINAL
+        task is simply dispatched again — same task id, same package, fresh
+        one-time ticket (which invalidates the previous one). Local agents
+        keep the feedback-preamble rerun contract.
+        """
         tid = upstream_task_id.strip()
         text = feedback.strip()
         if not tid:
             raise ValueError("upstream task id is required")
-        if not text:
-            raise ValueError("checkpoint rerun feedback is required")
         if self._cancel_evt.is_set():
             raise RuntimeError("run is cancelling; checkpoint rerun is unavailable")
+        rerun_agent = None
+        async with self._checkpoint_lock:
+            cp = self._dispatch_checkpoint
+            if cp is not None:
+                pre_item = cp.items.get(tid)
+                if pre_item is not None:
+                    rerun_agent = self._agents.get(pre_item.owner_agent_id)
+        is_external = rerun_agent is not None and rerun_agent.kind == AgentKind.external
+        if not text and not is_external:
+            raise ValueError("checkpoint rerun feedback is required")
         async with self._checkpoint_lock:
             cp = self._dispatch_checkpoint
             if cp is None:
@@ -504,15 +520,28 @@ class RunController:
                 task_id=tid,
                 payload={"target_status": "in_progress", "source": "checkpoint_rerun"},
             )
-        prompt = await self._build_checkpoint_rerun_prompt(
-            downstream_task_id=downstream_task_id,
-            upstream_item=item,
-            feedback=text,
-        )
+        if is_external:
+            # One-click re-dispatch of the ORIGINAL task: the external session
+            # re-mints the ticket and re-sends the channel outbound with the
+            # same task id/package (ExternalNodeSession derives the package
+            # from the task id, so the message here is the same task sheet).
+            book_for_rerun = self._tasks.get(tid)
+            if book_for_rerun is None:
+                raise RuntimeError(f"external checkpoint rerun: unknown task {tid!r}")
+            ctx = await self._compose_dispatch_context(agent, book_for_rerun.task)
+            prompt = self._render_dispatch_message(agent, book_for_rerun.task, ctx)
+            dispatch_task_id = tid
+        else:
+            prompt = await self._build_checkpoint_rerun_prompt(
+                downstream_task_id=downstream_task_id,
+                upstream_item=item,
+                feedback=text,
+            )
+            dispatch_task_id = f"checkpoint-rerun-{tid}"
         try:
             await self._dispatch_custom_task(
                 agent=self._agents[item.owner_agent_id],
-                task_id=f"checkpoint-rerun-{tid}",
+                task_id=dispatch_task_id,
                 message=prompt,
             )
         except Exception:
@@ -595,22 +624,7 @@ class RunController:
             "run_complaint_phase_started",
             payload={"complaint_length": len(text)},
         )
-        # Complaint fixes are dispatched to OpenClaw AND Hermes workers (other
-        # platforms are intentionally excluded for now). Only OpenClaw is also a
-        # merge target; Hermes complaint output is NOT merged (worktree removed
-        # by the unified terminal cleanup).
-        # Complaint fix targets: persistent OpenClaw/Hermes workers only (non-leader).
-        # Temporary inline agents are excluded — complaint refinement is for managed
-        # platform agents only.
-        complaint_targets = [
-            a for a in self.spec.agents
-            if (
-                not a.is_leader
-                and not a.is_temporary
-                and a.kind in (AgentKind.openclaw, AgentKind.hermes)
-                and a.id != self._leader_id
-            )
-        ]
+        complaint_targets = self._complaint_target_agents()
         openclaw_merge_targets = self._merge_requirement_agents()
         if not complaint_targets and not openclaw_merge_targets:
             self._emit_event(
@@ -926,7 +940,8 @@ class RunController:
         self._in_tick = True
         self._leader_inbox_tick_cache = None
         try:
-            return await self._tick_inner()
+            activity = await self._tick_inner()
+            return self._reconcile_external_wait_status() or activity
         finally:
             self._in_tick = False
             self._leader_inbox_tick_cache = None
@@ -1077,6 +1092,34 @@ class RunController:
 
     # ── ready-set + dispatch ─────────────────────────────────────────
 
+    def _reconcile_external_wait_status(self) -> bool:
+        """Flip ``running`` ↔ ``awaiting_external`` from the in-flight task mix.
+
+        ``awaiting_external`` = at least one task is in flight and EVERY
+        in-flight task is owned by an external execution node — i.e. the run
+        is purely blocked on results from outside the local agent stack.
+        Only these two statuses ever flip here (checkpoint/review/complaint/
+        terminal states own their transitions); the run detail page renders
+        its cards from independent data sources, so a checkpoint opening
+        while external tasks are pending still shows both.
+        """
+        if self.run.status not in (RunStatus.running, RunStatus.awaiting_external):
+            return False
+        in_flight = [
+            b for b in self._tasks.values() if b.state == _TaskState.in_progress
+        ]
+        external_only = bool(in_flight)
+        for book in in_flight:
+            owner = self._agents.get(book.task.owner_agent_id)
+            if owner is None or owner.kind != AgentKind.external:
+                external_only = False
+                break
+        target = RunStatus.awaiting_external if external_only else RunStatus.running
+        if self.run.status == target:
+            return False
+        self._set_status(target, reason="external_wait_reconcile")
+        return True
+
     def _task_requires_manual_checkpoint(self, task: FlowTask) -> bool:
         if task.is_leader_summary:
             return False
@@ -1108,10 +1151,18 @@ class RunController:
             item = cp.items.get(dep_id)
             if item is None:
                 continue
+            owner = self._agents.get(item.owner_agent_id)
+            owner_external = getattr(owner, "external", None) if owner else None
             items.append({
                 "task_id": item.task_id,
                 "subject": item.subject,
                 "owner_agent_id": item.owner_agent_id,
+                # Lets the UI adapt checkpoint actions per owner type: external
+                # items get one-click re-dispatch, no feedback box, no diff.
+                "owner_kind": owner.kind.value if owner else None,
+                "external_channel": (
+                    owner_external.channel.value if owner_external else None
+                ),
                 "summary": item.summary,
                 "worktree_path": item.worktree_path,
                 "branch_name": item.branch_name,
@@ -3199,6 +3250,27 @@ class RunController:
         """Resolve the Flow execution mode from the spec variables."""
         variables = getattr(self.spec, "variables", None) or {}
         return flow_mode(variables)
+
+    def _complaint_target_agents(self) -> list[FlowAgent]:
+        """Complaint-fix targets: persistent OpenClaw/Hermes WORKERS only.
+
+        Complaint fixes are dispatched to OpenClaw AND Hermes workers (other
+        platforms are intentionally excluded for now). Only OpenClaw is also a
+        merge target; Hermes complaint output is NOT merged (worktree removed
+        by the unified terminal cleanup). Excluded by construction: the leader,
+        temporary inline agents, and every other kind — notably
+        ``AgentKind.external`` (external execution nodes have no local session
+        or worktree; a complaint can never be "fixed" by re-dispatching them).
+        """
+        return [
+            a for a in self.spec.agents
+            if (
+                not a.is_leader
+                and not a.is_temporary
+                and a.kind in (AgentKind.openclaw, AgentKind.hermes)
+                and a.id != self._leader_id
+            )
+        ]
 
     def _merge_requirement_agents(self) -> list[FlowAgent]:
         # In easy / developer mode every merge is performed in-task (easy → all

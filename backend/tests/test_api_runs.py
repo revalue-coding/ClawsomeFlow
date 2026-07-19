@@ -1990,15 +1990,28 @@ def test_checkpoint_approve_returns_unavailable_when_controller_absent(
     assert r.json()["error"] == "CHECKPOINT_UNAVAILABLE"
 
 
-def test_checkpoint_rerun_requires_feedback(app_client: TestClient) -> None:
+def test_checkpoint_rerun_requires_feedback(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty feedback is rejected by the CONTROLLER for local agents (the API
+    forwards it as-is because external-node items legitimately rerun without
+    feedback — one-click re-dispatch)."""
     flow = _make_flow()
     run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
+
+    class _Controller:
+        async def request_checkpoint_rerun(self, *, upstream_task_id: str, feedback: str):
+            assert feedback == ""
+            raise ValueError("checkpoint rerun feedback is required")
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
     r = app_client.post(
         f"/api/runs/{run.id}/checkpoint/items/t1/rerun",
         json={"feedback": "   "},
     )
     assert r.status_code == 400
-    assert r.json()["error"] == "INVALID_CHECKPOINT_FEEDBACK"
+    assert r.json()["error"] == "INVALID_PAYLOAD"
 
 
 def test_checkpoint_rerun_calls_controller(

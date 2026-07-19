@@ -210,6 +210,19 @@ async def dispatch_external_task(
         "channel": ext.channel.value,
         "callbackUrl": callback_url,
         "callbackToken": ticket,
+        # Self-describing completion contract so an integrated system needs no
+        # out-of-band documentation: POST this body back when the work is done.
+        # (callbackUrl/callbackToken above are kept as flat legacy fields.)
+        "callback": {
+            "method": "POST",
+            "url": callback_url,
+            "auth": "Authorization: Bearer <callbackToken>  (or body field 'token')",
+            "bodyExample": {
+                "status": "success | failed",
+                "summary": "<completion summary — include absolute paths / links "
+                           "to deliverables; on failure: the blocking reason>",
+            },
+        },
         **package,
     }
 
@@ -238,7 +251,9 @@ async def dispatch_external_task(
         )
 
     if ext.channel == ExternalChannel.human:
-        _notify_flow_channels_async(storage, run_id=run_id, package=outbound_package)
+        _notify_flow_channels_async(
+            storage, run_id=run_id, package=outbound_package, message=message,
+        )
         return
     if ext.channel == ExternalChannel.webhook:
         await _post_outbound(str(ext.endpoint_url), outbound_package)
@@ -296,6 +311,11 @@ async def _post_delegate(
         "sourceRunId": outbound_package["runId"],
         "sourceTaskId": outbound_package["taskId"],
     }
+    # Static param-field values for the remote Flow (its run-input fields),
+    # configured on the external node. The remote delegate endpoint stores
+    # them as the run's inputs — exactly like a local "参数字段" form fill.
+    if getattr(ext, "inputs", None):
+        body["inputs"] = dict(ext.inputs)
     async with httpx.AsyncClient(timeout=_OUTBOUND_TIMEOUT_SEC) as client:
         resp = await client.post(
             url, json=body, headers={"Authorization": f"Bearer {secret}"},
@@ -310,8 +330,57 @@ async def _post_delegate(
         return None
 
 
+#: Cap the task-briefing block in the human-dispatch notification. Same order
+#: of magnitude as run_notify._CONTENT_MAX_CHARS; chat platforms truncate
+#: further per their own limits.
+_NOTIFY_CONTENT_MAX_CHARS = 3000
+
+
+def build_external_dispatch_notification(
+    run: FlowRun,
+    *,
+    package: dict[str, Any],
+    message: str,
+    flow_name: str | None = None,
+) -> dict[str, Any]:
+    """Webhook payload announcing "an external task was dispatched".
+
+    This is NOT a run-terminal notification — the ``run_external_task`` event
+    tells the recipient (typically the assignee's chat) that a task now waits
+    on an external executor. It carries the task identity (subject/channel/
+    assignee) plus the full task sheet (description, upstream inputs, output
+    requirement, result-submission how-to) as ``content``, and where to act
+    (``runUrl`` — the local Run page for the human channel).
+    """
+    cfg = load_config()
+    base = (getattr(cfg, "external_callback_base_url", None) or "").strip()
+    if not base:
+        base = f"http://127.0.0.1:{getattr(cfg, 'csflow_port', 17017)}"
+    status = run.status.value if hasattr(run.status, "value") else str(run.status)
+    return {
+        "event": "run_external_task",
+        "runId": run.id,
+        "flowId": run.flow_id,
+        "flowName": flow_name,
+        "teamName": run.team_name,
+        "status": status,
+        "taskId": package.get("taskId") or "",
+        "taskSubject": package.get("subject") or "",
+        "channel": package.get("channel") or "",
+        "assignee": package.get("assignee") or "",
+        "runUrl": f"{base.rstrip('/')}/runs/{run.id}",
+        # Full task sheet: flow goal, upstream inputs, task description
+        # (incl. output requirement), result-submission instructions.
+        "content": (message or "").strip()[:_NOTIFY_CONTENT_MAX_CHARS],
+    }
+
+
 def _notify_flow_channels_async(
-    storage: StorageBackend, *, run_id: str, package: dict[str, Any],
+    storage: StorageBackend,
+    *,
+    run_id: str,
+    package: dict[str, Any],
+    message: str,
 ) -> None:
     """Best-effort: push the human todo card to the Flow's notify webhooks.
 
@@ -327,17 +396,16 @@ def _notify_flow_channels_async(
         channels = flow_channels_for_run(run)
         if not channels:
             return
-        payload = {
-            "event": "run_external_task",
-            "runId": run_id,
-            "flowId": run.flow_id,
-            "teamName": run.team_name,
-            "status": "waiting_external",
-            "content": (
-                f"External task waiting: {package.get('subject') or package.get('taskId')}"
-                + (f" (assignee: {package['assignee']})" if package.get("assignee") else "")
-            ),
-        }
+        flow_name: str | None = None
+        try:
+            flow = storage.flow_get(run.flow_id)
+            if flow is not None:
+                flow_name = flow.name
+        except Exception:  # pragma: no cover — enrichment only
+            pass
+        payload = build_external_dispatch_notification(
+            run, package=package, message=message, flow_name=flow_name,
+        )
 
         def _send() -> None:
             for ch in channels:
