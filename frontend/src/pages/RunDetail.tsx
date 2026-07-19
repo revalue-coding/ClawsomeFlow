@@ -119,6 +119,8 @@ type TaskBoardEdge = {
   to: string;
   highlight: boolean;
   animate: boolean;
+  /** Latest inbox hand-off summary from the upstream (``from``) task, if any. */
+  inboxMessage: string | null;
 };
 
 type TaskBoardModel = {
@@ -1583,6 +1585,7 @@ function TaskDependencyBoard({
 }) {
   const { t } = useTranslation();
   const [hoverNodeId, setHoverNodeId] = useState<string | null>(null);
+  const [hoverEdgeKey, setHoverEdgeKey] = useState<string | null>(null);
   // Draggable split between the task list (left) and the graph (right) on
   // md+ screens; the fraction persists across runs via localStorage. On
   // narrow screens the panels stack and the handle is hidden.
@@ -1634,6 +1637,9 @@ function TaskDependencyBoard({
     );
   }
   const hovered = board.visibleNodes.find((n) => n.id === hoverNodeId) ?? null;
+  const hoveredEdge = hoverEdgeKey
+    ? board.edges.find((e) => `${e.from}->${e.to}` === hoverEdgeKey) ?? null
+    : null;
   // Direct neighbourhood of the hovered node — used to spotlight its edges
   // and dim unrelated ones so dependency chains pop out on busy graphs.
   const hoverLinked = new Set<string>();
@@ -1817,6 +1823,7 @@ function TaskDependencyBoard({
                 const from = board.nodeById.get(e.from);
                 const to = board.nodeById.get(e.to);
                 if (!from || !to) return null;
+                const edgeKey = `${e.from}->${e.to}`;
                 const sx = from.x;
                 const sy = from.y;
                 const tx = to.x;
@@ -1830,24 +1837,46 @@ function TaskDependencyBoard({
                 const startGap = nodeRadius(from) + 2;
                 const bx = sx + (dx / dist) * startGap;
                 const by = sy + (dy / dist) * startGap;
-                const stroke = e.highlight ? "#f5b942" : "#4d679d";
-                const marker = e.highlight
+                const edgeHovered = hoverEdgeKey === edgeKey;
+                const stroke = e.highlight || edgeHovered ? "#f5b942" : "#4d679d";
+                const marker = e.highlight || edgeHovered
                   ? "url(#arrow-open-highlight)"
                   : "url(#arrow-open-normal)";
                 const d = boardEdgePath(bx, by, ex, ey);
-                const dimmed = hoverNodeId !== null
+                const dimmed = !edgeHovered && hoverNodeId !== null
                   && !(hoverLinked.has(e.from) && hoverLinked.has(e.to));
+                const midX = (bx + ex) / 2;
+                const midY = (by + ey) / 2;
                 return (
                   <g
                     key={`edge-${e.from}-${e.to}`}
                     className="transition-opacity duration-200"
                     opacity={dimmed ? 0.18 : 1}
+                    onMouseEnter={() => {
+                      setHoverNodeId(null);
+                      setHoverEdgeKey(edgeKey);
+                    }}
+                    onMouseLeave={() =>
+                      setHoverEdgeKey((cur) => (cur === edgeKey ? null : cur))
+                    }
+                    style={{ cursor: e.inboxMessage ? "help" : "default" }}
+                    data-edge-mid-x={midX}
+                    data-edge-mid-y={midY}
                   >
+                    {/* Wide invisible hit target so thin arrows are easy to hover. */}
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke="transparent"
+                      strokeWidth={14}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
                     <path
                       d={d}
                       fill="none"
                       stroke={stroke}
-                      strokeWidth={1.8}
+                      strokeWidth={edgeHovered ? 2.4 : 1.8}
                       strokeLinejoin="round"
                       strokeLinecap="round"
                       markerEnd={marker}
@@ -1982,7 +2011,7 @@ function TaskDependencyBoard({
                 );
               })}
             </svg>
-            {hovered && (
+            {hovered && !hoveredEdge && (
               <div
                 className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded-md border border-[#2a3558] bg-[#020817]/95 px-2.5 py-1.5 text-xs text-white shadow-lg whitespace-nowrap"
                 style={{
@@ -1994,6 +2023,33 @@ function TaskDependencyBoard({
                 <span className="ml-1.5 font-mono text-[10px] text-[#9ab0df]">
                   {hovered.ownerAgentId}
                 </span>
+              </div>
+            )}
+            {hoveredEdge && (
+              <div
+                className="pointer-events-none absolute z-10 max-w-[min(360px,70%)] -translate-x-1/2 -translate-y-full rounded-md border border-[#2a3558] bg-[#020817]/95 px-2.5 py-1.5 text-xs text-white shadow-lg"
+                style={{
+                  left: (() => {
+                    const from = board.nodeById.get(hoveredEdge.from);
+                    const to = board.nodeById.get(hoveredEdge.to);
+                    if (!from || !to) return "50%";
+                    return `${(((from.x + to.x) / 2) / board.width) * 100}%`;
+                  })(),
+                  top: (() => {
+                    const from = board.nodeById.get(hoveredEdge.from);
+                    const to = board.nodeById.get(hoveredEdge.to);
+                    if (!from || !to) return "40%";
+                    return `${(((from.y + to.y) / 2) / board.height) * 100}%`;
+                  })(),
+                }}
+              >
+                <div className="mb-0.5 text-[10px] uppercase tracking-wide text-[#9ab0df]">
+                  {t("runDetail.boardEdgeInboxTitle")}
+                </div>
+                <div className="whitespace-pre-wrap break-words text-[#e8eeff]">
+                  {hoveredEdge.inboxMessage?.trim()
+                    || t("runDetail.boardEdgeInboxEmpty")}
+                </div>
               </div>
             )}
           </div>
@@ -3492,9 +3548,14 @@ function buildTaskBoard(
     };
   });
   const nodeById = new Map(visibleNodes.map((n2) => [n2.id, n2] as const));
+  const inboxByTask = collectTaskInboxHandoffs(events);
 
-  const edges: TaskBoardEdge[] = edgeSpecs.filter((e) =>
-    nodeById.has(e.from) && nodeById.has(e.to));
+  const edges: TaskBoardEdge[] = edgeSpecs
+    .filter((e) => nodeById.has(e.from) && nodeById.has(e.to))
+    .map((e) => ({
+      ...e,
+      inboxMessage: inboxByTask.get(e.from) ?? null,
+    }));
 
   const listNodes = [...visibleNodes].sort((a, b) => {
     if (a.state !== b.state) return a.state === "dispatched" ? -1 : 1;
@@ -3503,6 +3564,58 @@ function buildTaskBoard(
   });
 
   return { visibleNodes, listNodes, edges, nodeById, width: tightWidth, height: tightHeight };
+}
+
+/** Latest inbox hand-off summary per upstream task id.
+ *
+ * Sources (all durable RunEvents — available mid-run and after terminal):
+ * 1. ``task_inbox_handoff`` — written when the scheduler records a leader-inbox
+ *    worker report (preferred; covers every agent kind).
+ * 2. ``external_task_completed`` — external-node receipt summary.
+ * 3. ``run_terminal_execution_log.tasks[].output_messages`` — fallback for
+ *    runs that finished before (1) existed.
+ */
+function collectTaskInboxHandoffs(events: RunWsEvent[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const ordered = [...events].sort((a, b) => a.id - b.id);
+  for (const e of ordered) {
+    const tid = typeof e.taskId === "string" ? e.taskId : "";
+    if (e.type === "task_inbox_handoff" && tid) {
+      const summary = String(
+        (e.payload as Record<string, unknown> | undefined)?.summary ?? "",
+      ).trim();
+      if (summary) out.set(tid, summary);
+      continue;
+    }
+    if (e.type === "external_task_completed" && tid) {
+      const summary = String(
+        (e.payload as Record<string, unknown> | undefined)?.summary ?? "",
+      ).trim();
+      if (summary) out.set(tid, summary);
+      continue;
+    }
+    if (e.type !== "run_terminal_execution_log") continue;
+    const rows = Array.isArray((e.payload as Record<string, unknown>)?.tasks)
+      ? ((e.payload as Record<string, unknown>).tasks as Array<Record<string, unknown>>)
+      : [];
+    for (const row of rows) {
+      const rowId = String(row.task_id ?? row.taskId ?? "");
+      if (!rowId || out.has(rowId)) continue;
+      const msgs = Array.isArray(row.output_messages)
+        ? (row.output_messages as Array<Record<string, unknown>>)
+        : Array.isArray(row.outputMessages)
+        ? (row.outputMessages as Array<Record<string, unknown>>)
+        : [];
+      for (let i = msgs.length - 1; i >= 0; i -= 1) {
+        const summary = String(msgs[i]?.summary ?? "").trim();
+        if (summary) {
+          out.set(rowId, summary);
+          break;
+        }
+      }
+    }
+  }
+  return out;
 }
 
 type WorkerReportHistoryItem = {

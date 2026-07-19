@@ -683,15 +683,44 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
 # ── External execution nodes (AgentKind.external) ────────────────────
 
 
+def _upstream_outputs_block_external(ctx: DispatchContext) -> str:
+    """Upstream hand-offs for an external executor (human / webhook / remote).
+
+    External nodes own no worktree. Never invent or surface local worktree /
+    branch paths here — an external executor cannot use them, and a remote
+    machine would only be misled. Summaries + task identity are enough.
+    """
+    if not ctx.upstream_outputs:
+        return ""
+    n = len(ctx.upstream_outputs)
+    lines: list[str] = [
+        f"## Direct Upstream Outputs ({n} item(s), first-level dependencies only)",
+        "Upstream executors may be local agents or other external nodes. "
+        "Use the completion summary below as context; there is no shared "
+        "worktree path for this node.",
+    ]
+    for u in ctx.upstream_outputs:
+        lines.append(
+            f"- task `{u.task_id}` \"{u.subject}\" by agent `{u.from_agent}`"
+        )
+        if u.summary:
+            lines.append(f"  - completion summary: {u.summary}")
+        else:
+            lines.append(
+                "  - completion summary: _(not available yet — "
+                "ask the run operator if you need prior deliverables)_"
+            )
+    return "\n".join(lines)
+
+
 def build_external_task_text(ctx: DispatchContext) -> str:
     """Human-readable task sheet for an external executor.
 
     Unlike the worker/leader builders this contains NO ClawTeam protocol
     steps (an external executor never talks to ClawTeam — the completion
     round-trip happens through the /api/external receipt endpoint or the
-    WebUI card). Upstream summaries are included so the executor has the
-    same first-level context a local worker would get; worktree paths are
-    kept (meaningful for a human on the same machine, harmless remotely).
+    WebUI card). Upstream summaries are included without worktree/branch
+    paths — external nodes do not own a local workspace.
     """
     blocks = [
         (
@@ -703,12 +732,12 @@ def build_external_task_text(ctx: DispatchContext) -> str:
             f"Run ID: `{ctx.run_id}`  ·  Team: `{ctx.team_name}`"
         ),
         _flow_goal_block(ctx),
-        _upstream_outputs_block(ctx),
+        _upstream_outputs_block_external(ctx),
         _task_block(ctx),
         (
             "## Result Submission\n"
-            "- Provide a concise completion summary (include absolute paths / "
-            "links to any deliverables).\n"
+            "- Provide a concise completion summary (include links or "
+            "references to deliverables when applicable).\n"
             "- If the task cannot be completed, submit a failure with the "
             "blocking reason instead of leaving it open."
         ),
@@ -726,6 +755,9 @@ def build_external_task_package(ctx: DispatchContext) -> dict[str, object]:
     ``description`` / ``outputRequirement`` are the two UI fields split back
     out of the canonical merged description, so an integrated system gets the
     task briefing and the expected deliverable shape as separate fields.
+
+    Upstream entries intentionally omit worktree/branch — external nodes
+    never share a local git workspace with the origin scheduler.
     """
     from app.models import split_description
 
@@ -745,7 +777,6 @@ def build_external_task_package(ctx: DispatchContext) -> dict[str, object]:
                 "subject": u.subject,
                 "fromAgent": u.from_agent,
                 "summary": u.summary,
-                "worktreePath": u.worktree_path,
             }
             for u in ctx.upstream_outputs
         ],

@@ -235,6 +235,8 @@ const en = {
   flowEditor: {
     titleNew: "New Flow",
     titleEdit: "Edit Flow",
+    flowIdLabel: "Flow ID",
+    flowIdCopy: "Copy Flow ID (needed when a remote ClawsomeFlow delegates here)",
     flowBasics: "Flow basics",
     easyMode: "Easy mode",
     easyModeSub: "Agents bring all their results into your project automatically; you can still give feedback at the end",
@@ -746,6 +748,8 @@ const en = {
     },
     boardOpenNew: "Open in new window",
     boardEmpty: "No task has been dispatched yet. The graph appears once execution starts.",
+    boardEdgeInboxTitle: "Inbox message along this dependency",
+    boardEdgeInboxEmpty: "(No inbox message yet)",
     boardTaskListTitle: "Executed / Running Tasks",
     boardNodeRunning: "Running",
     boardNodeDone: "Done",

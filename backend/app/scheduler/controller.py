@@ -1984,6 +1984,18 @@ class RunController:
             self._worker_report_history.append(item)
             if r.task_id:
                 self._task_outputs.setdefault(r.task_id, []).append(item)
+                # Durable hand-off for the Run board edge tooltip (survives
+                # after the run ends; also available mid-run via WS/events).
+                self._emit_event(
+                    "task_inbox_handoff",
+                    agent_id=r.from_agent if r.from_agent != "?" else None,
+                    task_id=r.task_id,
+                    payload={
+                        "fromAgent": r.from_agent,
+                        "summary": summary[:4000],
+                        "collectedAt": ts,
+                    },
+                )
             self._emit_worker_exit_observed_event(report=r, summary=summary)
 
     def _emit_worker_exit_observed_event(self, *, report: WorkerReport, summary: str) -> None:

@@ -336,8 +336,9 @@ class ExternalNodeConfig(_ApiBase):
       ``{base_url}/api/external/delegate`` on the remote ClawsomeFlow, which
       runs ``flow_id`` unattended and calls back with the leader report.
       ``pair_token_ref`` names an entry in the local
-      ``Config.external_pair_tokens`` table (the secret itself never lives in
-      the Flow spec).
+      ``Config.external_remote_targets`` table (outbound secrets registered via
+      ``csflow external add-remote``; the secret itself never lives in the
+      Flow spec). The peer’s inbound table is ``external_pair_tokens``.
     """
 
     channel: ExternalChannel

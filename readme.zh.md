@@ -14,12 +14,12 @@
   <b>简体中文</b>
 </p>
 
-<p><b>把目标编排成一张可复用的任务流程图，由调度器主动驱动一支 AI Agent 团队去执行——并行推进、彼此隔离、全程可观测、稳定收敛地交付。你负责编排，掌控交给 ClawsomeFlow。</b></p>
+<p><b>面向长周期、多方协作的 Harness——人、机器与任意 Agent 平台，在同一条可控流程里协同。</b></p>
 
-<p><b>不只是「跑完这一次」，而是沉淀一条能反复稳定产出的工作流。</b> 一次定义 Flow，用执行参数灵活复用，随时按需重跑。而且不止于写代码：把<b>一人公司里的所有角色</b>——市场、内容、运营、客服、研发——编排成一条<b>端到端、可复用</b>的工作流。</p>
+<p>真实业务从来不是「纯 AI」：总有人要对接物理世界、审批不可逆操作、或做关键决策；协作也往往跨机器、跨工具，而不是困在一台电脑或一次对话里。ClawsomeFlow 把 <b>真人、远程 ClawsomeFlow、自定义 Webhook、以及各类 CLI Agent</b> 都当作同一张 DAG 里的一等执行节点：可复用、可观测、可检查点、成本可控。</p>
 
 <p>
-  <b>全面兼容</b> OpenClaw、Claude Code、Codex、Cursor、Hermes 等 CLI Agent。
+  兼容 <b>OpenClaw、Hermes、Claude Code、Codex、Cursor</b> 等 CLI Agent，也兼容你已有的系统——只需一份简洁的 webhook 约定。
 </p>
 
 <p>
@@ -28,6 +28,7 @@
   <a href="#-news">News</a> ·
   <a href="#-谁最该试试它">谁最该试试它</a> ·
   <a href="#-核心特性">核心特性</a> ·
+  <a href="#-外部执行节点">外部执行节点</a> ·
   <a href="#%EF%B8%8F-工作原理">工作原理</a> ·
   <a href="#-为什么是-clawsomeflow">为什么是 ClawsomeFlow</a> ·
   <a href="#-贡献者本地部署与测试">贡献者开发</a> ·
@@ -39,7 +40,6 @@
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/Frontend-React_18-61DAFB?style=for-the-badge&logo=react&logoColor=black">
-  <img alt="Built on ClawTeam" src="https://img.shields.io/badge/Built_on-ClawTeam-FF6B6B?style=for-the-badge&logo=git&logoColor=white">
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-4ECDC4?style=for-the-badge">
   <a href="https://discord.gg/hcpMwXnrkM"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
@@ -56,39 +56,32 @@
 
 ## 🎯 谁最该试试它？
 
-- 想打造 **AI Native 一人公司**、希望编排的**不止是写代码**（还包括市场、内容、运营、客服、研发等所有角色）、追求**端到端**工作流的建设者；希望把重复执行的工作系统化交给 Agent 团队的创业者与运营者；
-- 需要让多个 Agent 像真实团队一样分工协作（规划、实现、校验、汇总），而不是多开几个聊天窗口的开发者与团队；
-- 想成为“**超级个体**”，以一人之力调度多个专业 Agent 持续放大产出的创造者；
-- 受够了 **Prompt 自调度黑盒**、追求可预测、成本可控、可回滚工程流程的实践派；
-- 想打造一支可在**本地多分支并行开发**的软件工程 Agent 团队。
+- 正在建设 **AI Native 业务**、工作必然跨人、跨工具、跨机器，而不是只停在写代码沙盒里的运营者与建设者；
+- 流程里需要 **人工检查点**、不可逆审批，或必须对接真实物理世界的团队；
+- 希望 **OpenClaw / Hermes / Claude / Codex / Cursor**（以及自研 Agent 栈）在同一张图里协作的人；
+- 受够了用**一次超长对话**扛复杂长周期项目、希望流程可复用、可审计、成本可控的实践派。
 
 ---
 
 ## ✨ 核心特性
 
-ClawsomeFlow 把零散的 AI Agent 变成一套可控的工程系统——从第一条指令，到最终可审阅的交付结果。
+ClawsomeFlow 是一套 **Harness**：让长周期、多执行方的协作保持稳定——能力可以变强，流程却不会坍成一份无法审阅的聊天记录。
 
-| 🗣️ 用自然语言搞定一切 | 🧠 精准编排，而非碰运气 | 🚀 众多 Agent CLI，同一张图 |
+| 🤝 人机协同 · 跨机器 · 跨 Agent 平台 | 🔗 跨机器协同 | 🧩 接入你自己的执行方 |
 |---|---|---|
-| 定义 Flow、创建 Agent、编排任务、运行中实时干预——只需描述你想要什么。无需胶水代码，也无需折腾 SDK。 | 控制流写在代码里，而不是塞进 Prompt。调度器负责派发、重试、超时与收敛——行为可预测，Token 不浪费。 | 把工作编排成 DAG，让多个 Agent 并行协作；由 Leader 汇总并将结果收敛为一份交付物。 |
+| 真人、本地 Agent、远程 ClawsomeFlow、自定义系统，共享**同一张 DAG**与相同的依赖 / 完成语义。 | 把子任务委派到另一台机器上的 Flow，结果回注为上游上下文。 | 极简 webhook 约定——或你自研的 Agent 平台——无需改调度器即可接入。 |
 
-| 🔐 默认隔离与回滚 | 📊 可审计及可观测性 | 🔄 会自我进化的系统 |
+| ♻️ 可复用、可稳定产出 | 🎛️ 过程可控 | 💸 成本可控 |
 |---|---|---|
-| 基于 Git worktree 的底层隔离机制，结合内置跨进程仓库锁，确保 Agent 各类协作行为的绝对可靠性；支持智能合入与回滚，任意一次合入都可快捷查看并**一键撤销**。还可内置人工检查点，随时进行行为纠正。 | 每一次 dispatch / completion / failure 都记录为 RunEvent——每次运行都可追溯、可回放、可审阅，绝不是黑盒。 | 对结果不满意？发起一次「投诉」，系统会反思、返工，并把经验写回——让下一次比上一次更好。 |
+| 一次定义 Flow，参数化复跑；结构稳定、结果可预期，而不是一次性 Prompt。 | 人工检查点、子任务重跑、投诉改进闭环。你掌舵，Harness 记住状态。 | 工作拆到多节点，每个执行方只看短上下文——比单 Agent 扛全项目更省 token。 |
 
-| ♻️ 可复用、可稳定重复产出的工作流 | 🏢 覆盖一人公司所有角色的端到端工作流 |
+| ⏪ 可回滚与仓库安全 | 👁 全程可观测 | 🌱 可自我提升 |
+|---|---|---|
+| Worktree 隔离 + **内置跨进程仓库锁**，并行修改不踩坏基线；合并与结果可审可回退。 | 每次派发、交接与失败都是 RunEvent——看板、依赖边上的 inbox 消息、完整回放。 | 不满意就投诉；系统返工并把教训写回，下次更好。 |
+
+| ⏳ 支撑长周期 | 🏢 不止 coding |
 |---|---|
-| 一次定义 Flow，用运行参数复用，每次稳定、收敛、可审计地产出，而非一次性任务。 | 不止于 coding，编排市场、内容、运营、客服、研发等全部角色，组成一条端到端、可复用的工作流。 |
-
-
-ClawsomeFlow 继承了 ClawTeam 的如下底座能力：
-
-- **Git Worktree 并行隔离底座**：每个 Agent 拥有独立分支与目录，天然适合多 Agent 并行开发。
-- **Agent 间消息**：点对点 inbox 与广播，团队成员实时共享进展。
-
-> ClawsomeFlow 在此之上，增加了 **AI 与精确编排结合、增强 Harness 工程（内置跨进程仓库锁让多分支并行开发绝对可靠，支持智能合入与回滚——含运行后逐 Agent 的 Run diff 查看与一键撤销合入，支持投诉机制，并可内置人工检查点，随时进行行为纠正）、OpenClaw/Hermes 深度适配、Web 产品化** 等能力。
-
----
+| Flow 可跨小时到数周：等人、等远程任务、跨专业交接而不丢线。 | 市场、运营、内容、客服、研发——能回报结果的专业，都能成为节点。 |
 
 ## 🛠️ 工作原理
 
@@ -96,10 +89,10 @@ ClawsomeFlow 继承了 ClawTeam 的如下底座能力：
 
 ![ClawsomeFlow 任务编排总体框架图](./docs/assets/flow-orchestration-overview.png)
 
-1. **描述你的目标** —— 用自然语言告诉 ClawsomeFlow 你想要什么，或在画布上把 Flow 编排成任务与依赖关系图。
-2. **Agent 并行执行** —— 调度器主动把就绪任务派发给合适的 Agent，每个 Agent 在独立工作区中运行，并被驱动至完成。
-3. **观察、干预、恢复** —— 实时跟踪每一步。以清晰的策略重试、跳过或中止，并在人工检查点确认结果后再落地。
-4. **收敛并交付** —— 由 Leader 将并行的工作合并为一份经过审阅的交付物，运行记录全程可审计。
+1. **描述目标** — 把 Flow 排成图：本地 Agent、真人、webhook、远程 ClawsomeFlow 按需入座。
+2. **各方执行自己的部分** — Harness 派发就绪节点（可并行），隔离 Agent 工作区，并在等人/等远程时不断线。
+3. **观察、干预、恢复** — 实时看板（依赖边上可看 inbox 交接）、检查点、子任务重跑、重试/跳过/中止。
+4. **汇总交付** — leader 收敛为可审阅结果；历史可审计、可改进。
 
 ---
 
@@ -139,73 +132,78 @@ ClawsomeFlow 继承了 ClawTeam 的如下底座能力：
 
 ---
 
-## 🌐 外部执行节点 —— 真人、黑箱系统、跨机器,统统进同一张 DAG
+## 🌐 外部执行节点
 
-一个大型项目不可能 100% 由 agent 执行——总有环节需要真人介入(签合同、验硬件、拍板决策),也总有子任务属于另一个系统或另一台机器。**外部执行节点**把「执行人」的定义彻底打开:DAG 里的任务可以由以下任何一方认领:
+真实项目总会走出「纯 AI」：有人要检查硬件、审批付款或在模糊处拍板；另一套系统要跑黑盒步骤；另一台机器上已有合适的 Flow。**外部执行节点**让这些执行方成为 DAG 的一等公民——不启本地进程、不建 worktree，却与 Agent 节点共享相同的依赖解阻与上游摘要语义。
 
-- **🙋 真人** —— 任务以待办卡片出现在 Run 详情页(可选经 Flow 的通知 webhook 推送到飞书 / Telegram / Slack 等);人完成工作后就地提交结果。
-- **📦 你的任意系统(通用接口)** —— ClawsomeFlow 把任务包(含上游产出与一次性签名回执票据)POST 到你的端点;黑箱内部怎么执行完全不设限,做完带票据回调即可。两个 JSON 消息,就是完整的对接协议。
-- **🖥️ 远端 ClawsomeFlow** —— 把任务委托给另一台机器上的某条 Flow,其 leader 工作报告回传后自动成为本节点的产出。两台机器的两张 DAG 经由一个节点缝合起来。
+三种 Owner 类型（Flow 编辑 → Owner 来源 → **外部执行**）：
 
-外部节点不启动任何进程、不占有 worktree 与分支——但它们与普通 agent 遵守同一套依赖图与完成语义:下游任务在其完成后解锁,并自动拿到它的结果摘要作为上游上下文。超时完全可配(真人任务可设为「永不超时」,跨天也没问题),失败同样走 retry / skip / abort 策略。
+| Owner 类型 | 谁来执行 | 结果如何回来 |
+|---|---|---|
+| **人工** | Run 页上的真人（可选聊天通知） | 在待办卡片上提交结果 |
+| **远程ClawsomeFlow** | 另一台 ClawsomeFlow 上的某条 Flow | 对端无人值守执行，leader 报告回调 |
+| **通用接口（webhook）** | 你自有的任意 HTTP 服务 | POST 任务包 → 你的系统回调回执 |
 
-在 Flow 编辑器中把 Owner 来源切到「外部执行人」即可使用;跨机器协作只需两台实例配对一次:
+在 Flow 编辑页可直接看到并复制 **Flow ID**——配置「远程ClawsomeFlow」节点时对端需要它。
+
+### 远程ClawsomeFlow — 两边各配什么
+
+**受理方（peer，被委派的机器）：**
 
 ```bash
-# 在【受理委托】的机器上:
-csflow external pair-token machine-a     # 生成入站配对凭证
-csflow external expose on                # 仅对 /api/external 放行远程访问
-
-# 在【发起委托】的机器上:
-csflow external add-remote machine-b <上一步生成的密钥>
-csflow external callback-url http://this-host:17017
+csflow external pair-token peer-a          # 入站凭证（只打印一次）
+csflow external expose on                  # 仅放开 /api/external 的非本机访问
+# 把密钥、本机可达地址、目标 Flow ID 发给发起方
 ```
 
-对外暴露的永远只有窄小的 `/api/external/*` 面——主 API 保持仅本机可达,且每个入站请求都携带自己的一次性、单任务凭证。
+**发起方（origin，委派出去的机器）：**
 
----
+```bash
+csflow external add-remote peer-a <peer 给的密钥>
+csflow external callback-url http://<origin-host>:17017   # peer 必须能回调到的绝对地址
+```
+
+在编辑器中选择 **远程ClawsomeFlow**，填写对端地址、Flow ID、凭证名称（`peer-a`）。节点运行时 origin 调用 `/api/external/delegate`；peer 结束后回调 origin 的一次性回执 URL。
+
+### 通用接口（webhook）— 两边各配什么
+
+**ClawsomeFlow（origin）：** 编辑器选 **通用接口（webhook）**，填你的端点 URL。按需：
+
+```bash
+csflow external callback-url http://<origin-host>:17017
+csflow external expose on    # 仅当外部系统需从外网访问 /api/external 时
+```
+
+**你的系统：** 接收 `POST` JSON（`schemaVersion: 1`，`event: external_task_dispatch`），内含任务说明、`upstreamOutputs` 与自描述的 `callback`。完成后：
+
+```http
+POST {callbackUrl}
+Authorization: Bearer {callbackToken}
+Content-Type: application/json
+
+{"status": "success", "summary": "交付说明（可带链接/引用）"}
+```
+
+整个对接就是两次 JSON。未知字段应忽略；后续可加字段而不必立刻升 `schemaVersion`。
+
+协作面只暴露 `/api/external/*`；主 API 仍仅本机；每次回执都是一次性、单任务票据。
 
 ## 🤔 为什么是 ClawsomeFlow？
 
-多 Agent 框架常见的痛点不是「模型能力不足」，而是「协作控制流不稳定」：流程写在 Prompt 里，最终行为取决于 Agent 当下的理解和模型质量，系统的可预测性、成本与恢复能力都不够强。
+多智能体落地的难点，很少是「模型不够聪明」，而是**协作没有 Harness**：流程写在 Prompt 里、上下文膨胀、人与其它机器插不进来，长项目变得无法审阅。
 
-ClawsomeFlow 的方法很直接：**把协调从自然语言迁回代码，把并发隔离做成默认能力，把失败处理做成流程内建。**
+ClawsomeFlow 的判断很直接：把协调放进**持久的 Harness**——开放的执行方（人 / 远程 / webhook / 任意 Agent CLI）、短上下文节点、检查点、仓库锁、可观测与可复用——让能力变强时流程不散架。
 
-### 🆚 与其他 Agent 编排平台的对比
-
-| 维度 | 其他多 Agent 编排平台 | ✅ ClawsomeFlow |
+| | 典型「单 Agent + 一次对话」 | ClawsomeFlow |
 |---|---|---|
-| **可复用性** | 一次性执行：过程不可控，难以稳定复用 | **工作流本身即交付物**——一次定义，通过灵活定义执行参数反复重跑，每次稳定收敛产出 |
-| **覆盖范围** | 多数仅限写代码 | **覆盖一人公司所有角色**——市场、内容、运营、客服、研发——编排成一条端到端工作流 |
-| **工程护栏（Harness）** | 普遍缺失，失败靠 Agent 临场发挥 | **Harness engineering**：人工检查点、结果可回滚、投诉闭环机制、定期熵管理 |
-| **任务编排适配** | 多为框架特定，绑定单一生态 | 任务编排 **深度适配 OpenClaw/Hermes Agents**，同时兼容 Claude / Codex / Cursor 等任意 CLI Agent 同图协同 |
-| **并发与隔离** | 并行易竞争，workspace 冲突、上下文串扰 | **多任务并行时 workspace 隔离、可回滚，并彻底解决会话冲突**；**内置跨进程仓库锁，让多分支并行开发与合入绝对可靠** |
-| **可观测性** | 上下文多为黑盒 | 全链路 RunEvent 可追踪、可审计、可回放 |
+| **谁能执行** | 基本是眼前的模型 | 人、远程实例、webhook、多 Agent 平台 |
+| **长项目** | 上下文腐烂，难安全暂停/续跑 | 为长周期 + 等人 + 重跑而设计的 Flow |
+| **成本** | 一个上下文扛一切 | 拆节点 → 更短上下文，更省 token |
+| **可控性** | 指望 Prompt 扛住 | 检查点、子任务重跑、投诉闭环、可回滚 |
+| **并发** | 容易互相踩仓库 | Worktree 隔离 + 内置仓库锁 |
+| **范围** | 偏 coding 演示 | 跨专业、端到端的业务流 |
 
-#### ✨ 最终效果？
-
-**你负责目标，ClawsomeFlow 负责把多 Agent 协同执行做成稳定、可控、可收敛的工程系统。**
-
----
-
-## 🧩 与 ClawTeam 的关系
-
-ClawsomeFlow 构建在 **ClawTeam** 之上。
-
-### 🔍 ClawTeam vs ClawsomeFlow 简要对比
-
-| 维度 | ClawTeam | ClawsomeFlow |
-|---|---|---|
-| **定位** | 群体智能协议底座（Agent 自组织） | Agent 工作流编排平台 |
-| **协作驱动** | Agent 在 Prompt 中自轮询、自调度 | 服务端调度器主动派发，确定性执行 |
-| **协作流程** | 协作流程不可控，更适合一次性任务 | 调度器驱动的确定性工作流，适合可重复、可收敛的工程协作 |
-| **多分支并行可靠性** | **无仓库级合入锁**——基线分支并发合入会竞争、可能损坏 git 元数据，完全不可控 | **内置跨进程仓库锁，保证多分支并行开发的绝对可靠性** |
-| **失败与护栏** | 基础生命周期协议 | 人工检查点 / 回滚 / 投诉闭环 / 熵管理 |
-| **Skill 配置** | 需要在 Agent 平台额外配置 skills | 无需额外配置 skills，开箱即用 |
-| **使用形态** | CLI + MCP + 监控面板 | Web UI + CLI，自然语言全流程治理 |
-| **OpenClaw/Hermes 适配** | 作为可选 CLI Agent 支持 | 深度适配，解决会话与 workspace 并发冲突 |
-
----
+**目标归你。多方执行的掌控，交给 ClawsomeFlow。**
 
 ## 🚀 快速开始
 

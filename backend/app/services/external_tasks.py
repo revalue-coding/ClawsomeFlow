@@ -13,6 +13,51 @@ regular worker does itself:
 2. ``task_update(<clawteam id>, status=completed, force=True)`` so ClawTeam
    unblocks the dependents and the controller mirrors the state next tick.
 
+────────────────────────────────────────────────────────────────────────
+Stable wire protocol (``schemaVersion: 1``) — treat as a public contract.
+Add optional fields freely; never rename/remove required keys without a
+new schemaVersion. Integrators should ignore unknown fields.
+────────────────────────────────────────────────────────────────────────
+
+**A. Webhook dispatch** — ClawsomeFlow → your endpoint (POST JSON)::
+
+    {
+      "schemaVersion": 1,
+      "event": "external_task_dispatch",
+      "runId", "taskId", "agentId", "channel": "webhook",
+      "subject", "description", "outputRequirement",
+      "upstreamOutputs": [{"taskId","subject","fromAgent","summary"}],
+      "callbackUrl", "callbackToken",
+      "callback": {
+        "method": "POST", "url": <callbackUrl>,
+        "auth": "Authorization: Bearer <callbackToken>",
+        "bodyExample": {"status": "success|failed", "summary": "..."}
+      }
+    }
+
+**B. Webhook / external receipt** — your system → ClawsomeFlow::
+
+    POST /api/external/tasks/{runId}/{taskId}/complete
+    Authorization: Bearer <callbackToken>
+    {"status": "success"|"failed", "summary": "<text>"}
+
+**C. Remote ClawsomeFlow delegate** — origin → peer::
+
+    POST {peer}/api/external/delegate
+    Authorization: Bearer <pair-secret>
+    {
+      "flowId", "runtimePrompt"?, "inputs"?,
+      "callbackUrl", "callbackToken",
+      "sourceRunId"?, "sourceTaskId"?
+    }
+    → 202 {"id": <remoteRunId>, "status", "teamName"}
+
+**D. Delegate callback** — peer → origin (on remote run terminal)::
+
+    POST <callbackUrl>   # usually origin's /api/external/tasks/.../complete
+    Authorization: Bearer <callbackToken>
+    {"status": "success"|"failed", "summary": "<leader report>"}
+
 **Ticket scheme** (one-time signed receipt credential, stateless verify):
 
     ticket = "{nonce}.{HMAC-SHA256(internal_token_secret,
@@ -68,6 +113,10 @@ EXTERNAL_TASK_COMPLETED_EVENT = "external_task_completed"
 EXTERNAL_DELEGATE_ACCEPTED_EVENT = "external_delegate_accepted"
 
 _TICKET_CONTEXT = "csflow-external"
+#: Public wire-protocol version stamped on every outbound external package.
+#: Bump only when making a breaking change; keep additive changes on the same
+#: version (unknown fields must be ignored by receivers).
+EXTERNAL_SCHEMA_VERSION = 1
 _EVENT_SCAN_LIMIT = 5000
 _OUTBOUND_TIMEOUT_SEC = 15.0
 _CALLBACK_ATTEMPTS = 3
@@ -203,6 +252,7 @@ async def dispatch_external_task(
     callback_url = _callback_url(run_id, task_id, config=cfg)
 
     outbound_package: dict[str, Any] = {
+        "schemaVersion": EXTERNAL_SCHEMA_VERSION,
         "event": "external_task_dispatch",
         "runId": run_id,
         "taskId": task_id,
@@ -212,15 +262,15 @@ async def dispatch_external_task(
         "callbackToken": ticket,
         # Self-describing completion contract so an integrated system needs no
         # out-of-band documentation: POST this body back when the work is done.
-        # (callbackUrl/callbackToken above are kept as flat legacy fields.)
+        # (callbackUrl/callbackToken above are kept as flat convenience fields.)
         "callback": {
             "method": "POST",
             "url": callback_url,
             "auth": "Authorization: Bearer <callbackToken>  (or body field 'token')",
             "bodyExample": {
                 "status": "success | failed",
-                "summary": "<completion summary — include absolute paths / links "
-                           "to deliverables; on failure: the blocking reason>",
+                "summary": "<completion summary — links/refs to deliverables; "
+                           "on failure: the blocking reason>",
             },
         },
         **package,
@@ -587,6 +637,7 @@ def send_delegate_callback(prepared: dict[str, Any]) -> threading.Thread:
         if not summary:
             summary = f"delegated run finished with status {prepared['run_status']}"
         body = {
+            "schemaVersion": EXTERNAL_SCHEMA_VERSION,
             "token": prepared["token"],
             "status": "success" if prepared["ok"] else "failed",
             "summary": summary,

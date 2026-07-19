@@ -14,12 +14,12 @@
   <a href="./readme.zh.md">简体中文</a>
 </p>
 
-<p><b>Turn your goal into a reusable task flow, and let an active scheduler drive a team of AI agents to execute it — parallel, isolated, observable, and convergent. You orchestrate the work; ClawsomeFlow keeps it under control.</b></p>
+<p><b>A harness for long-running, multi-party work — humans, machines, and any agent platform in one controllable flow.</b></p>
 
-<p><b>Don't just run a one-off task — build a workflow that ships the same result reliably, again and again.</b> Define a Flow once, reuse it flexibly with execution parameters, and re-run it whenever you need it. And it's not just for coding: orchestrate <b>every role of a one-person company</b> — market, content, ops, customer service, engineering — into one <b>end-to-end, reusable</b> workflow.</p>
+<p>Production work is never “AI-only”. Someone has to touch the physical world, approve an irreversible action, or make a judgment call. Teams also span machines and tools — not a single laptop or a single chat. ClawsomeFlow treats <b>people, remote ClawsomeFlow instances, custom webhooks, and CLI agents</b> as first-class executors in the same DAG: reusable, observable, checkpointable, and cost-aware.</p>
 
 <p>
-  <b>Full compatibility with</b> OpenClaw, Claude Code, Codex, Cursor, Hermes and other CLI Agents.
+  Works with <b>OpenClaw, Hermes, Claude Code, Codex, Cursor</b> and other CLI agents — and with <b>any system you already run</b> via a simple webhook contract.
 </p>
 
 <p>
@@ -28,6 +28,7 @@
   <a href="#-news">News</a> ·
   <a href="#-who-should-try-it">Who Should Try It</a> ·
   <a href="#-core-features">Core Features</a> ·
+  <a href="#-external-execution-nodes">External Nodes</a> ·
   <a href="#%EF%B8%8F-how-it-works">How It Works</a> ·
   <a href="#-why-clawsomeflow">Why ClawsomeFlow</a> ·
   <a href="#-contributor-local-deploy-and-test">Contributor Local Deploy</a> ·
@@ -39,7 +40,6 @@
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/Frontend-React_18-61DAFB?style=for-the-badge&logo=react&logoColor=black">
-  <img alt="Built on ClawTeam" src="https://img.shields.io/badge/Built_on-ClawTeam-FF6B6B?style=for-the-badge&logo=git&logoColor=white">
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-4ECDC4?style=for-the-badge">
   <a href="https://discord.gg/hcpMwXnrkM"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
@@ -56,38 +56,32 @@
 
 ## 🎯 Who Should Try It?
 
-- Builders of an **AI-native one-person company** who want to orchestrate **every role — not just coding** (market, content, ops, customer service, engineering) into one **end-to-end** workflow; founders and operators who systematically delegate repeatable work to agent teams;
-- Developers and teams who need multiple agents to collaborate like a real team (plan, implement, verify, converge) — not just more chat windows;
-- Ambitious **super-individual** creators — one person steering many specialized agents to continuously amplify output;
-- Engineering-minded folks **done with prompt-only black-box orchestration** — predictable behavior, controllable cost, rollback guardrails;
-- Building a software engineering agent team that can **develop in parallel across local branches**.
+- Operators building **AI-native businesses** where work crosses people, tools, and machines — not just a coding sandbox;
+- Teams that need **human checkpoints**, irreversible approvals, or real-world steps inside an otherwise automated flow;
+- Builders who want **OpenClaw / Hermes / Claude / Codex / Cursor** (and custom agent stacks) collaborating in one graph;
+- Anyone tired of **one long chat context** for complex, multi-week work — and who wants reusable, auditable, cost-controlled runs.
 
 ---
 
 ## ✨ Core Features
 
-ClawsomeFlow turns scattered AI agents into a controllable engineering system — from the first instruction to the final, reviewable result.
+ClawsomeFlow is a **harness**: it keeps long-cycle, multi-executor work stable — so capability scales without the process collapsing into an unreviewable chat transcript.
 
-| 🗣️ Get it done in natural language | 🧠 Precise orchestration, not guesswork | 🚀 Many agents, one graph |
+| 🤝 Human + machine + any agent platform | 🔗 Cross-machine collaboration | 🧩 Bring your own executor |
 |---|---|---|
-| Define flows, create agents, orchestrate tasks, and step in at runtime — all by describing what you want. No glue code, no SDK wrangling. | Control flow lives in code, not in a prompt. The scheduler decides dispatch, retry, timeout and convergence — so behavior is predictable and tokens aren't wasted. | Lay out your work as a DAG and let multiple agents collaborate in parallel; a leader summarizes and converges the results into one deliverable. |
+| People, local agents, remote ClawsomeFlow, and custom systems sit in the **same DAG** with the same dependency and completion semantics. | Delegate a subtask to another machine’s Flow; stitch results back as upstream context. | A minimal webhook contract — or a custom agent platform you build yourself — plugs in without rewriting the scheduler. |
 
-| 🔐 Isolation & rollback by default | 📊 Observability you can audit | 🔄 A system that improves itself |
+| ♻️ Reusable & reliably repeatable | 🎛️ Controllable process | 💸 Cost-aware by design |
 |---|---|---|
-| Built on Git worktree isolation with a **built-in cross-process repo lock**, ensuring absolute reliability of all agent collaboration behaviors; supports intelligent merge and rollback, and any merge can be quickly checked and  **reverted with one click**, plus optional human checkpoints for in-flight course correction. | Every dispatch, completion and failure is recorded as a RunEvent — each run is traceable, replayable and reviewable, with no black boxes. | Not happy with a result? File a complaint and the system reflects, reworks, and writes the lesson back — so the next run is better than the last. |
+| Define a Flow once; re-run with parameters. Same structure, stable output — not a one-off prompt. | Human checkpoints, selective re-run of subtasks, complaint/improve loops. You steer; the harness remembers. | Split work across nodes so each executor sees a short, relevant context — far cheaper than one mega-agent carrying the whole project. |
 
-| ♻️ Reusable, reliably repeatable workflows | 🏢 End-to-end workflows for every role of a one-person company |
+| ⏪ Rollback & repo safety | 👁 Observable end-to-end | 🌱 Self-improving runs |
+|---|---|---|
+| Worktree isolation plus a **built-in cross-process repo lock** so parallel edits don’t corrupt the baseline; merges and results stay reviewable and revertible. | Every dispatch, hand-off, and failure is a RunEvent — live board, edge inbox messages, full replay. | Not happy? Complain; the system reworks and records the lesson for the next run. |
+
+| ⏳ Built for long cycles | 🏢 Beyond coding |
 |---|---|
-| Define a Flow once, reuse it with runtime parameters — stable, convergent, and auditable every time, not a one-off task. | Beyond coding: orchestrate market, content, ops, customer service, and engineering into one end-to-end, reusable workflow. |
-
-ClawsomeFlow inherits the following capabilities from ClawTeam:
-
-- **Git Worktree parallel isolation foundation**: each Agent has an independent branch and directory, naturally fitting multi-agent parallel development.
-- **Inter-Agent messaging**: point-to-point inbox and broadcast, so team members share progress in real time.
-
-> On top of this, ClawsomeFlow adds **AI combined with precise orchestration, enhanced Harness engineering (built-in cross-process repo lock for absolutely reliable multi-branch parallel development, intelligent merge and rollback — including a post-run per-agent Run diff and one-click merge revert, complaint-loop mechanism, optional human checkpoints for in-flight correction), deep OpenClaw/Hermes adaptation, and Web productization**.
-
----
+| Flows can span hours to weeks: human wait times, remote jobs, and multi-specialty hand-offs without losing the thread. | Market, ops, content, support, engineering — any specialty that can report a result can be a node. |
 
 ## 🛠️ How It Works
 
@@ -95,10 +89,10 @@ From a sentence to a shipped result. You stay in charge of the goal; ClawsomeFlo
 
 ![ClawsomeFlow task orchestration framework](./docs/assets/flow-orchestration-overview.png)
 
-1. **Describe your goal** — Tell ClawsomeFlow what you want in plain language, or compose a Flow visually as a graph of tasks and dependencies.
-2. **Agents run in parallel** — The scheduler actively dispatches ready tasks to the right agents, each in its own isolated workspace, and drives them to completion.
-3. **Watch, steer, recover** — Follow every step live. Retry, skip or abort with clear strategies, and approve results at human checkpoints before anything lands.
-4. **Converge & deliver** — A leader merges the parallel work into one reviewed deliverable — and the run history stays fully auditable.
+1. **Describe your goal** — Compose a Flow as a graph: local agents, humans, webhooks, and remote ClawsomeFlow nodes as needed.
+2. **Executors run their part** — The harness dispatches ready nodes (parallel where possible), isolates agent workspaces, and waits on people or remote systems without losing the thread.
+3. **Watch, steer, recover** — Live board (including inbox hand-offs on dependency edges), checkpoints, selective re-run, retry/skip/abort.
+4. **Converge & deliver** — A leader summarizes into one reviewed result; history stays auditable and improvable.
 
 ---
 
@@ -138,73 +132,78 @@ Developer mode offers **software-development collaboration projects** a more fle
 
 ---
 
-## 🌐 External Execution Nodes — humans, black-box systems, and remote machines in one DAG
+## 🌐 External Execution Nodes
 
-A large project can never be 100% agent-executed — some steps need a human hand (sign a contract, inspect hardware, make a judgment call), and some belong to another system or another machine. **External execution nodes** open up the definition of "executor": a task in your DAG can be owned by
+Real projects always leave the “AI-only” box: a person must inspect hardware, approve a payment, or decide under ambiguity; another team’s system must run a black-box step; another machine already hosts the right Flow. **External nodes** make those executors first-class citizens in your DAG — no local process, no worktree, same unblock / upstream-summary semantics as any agent.
 
-- **🙋 A human** — the task shows up as a todo card on the Run page (optionally pushed to Feishu / Telegram / Slack via the Flow's notify webhooks); the person does the work and submits the result right there.
-- **📦 Any system of yours (generic interface)** — ClawsomeFlow POSTs the task package (with upstream outputs and a one-time signed callback ticket) to your endpoint; your black box does whatever it does, then calls back with the result. Two JSON messages — that's the whole integration.
-- **🖥️ A remote ClawsomeFlow** — delegate the task to a Flow on another machine; its leader report comes back as this node's output. Two machines' DAGs stitched together through one node.
+Three owner kinds (Flow editor → Owner source → **External execution**):
 
-External nodes spawn no process and own no worktree or branch — but they sit in the same dependency graph with the same completion semantics: downstream tasks unblock on their completion and automatically receive their result summaries as upstream context. Timeouts are fully configurable (including "no timeout" for human tasks that take days), and failures flow through the same retry/skip/abort policies as any agent.
+| Owner kind | Who runs it | How the result returns |
+|---|---|---|
+| **Human** | A person on the Run page (optional chat notify) | Submit result on the todo card |
+| **Remote ClawsomeFlow** | A Flow on another ClawsomeFlow instance | Peer runs unattended; leader report callbacks |
+| **Generic interface (webhook)** | Any HTTP service you own | POST task package → your system callbacks |
 
-Set it up in the Flow editor (owner source → "External executor"), and for cross-machine collaboration pair the two instances once:
+Open the Flow editor to copy the **Flow ID** — remote peers need it when configuring a Remote ClawsomeFlow node.
+
+### Remote ClawsomeFlow — what to configure
+
+**On the machine that ACCEPTS work (peer):**
 
 ```bash
-# On the machine that ACCEPTS delegations:
-csflow external pair-token machine-a     # generate the inbound credential
-csflow external expose on                # allow remote callers on /api/external only
-
-# On the machine that DELEGATES:
-csflow external add-remote machine-b <secret-from-above>
-csflow external callback-url http://this-host:17017
+csflow external pair-token peer-a          # inbound credential (print once)
+csflow external expose on                  # allow non-loopback /api/external only
+# Share the secret + this host’s base URL + the target Flow ID with the origin.
 ```
 
-Only the narrow `/api/external/*` surface is ever exposed — the main API stays loopback-only, and every inbound call carries its own one-time, single-task credential.
+**On the machine that DELEGATES (origin):**
 
----
+```bash
+csflow external add-remote peer-a <secret-from-peer>
+csflow external callback-url http://<origin-host>:17017   # absolute URL peer can reach
+```
+
+In the Flow editor, pick **Remote ClawsomeFlow**, set peer base URL, Flow ID, and credential name (`peer-a`). When the node runs, origin POSTs `/api/external/delegate`; when the peer finishes, it POSTs back to origin’s one-time receipt URL.
+
+### Generic interface (webhook) — what to configure
+
+**On ClawsomeFlow (origin):** in the editor, pick **Generic interface (webhook)** and set your endpoint URL. Optionally set:
+
+```bash
+csflow external callback-url http://<origin-host>:17017
+csflow external expose on    # only if the partner must reach /api/external from outside
+```
+
+**On your system:** accept `POST` JSON (`schemaVersion: 1`, `event: external_task_dispatch`) containing the task sheet, `upstreamOutputs`, and a self-describing `callback` block. When done:
+
+```http
+POST {callbackUrl}
+Authorization: Bearer {callbackToken}
+Content-Type: application/json
+
+{"status": "success", "summary": "what you delivered (links/refs welcome)"}
+```
+
+That is the whole integration — two JSON messages. Unknown fields are ignored; additive fields may appear in later releases without bumping `schemaVersion`.
+
+Only `/api/external/*` is ever exposed for this collaboration surface. The main API stays loopback-only; every receipt uses a one-time, single-task ticket.
 
 ## 🤔 Why ClawsomeFlow?
 
-The common pain point of multi-agent frameworks is not "insufficient model capability", but "unstable collaboration control flow": the process is written in the Prompt, the final behavior depends on the Agent's in-the-moment understanding and model quality, and the system's predictability, cost and recoverability are all too weak.
+The hard part of agentic work is rarely “the model isn’t smart enough”. It’s that **collaboration has no harness**: process lives in a prompt, context balloons, humans and other machines can’t join cleanly, and long projects become unreviewable.
 
-ClawsomeFlow's approach is direct: **migrate coordination from natural language back into code, make concurrency isolation a default capability, and make failure handling a built-in part of the process.**
+ClawsomeFlow’s bet is simple: **put coordination in a durable harness** — open executors (human / remote / webhook / any agent CLI), short per-node context, checkpoints, locks, observability, and reuse — so capability can grow without the process falling apart.
 
-### 🆚 Comparison with Other Agent Orchestration Platforms
-
-| Dimension | Other Multi-Agent Orchestration Platforms | ✅ ClawsomeFlow |
+| | Typical “one agent + one chat” | ClawsomeFlow |
 |---|---|---|
-| **Reusability** | One-off execution: the process is uncontrollable and hard to reuse reliably | **Workflows are the deliverable** — define once, re-run flexibly via execution parameters for stable, convergent output every time |
-| **Scope** | Mostly coding-only | **Every role of a one-person company** — market, content, ops, customer service, engineering — as one end-to-end workflow |
-| **Engineering harness** | Generally missing; failures rely on Agent improvisation | **Harness engineering**: human checkpoints, rollbackable results, complaint-loop mechanism, periodic entropy management |
-| **Task orchestration fit** | Mostly framework-specific, bound to a single ecosystem | Task orchestration is **deeply adapted to OpenClaw/Hermes Agents**, while also being compatible with any CLI Agent (Claude / Codex / Cursor, etc.) collaborating in the same graph |
-| **Concurrency & isolation** | Easy contention in parallel, workspace conflicts, context cross-talk | **Workspace isolation and rollback under multi-task parallelism, and thoroughly resolves session conflicts**; **built-in cross-process repo lock makes parallel multi-branch development and merging absolutely reliable** |
-| **Observability** | Context is mostly a black box | Full-chain RunEvent — traceable, auditable, replayable |
+| **Who can execute** | Mostly the model in front of you | Humans, remote instances, webhooks, many agent platforms |
+| **Long projects** | Context rot; hard to pause / resume safely | Flows built for long cycles + human wait + re-run |
+| **Cost** | One context carries everything | Split nodes → shorter contexts, lower token spend |
+| **Control** | Hope the prompt holds | Checkpoints, selective re-run, complaint loop, rollback |
+| **Concurrency** | Easy to step on the same repo | Worktree isolation + built-in repo lock |
+| **Scope** | Coding demos | Cross-specialty, end-to-end operational flows |
 
-#### ✨ The Result?
-
-**You own the goal, and ClawsomeFlow turns multi-agent collaborative execution into a stable, controllable, convergent engineering system.**
-
----
-
-## 🧩 Relationship with ClawTeam
-
-ClawsomeFlow is built on top of **ClawTeam**.
-
-### 🔍 ClawTeam vs ClawsomeFlow at a Glance
-
-| Dimension | ClawTeam | ClawsomeFlow |
-|---|---|---|
-| **Positioning** | Swarm-intelligence protocol foundation (Agent self-organization) | Agent workflow orchestration platform |
-| **Collaboration driver** | Agents self-poll and self-schedule in the Prompt | Server-side scheduler actively dispatches, deterministic execution |
-| **Collaboration flow** | Collaboration flow is uncontrollable; better suited to one-off tasks | Scheduler-driven deterministic workflows, suited to repeatable, convergent engineering collaboration |
-| **Parallel-merge reliability** | **No repo-level merge lock** — concurrent baseline merges race and can corrupt git metadata; completely uncontrolled | **Built-in cross-process repo lock guarantees the absolute reliability of parallel multi-branch development** |
-| **Failure & guardrails** | Basic lifecycle protocol | Human checkpoints / rollback / complaint-loop / entropy management |
-| **Skill configuration** | Requires extra skill setup on the Agent platform | No extra skill configuration needed, works out of the box |
-| **Usage form** | CLI + MCP + monitoring dashboard | Web UI + CLI, full-flow governance in natural language |
-| **OpenClaw/Hermes adaptation** | Supported as an optional CLI Agent | Deeply adapted, resolving session and workspace concurrency conflicts |
-
----
+**You own the goal. ClawsomeFlow keeps the multi-party execution under control.**
 
 ## 🚀 Quick Start
 

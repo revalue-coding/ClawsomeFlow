@@ -235,6 +235,8 @@ const zh = {
   flowEditor: {
     titleNew: "新建 Flow",
     titleEdit: "编辑 Flow",
+    flowIdLabel: "Flow ID",
+    flowIdCopy: "复制 Flow ID（远程 ClawsomeFlow 委派时需要）",
     flowBasics: "Flow 基础信息",
     easyMode: "省心模式",
     easyModeSub: "Agent 自动把全部成果并入项目，完成后仍可统一反馈",
@@ -737,6 +739,8 @@ const zh = {
     },
     boardOpenNew: "在新窗口打开",
     boardEmpty: "正在派发任务，依赖图会在任务进入执行后显示。",
+    boardEdgeInboxTitle: "沿此依赖传递的 inbox 消息",
+    boardEdgeInboxEmpty: "（尚无 inbox 消息）",
     boardTaskListTitle: "已执行 / 执行中任务",
     boardNodeRunning: "执行中",
     boardNodeDone: "已完成",

@@ -270,6 +270,11 @@ def test_build_external_task_text_has_no_clawteam_protocol() -> None:
     assert "schematics at /wt/s.pdf" in text
     assert "clawteam" not in text  # no protocol steps for external executors
     assert "_csflow_unattended" not in text  # internal markers stay hidden
+    # External nodes own no worktree — never inject workspace path/branch lines
+    # (a completion summary may still mention paths the upstream agent wrote).
+    assert "worktree:" not in text
+    assert "base branch" not in text
+    assert "no shared worktree path" in text.lower() or "no shared" in text.lower()
 
 
 def test_build_external_task_package_fields() -> None:
@@ -279,6 +284,7 @@ def test_build_external_task_package_fields() -> None:
     assert pkg["leaderAgentId"] == "leader"
     assert pkg["runtimeInputs"] == {"goal": "v1"}
     assert pkg["upstreamOutputs"][0]["taskId"] == "t0"
+    assert "worktreePath" not in pkg["upstreamOutputs"][0]
 
 
 def test_build_external_task_package_splits_output_requirement() -> None:
@@ -549,9 +555,10 @@ def test_dispatch_webhook_outbound_includes_callback_contract(
     body = captured["body"]
     assert captured["url"] == "https://partner.example/tasks"
     assert body["event"] == "external_task_dispatch"
+    assert body["schemaVersion"] == 1
     assert body["description"] == "briefing"
     assert body["outputRequirement"] == "a verdict"
-    # Self-describing completion contract (flat legacy fields kept too).
+    # Self-describing completion contract (flat convenience fields kept too).
     assert body["callback"]["method"] == "POST"
     assert body["callback"]["url"] == body["callbackUrl"]
     assert body["callback"]["bodyExample"]["status"] == "success | failed"

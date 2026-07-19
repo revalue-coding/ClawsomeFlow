@@ -2156,11 +2156,34 @@ export function FlowEditor() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-ink-900">
-          {isNew ? t("flowEditor.titleNew") : t("flowEditor.titleEdit")}
-        </h1>
-        <div className="flex gap-2">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold text-ink-900">
+            {isNew ? t("flowEditor.titleNew") : t("flowEditor.titleEdit")}
+          </h1>
+          {!isNew && id && (
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-ink-500">
+              <span>{t("flowEditor.flowIdLabel")}</span>
+              <code className="rounded bg-ink-100 px-1.5 py-0.5 font-mono text-ink-800">
+                {id}
+              </code>
+              <button
+                type="button"
+                className="btn-outline !px-2 !py-0.5 text-xs"
+                onClick={() => {
+                  void navigator.clipboard.writeText(id).then(
+                    () => undefined,
+                    () => undefined,
+                  );
+                }}
+                title={t("flowEditor.flowIdCopy")}
+              >
+                {t("common.copy")}
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 gap-2">
           <button
             className="btn-outline"
             onClick={() => {
