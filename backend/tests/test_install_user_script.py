@@ -33,6 +33,7 @@ def _build_fake_env(
     existing_deployment: bool,
     pip_candidate_version: str,
     stable_versions: list[str] | None = None,
+    eat_stdin: bool = False,
 ) -> tuple[dict[str, str], Path]:
     home_dir = tmp_path / "home"
     home_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +175,13 @@ EOF
           echo "0.1.0"
           exit 0
         fi
+        # Simulate a child that inherits the piped stdin (as a real agent-runtime
+        # probe/subprocess does during upgrade-runtime) and drains it to EOF. If
+        # the installer were a flat top-level call sequence, this would swallow the
+        # unread script tail and truncate the run; the main() wrap must prevent it.
+        if [[ "${CSFLOW_TEST_EAT_STDIN:-0}" == "1" && "${1:-}" == "upgrade-runtime" ]]; then
+          cat >/dev/null 2>&1 || true
+        fi
         printf '%s\\n' "$*" >> "${CSFLOW_TEST_LOG_DIR:?}/csflow.commands"
         exit 0
         """,
@@ -252,6 +260,7 @@ EOF
             "CSFLOW_TEST_PIP_CANDIDATE_VERSION": pip_candidate_version,
             "CSFLOW_TEST_FAKE_BIN": str(fake_bin),
             "CSFLOW_PYPI_JSON_URL": pypi_json_url,
+            "CSFLOW_TEST_EAT_STDIN": "1" if eat_stdin else "0",
         }
     )
     return env, log_dir
@@ -267,6 +276,7 @@ def _run_installer(
     via_stdin: bool = False,
     existing_deployment: bool = False,
     stable_versions: list[str] | None = None,
+    eat_stdin: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
     env, log_dir = _build_fake_env(
         tmp_path,
@@ -275,6 +285,7 @@ def _run_installer(
         existing_deployment=existing_deployment,
         pip_candidate_version=pip_candidate_version,
         stable_versions=stable_versions,
+        eat_stdin=eat_stdin,
     )
     base_args = ["--yes", "--skip-linger", *args]
     if via_stdin:
@@ -363,6 +374,32 @@ def test_install_user_supports_remote_pipe_execution(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     install_cmd = _first_clawsomeflow_install_cmd(pip_commands)
     assert "--pre" not in install_cmd
+
+
+def test_install_user_pipe_survives_stdin_draining_child(tmp_path: Path) -> None:
+    """A child spawned mid-install (here the fake ``csflow upgrade-runtime``) that
+    inherits and drains the piped stdin must NOT be able to truncate the run.
+
+    Regression guard for the `curl … | bash` footgun: the installer wraps its
+    orchestration in ``main()`` invoked on the last line, forcing bash to read the
+    whole script before any step runs. Without that guard the stdin-eater would
+    swallow the unread tail ([8/11]..health) and bash would exit 0 silently before
+    starting the service. We therefore assert the FINAL step still executed.
+    """
+    result, _, csflow_commands = _run_installer(
+        tmp_path,
+        args=[],
+        via_stdin=True,
+        existing_deployment=True,
+        eat_stdin=True,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    # The very last installer step prints this line; its presence proves the
+    # script tail was not consumed by the stdin-draining child.
+    assert "Current deployed version:" in combined, combined
+    # The upgrade-runtime child (the stdin eater) still ran on the existing deploy.
+    assert "upgrade-runtime --yes --no-restart-service" in csflow_commands
 
 
 def test_install_user_first_time_uses_install_pipeline(tmp_path: Path) -> None:

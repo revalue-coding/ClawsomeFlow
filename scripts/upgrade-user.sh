@@ -154,6 +154,13 @@ Run the installer instead:
   curl -fsSL https://clawsomeflow.com/install.sh | bash"
 fi
 
+# Run the upgrade pipeline inside main() invoked on the LAST line — see the long
+# note in install-user.sh. Under `curl … | bash` this guarantees bash reads the
+# whole script before any long step (pip / `csflow upgrade-runtime`) runs, so a
+# child that inherits the piped stdin cannot swallow the unread script tail
+# ([2/4]..[4/4]) and make bash exit 0 silently before the health check.
+# Body kept at original indentation on purpose to preserve the heredocs below.
+main() {
 if [[ "${USE_PRE}" == "1" ]]; then
   say "[1/4] Upgrading clawsomeflow package (pre-release channel)"
   "${VENV_BIN}/pip" install --upgrade --index-url "${PYPI_INDEX_URL}" --pre clawsomeflow \
@@ -211,3 +218,6 @@ else
   warn "Upgrade finished (${installed_version}) but the health check did not pass within 60s: ${health_url}"
   warn "Inspect with: ${VENV_BIN}/csflow doctor   /   ${VENV_BIN}/csflow logs tail -f"
 fi
+}
+
+main "$@"

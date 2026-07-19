@@ -606,20 +606,34 @@ print_deployed_version() {
   say "Current deployed version: ${deployed_version}"
 }
 
-say "🦞 ClawsomeFlow end-user installer"
-probe_existing_deployment
-ensure_local_bin_in_path
-ensure_python311
-ensure_os_packages
-ensure_runtime_venv
-ensure_clawteam_runtime
-install_clawsomeflow
-install_launchers
-reconcile_installation
-write_user_service
-enable_linger_if_possible
-verify_runtime_stack
-start_user_service
-health_check
-print_deployed_version
+# Run the whole orchestration inside main() invoked on the LAST line.
+# When executed via `curl … | bash`, bash reads this script from a pipe. If the
+# steps were called sequentially at top level, bash would still have the script
+# tail unread in the pipe while a long step runs — and any child that inherits
+# that pipe as stdin and reads it (e.g. an agent-runtime probe/subprocess spawned
+# during `csflow upgrade-runtime`) would swallow the not-yet-read remainder,
+# leaving bash to hit EOF and exit 0 silently mid-install (skipping [8/11]..health).
+# Wrapping the flow in a function forces bash to read the ENTIRE script before
+# executing any step, so the pipe is already fully consumed and no child can
+# truncate the run. Do not revert to a flat top-level call sequence.
+main() {
+  say "🦞 ClawsomeFlow end-user installer"
+  probe_existing_deployment
+  ensure_local_bin_in_path
+  ensure_python311
+  ensure_os_packages
+  ensure_runtime_venv
+  ensure_clawteam_runtime
+  install_clawsomeflow
+  install_launchers
+  reconcile_installation
+  write_user_service
+  enable_linger_if_possible
+  verify_runtime_stack
+  start_user_service
+  health_check
+  print_deployed_version
+}
+
+main "$@"
 

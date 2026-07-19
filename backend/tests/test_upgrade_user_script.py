@@ -23,6 +23,7 @@ def _build_fake_env(
     *,
     pip_fail_pinned_only: bool = False,
     stable_versions: list[str] | None = None,
+    eat_stdin: bool = False,
 ) -> tuple[dict[str, str], Path]:
     home_dir = tmp_path / "home"
     venv_bin = home_dir / ".clawsomeflow" / ".venv" / "bin"
@@ -56,6 +57,12 @@ def _build_fake_env(
         if [[ "${1:-}" == "version" ]]; then
           echo "0.1.0"
           exit 0
+        fi
+        # Mimic a child that inherits and drains the piped stdin during the
+        # upgrade-runtime step. The main() wrap must keep the script tail ([4/4]
+        # health check) intact regardless.
+        if [[ "${CSFLOW_TEST_EAT_STDIN:-0}" == "1" && "${1:-}" == "upgrade-runtime" ]]; then
+          cat >/dev/null 2>&1 || true
         fi
         printf '%s\\n' "$*" >> "${CSFLOW_TEST_LOG_DIR:?}/csflow.commands"
         exit 0
@@ -121,6 +128,7 @@ def _build_fake_env(
             "CSFLOW_TEST_PIP_FAIL": "0",
             "CSFLOW_TEST_PIP_FAIL_PINNED": "1" if pip_fail_pinned_only else "0",
             "CSFLOW_PYPI_JSON_URL": pypi_json_url,
+            "CSFLOW_TEST_EAT_STDIN": "1" if eat_stdin else "0",
         }
     )
     return env, log_dir
@@ -132,20 +140,34 @@ def _run_upgrader(
     args: list[str],
     pip_fail_pinned_only: bool = False,
     stable_versions: list[str] | None = None,
+    via_stdin: bool = False,
+    eat_stdin: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
     env, log_dir = _build_fake_env(
         tmp_path,
         pip_fail_pinned_only=pip_fail_pinned_only,
         stable_versions=stable_versions,
+        eat_stdin=eat_stdin,
     )
-    result = subprocess.run(
-        ["bash", str(UPGRADE_SCRIPT), *args],
-        cwd=REPO,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    if via_stdin:
+        result = subprocess.run(
+            ["bash", "-s", "--", *args],
+            input=UPGRADE_SCRIPT.read_text(encoding="utf-8"),
+            cwd=REPO,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    else:
+        result = subprocess.run(
+            ["bash", str(UPGRADE_SCRIPT), *args],
+            cwd=REPO,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
     pip_log = log_dir / "pip.commands"
     pip_commands = pip_log.read_text(encoding="utf-8").splitlines() if pip_log.exists() else []
     csflow_log = log_dir / "csflow.commands"
@@ -217,6 +239,25 @@ def test_upgrade_user_pinned_stable_failure_retries_quietly(tmp_path: Path) -> N
         for cmd in pip_commands
     )
     assert "upgrade-runtime --restart-service" in csflow_commands
+
+
+def test_upgrade_user_pipe_survives_stdin_draining_child(tmp_path: Path) -> None:
+    """`curl … | bash` regression guard: a child that drains the piped stdin
+    during ``csflow upgrade-runtime`` must not truncate the script tail ([4/4]
+    health check). The upgrader wraps its pipeline in ``main()`` called on the
+    last line so bash reads the whole script before any step runs.
+    """
+    result, _, csflow_commands = _run_upgrader(
+        tmp_path,
+        args=[],
+        via_stdin=True,
+        eat_stdin=True,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "upgrade-runtime --restart-service" in csflow_commands
+    # [4/4] runs only if the tail survived the stdin-draining upgrade-runtime child.
+    assert "[4/4]" in combined, combined
 
 
 def test_upgrade_user_help_documents_cli_and_pep668_safety() -> None:
