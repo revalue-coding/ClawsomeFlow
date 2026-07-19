@@ -410,6 +410,30 @@ def _remove_task_decomposer_skill(cfg: Config) -> list[str] | None:
     return warnings or None
 
 
+def _enable_external_api_expose_default(_cfg: Config) -> list[str] | None:
+    """Flip historical ``external_api_expose=False`` → True (default open).
+
+    The /api/external surface is credential-gated (one-time ticket / pairing
+    secret), so opening non-loopback access needs no CLI opt-in. Pre-change
+    configs (and any ``save_config`` that persisted the old False default)
+    would otherwise leave upgrade-only users closed while fresh installs are
+    open. Runs once via the migrations ledger; operators who want lockdown
+    afterwards run ``csflow external expose off`` (that False sticks).
+    """
+    from app.config import load_config, save_config
+    from app.integrations.internal_token import ensure_api_token_initialised
+
+    current = load_config(force_reload=True)
+    if current.external_api_expose:
+        return None
+    updated = ensure_api_token_initialised(
+        current.model_copy(update={"external_api_expose": True}),
+    )
+    save_config(updated)
+    logger.info("upgrade_external_api_expose_enabled_default")
+    return None
+
+
 # Register migrations in chronological order. Newer entries come last.
 # Each ``apply`` MUST be idempotent (re-runnable). A migration runs once ever,
 # gated by the applied-migrations ledger (see module docstring).
@@ -433,6 +457,15 @@ MIGRATIONS: list[Migration] = [
         version="0.1.15b1",
         description="remove deleted csflow-task-decomposer skill from workspaces",
         apply=_remove_task_decomposer_skill,
+        critical=False,
+    ),
+    # 0.2.0b3: /api/external defaults open (credential-gated). Flip historical
+    # False → True once so upgrade-only users match fresh installs without
+    # ``csflow external expose on``. See _enable_external_api_expose_default.
+    Migration(
+        version="0.2.0b3",
+        description="default-open /api/external (flip historical expose=False)",
+        apply=_enable_external_api_expose_default,
         critical=False,
     ),
 ]

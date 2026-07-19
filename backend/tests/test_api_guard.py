@@ -146,3 +146,76 @@ def test_evaluate_ipv6_loopback_host() -> None:
 def test_evaluate_missing_host_allows_with_token() -> None:
     req = _FakeReq({"authorization": f"Bearer {_TOKEN}"})
     assert evaluate(req, _TOKEN) is None  # type: ignore[arg-type]
+
+
+# ── Law 1: remote source IPs may reach ONLY /api/external/* ───────────
+
+
+def _remote_client_app(client_host: str = "203.0.113.9"):
+    """Wrap the app so every connection appears to come from *client_host*."""
+    inner = create_app()
+
+    async def wrapped(scope, receive, send):
+        scope = dict(scope)
+        scope["client"] = (client_host, 55555)
+        await inner(scope, receive, send)
+
+    return wrapped
+
+
+def test_remote_client_blocked_from_main_api() -> None:
+    with TestClient(_remote_client_app(), base_url="http://127.0.0.1:17017") as c:
+        r = c.get("/api/flows")
+        assert r.status_code == 403
+        assert r.json()["error"] == "REMOTE_NOT_ALLOWED"
+
+
+def test_remote_client_cannot_forge_same_origin_headers() -> None:
+    """A remote socket + forged loopback Host + Sec-Fetch-Site must NOT pass."""
+    _set_token(_TOKEN)
+    with TestClient(_remote_client_app(), base_url="http://127.0.0.1:17017") as c:
+        r = c.get(
+            "/api/flows",
+            headers={"Host": "127.0.0.1", "Sec-Fetch-Site": "same-origin"},
+        )
+        assert r.status_code == 403
+        assert r.json()["error"] == "REMOTE_NOT_ALLOWED"
+
+
+def test_remote_client_blocked_from_spa_and_health() -> None:
+    with TestClient(_remote_client_app(), base_url="http://127.0.0.1:17017") as c:
+        assert c.get("/health").status_code == 403
+        assert c.get("/").status_code == 403
+
+
+def test_remote_client_allowed_on_external_prefix() -> None:
+    # Reaches the endpoint; rejected only by the endpoint's own ticket auth.
+    with TestClient(_remote_client_app(), base_url="http://203.0.113.9:17017") as c:
+        r = c.post(
+            "/api/external/tasks/r1/t1/complete",
+            json={"status": "success", "summary": "x", "token": "a.b"},
+        )
+        assert r.status_code == 401
+        assert r.json()["error"] == "EXTERNAL_TICKET_INVALID"
+
+
+def test_remote_client_blocked_from_websocket() -> None:
+    import pytest as _pytest
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(_remote_client_app(), base_url="http://127.0.0.1:17017") as c:
+        with _pytest.raises(WebSocketDisconnect):
+            with c.websocket_connect("/ws/run-nonexistent"):
+                pass  # pragma: no cover - handshake must be rejected
+
+
+def test_loopback_client_still_reaches_websocket_route() -> None:
+    """Loopback clients pass Law 1 and reach the route's own logic (4404)."""
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(create_app(), base_url="http://127.0.0.1:17017") as c:
+        try:
+            with c.websocket_connect("/ws/run-nonexistent"):
+                pass
+        except WebSocketDisconnect as exc:
+            assert exc.code == 4404

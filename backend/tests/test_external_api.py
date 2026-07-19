@@ -313,37 +313,64 @@ def test_delegate_unknown_flow_404(
 # ── guard: /api/external Host rule ──────────────────────────────────────
 
 
-def test_external_prefix_blocked_for_remote_host_by_default() -> None:
-    # Non-loopback Host + expose OFF → 403 before reaching the endpoint.
+def test_external_prefix_allows_remote_host_by_default() -> None:
+    # Default-open: non-loopback Host reaches the endpoint (ticket auth decides).
+    cfg = load_config()
+    assert cfg.external_api_expose is True
     with TestClient(create_app(), base_url="http://203.0.113.5:17017") as c:
         r = c.post(
             "/api/external/tasks/r1/t1/complete",
             json={"status": "success", "summary": "x", "token": "a.b"},
         )
-        assert r.status_code == 403
-        assert r.json()["error"] == "HOST_NOT_ALLOWED"
+        assert r.status_code == 401
+        assert r.json()["error"] == "EXTERNAL_TICKET_INVALID"
 
 
-def test_external_prefix_allows_remote_host_when_exposed() -> None:
+def test_external_prefix_blocked_for_remote_host_when_locked_down() -> None:
+    # Opt-out: ``csflow external expose off`` re-locks to loopback-only.
     cfg = load_config()
-    save_config(cfg.model_copy(update={"external_api_expose": True}))
+    save_config(cfg.model_copy(update={"external_api_expose": False}))
     try:
         with TestClient(create_app(), base_url="http://203.0.113.5:17017") as c:
             r = c.post(
                 "/api/external/tasks/r1/t1/complete",
                 json={"status": "success", "summary": "x", "token": "a.b"},
             )
-            # Passed the Host gate; rejected by the endpoint's own ticket auth.
-            assert r.status_code == 401
-            assert r.json()["error"] == "EXTERNAL_TICKET_INVALID"
+            assert r.status_code == 403
+            assert r.json()["error"] == "HOST_NOT_ALLOWED"
     finally:
         save_config(load_config().model_copy(
-            update={"external_api_expose": False},
+            update={"external_api_expose": True},
         ))
 
 
-def test_main_api_still_loopback_only_when_exposed() -> None:
-    # Widening /api/external must NOT loosen the main /api surface.
+def test_external_lockdown_blocks_remote_client_with_forged_loopback_host() -> None:
+    # Lockdown must hold against a remote socket presenting "Host: 127.0.0.1".
+    inner = create_app()
+
+    async def remote_client_app(scope, receive, send):
+        scope = dict(scope)
+        scope["client"] = ("203.0.113.5", 55555)
+        await inner(scope, receive, send)
+
+    cfg = load_config()
+    save_config(cfg.model_copy(update={"external_api_expose": False}))
+    try:
+        with TestClient(remote_client_app, base_url="http://127.0.0.1:17017") as c:
+            r = c.post(
+                "/api/external/tasks/r1/t1/complete",
+                json={"status": "success", "summary": "x", "token": "a.b"},
+            )
+            assert r.status_code == 403
+            assert r.json()["error"] == "HOST_NOT_ALLOWED"
+    finally:
+        save_config(load_config().model_copy(
+            update={"external_api_expose": True},
+        ))
+
+
+def test_main_api_still_loopback_only_when_external_open() -> None:
+    # Default-open /api/external must NOT loosen the main /api surface.
     cfg = load_config()
     save_config(cfg.model_copy(
         update={"external_api_expose": True, "api_token": "tok-guard"},
@@ -355,7 +382,7 @@ def test_main_api_still_loopback_only_when_exposed() -> None:
             assert r.json()["error"] == "HOST_NOT_ALLOWED"
     finally:
         save_config(load_config().model_copy(
-            update={"external_api_expose": False, "api_token": None},
+            update={"api_token": None},
         ))
 
 

@@ -1,34 +1,43 @@
-"""Loopback + bearer-token guard for the public ``/api`` surface.
+"""Network guard for the whole app surface (peer-symmetric security model).
 
-Mirrors the OpenClaw gateway paradigm (loopback bind + mandatory token). The
-guard activates **only** when ``Config.api_token`` is set (auto-generated at
-init, stored privately in ``~/.clawsomeflow/config.json``). When the token is
-unset the guard is a complete no-op, so local dev and the test-suite — which
-never set a token — behave exactly as before.
+Every ClawsomeFlow instance is identical (no hub / no central gateway), so
+the same two laws apply on every peer:
 
-Who is allowed when the guard is active (request must be to ``/api/*`` but not
-``/api/internal/*`` — the latter keeps its own minted-token auth):
+**Law 1 — remote clients may reach ONLY ``/api/external/*``.** The service
+binds ``0.0.0.0`` so peers can collaborate with zero setup, but a connection
+whose *source IP* is not loopback is rejected on every other surface (main
+``/api``, ``/ws``, SPA, health) with ``403 REMOTE_NOT_ALLOWED``. The
+collaboration surface itself carries its own narrow credentials (one-time
+ticket / pairing secret — see ``app.api.external``), which is why it may stay
+open. ``csflow external expose off`` locks even that surface back to
+loopback-only. Client-IP checks cannot be forged remotely (unlike ``Host`` /
+``Sec-Fetch-Site`` headers); local port-forwards (SSH ``-L``, vite dev proxy)
+still present a loopback source and keep working.
 
-1. **Host allowlist** (anti DNS-rebinding): the ``Host`` header must resolve to
-   a loopback hostname, else ``403``.
-2. **Valid token** → allow. External callers send ``Authorization: Bearer
-   <api_token>`` (or ``X-API-Key: <api_token>``). This is the path your local
-   external service uses.
-3. **Same-origin browser SPA** → allow without a token, so the bundled WebUI
-   keeps working untouched. Detected via Fetch-Metadata (``Sec-Fetch-Site:
-   same-origin|none``) with an ``Origin``/``Referer`` loopback fallback for
-   older browsers. (A non-browser client could forge these headers, but a
-   malicious process running as the same OS user can already read config.json
-   directly — that case is out of scope for any in-process auth.)
+**Law 2 — the bearer-token guard for local ``/api`` callers.** Activates
+**only** when ``Config.api_token`` is set (auto-generated at init, stored
+privately in ``~/.clawsomeflow/config.json``); when unset it is a complete
+no-op so dev and the test-suite behave as before. For guarded paths
+(``/api/*`` minus ``/api/internal/*`` which keeps its own minted-token auth):
+
+1. **Host allowlist** (anti DNS-rebinding): the ``Host`` header must resolve
+   to a loopback hostname, else ``403``.
+2. **Valid token** → allow (``Authorization: Bearer <api_token>`` or
+   ``X-API-Key``).
+3. **Same-origin browser SPA** → allow without a token (Fetch-Metadata /
+   ``Origin`` / ``Referer``). Safe because Law 1 already guarantees the
+   client socket is loopback — a remote caller can never reach this branch,
+   and a malicious same-OS-user process can read config.json anyway (OS
+   boundary, out of scope).
 4. Otherwise → ``401``.
 
-The WebSocket surface (``/ws/*``) is not under ``/api`` and is therefore not
-gated here; it remains loopback-only.
+WebSocket scopes (``/ws/*``) are covered by Law 1 (loopback clients only).
 """
 
 from __future__ import annotations
 
 import hmac
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
 from starlette.requests import Request
@@ -38,6 +47,26 @@ from starlette.types import ASGIApp
 from app.config import load_config
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _client_is_loopback(scope) -> bool:
+    """True when the transport peer is the local machine.
+
+    ``testclient`` is Starlette's TestClient default. ``client is None``
+    (in-process / unix-socket transports) counts as local.
+    """
+    client = scope.get("client")
+    if client is None:
+        return True
+    host = str(client[0])
+    if host in ("testclient", "localhost"):
+        return True
+    if host.startswith("127."):
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _hostname_of_host_header(value: str) -> str:
@@ -116,7 +145,8 @@ def evaluate(request: Request, api_token: str) -> Response | None:
 # External-execution collaboration surface: its endpoints carry their own
 # per-task ticket / pairing-credential auth (see app.api.external), so the
 # global bearer/same-origin rules do NOT apply here — only the Host rule,
-# which is relaxed iff the user opted in via Config.external_api_expose.
+# which defaults open (``Config.external_api_expose=True``) because the
+# credential gate is sufficient. ``expose off`` re-locks to loopback-only.
 _EXTERNAL_PREFIX = "/api/external/"
 
 
@@ -130,30 +160,54 @@ def _is_guarded_path(path: str) -> bool:
     )
 
 
-def evaluate_external(request: Request, *, expose_enabled: bool) -> Response | None:
-    """Host rule for ``/api/external/*``: loopback always allowed; a
-    non-loopback Host is allowed only when the operator explicitly exposed
-    the surface (``Config.external_api_expose``). Token verification is the
-    endpoint's own job (one-time ticket / pairing credential)."""
+def evaluate_external(
+    request: Request,
+    *,
+    expose_enabled: bool,
+    client_is_loopback: bool = True,
+) -> Response | None:
+    """Access rule for ``/api/external/*``: open by default.
+
+    Remote callers are allowed when ``Config.external_api_expose`` is True
+    (the default — the surface is credential-gated). ``expose off`` re-locks
+    to loopback-only: both a non-loopback ``Host`` and a non-loopback client
+    socket are then rejected (the socket check cannot be forged). Token
+    verification is the endpoint's own job (one-time ticket / pairing
+    credential).
+    """
+    if expose_enabled:
+        return None
     host = _hostname_of_host_header(request.headers.get("host", ""))
-    if host and host not in _LOOPBACK_HOSTS and not expose_enabled:
+    if (host and host not in _LOOPBACK_HOSTS) or not client_is_loopback:
         return _deny(
             "HOST_NOT_ALLOWED",
-            "external API surface is not exposed "
-            "(enable config.external_api_expose to accept remote callers)",
+            "external API surface is locked to loopback "
+            "(config.external_api_expose=false; "
+            "'csflow external expose on' to re-open)",
             403,
         )
     return None
 
 
 class ApiTokenGuardMiddleware:
-    """Pure-ASGI middleware enforcing :func:`evaluate` on guarded HTTP paths."""
+    """Pure-ASGI middleware enforcing the two laws in the module docstring."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope.get("type") != "http":
+        stype = scope.get("type")
+
+        if stype == "websocket":
+            # Law 1 for /ws/*: loopback clients only.
+            if not _client_is_loopback(scope):
+                await receive()  # consume "websocket.connect"
+                await send({"type": "websocket.close", "code": 1008})
+                return
+            await self.app(scope, receive, send)
+            return
+
+        if stype != "http":
             await self.app(scope, receive, send)
             return
         path = scope.get("path", "")
@@ -163,12 +217,27 @@ class ApiTokenGuardMiddleware:
             request = Request(scope, receive=receive)
             denied = evaluate_external(
                 request,
-                expose_enabled=bool(getattr(cfg, "external_api_expose", False)),
+                # Default open when the key is somehow absent (matches Config).
+                expose_enabled=bool(getattr(cfg, "external_api_expose", True)),
+                client_is_loopback=_client_is_loopback(scope),
             )
             if denied is not None:
                 await denied(scope, receive, send)
                 return
             await self.app(scope, receive, send)
+            return
+
+        # Law 1: everything except /api/external/* is local-only. A source-IP
+        # check — remote callers cannot forge it (Host/Sec-Fetch-Site can be).
+        if not _client_is_loopback(scope):
+            denied = _deny(
+                "REMOTE_NOT_ALLOWED",
+                "only /api/external/* is remote-reachable; "
+                "this surface accepts loopback connections only "
+                "(use an SSH tunnel for remote administration)",
+                403,
+            )
+            await denied(scope, receive, send)
             return
 
         if not _is_guarded_path(path):

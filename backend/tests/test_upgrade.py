@@ -919,6 +919,27 @@ def test_run_upgrade_repairs_incompatible_mcp_sdk(
     assert called["n"] == 1
 
 
+def test_migration_enables_external_api_expose_default(
+    tmp_clawsomeflow_home: Path,
+) -> None:
+    """Historical external_api_expose=False → True once (default-open surface)."""
+    from app.config import load_config, save_config
+
+    save_config(Config(external_api_expose=False, api_token=None))
+    assert load_config(force_reload=True).external_api_expose is False
+
+    warnings = upgrade._enable_external_api_expose_default(Config())
+    assert warnings is None
+    cfg = load_config(force_reload=True)
+    assert cfg.external_api_expose is True
+    assert cfg.api_token  # widened bind requires the main /api guard
+
+    # Idempotent: already-True is a no-op (does not rotate the token).
+    token = cfg.api_token
+    upgrade._enable_external_api_expose_default(Config())
+    assert load_config(force_reload=True).api_token == token
+
+
 def test_run_upgrade_warns_when_mcp_sdk_repair_fails(
     tmp_clawsomeflow_home: Path,
     monkeypatch: pytest.MonkeyPatch,

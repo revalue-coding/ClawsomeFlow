@@ -14,10 +14,12 @@ The ONLY inbound face a remote executor ever talks to. Two endpoints:
   fires the result back when the run turns terminal.
 
 Network rule (enforced by :class:`app.api._api_guard.ApiTokenGuardMiddleware`):
-loopback callers are always allowed; non-loopback callers are allowed only
-when ``Config.external_api_expose`` is on. The global api_token /
-same-origin rules deliberately do NOT apply here — these endpoints carry
-their own, narrower credentials.
+this prefix is the ONLY surface remote source IPs may reach (peer-symmetric
+model — every instance enforces the same law). Open by default
+(``Config.external_api_expose`` = True — the surface is credential-gated);
+``csflow external expose off`` re-locks it to loopback-only. The global
+api_token / same-origin rules deliberately do NOT apply here — these
+endpoints carry their own, narrower credentials.
 """
 
 from __future__ import annotations

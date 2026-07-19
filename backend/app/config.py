@@ -94,16 +94,19 @@ class Config(BaseModel):
     )
 
     # ── External execution nodes (/api/external surface) ────────────────
-    # All default to None/False/empty → upgrade-only users need no migration
-    # and the feature is fully opt-in (zero regression when unused).
+    # Credentials / callback URL stay opt-in (None/empty). The Host/bind
+    # surface defaults open (credential-gated); see external_api_expose.
 
     external_api_expose: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When True the /api/external/* prefix accepts non-loopback Hosts "
-            "(the service must also be bound to a non-loopback interface). "
-            "Every other /api/* path keeps the loopback-only rule. Requires "
-            "api_token to be initialised (refused otherwise at guard level)."
+            "When True (the default) the /api/external/* prefix accepts "
+            "remote callers and ``csflow serve`` binds 0.0.0.0. Safe by "
+            "default: that surface is credential-gated (one-time ticket / "
+            "pairing secret), and the guard middleware rejects remote "
+            "source IPs on every other surface (main /api, /ws, SPA) — "
+            "see app.api._api_guard. Set False via ``csflow external "
+            "expose off`` for a full loopback-only lockdown."
         ),
     )
     external_callback_base_url: str | None = Field(

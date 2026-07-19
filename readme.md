@@ -149,17 +149,16 @@ In the Flow editor: Owner source → **External execution**, then pick an owner 
 1. **Peer**: open the target Flow's editor and click **Copy remote call info** next to the title — you get a JSON blob (base URL, Flow ID, param fields, pairing credential). Send it to the origin.
 2. **Origin**: in the subtask pick **Remote ClawsomeFlow**, paste the blob into **Remote Flow call info** and save the subtask — base URL / Flow ID / credential are registered automatically; the secret is stored locally, never in the Flow spec.
 
-Across machines the peer must first run `csflow external expose on` to allow non-loopback access (this changes the service bind, so it stays a CLI step).
+Nothing extra to configure across machines — both ends are plain, fully symmetric ClawsomeFlow services (no hub). Security model: **remotes can reach only the `/api/external` collaboration surface** (one-time ticket / pairing-credential auth); the WebUI and every other API accept loopback connections only, enforced by source IP — administer remotely over an SSH tunnel (`ssh -L 17017:127.0.0.1:17017`). Full loopback lockdown: `csflow external expose off`.
 
 **Params flow automatically (only when the remote Flow declares param fields)**: upstream tasks are then asked to report values for them; you may also type known values on the node (they override upstream). Unfilled fields take the union of upstream reports; anything still empty is sent as `参数为空`. If the remote Flow has no param fields, no special handling is applied.
 
 ### Generic interface (webhook)
 
-**On ClawsomeFlow:** pick **Generic interface (webhook)** and set your endpoint URL. If the partner must reach you from another host:
+**On ClawsomeFlow:** pick **Generic interface (webhook)** and set your endpoint URL. If the partner must reach you from another host, set the callback base URL (`/api/external` is already open by default):
 
 ```bash
 csflow external callback-url http://<origin-host>:17017
-csflow external expose on
 ```
 
 **On your system:** accept the task `POST`, then when done:

@@ -733,7 +733,8 @@ def test_failed_terminal_maps_to_failed_callback() -> None:
 def test_config_new_fields_have_safe_defaults() -> None:
     # An upgrade-only user's old config.json (no external_* keys) must load.
     cfg = Config.model_validate({"deployment_mode": "local"})
-    assert cfg.external_api_expose is False
+    # /api/external defaults open — credential-gated, no CLI opt-in needed.
+    assert cfg.external_api_expose is True
     assert cfg.external_callback_base_url is None
     assert cfg.external_pair_tokens == {}
     assert cfg.external_remote_targets == {}

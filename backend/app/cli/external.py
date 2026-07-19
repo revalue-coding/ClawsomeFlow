@@ -10,8 +10,8 @@ adds zero upgrade-parity surface):
   instance (referenced from Flow specs via ``external.pairTokenRef``).
 * ``remove-remote <name>``     — drop an outbound credential.
 * ``list``                     — show inbound + outbound credential names.
-* ``expose on|off``            — toggle non-loopback access to
-  ``/api/external/*`` (widens the service bind; restart to apply).
+* ``expose on|off``            — opt-out lockdown for ``/api/external/*``
+  (default is ON / open; ``off`` re-locks to loopback; restart to apply).
 * ``callback-url [<url>]``     — show/set the base URL remote executors use
   to call back into this instance.
 """
@@ -124,14 +124,17 @@ def list_credentials() -> None:
 
 @app.command()
 def expose(
-    state: str = typer.Argument(..., help="'on' or 'off'."),
+    state: str = typer.Argument(..., help="'on' (default) or 'off' (lockdown)."),
 ) -> None:
-    """Allow (or forbid) non-loopback access to the /api/external/* surface.
+    """Open or lock down non-loopback access to /api/external/*.
 
-    Turning this on also makes ``csflow serve`` bind 0.0.0.0 — every other
-    /api path still rejects non-loopback Hosts. Requires a service restart
-    (``csflow start``) to take effect. The api_token guard is initialised
-    first so widening the bind can never expose an unguarded main surface.
+    Default is ON: the surface is credential-gated (ticket / pairing secret),
+    so remote collaboration needs no CLI step. Remote source IPs can reach
+    ONLY ``/api/external/*`` — main ``/api``, ``/ws`` and the WebUI accept
+    loopback connections exclusively, on every peer alike. ``off`` re-locks
+    even the external surface and keeps ``csflow serve`` on 127.0.0.1;
+    ``on`` widens the bind to 0.0.0.0 after ensuring ``api_token`` is
+    initialised. Restart (``csflow start``) to apply.
     """
     normalized = state.strip().lower()
     if normalized not in ("on", "off"):

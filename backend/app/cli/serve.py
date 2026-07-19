@@ -36,11 +36,18 @@ def serve(
     """Start the FastAPI backend (assumes ``csflow init`` already ran)."""
     cfg = cfg_mod.load_config()
     actual_port = port or cfg.csflow_port
-    # External-node cross-machine collaboration: when the user opted in
-    # (csflow external expose on), widen the bind so /api/external/* is
-    # reachable remotely. The API guard still rejects non-loopback Hosts on
-    # every other /api path, so the main surface stays loopback-only.
-    if host == "127.0.0.1" and getattr(cfg, "external_api_expose", False):
+    # Peer-symmetric collaboration: every instance is identical (no hub), so
+    # the bind widens by default to make /api/external/* reachable. The guard
+    # middleware enforces that remote source IPs can reach ONLY that
+    # credential-gated prefix — main /api, /ws and the SPA stay loopback-only.
+    # ``csflow external expose off`` keeps the loopback bind.
+    if host == "127.0.0.1" and getattr(cfg, "external_api_expose", True):
+        from app.integrations.internal_token import ensure_api_token_initialised
+
+        widened = ensure_api_token_initialised(cfg)
+        if widened is not cfg:
+            cfg_mod.save_config(widened)
+            cfg = widened
         host = "0.0.0.0"
 
     write_pid()

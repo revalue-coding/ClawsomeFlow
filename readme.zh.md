@@ -149,17 +149,16 @@ Flow 编辑：Owner 来源 → **外部执行**，再选 Owner 类型：
 1. **受理方**：打开目标 Flow 的编辑页，点标题旁的「复制远程调用信息」，得到一段 JSON（含地址、Flow ID、参数字段、配对凭证），发给发起方。
 2. **发起方**：在子任务里选 **远程ClawsomeFlow**，把 JSON 粘进「远端 Flow调用信息」后保存子任务即可——地址 / Flow ID / 凭证由后台自动解析注册，凭证只存本机、不写进 Flow。
 
-跨机器时，受理方需先 `csflow external expose on` 放开非本机访问（这步会改变服务绑定，仍走 CLI）。
+跨机器无需额外配置，两端就是两个完全对等的普通 ClawsomeFlow 服务（无中心节点）。安全模型：**远程只能访问 `/api/external` 协作面**（一次性票据 / 配对凭证鉴权），WebUI 与其余全部 API 按来源 IP 只接受本机连接——远程管理请走 SSH 隧道（`ssh -L 17017:127.0.0.1:17017`）。如需彻底锁回本机：`csflow external expose off`。
 
 **参数自动流转（仅当远端 Flow 声明了参数字段时）**：有参数字段时，上游任务会被要求回报这些字段的值；你也可在节点里手填已知值（覆盖上游）。未覆盖的取上游并集，仍为空则发「参数为空」。远端 Flow 无参数字段时不做任何特殊处理。
 
 ### 通用接口（webhook）
 
-**ClawsomeFlow：** 选 **通用接口（webhook）**，填你的端点 URL。若对方需要从外网回调你：
+**ClawsomeFlow：** 选 **通用接口（webhook）**，填你的端点 URL。若对方需要从外网回调你，设好回调基址即可（`/api/external` 默认已开放）：
 
 ```bash
 csflow external callback-url http://<origin-host>:17017
-csflow external expose on
 ```
 
 **你的系统：** 接收任务 `POST`，完成后：
