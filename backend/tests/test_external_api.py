@@ -638,9 +638,9 @@ def test_remote_call_info_mints_token_and_returns_param_fields(app_client) -> No
     assert body["paramFields"] == ["需求描述", "目标目录"]
     assert body["pairTokenName"] == f"remote-{flow.id}"
     assert body["pairSecret"]
-    # baseUrl is always empty in the paste blob — origin operator types the
-    # reachable URL on the subtask form (SSH tunnels poison request Host).
-    assert body["baseUrl"] == ""
+    # baseUrl is omitted from the API blob — origin operator types reachability
+    # on the subtask form (SSH tunnels poison request Host).
+    assert "baseUrl" not in body
     # The inbound pairing credential is now stored in config (idempotent).
     cfg = load_config()
     assert cfg.external_pair_tokens.get(f"remote-{flow.id}") == body["pairSecret"]
@@ -649,7 +649,7 @@ def test_remote_call_info_mints_token_and_returns_param_fields(app_client) -> No
     # Second call reuses the same secret (idempotent).
     resp2 = app_client.post(f"/api/flows/{flow.id}/remote-call-info")
     assert resp2.json()["pairSecret"] == body["pairSecret"]
-    assert resp2.json()["baseUrl"] == ""
+    assert "baseUrl" not in resp2.json()
 
 
 def test_remote_call_info_never_echoes_callback_base_url(app_client) -> None:
@@ -662,7 +662,7 @@ def test_remote_call_info_never_echoes_callback_base_url(app_client) -> None:
     )
     resp = app_client.post(f"/api/flows/{flow.id}/remote-call-info")
     assert resp.status_code == 200, resp.text
-    assert resp.json()["baseUrl"] == ""
+    assert "baseUrl" not in resp.json()
 
 
 def test_register_remote_target_stores_secret_off_spec(app_client) -> None:

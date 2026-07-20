@@ -1899,9 +1899,18 @@ def test_retry_task_calls_mcp_with_clawteam_id(
     assert captured["force"] is True
 
 
-def test_checkpoint_approve_requires_awaiting_status(app_client: TestClient) -> None:
+def test_checkpoint_approve_requires_awaiting_status(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     flow = _make_flow()
     run = _make_run(flow_id=flow.id, status=RunStatus.running)
+
+    class _Controller:
+        def checkpoint_snapshot(self):
+            return None
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
     r = app_client.post(f"/api/runs/{run.id}/checkpoint/items/t1/approve")
     assert r.status_code == 409
     assert r.json()["error"] == "NOT_AWAITING_CHECKPOINT"
@@ -1948,6 +1957,9 @@ def test_checkpoint_approve_calls_controller(
     captured: dict[str, Any] = {}
 
     class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "t2", "items": []}
+
         async def approve_checkpoint_item(self, *, upstream_task_id: str):
             captured["task_id"] = upstream_task_id
             row = get_storage().run_get(run.id)
@@ -1985,6 +1997,9 @@ def test_checkpoint_rerun_requires_feedback(
     run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
 
     class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "t2", "items": []}
+
         async def request_checkpoint_rerun(self, *, upstream_task_id: str, feedback: str):
             assert feedback == ""
             raise ValueError("checkpoint rerun feedback is required")
@@ -2007,6 +2022,9 @@ def test_checkpoint_rerun_calls_controller(
     captured: dict[str, Any] = {}
 
     class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "t2", "items": []}
+
         async def request_checkpoint_rerun(self, *, upstream_task_id: str, feedback: str):
             captured["task_id"] = upstream_task_id
             captured["feedback"] = feedback
@@ -2029,6 +2047,9 @@ def test_checkpoint_rerun_conflict_maps_specific_error(
     run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
 
     class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "t2", "items": []}
+
         async def request_checkpoint_rerun(self, *, upstream_task_id: str, feedback: str):
             del upstream_task_id, feedback
             raise RuntimeError(
@@ -2101,6 +2122,9 @@ def test_checkpoint_mark_read_calls_controller(
     captured: dict[str, Any] = {}
 
     class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "t2", "items": []}
+
         async def mark_checkpoint_item_read(self, *, upstream_task_id: str):
             captured["task_id"] = upstream_task_id
 
@@ -2111,9 +2135,18 @@ def test_checkpoint_mark_read_calls_controller(
     assert captured["task_id"] == "t1"
 
 
-def test_checkpoint_mark_read_requires_awaiting_status(app_client: TestClient) -> None:
+def test_checkpoint_mark_read_requires_awaiting_status(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     flow = _make_flow()
     run = _make_run(flow_id=flow.id, status=RunStatus.running)
+
+    class _Controller:
+        def checkpoint_snapshot(self):
+            return None
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
     r = app_client.post(f"/api/runs/{run.id}/checkpoint/items/t1/mark-read")
     assert r.status_code == 409
     assert r.json()["error"] == "NOT_AWAITING_CHECKPOINT"

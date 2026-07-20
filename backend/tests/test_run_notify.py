@@ -883,7 +883,8 @@ def test_api_test_endpoint_posts_to_adhoc_channel(webhook_server) -> None:
     assert r.json()["success"] is True
     body = handler.received[0]
     assert body["msg_type"] == "text"
-    assert "webhook test" in body["content"]["text"]
+    # feishu format resolves notify language to zh (platform default).
+    assert "通知渠道测试" in body["content"]["text"]
 
 
 def test_api_test_endpoint_posts_to_all_saved_channels(webhook_server) -> None:
