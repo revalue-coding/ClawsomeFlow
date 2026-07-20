@@ -1166,6 +1166,11 @@ export const api = {
       `/api/runs/${id}/external-tasks/${taskId}/complete`,
       { status, summary },
     ),
+  redispatchExternalTask: (id: string, taskId: string) =>
+    request<RunSummary>(
+      "POST",
+      `/api/runs/${id}/external-tasks/${taskId}/redispatch`,
+    ),
   getCheckpointItemDiff: (id: string, taskId: string) =>
     request<PendingMergeDiff>(
       "GET",

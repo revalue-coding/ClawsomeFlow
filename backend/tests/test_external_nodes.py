@@ -288,6 +288,9 @@ def test_build_external_task_text_zh_and_notify_brief() -> None:
     zh = build_external_task_text(_ctx(), lang="zh")
     assert "ClawsomeFlow 外部任务" in zh
     assert "结果提交" in zh
+    assert "直接上游产出" in zh
+    assert "完成摘要" in zh
+    assert "Direct Upstream Outputs" not in zh
     brief = build_external_notify_brief(
         {
             "taskId": "t1",

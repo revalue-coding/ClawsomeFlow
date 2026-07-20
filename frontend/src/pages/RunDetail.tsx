@@ -33,6 +33,7 @@ import {
   StatusPill,
 } from "@/components/ui";
 import { useDialog } from "@/components/dialog";
+import { pickExternalTaskSheet } from "@/lib/externalTaskSheet";
 import { DEFAULT_TARGET_BRANCH, getDevMode } from "@/lib/flowRuntime";
 import { useSessionBackedState } from "@/lib/sessionState";
 import { RunWsEvent, eventViewToWs, openRunStream } from "@/lib/ws";
@@ -954,7 +955,11 @@ export function RunDetail() {
 
       {/* External execution node tasks (human todo cards / channel waiting state) */}
       {!TERMINAL.has(run.status) && (
-        <ExternalTasksCard runId={run.id} events={events} />
+        <ExternalTasksCard
+          runId={run.id}
+          teamName={run.teamName ?? ""}
+          events={events}
+        />
       )}
 
       {mergeFailures.length > 0 && (
@@ -3029,9 +3034,20 @@ type ExternalTaskItem = {
   assignee: string;
   subject: string;
   message: string;
+  messageZh: string;
+  messageEn: string;
   nonce: string;
   /** Per-task output-summary requirement (from the Flow editor field). */
   outputRequirement: string;
+  description: string;
+  flowDescription: string;
+  runtimeInputs: Record<string, unknown> | null;
+  upstreamOutputs: Array<{
+    taskId?: string;
+    subject?: string;
+    fromAgent?: string;
+    summary?: string;
+  }> | null;
 };
 
 /** Outstanding external-node dispatches: latest dispatch per task, minus
@@ -3047,6 +3063,8 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
     if (!tid) continue;
     const payload = (e.payload ?? {}) as Record<string, unknown>;
     if (e.type === "external_task_dispatched") {
+      const runtimeRaw = payload.runtimeInputs ?? payload.runtime_inputs;
+      const upstreamRaw = payload.upstreamOutputs ?? payload.upstream_outputs;
       latest.set(tid, {
         taskId: tid,
         agentId: e.agentId ?? "",
@@ -3054,10 +3072,23 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
         assignee: String(payload.assignee ?? ""),
         subject: String(payload.subject ?? ""),
         message: String(payload.message ?? ""),
+        messageZh: String(payload.messageZh ?? payload.message_zh ?? ""),
+        messageEn: String(payload.messageEn ?? payload.message_en ?? ""),
         nonce: String(payload.nonce ?? ""),
         outputRequirement: String(
           payload.outputRequirement ?? payload.output_requirement ?? "",
         ).trim(),
+        description: String(payload.description ?? "").trim(),
+        flowDescription: String(
+          payload.flowDescription ?? payload.flow_description ?? "",
+        ).trim(),
+        runtimeInputs:
+          runtimeRaw && typeof runtimeRaw === "object" && !Array.isArray(runtimeRaw)
+            ? (runtimeRaw as Record<string, unknown>)
+            : null,
+        upstreamOutputs: Array.isArray(upstreamRaw)
+          ? (upstreamRaw as ExternalTaskItem["upstreamOutputs"])
+          : null,
       });
     } else if (e.type === "external_task_completed") {
       completedNonces.add(`${tid}:${String(payload.nonce ?? "")}`);
@@ -3074,16 +3105,21 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
 
 function ExternalTasksCard({
   runId,
+  teamName,
   events,
 }: {
   runId: string;
+  teamName: string;
   events: RunWsEvent[];
 }) {
-  const { t } = useTranslation();
-  const { alert } = useDialog();
+  const { t, i18n } = useTranslation();
+  const { alert, confirm } = useDialog();
+  const uiLang = i18n.language?.startsWith("zh") ? "zh" : "en";
   const items = useMemo(() => collectExternalTasks(events), [events]);
   const [summaries, setSummaries] = useState<Record<string, string>>({});
+  /** Task id currently completing or redistributing — locks sibling buttons. */
   const [submitting, setSubmitting] = useState<string | null>(null);
+  const [redispatching, setRedispatching] = useState<string | null>(null);
   /** Optimistic dismiss so the card vanishes before the WS completion event. */
   const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(() => new Set());
   /** Controlled open state — native <details> resets on parent remount/WS ticks. */
@@ -3129,6 +3165,30 @@ function ExternalTasksCard({
     }
   }
 
+  async function redispatch(taskId: string) {
+    const ok = await confirm(t("runDetail.external.redispatchConfirm"), {
+      okText: t("runDetail.external.redispatchConfirmOk"),
+      cancelText: t("common.cancel"),
+    });
+    if (!ok) return;
+    setRedispatching(taskId);
+    try {
+      await api.redispatchExternalTask(runId, taskId);
+      // New dispatch event replaces the card (new nonce); dismiss this key so
+      // the stale card does not linger until the WS event arrives.
+      setDismissedKeys((prev) => {
+        const next = new Set(prev);
+        const current = items.find((it) => it.taskId === taskId);
+        if (current) next.add(`${current.taskId}:${current.nonce}`);
+        return next;
+      });
+    } catch (e) {
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setRedispatching(null);
+    }
+  }
+
   const channelLabel = (channel: string) =>
     channel === "human"
       ? t("runDetail.external.channelHuman")
@@ -3148,6 +3208,10 @@ function ExternalTasksCard({
           const sheetKey = `${item.taskId}:${item.nonce}`;
           const sheetOpen = openSheets.has(sheetKey);
           const isHuman = item.channel === "human";
+          const canRedispatch =
+            item.channel === "webhook" || item.channel === "remote_csflow";
+          const actionsBusy =
+            submitting === item.taskId || redispatching === item.taskId;
           return (
             <div
               key={`external-${sheetKey}`}
@@ -3177,30 +3241,51 @@ function ExternalTasksCard({
                 {t("runDetail.external.nodeLabel")}:{" "}
                 <span className="font-mono">{item.agentId}</span>
               </div>
-              {item.message && (
-                <div className="mt-2">
-                  <button
-                    type="button"
-                    className="cursor-pointer text-sm font-semibold text-brand-700 underline underline-offset-2 hover:text-brand-800"
-                    aria-expanded={sheetOpen}
-                    onClick={() =>
-                      setOpenSheets((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(sheetKey)) next.delete(sheetKey);
-                        else next.add(sheetKey);
-                        return next;
-                      })
-                    }
-                  >
-                    {t("runDetail.external.showTaskSheet")}
-                  </button>
-                  {sheetOpen && (
-                    <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2 text-xs text-ink-700">
-                      {item.message}
-                    </pre>
-                  )}
-                </div>
-              )}
+              {(() => {
+                const sheetText = pickExternalTaskSheet(
+                  {
+                    message: item.message,
+                    messageZh: item.messageZh,
+                    messageEn: item.messageEn,
+                    channel: item.channel,
+                    subject: item.subject,
+                    description: item.description,
+                    outputRequirement: item.outputRequirement,
+                    flowDescription: item.flowDescription,
+                    runtimeInputs: item.runtimeInputs,
+                    upstreamOutputs: item.upstreamOutputs,
+                    taskId: item.taskId,
+                    runId,
+                    teamName,
+                  },
+                  uiLang,
+                );
+                if (!sheetText) return null;
+                return (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      className="cursor-pointer text-sm font-semibold text-brand-700 underline underline-offset-2 hover:text-brand-800"
+                      aria-expanded={sheetOpen}
+                      onClick={() =>
+                        setOpenSheets((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(sheetKey)) next.delete(sheetKey);
+                          else next.add(sheetKey);
+                          return next;
+                        })
+                      }
+                    >
+                      {t("runDetail.external.showTaskSheet")}
+                    </button>
+                    {sheetOpen && (
+                      <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2 text-xs text-ink-700">
+                        {sheetText}
+                      </pre>
+                    )}
+                  </div>
+                );
+              })()}
               {!isHuman && (
                 <div className="mt-2 text-xs text-ink-600">
                   {item.channel === "webhook"
@@ -3228,7 +3313,7 @@ function ExternalTasksCard({
                     <button
                       type="button"
                       className="btn-outline"
-                      disabled={submitting === item.taskId}
+                      disabled={actionsBusy}
                       onClick={() => {
                         setFailModal({ taskId: item.taskId, nonce: item.nonce });
                         setFailReason("");
@@ -3239,7 +3324,7 @@ function ExternalTasksCard({
                     <button
                       type="button"
                       className="btn-primary"
-                      disabled={submitting === item.taskId}
+                      disabled={actionsBusy}
                       onClick={() =>
                         void submit(
                           item.taskId,
@@ -3256,11 +3341,11 @@ function ExternalTasksCard({
                   </div>
                 </div>
               ) : (
-                <div className="mt-3 flex items-center justify-end">
+                <div className="mt-3 flex items-center justify-end gap-2">
                   <button
                     type="button"
                     className="btn-outline"
-                    disabled={submitting === item.taskId}
+                    disabled={actionsBusy}
                     onClick={() => {
                       setFailModal({ taskId: item.taskId, nonce: item.nonce });
                       setFailReason("");
@@ -3268,6 +3353,18 @@ function ExternalTasksCard({
                   >
                     {t("runDetail.external.submitFailed")}
                   </button>
+                  {canRedispatch && (
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={actionsBusy}
+                      onClick={() => void redispatch(item.taskId)}
+                    >
+                      {redispatching === item.taskId
+                        ? t("runDetail.external.redispatching")
+                        : t("runDetail.external.redispatch")}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -3277,7 +3374,7 @@ function ExternalTasksCard({
       <Modal
         open={!!failModal}
         onClose={() => {
-          if (submitting) return;
+          if (submitting || redispatching) return;
           setFailModal(null);
           setFailReason("");
         }}
@@ -3291,12 +3388,13 @@ function ExternalTasksCard({
             value={failReason}
             onChange={(e) => setFailReason(e.target.value)}
             autoFocus
+            disabled={!!submitting || !!redispatching}
           />
           <div className="flex justify-end gap-2">
             <button
               type="button"
               className="btn-outline"
-              disabled={!!submitting}
+              disabled={!!submitting || !!redispatching}
               onClick={() => {
                 setFailModal(null);
                 setFailReason("");
@@ -3307,7 +3405,7 @@ function ExternalTasksCard({
             <button
               type="button"
               className="btn-danger"
-              disabled={!!submitting}
+              disabled={!!submitting || !!redispatching}
               onClick={() => {
                 if (!failModal) return;
                 const reason = failReason.trim();

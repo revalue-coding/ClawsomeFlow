@@ -821,9 +821,16 @@ WEBHOOK_REMOTE_NOTES = (
     "In your callback summary, do not include local file paths; describe "
     "necessary results in plain text (links or references are fine)."
 )
+WEBHOOK_REMOTE_NOTES_ZH = (
+    "这是远程任务。上游产出中出现的绝对路径在你本机上可能不存在——"
+    "请勿在本地打开或拉取。回传摘要时不要写入本机文件路径；"
+    "用纯文本描述必要结果（链接或引用即可）。"
+)
 
 
-def _upstream_outputs_block_external(ctx: DispatchContext) -> str:
+def _upstream_outputs_block_external(
+    ctx: DispatchContext, *, lang: str = "en",
+) -> str:
     """Upstream hand-offs for an external executor (human / webhook / remote).
 
     External nodes own no worktree. Never invent or surface local worktree /
@@ -833,23 +840,36 @@ def _upstream_outputs_block_external(ctx: DispatchContext) -> str:
     if not ctx.upstream_outputs:
         return ""
     n = len(ctx.upstream_outputs)
-    lines: list[str] = [
-        f"## Direct Upstream Outputs ({n} item(s), first-level dependencies only)",
-        "Upstream executors may be local agents or other external nodes. "
-        "Use the completion summary below as context; there is no shared "
-        "worktree path for this node.",
-    ]
+    if lang == "zh":
+        lines: list[str] = [
+            f"## 直接上游产出（{n} 项，仅一级依赖）",
+            "上游可能是本地 Agent 或其他外部节点。"
+            "请以下方完成摘要为上下文；本节点没有共享 worktree 路径。",
+        ]
+        summary_label = "完成摘要"
+        missing = "_(暂无 — 如需前序交付物请询问 Run 操作者)_"
+        by_agent = "执行者"
+    else:
+        lines = [
+            f"## Direct Upstream Outputs ({n} item(s), first-level dependencies only)",
+            "Upstream executors may be local agents or other external nodes. "
+            "Use the completion summary below as context; there is no shared "
+            "worktree path for this node.",
+        ]
+        summary_label = "completion summary"
+        missing = (
+            "_(not available yet — "
+            "ask the run operator if you need prior deliverables)_"
+        )
+        by_agent = "by agent"
     for u in ctx.upstream_outputs:
         lines.append(
-            f"- task `{u.task_id}` \"{u.subject}\" by agent `{u.from_agent}`"
+            f"- task `{u.task_id}` \"{u.subject}\" {by_agent} `{u.from_agent}`"
         )
         if u.summary:
-            lines.append(f"  - completion summary: {u.summary}")
+            lines.append(f"  - {summary_label}: {u.summary}")
         else:
-            lines.append(
-                "  - completion summary: _(not available yet — "
-                "ask the run operator if you need prior deliverables)_"
-            )
+            lines.append(f"  - {summary_label}: {missing}")
     return "\n".join(lines)
 
 
@@ -918,14 +938,15 @@ def build_external_task_text(
     blocks = [
         intro,
         f"{goal_h}\n{desc}\n{inputs_h}\n{inputs_body}",
-        _upstream_outputs_block_external(ctx),
+        _upstream_outputs_block_external(ctx, lang=resolved),
         f"{task_h}\n{task_desc}",
         submit,
     ]
     ext = getattr(ctx.agent, "external", None)
     if ext is not None and ext.channel == ExternalChannel.webhook:
-        blocks.append(f"{notes_h}\n{WEBHOOK_REMOTE_NOTES}")
-    remote_block = _remote_param_report_block_external(ctx)
+        notes = WEBHOOK_REMOTE_NOTES_ZH if resolved == "zh" else WEBHOOK_REMOTE_NOTES
+        blocks.append(f"{notes_h}\n{notes}")
+    remote_block = _remote_param_report_block_external(ctx, lang=resolved)
     if remote_block:
         blocks.append(remote_block)
     return "\n\n".join(b for b in blocks if b).strip() + "\n"
@@ -1025,7 +1046,9 @@ def build_delegate_runtime_prompt(package: dict[str, object]) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _remote_param_report_block_external(ctx: DispatchContext) -> str:
+def _remote_param_report_block_external(
+    ctx: DispatchContext, *, lang: str = "en",
+) -> str:
     """Ask an EXTERNAL executor to append per-downstream params to its result.
 
     External executors report a single free-text completion summary (via the
@@ -1038,28 +1061,49 @@ def _remote_param_report_block_external(ctx: DispatchContext) -> str:
     if not targets:
         return ""
     task_id = ctx.task.id
-    lines = [
-        "## Remote Parameter Report (include in your result)",
-        (
-            f"{len(targets)} downstream remote ClawsomeFlow node(s) need "
-            "parameter values. At the END of your completion summary, append "
-            "ONE block per target below (header line + JSON object). Use an "
-            "empty string for any field you cannot provide; do not invent "
-            "values or include local absolute paths."
-        ),
-        "",
-    ]
+    if lang == "zh":
+        lines = [
+            "## 远程参数回报（请写入你的结果摘要）",
+            (
+                f"有 {len(targets)} 个下游远程 ClawsomeFlow 节点需要参数。"
+                "请在完成摘要末尾为下列每个目标各附加一块（标题行 + JSON 对象）。"
+                "无法提供的字段填空字符串；不要编造值，也不要写入本机绝对路径。"
+            ),
+            "",
+        ]
+        empty_goal = "(未提供总体目标)"
+        goal_l, fields_l, example_l, target_l = (
+            "总体目标", "参数字段", "示例", "目标",
+        )
+    else:
+        lines = [
+            "## Remote Parameter Report (include in your result)",
+            (
+                f"{len(targets)} downstream remote ClawsomeFlow node(s) need "
+                "parameter values. At the END of your completion summary, append "
+                "ONE block per target below (header line + JSON object). Use an "
+                "empty string for any field you cannot provide; do not invent "
+                "values or include local absolute paths."
+            ),
+            "",
+        ]
+        empty_goal = "(no overall goal provided)"
+        goal_l, fields_l, example_l, target_l = (
+            "Overall goal", "Parameter fields", "Example", "Target",
+        )
     for i, target in enumerate(targets, start=1):
         schema = ", ".join(
             f'"{f}": "<value or empty>"' for f in target.param_fields
         )
         field_list = ", ".join(f"`{f}`" for f in target.param_fields)
-        goal = (target.flow_description or "").strip() or "(no overall goal provided)"
+        goal = (target.flow_description or "").strip() or empty_goal
         header = f"{REMOTE_PARAMS_HEADER}: {task_id} {target.downstream_task_id}"
-        lines.append(f"### Target {i} — {_format_remote_param_target_heading(target)}")
-        lines.append(f"- Overall goal: {goal}")
-        lines.append(f"- Parameter fields: {field_list}")
-        lines.append(f"- Example: `{header}` `{{{schema}}}`")
+        lines.append(
+            f"### {target_l} {i} — {_format_remote_param_target_heading(target)}"
+        )
+        lines.append(f"- {goal_l}: {goal}")
+        lines.append(f"- {fields_l}: {field_list}")
+        lines.append(f"- {example_l}: `{header}` `{{{schema}}}`")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -1153,6 +1197,7 @@ __all__ = [
     "RemoteParamTarget",
     "UpstreamOutput",
     "WEBHOOK_REMOTE_NOTES",
+    "WEBHOOK_REMOTE_NOTES_ZH",
     "WorkerReport",
     "build_external_task_package",
     "build_delegate_runtime_prompt",

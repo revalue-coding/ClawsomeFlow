@@ -4510,6 +4510,163 @@ def _external_checkpoint_snapshots() -> list[TaskSnapshot]:
 
 
 @pytest.mark.asyncio
+async def test_waiting_webhook_external_redispatch_invalidates_prior_nonce(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run-detail redispatch for webhook/remote: fresh ticket, old nonce stale."""
+    from app.models import ExternalChannel, ExternalNodeConfig
+    from app.scheduler.sessions.external import ExternalNodeSession
+    from app.services import external_tasks as ext_svc
+
+    nonces: list[str] = []
+
+    async def fake_dispatch(**kw: Any) -> None:
+        from app.events import publish_run_event
+
+        nonce = f"nonce-{len(nonces) + 1}"
+        nonces.append(nonce)
+        pkg = dict(kw.get("package") or {})
+        pkg.setdefault("leaderAgentId", "leader")
+        pkg.setdefault("clawteamTaskId", kw["task_id"])
+        publish_run_event(
+            kw["storage"],
+            run_id=kw["run_id"],
+            event_type=ext_svc.EXTERNAL_TASK_DISPATCHED_EVENT,
+            agent_id=kw["agent"].id,
+            task_id=kw["task_id"],
+            payload={
+                "channel": kw["agent"].external.channel.value,
+                "nonce": nonce,
+                "message": kw["message"],
+                **pkg,
+            },
+        )
+
+    monkeypatch.setattr(ext_svc, "dispatch_external_task", fake_dispatch)
+
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(
+                id="wh",
+                kind=AgentKind.external,
+                external=ExternalNodeConfig(
+                    channel=ExternalChannel.webhook,
+                    endpoint_url="https://partner.example/hook",
+                ),
+            ),
+            FlowAgent(
+                id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                is_leader=True, merge_strategy=MergeStrategy.manual,
+            ),
+        ],
+        tasks=[
+            FlowTask(
+                id="t1", owner_agent_id="wh", subject="call partner",
+                description="do remote work",
+            ),
+            FlowTask(
+                id="ts", owner_agent_id="leader", subject="summary",
+                description="wrap", depends_on=["t1"], is_leader_summary=True,
+            ),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    storage = get_storage()
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        if agent.kind == AgentKind.external:
+            async def package_provider(task_id: str) -> dict[str, Any]:
+                return {"subject": "call partner", "clawteamTaskId": task_id}
+
+            return ExternalNodeSession(
+                agent=agent, team_name=run.team_name, run_id=run.id,
+                storage=storage, package_provider=package_provider,
+            )
+        return _RecordingSession(
+            agent=agent, team_name=run.team_name, run_id=run.id,
+        )
+
+    snapshots = [
+        TaskSnapshot(task_id="t1", owner_agent_id="wh", status="pending",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="ts", owner_agent_id="leader", status="blocked",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=factory,
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=lambda: [],
+    )
+    await rc.tick()
+    assert len(nonces) == 1
+    assert rc._sessions["wh"].state.value == "busy"
+
+    await rc.redispatch_waiting_external_task(task_id="t1")
+    assert nonces == ["nonce-1", "nonce-2"]
+    latest = ext_svc.latest_dispatch_event(storage, run_id=run.id, task_id="t1")
+    assert latest is not None
+    assert (latest.payload or {}).get("nonce") == "nonce-2"
+    # Session ends Busy again after the replacement dispatch.
+    assert rc._sessions["wh"].state.value == "busy"
+
+    # Late callback from the FIRST dispatch must be rejected — no ClawTeam write.
+    class _FakeMcp:
+        def __init__(self) -> None:
+            self.mailbox_calls: list[dict[str, Any]] = []
+            self.task_updates: list[dict[str, Any]] = []
+
+        async def mailbox_send(self, **kw: Any) -> None:
+            self.mailbox_calls.append(kw)
+
+        async def task_update(self, **kw: Any) -> dict[str, Any]:
+            self.task_updates.append(kw)
+            return {}
+
+    fake = _FakeMcp()
+
+    async def _mcp(*, user: str | None = None) -> _FakeMcp:
+        del user
+        return fake
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _mcp,
+    )
+    with pytest.raises(ext_svc.ExternalTaskError) as stale_exc:
+        await ext_svc.complete_external_task(
+            storage=storage,
+            run=run,
+            task_id="t1",
+            nonce="nonce-1",
+            ok=True,
+            summary="late result from first dispatch",
+            source="test",
+        )
+    assert stale_exc.value.code == "EXTERNAL_TICKET_STALE"
+    assert fake.mailbox_calls == []
+    assert fake.task_updates == []
+
+    # The NEW dispatch's nonce is still accepted.
+    recorded = await ext_svc.complete_external_task(
+        storage=storage,
+        run=run,
+        task_id="t1",
+        nonce="nonce-2",
+        ok=True,
+        summary="fresh result",
+        source="test",
+    )
+    assert recorded["status"] == "recorded"
+    assert len(fake.task_updates) == 1
+    assert "fresh result" in fake.mailbox_calls[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_external_item_one_click_redispatch(fake_lookup) -> None:
     """External checkpoint items rerun WITHOUT feedback by re-dispatching the
     ORIGINAL task (same task id — not a checkpoint-rerun-* custom task), and

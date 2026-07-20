@@ -301,6 +301,11 @@ async def dispatch_external_task(
     ticket = mint_ticket(run_id, task_id, nonce, config=cfg)
     callback_url = _callback_url(run_id, task_id, config=cfg)
 
+    # UI-only bilingual sheets (Run detail card). Never send to webhook/peer.
+    package_wire = dict(package)
+    message_zh = package_wire.pop("messageZh", None)
+    message_en = package_wire.pop("messageEn", None)
+
     outbound_package: dict[str, Any] = {
         "schemaVersion": EXTERNAL_SCHEMA_VERSION,
         "event": "external_task_dispatch",
@@ -323,7 +328,7 @@ async def dispatch_external_task(
                            "on failure: the blocking reason>",
             },
         },
-        **package,
+        **package_wire,
     }
     # Webhook partners run on a different host — remind them not to chase
     # foreign absolute paths or echo local paths back in the summary.
@@ -337,19 +342,25 @@ async def dispatch_external_task(
     # persist before any outbound side effect.
     from app.events import publish_run_event
 
+    event_payload: dict[str, Any] = {
+        "channel": ext.channel.value,
+        "nonce": nonce,
+        "assignee": ext.assignee,
+        "message": message,
+        **package_wire,
+    }
+    if isinstance(message_zh, str) and message_zh.strip():
+        event_payload["messageZh"] = message_zh
+    if isinstance(message_en, str) and message_en.strip():
+        event_payload["messageEn"] = message_en
+
     row = publish_run_event(
         storage,
         run_id=run_id,
         event_type=EXTERNAL_TASK_DISPATCHED_EVENT,
         agent_id=agent.id,
         task_id=task_id,
-        payload={
-            "channel": ext.channel.value,
-            "nonce": nonce,
-            "assignee": ext.assignee,
-            "message": message,
-            **package,
-        },
+        payload=event_payload,
     )
     if row is None:
         raise RuntimeError(

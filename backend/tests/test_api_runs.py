@@ -2045,6 +2045,54 @@ def test_checkpoint_rerun_conflict_maps_specific_error(
     assert r.json()["error"] == "CHECKPOINT_RERUN_CONFLICT"
 
 
+def test_external_task_redispatch_calls_controller(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_external)
+    captured: dict[str, Any] = {}
+
+    class _Controller:
+        async def redispatch_waiting_external_task(self, *, task_id: str):
+            captured["task_id"] = task_id
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
+    r = app_client.post(f"/api/runs/{run.id}/external-tasks/t-remote/redispatch")
+    assert r.status_code == 200, r.text
+    assert captured["task_id"] == "t-remote"
+
+
+def test_external_task_redispatch_rejects_human_channel(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.running)
+
+    class _Controller:
+        async def redispatch_waiting_external_task(self, *, task_id: str):
+            raise ValueError(
+                "redispatch is only available for webhook / remote_csflow "
+                "(got 'human')"
+            )
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
+    r = app_client.post(f"/api/runs/{run.id}/external-tasks/t-human/redispatch")
+    assert r.status_code == 400
+    assert r.json()["error"] == "INVALID_PAYLOAD"
+
+
+def test_external_task_redispatch_terminal_run_409(
+    app_client: TestClient,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+    r = app_client.post(f"/api/runs/{run.id}/external-tasks/t1/redispatch")
+    assert r.status_code == 409
+    assert r.json()["error"] == "EXTERNAL_RUN_NOT_ACTIVE"
+
+
 def test_checkpoint_mark_read_calls_controller(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

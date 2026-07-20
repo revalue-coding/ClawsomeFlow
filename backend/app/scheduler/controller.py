@@ -257,7 +257,7 @@ _OPENCLAW_HEADLESS_TIMEOUT_SEC = MIN_TASK_TIMEOUT_SECONDS
 # Cursor Agent often keeps the Node process alive after the stream-json
 # ``result`` event — waiting on ``communicate()`` with the 4h complaint
 # ceiling made dispatch appear hung for minutes until the user aborted.
-_PARAM_FILL_HEADLESS_TIMEOUT_SEC = 180.0
+_PARAM_FILL_HEADLESS_TIMEOUT_SEC = 300.0  # 5 min
 _RUNTIME_SOCKET_CAPTURE_LINES = 140
 _RUNTIME_SOCKET_TAIL_CHARS = 1800
 _RUNTIME_SOCKET_RECOVERY_LIMIT = 2
@@ -538,6 +538,88 @@ class RunController:
                 },
             )
         return payload
+
+    async def redispatch_waiting_external_task(self, *, task_id: str) -> None:
+        """Re-dispatch a waiting webhook / remote_csflow external task.
+
+        Used from the Run-detail card while the operator waits for a callback.
+        Issues a fresh one-time ticket (same as a first dispatch) so the prior
+        nonce is immediately stale — late callbacks with the old ticket get
+        ``EXTERNAL_TICKET_STALE``. Human-channel cards keep the submit form
+        instead; checkpoint external redispatch stays on
+        :meth:`request_checkpoint_rerun`.
+        """
+        tid = (task_id or "").strip()
+        if not tid:
+            raise ValueError("task id is required")
+        if self._cancel_evt.is_set():
+            raise RuntimeError("run is cancelling; external redispatch unavailable")
+        book = self._tasks.get(tid)
+        if book is None:
+            raise KeyError(tid)
+        agent = self._agents.get(book.task.owner_agent_id)
+        if (
+            agent is None
+            or agent.kind != AgentKind.external
+            or agent.external is None
+        ):
+            raise ValueError(f"task {tid!r} is not owned by an external node")
+        channel = agent.external.channel
+        if channel not in (
+            ExternalChannel.webhook,
+            ExternalChannel.remote_csflow,
+        ):
+            raise ValueError(
+                "redispatch is only available for webhook / remote_csflow "
+                f"(got {channel.value!r})"
+            )
+        from app.services.external_tasks import latest_dispatch_event
+
+        prior = latest_dispatch_event(
+            self.storage, run_id=self.run.id, task_id=tid,
+        )
+        if prior is None:
+            raise RuntimeError(
+                f"task {tid!r} has no outstanding external dispatch to replace"
+            )
+        prior_nonce = str((prior.payload or {}).get("nonce") or "")
+
+        # Waiting externals sit Busy with no local process — free the session
+        # so :meth:`dispatch` can Idle→Busy again with a fresh ticket.
+        sess = self._sessions.get(agent.id)
+        if sess is not None and sess.state == SessionState.Busy:
+            sess.mark_idle(reason="external_waiting_redispatch")
+
+        ctx = await self._compose_dispatch_context(agent, book.task)
+        message = self._render_dispatch_message(agent, book.task, ctx)
+        now_epoch = time.time()
+        book.state = _TaskState.in_progress
+        book.dispatched_at = now_epoch
+        self.dispatch_clock.mark(tid, now_epoch)
+        # Keep ClawTeam in_progress (already is); force in case of drift.
+        await self._update_clawteam_task_status(
+            tid,
+            status="in_progress",
+            caller="csflow-external-redispatch",
+            force=True,
+        )
+        try:
+            await self._dispatch_custom_task(
+                agent=agent, task_id=tid, message=message,
+            )
+        except Exception:
+            # Leave book in_progress — operator can retry; prior nonce is
+            # only invalidated once the new dispatch event persists.
+            raise
+        self._emit_event(
+            "external_task_redispatched",
+            agent_id=agent.id,
+            task_id=tid,
+            payload={
+                "channel": channel.value,
+                "invalidated_nonce": prior_nonce,
+            },
+        )
 
     async def request_checkpoint_rerun(
         self,
@@ -2830,6 +2912,10 @@ class RunController:
         agent = self._agents[book.task.owner_agent_id]
         ctx = await self._compose_dispatch_context(agent, book.task)
         package = build_external_task_package(ctx)
+        # Bilingual sheets for the Run-detail card (UI language pill). Stripped
+        # from webhook/delegate outbound in ``dispatch_external_task``.
+        package["messageZh"] = build_external_task_text(ctx, lang="zh")
+        package["messageEn"] = build_external_task_text(ctx, lang="en")
         # remote_csflow nodes delegate a remote Flow: resolve its run-input
         # param values now (union of upstream reports + user overrides +
         # headless-leader fallback + placeholder) so _post_delegate can send

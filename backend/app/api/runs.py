@@ -29,6 +29,9 @@ Endpoints:
   clear unread highlight state for a refreshed checkpoint item
 * ``POST   /api/runs/{run_id}/retry-task/{task_id}``  — flip a ClawTeam
   task back to ``pending`` so the controller redispatches it next tick
+* ``POST   /api/runs/{run_id}/external-tasks/{task_id}/redispatch`` —
+  re-dispatch a waiting webhook / remote_csflow external task (fresh
+  ticket; prior dispatch invalidated)
 
 Cross-references:
 * The Run row is created here (``Run.status = pending``); the scheduler
@@ -2833,6 +2836,72 @@ async def complete_external_task_webui(
     except ExternalTaskError as exc:
         raise ApiError(exc.code, exc.message, status_code=exc.status_code) from exc
     return _to_summary(run)
+
+
+@router.post(
+    "/runs/{run_id}/external-tasks/{task_id}/redispatch",
+    response_model=RunSummary,
+)
+async def redispatch_external_task_webui(
+    run_id: Annotated[str, Path()],
+    task_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunSummary:
+    """Re-dispatch a waiting webhook / remote_csflow external task.
+
+    Mints a fresh one-time ticket and re-sends the channel outbound. The
+    previous dispatch nonce is invalidated immediately (late callbacks with
+    the old ticket → ``EXTERNAL_TICKET_STALE``). Human-channel tasks are
+    rejected — they use the submit / report-failure form instead.
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if run.status in _TERMINAL:
+        raise ApiError(
+            "EXTERNAL_RUN_NOT_ACTIVE",
+            "external task redispatch requires the run to still be active",
+            status_code=409,
+        )
+    sched = get_scheduler()
+    controller = sched.get_controller(run.id)
+    if controller is None:
+        raise ApiError(
+            "REDISPATCH_UNAVAILABLE",
+            "controller not available; cannot redispatch external task",
+            status_code=409,
+        )
+    try:
+        await controller.redispatch_waiting_external_task(task_id=task_id)
+    except KeyError as exc:
+        raise ApiError(
+            "TASK_NOT_FOUND",
+            f"task {task_id!r} not found in this run",
+            status_code=404,
+        ) from exc
+    except ValueError as exc:
+        raise ApiError("INVALID_PAYLOAD", str(exc), status_code=400) from exc
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "no outstanding external dispatch" in msg:
+            raise ApiError(
+                "EXTERNAL_TASK_NOT_DISPATCHED", msg, status_code=409,
+            ) from exc
+        raise ApiError("REDISPATCH_FAILED", msg, status_code=409) from exc
+    except Exception as exc:  # pragma: no cover — channel/outbound failures
+        logger.warning(
+            "external_task_redispatch_failed",
+            run_id=run.id, task_id=task_id, error=str(exc),
+        )
+        raise ApiError(
+            "REDISPATCH_FAILED",
+            f"failed to redispatch external task {task_id!r}: {exc}",
+            status_code=409,
+        ) from exc
+    refreshed = storage.run_get(run.id) or run
+    return _to_summary(refreshed)
 
 
 @router.post(
