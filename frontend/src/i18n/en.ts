@@ -477,8 +477,12 @@ const en = {
         "On the target Flow's editor click \"Copy remote call info\", paste the JSON here; it is parsed and registered when you save the subtask.",
       externalRemoteCallInfoEmpty: "Paste the remote Flow call info first.",
       externalRemoteCallInfoInvalid: "Call info is not valid JSON — copy it again from the target Flow.",
+      externalRemoteCallInfoShapeInvalid:
+        "Call info shape is invalid: it must include flowId, pairTokenName, and pairSecret (from the target Flow's \"Copy remote call info\").",
       externalBaseUrlRequired:
         "Enter the remote base URL the origin scheduler can actually reach (e.g. http://192.168.1.10:17017).",
+      externalBaseUrlInvalid:
+        "Remote base URL format is invalid: use http(s)://host[:port], e.g. http://192.168.1.10:17017.",
       externalBaseUrlPlaceholder: "e.g. http://192.168.1.10:17017 or http://127.0.0.1:17017",
       externalBaseUrlHint:
         "Must be a host:port the origin service process can reach directly. Do not use the 127.0.0.1:forwarded-port you see in a browser over an SSH tunnel.",
@@ -487,9 +491,10 @@ const en = {
       externalHumanHint: "A person completes this subtask and returns the result on the Run page. On dispatch, the task sheet (description, upstream inputs, output requirement) is pushed to the Flow's notify channels (Flow list → \"Notify\" button) to alert the assignee.",
       externalWebhookHint: "On dispatch we POST a task package to this endpoint; when done, follow the package’s callback and return {\"status\",\"summary\"}. The summary becomes this node’s output.",
       externalRemoteHint: "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output.",
-      externalRemoteHintWithParams: "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output. The remote Flow declares param fields: upstream tasks are asked to report values for them; below you may optionally fill values you already know (they override the upstream reports).",
+      externalRemoteHintWithParams:
+        "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output. The remote Flow declares param fields: upstream tasks will fill them intelligently; you may also enter known values yourself (they override upstream reports).",
       externalInputs: "Your own remote param-field values (optional, JSON object)",
-      externalInputsHint: "Optional: values you already know for the remote Flow's param fields (keys are field names). They override same-named values reported by upstream tasks; unfilled fields take the union of upstream reports, and anything still empty is sent as \"参数为空\". Example: {\"requirement\": \"crawl weekly report\", \"target dir\": \"/data/reports\"}",
+      externalInputsFields: "Fillable fields: {{fields}}",
       newAgentName: "AGENT name *",
       newAgentNamePlaceholder: "Create new, or pick an existing temporary agent in this Flow",
       leaderNewAgentPlaceholder: "New temporary agent name",

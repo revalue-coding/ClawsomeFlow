@@ -1141,19 +1141,18 @@ async def _terminate_cursor_process_best_effort(proc: Any) -> None:
             return
 
 
-async def _dispatch_to_cursor_leader_via_stream_json(
-    *,
-    request_id: str,
-    leader_target: _LeaderTarget,
+async def capture_cursor_stream_json_result(
     proc: Any,
+    *,
     timeout_sec: float,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read Cursor headless stream-json until the final result event.
+    log_context: dict[str, Any] | None = None,
+) -> str:
+    """Read Cursor headless stream-json until the final ``result`` event.
 
     Cursor Agent can finish the model turn but keep the Node process alive while
-    background handles flush. This path is intentionally Cursor-only: once the
-    result event is available, ClawsomeFlow has the complete proposal text and
-    does not need to wait for natural process exit.
+    background handles flush. Once the result event is available the caller has
+    the complete text and must not wait for natural process exit (``communicate``
+    would hang). Shared by AI-decompose and remote param-fill headless paths.
     """
     stdout_stream = getattr(proc, "stdout", None)
     if stdout_stream is None:
@@ -1163,6 +1162,7 @@ async def _dispatch_to_cursor_leader_via_stream_json(
     stdout_lines: list[str] = []
     result_text: str | None = None
     result_error: str | None = None
+    ctx = dict(log_context or {})
 
     try:
         while True:
@@ -1193,12 +1193,7 @@ async def _dispatch_to_cursor_leader_via_stream_json(
     except asyncio.CancelledError:
         await _terminate_cursor_process_best_effort(proc)
         await _finish_cursor_stderr_task(stderr_task)
-        logger.info(
-            "decompose_cursor_stream_cancelled",
-            request_id=request_id,
-            leader=leader_target.id,
-            leader_kind=leader_target.kind.value,
-        )
+        logger.info("cursor_stream_cancelled", **ctx)
         raise
     except asyncio.TimeoutError as exc:
         await _terminate_cursor_process_best_effort(proc)
@@ -1229,13 +1224,47 @@ async def _dispatch_to_cursor_leader_via_stream_json(
         )
 
     logger.info(
+        "cursor_stream_result_received",
+        result_chars=len(result_text),
+        stream_stdout_chars=len(out_text),
+        stderr_chars=len(err_text),
+        **ctx,
+    )
+    return result_text
+
+
+async def _dispatch_to_cursor_leader_via_stream_json(
+    *,
+    request_id: str,
+    leader_target: _LeaderTarget,
+    proc: Any,
+    timeout_sec: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """AI-decompose wrapper around :func:`capture_cursor_stream_json_result`."""
+    try:
+        result_text = await capture_cursor_stream_json_result(
+            proc,
+            timeout_sec=timeout_sec,
+            log_context={
+                "request_id": request_id,
+                "leader": leader_target.id,
+                "leader_kind": leader_target.kind.value,
+            },
+        )
+    except asyncio.CancelledError:
+        logger.info(
+            "decompose_cursor_stream_cancelled",
+            request_id=request_id,
+            leader=leader_target.id,
+            leader_kind=leader_target.kind.value,
+        )
+        raise
+    logger.info(
         "decompose_cursor_stream_result_received",
         request_id=request_id,
         leader=leader_target.id,
         leader_kind=leader_target.kind.value,
         result_chars=len(result_text),
-        stream_stdout_chars=len(out_text),
-        stderr_chars=len(err_text),
     )
     logger.info(
         "decompose_non_openclaw_session_completed",
@@ -1243,11 +1272,11 @@ async def _dispatch_to_cursor_leader_via_stream_json(
         leader=leader_target.id,
         leader_kind=leader_target.kind.value,
         stdout_chars=len(result_text),
-        stderr_chars=len(err_text),
+        stderr_chars=0,
     )
     return _extract_non_openclaw_proposal(
         stdout_text=result_text,
-        stderr_text=err_text,
+        stderr_text="",
     )
 
 

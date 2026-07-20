@@ -3612,10 +3612,11 @@ function TaskFormBody({
   onOwnerModeChange: (mode: OwnerMode) => void;
   onChange: (patch: Partial<TaskRow>) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { alert } = useDialog();
   const [pickingRepo, setPickingRepo] = useState(false);
   const ownerLocked = readOnly || isSummary;
+  const paramFieldSep = i18n.language.startsWith("zh") ? "、" : ", ";
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
   const ownerIsExternal = ownerMode === "external" || isExternalKind(row.ownerKind);
@@ -4080,6 +4081,54 @@ function TaskFormBody({
                     onChange={(e) =>
                       onChange({ externalRemoteCallInfo: e.target.value })
                     }
+                    onBlur={(e) => {
+                      if (ownerLocked) return;
+                      const raw = e.target.value.trim();
+                      if (!raw) {
+                        if (!remoteCsflowConfigured(row)) {
+                          void alert(
+                            t("flowEditor.taskFields.externalRemoteCallInfoEmpty"),
+                          );
+                        }
+                        return;
+                      }
+                      const parsed = parseRemoteCallInfoBlob(raw);
+                      if (!parsed.ok) {
+                        void alert(
+                          parsed.reason === "shape"
+                            ? t(
+                                "flowEditor.taskFields.externalRemoteCallInfoShapeInvalid",
+                              )
+                            : t(
+                                "flowEditor.taskFields.externalRemoteCallInfoInvalid",
+                              ),
+                        );
+                        return;
+                      }
+                      // Valid paste → surface param-fields UI immediately
+                      // (credential registration still happens on save).
+                      const fields = parsed.paramFields;
+                      const same =
+                        fields.length === row.externalRemoteParamFields.length
+                        && fields.every(
+                          (f, i) => f === row.externalRemoteParamFields[i],
+                        );
+                      if (
+                        same
+                        && (parsed.info.flowName || "") === row.externalRemoteFlowName
+                        && (parsed.info.flowDescription || "")
+                          === row.externalRemoteFlowDescription
+                      ) {
+                        return;
+                      }
+                      onChange({
+                        externalRemoteParamFields: fields,
+                        externalRemoteFlowName: parsed.info.flowName || "",
+                        externalRemoteFlowDescription:
+                          parsed.info.flowDescription || "",
+                        externalInputs: fields.length > 0 ? row.externalInputs : "",
+                      });
+                    }}
                   />
                 </div>
                 <div className="md:col-span-2">
@@ -4096,21 +4145,42 @@ function TaskFormBody({
                     onChange={(e) =>
                       onChange({ externalBaseUrl: e.target.value })
                     }
+                    onBlur={(e) => {
+                      if (ownerLocked) return;
+                      const raw = e.target.value.trim();
+                      if (!raw) {
+                        void alert(
+                          t("flowEditor.taskFields.externalBaseUrlRequired"),
+                        );
+                        return;
+                      }
+                      if (!isValidExternalBaseUrl(raw)) {
+                        void alert(
+                          t("flowEditor.taskFields.externalBaseUrlInvalid"),
+                        );
+                      }
+                    }}
                   />
                 </div>
                 {row.externalRemoteParamFields.length > 0 && (
                   <div className="md:col-span-2">
                     <label className="label">{t("flowEditor.taskFields.externalInputs")}</label>
+                    <div className="mb-1 text-xs text-ink-600">
+                      {t("flowEditor.taskFields.externalInputsFields", {
+                        fields: row.externalRemoteParamFields.join(paramFieldSep),
+                      })}
+                    </div>
                     <textarea
                       className="textarea h-20 font-mono text-xs"
                       value={row.externalInputs}
                       readOnly={ownerLocked}
-                      placeholder={'{\n  "需求描述": "…",\n  "目标目录": "/abs/path"\n}'}
+                      placeholder={
+                        `{\n${row.externalRemoteParamFields
+                          .map((f) => `  "${f}": ""`)
+                          .join(",\n")}\n}`
+                      }
                       onChange={(e) => onChange({ externalInputs: e.target.value })}
                     />
-                    <div className="text-xs text-ink-500 mt-1">
-                      {t("flowEditor.taskFields.externalInputsHint")}
-                    </div>
                   </div>
                 )}
               </>
@@ -5235,6 +5305,71 @@ function isPlaceholderPairSecret(secret: string | undefined | null): boolean {
   if (s === REMOTE_CALL_INFO_SECRET_PLACEHOLDER) return true;
   // Reconstructed / display-only secrets are wrapped in parentheses.
   return s.startsWith("(") && s.endsWith(")");
+}
+
+/** Sync format check for the pasted remote-call-info blob (blur / save). */
+function parseRemoteCallInfoBlob(
+  raw: string,
+):
+  | { ok: true; info: RemoteCallInfo; paramFields: string[] }
+  | { ok: false; reason: "empty" | "json" | "shape" } {
+  const text = raw.trim();
+  if (!text) return { ok: false, reason: "empty" };
+  let parsed: Record<string, unknown>;
+  try {
+    const value: unknown = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { ok: false, reason: "json" };
+    }
+    parsed = value as Record<string, unknown>;
+  } catch {
+    return { ok: false, reason: "json" };
+  }
+  const flowId = String(parsed.flowId ?? parsed.flow_id ?? "").trim();
+  const pairTokenName = String(
+    parsed.pairTokenName ?? parsed.pair_token_name ?? "",
+  ).trim();
+  const pairSecret = String(
+    parsed.pairSecret ?? parsed.pair_secret ?? "",
+  ).trim();
+  if (!flowId || !pairTokenName || !pairSecret) {
+    return { ok: false, reason: "shape" };
+  }
+  const rawFields = parsed.paramFields ?? parsed.param_fields;
+  const paramFields = Array.isArray(rawFields)
+    ? rawFields.map((f) => String(f ?? "").trim()).filter(Boolean)
+    : [];
+  return {
+    ok: true,
+    info: {
+      schemaVersion: Number(parsed.schemaVersion ?? parsed.schema_version ?? 1) || 1,
+      kind: String(parsed.kind ?? "csflow.remote_call_info"),
+      baseUrl: String(parsed.baseUrl ?? parsed.base_url ?? ""),
+      flowId,
+      flowName: String(parsed.flowName ?? parsed.flow_name ?? ""),
+      flowDescription: String(
+        parsed.flowDescription ?? parsed.flow_description ?? "",
+      ),
+      paramFields,
+      pairTokenName,
+      pairSecret,
+    },
+    paramFields,
+  };
+}
+
+/** True when *url* looks like an absolute http(s) base the scheduler can use. */
+function isValidExternalBaseUrl(url: string): boolean {
+  const raw = url.trim();
+  if (!raw) return false;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (!u.hostname) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

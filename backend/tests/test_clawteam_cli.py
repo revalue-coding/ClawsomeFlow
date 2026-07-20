@@ -23,6 +23,7 @@ from app.integrations.clawteam_cli import (
     ClawTeamCli,
     _ensure_repo_on_target_branch,
     _enforce_anti_loop,
+    _is_empty_git_revert_output,
     _SpawnArgs,
 )
 from app.user_context import set_request_user
@@ -1313,3 +1314,41 @@ async def test_run_merged_agent_patch_include_patch_false_skips_body(
     assert result["merge_count"] == 1
     assert result["files_changed"] == 1
     assert result["patch"] == ""
+
+
+def test_is_empty_git_revert_output_detects_already_undone() -> None:
+    assert _is_empty_git_revert_output(
+        "Auto-merging docs/grassland_destinations_research.md\n"
+        "On branch main\nnothing to commit, working tree clean\n",
+    )
+    assert not _is_empty_git_revert_output(
+        "CONFLICT (content): Merge conflict in docs/x.md\n",
+    )
+
+
+@pytest.mark.asyncio
+async def test_revert_agent_merges_treats_empty_rerevert_as_success(
+    tmp_path: Path,
+) -> None:
+    """Second 撤销合入 after a clean first revert must not look like a conflict."""
+    repo = _make_baseline_repo(tmp_path)
+    team = "csflow-abc12345"
+    agent = "alice"
+    _agent_merge(
+        repo, team=team, agent=agent, filename="a.txt", content="alice\n",
+        message=f"csflow: unattended merge clawteam/{team}/{agent}",
+    )
+    cli = ClawTeamCli()
+    first = await cli.revert_agent_merges(
+        team=team, agent=agent, repo=str(repo), target_branch="main",
+    )
+    assert first["ok"] is True
+    assert first["nothing_to_revert"] is False
+    assert first["merge_shas"]
+
+    second = await cli.revert_agent_merges(
+        team=team, agent=agent, repo=str(repo), target_branch="main",
+    )
+    assert second["ok"] is True
+    assert second["nothing_to_revert"] is True
+    assert "already reverted" in second["message"]

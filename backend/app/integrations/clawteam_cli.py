@@ -139,6 +139,21 @@ def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
     return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
 
 
+def _is_empty_git_revert_output(text: str) -> bool:
+    """True when ``git revert`` failed because the inverse was already applied.
+
+    Re-reverting a merge that was already undone yields exit code 1 with
+    ``nothing to commit, working tree clean`` (often after an ``Auto-merging``
+    line). That is *not* a conflict with later commits — treat as success /
+    already-reverted so the UI does not show a false "撤销合入失败".
+    """
+    lowered = (text or "").lower()
+    return (
+        "nothing to commit" in lowered
+        and "working tree clean" in lowered
+    )
+
+
 def _match_agent_merge_shas(log_out: str, branch: str) -> list[str]:
     """From ``git log --format=%H%x1f%s`` output, return the commit shas (in
     **chronological** order, oldest first) whose subject references *branch* as a
@@ -1043,6 +1058,9 @@ class ClawTeamCli:
                     if q_code == 1:  # 1 = differences present; 0 = none
                         effective.append(sha)
                 if not effective:
+                    # Idempotent: merges already empty / gone → success so the
+                    # API can mark the agent reverted and hide it from Run-diff.
+                    result["ok"] = True
                     result["nothing_to_revert"] = True
                     result["message"] = (
                         f"no effective merge of {branch!r} found on {target!r} to revert"
@@ -1104,6 +1122,7 @@ class ClawTeamCli:
                     cwd=repo_root, env=env,
                 )
                 if rv_code != 0:
+                    combined = ((rv_out or "") + (rv_err or "")).strip()
                     # Abort any in-progress revert, then restore to the exact
                     # pre-revert tip so no partial reverts remain.
                     await _run_in_cwd(
@@ -1113,10 +1132,26 @@ class ClawTeamCli:
                         await _run_in_cwd(
                             ["git", "reset", "--hard", orig_tip], cwd=repo_root, env=env,
                         )
-                    combined = ((rv_out or "") + (rv_err or "")).strip()[:600]
+                    if _is_empty_git_revert_output(combined):
+                        # Merges were already undone (prior 撤销合入 or manual
+                        # revert). Tip unchanged; report success + mark done.
+                        nh_code, nh_out, _ = await _run_in_cwd(
+                            ["git", "rev-parse", "HEAD"], cwd=repo_root, env=env,
+                        )
+                        result["ok"] = True
+                        result["nothing_to_revert"] = True
+                        result["merge_shas"] = effective
+                        result["revert_head"] = (
+                            (nh_out or "").strip() if nh_code == 0 else orig_tip
+                        )
+                        result["message"] = (
+                            "already reverted (empty git revert; no changes needed)"
+                        )
+                        return result
                     result["message"] = (
                         "git revert failed (likely a conflict with commits that "
-                        f"landed later); rolled back, no changes made:\n{combined}"
+                        "landed later); rolled back, no changes made:\n"
+                        f"{combined[:600]}"
                     )
                     return result
 

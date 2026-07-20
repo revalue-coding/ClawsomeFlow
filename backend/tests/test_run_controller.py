@@ -4608,6 +4608,99 @@ async def test_checkpoint_local_agent_rerun_still_requires_feedback(
 
 
 @pytest.mark.asyncio
+async def test_eager_checkpoint_opens_while_parallel_external_in_flight(
+    fake_lookup,
+) -> None:
+    """A completed checkpoint-required task must open review immediately even
+    when its only dependent is the summary (not yet ready). Parallel external
+    in-flight tasks keep their waiting card — both coexist."""
+    from app.models import ExternalChannel, ExternalNodeConfig
+
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(
+                id="local", kind=AgentKind.claude, repo="/tmp/main",
+                merge_strategy=MergeStrategy.manual,
+            ),
+            FlowAgent(
+                id="ext-node", kind=AgentKind.external,
+                external=ExternalNodeConfig(channel=ExternalChannel.remote_csflow,
+                                            base_url="http://peer:17017",
+                                            flow_id="flow-x",
+                                            pair_token_ref="peer"),
+            ),
+            FlowAgent(
+                id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                is_leader=True, merge_strategy=MergeStrategy.manual,
+            ),
+        ],
+        tasks=[
+            FlowTask(
+                id="t_local", owner_agent_id="local", subject="safety notes",
+                description="done", requires_human_checkpoint=True,
+            ),
+            FlowTask(
+                id="t_ext", owner_agent_id="ext-node", subject="assemble",
+                description="remote work", requires_human_checkpoint=True,
+            ),
+            FlowTask(
+                id="ts", owner_agent_id="leader", subject="summary",
+                description="wrap",
+                depends_on=["t_local", "t_ext"],
+                is_leader_summary=True,
+            ),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    run.status = RunStatus.running
+    sessions: dict[str, _RecordingSession] = {}
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        s = _RecordingSession(agent=agent, team_name=run.team_name, run_id=run.id)
+        sessions[agent.id] = s
+        return s
+
+    # Local checkpoint task already completed; parallel external still
+    # in_progress — summary must NOT be ready (not all non-summary done).
+    snapshots: list[TaskSnapshot] = [
+        TaskSnapshot(
+            task_id="t_local", owner_agent_id="local", status="completed",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="t_ext", owner_agent_id="ext-node", status="in_progress",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="ts", owner_agent_id="leader", status="blocked",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    async def inbox_provider() -> list[dict[str, str]]:
+        return []
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=factory,
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=inbox_provider,
+    )
+
+    await rc.tick()
+    assert run.status == RunStatus.awaiting_user_checkpoint
+    cp = rc.checkpoint_snapshot()
+    assert cp is not None
+    assert [it["task_id"] for it in cp["items"]] == ["t_local"]
+    # Summary must stay gated (not all non-summary tasks completed).
+    assert sessions.get("leader") is None or sessions["leader"].dispatched == []
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_pauses_local_but_allows_parallel_external(
     fake_lookup,
 ) -> None:

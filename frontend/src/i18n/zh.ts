@@ -472,7 +472,11 @@ const zh = {
         "在目标 Flow 的编辑页点击「复制远程调用信息」，把得到的 JSON 粘贴到这里；保存子任务时自动解析并注册。",
       externalRemoteCallInfoEmpty: "请先粘贴远端 Flow 调用信息。",
       externalRemoteCallInfoInvalid: "调用信息不是合法 JSON，请重新从目标 Flow 复制。",
+      externalRemoteCallInfoShapeInvalid:
+        "调用信息格式不正确：须包含 flowId、pairTokenName、pairSecret（从目标 Flow「复制远程调用信息」得到）。",
       externalBaseUrlRequired: "请填写远端地址（本机调度器实际能访问到的主机与端口，例如 http://192.168.1.10:17017）。",
+      externalBaseUrlInvalid:
+        "远端地址格式不正确：须为 http(s)://主机[:端口]，例如 http://192.168.1.10:17017。",
       externalBaseUrlPlaceholder: "例如 http://192.168.1.10:17017 或 http://127.0.0.1:17017",
       externalBaseUrlHint:
         "须填写发起方服务进程能直接访问的地址与端口。勿使用 SSH 隧道在浏览器里看到的 127.0.0.1:转发端口。",
@@ -481,9 +485,10 @@ const zh = {
       externalHumanHint: "由人工完成该子任务后在 Run 详情页返回结果。派发时会把任务说明（含任务描述、上游输入、输出要求）推送到该 Flow 配置的通知渠道（Flow 列表 →「通知」按钮），提醒执行人处理。",
       externalWebhookHint: "派发时向该端点 POST 任务包；完成后按包内 callback 说明回传 {\"status\",\"summary\"}。summary 会作为本节点产出给下游",
       externalRemoteHint: "委托给远端某条 Flow 执行，其最终报告作为本节点产出。",
-      externalRemoteHintWithParams: "委托给远端某条 Flow 执行，其最终报告作为本节点产出。该远端 Flow 声明了参数字段：上游任务会被要求额外回报这些字段的值；下方可选填你自己已知的参数值（会覆盖上游回报）。",
+      externalRemoteHintWithParams:
+        "委托给远端某条 Flow 执行，其最终报告作为本节点产出。该远端 Flow 声明了参数字段：上游任务会智能填入字段值；你也可以自行填写确定的参数值（将覆盖上游回报）。",
       externalInputs: "自主填写的远端参数字段值（可选，JSON 对象）",
-      externalInputsHint: "可选：你已知的远端 Flow「参数字段」值（键为字段名、值为内容），会覆盖上游任务回报的同名字段；未填的字段取上游回报的并集，仍为空则派发时填「参数为空」。示例：{\"需求描述\": \"抓取本周报表\", \"目标目录\": \"/data/reports\"}",
+      externalInputsFields: "可填写字段：{{fields}}",
       newAgentName: "AGENT 名称 *",
       newAgentNamePlaceholder: "新建或选择本Flow已有临时AGENT",
       leaderNewAgentPlaceholder: "新建临时 Agent 名称",

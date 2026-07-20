@@ -99,7 +99,11 @@ from app.scheduler.finalize import (
     finalize_run,
     run_terminal_tail_cleanup,
 )
-from app.scheduler.run_metadata import POST_COMPLAINT_STATUS_KEY, run_is_unattended
+from app.scheduler.run_metadata import (
+    POST_COMPLAINT_STATUS_KEY,
+    coalesce_reverted_merge_markers,
+    run_is_unattended,
+)
 from app.scheduler.naming import openclaw_session_id_for_run, team_name_for_run
 from app.repo_merge_lock import self_merge_instruction
 from app.scheduler.providers import DispatchClock
@@ -249,6 +253,11 @@ _POLL_MAX_SEC = 3.0
 # timeout floor (4h) — a shorter guard would kill a long-but-healthy task.
 # The previous 1h value could misjudge legitimate long fixes as failures.
 _OPENCLAW_HEADLESS_TIMEOUT_SEC = MIN_TASK_TIMEOUT_SECONDS
+# Remote param-fill is a short JSON extraction turn (not a real DAG task).
+# Cursor Agent often keeps the Node process alive after the stream-json
+# ``result`` event — waiting on ``communicate()`` with the 4h complaint
+# ceiling made dispatch appear hung for minutes until the user aborted.
+_PARAM_FILL_HEADLESS_TIMEOUT_SEC = 180.0
 _RUNTIME_SOCKET_CAPTURE_LINES = 140
 _RUNTIME_SOCKET_TAIL_CHARS = 1800
 _RUNTIME_SOCKET_RECOVERY_LIMIT = 2
@@ -1105,11 +1114,20 @@ class RunController:
         if self._cancel_evt.is_set():
             return activity
 
+        # 3.5. Eager checkpoint: open review as soon as a checkpoint-required
+        #    upstream completes — do NOT wait until its downstream enters the
+        #    ready set. Otherwise a parallel completed local review stays
+        #    invisible while an unrelated external task is still in flight
+        #    (summary-gated dependents never become ready mid-run).
+        if self._dispatch_checkpoint is None:
+            opened_eager = await self._maybe_open_eager_checkpoint()
+            activity = activity or opened_eager
+
         # 4. Dispatch the (potentially updated) ready set.
         ready = self._ready_tasks()
         if ready:
             dispatchable, checkpoint_target = self._partition_ready_tasks_for_checkpoint(ready)
-            if checkpoint_target is not None:
+            if checkpoint_target is not None and self._dispatch_checkpoint is None:
                 downstream_book, checkpoint_book = checkpoint_target
                 opened = await self._open_dispatch_checkpoint(
                     downstream_task=downstream_book.task,
@@ -1299,6 +1317,49 @@ class RunController:
             if owner is not None and owner.kind == AgentKind.external:
                 out.append(book)
         return out
+
+    async def _maybe_open_eager_checkpoint(self) -> bool:
+        """Open a checkpoint for a completed upstream that still needs review.
+
+        Serial: at most one open checkpoint. Prefer non-summary dependents so
+        a mid-DAG review is attributed to a real next task when possible;
+        fall back to the leader summary (even if it is not yet dispatchable).
+        """
+        if self._dispatch_checkpoint is not None or self._cancel_evt.is_set():
+            return False
+
+        candidates: list[tuple[int, str, FlowTask, FlowTask]] = []
+        for up_book in self._tasks.values():
+            up_task = up_book.task
+            if not self._task_requires_manual_checkpoint(up_task):
+                continue
+            if up_task.id in self._checkpoint_passed_tasks:
+                continue
+            if up_book.state != _TaskState.completed:
+                continue
+            dependents = [
+                b for b in self._tasks.values()
+                if up_task.id in (b.task.depends_on or [])
+            ]
+            if not dependents:
+                continue
+            non_summary = [
+                b for b in dependents if not b.task.is_leader_summary
+            ]
+            pick = (non_summary or dependents)[0].task
+            # Prefer reviewing against a concrete mid-DAG dependent (0)
+            # over the summary (1); then stable by upstream task id.
+            rank = 0 if not pick.is_leader_summary else 1
+            candidates.append((rank, up_task.id, pick, up_task))
+
+        if not candidates:
+            return False
+        candidates.sort(key=lambda row: (row[0], row[1]))
+        _rank, _uid, downstream, upstream = candidates[0]
+        return await self._open_dispatch_checkpoint(
+            downstream_task=downstream,
+            checkpoint_task=upstream,
+        )
 
     async def _checkpoint_gate_tick(self) -> tuple[bool, bool]:
         """Refresh/clear the active manual checkpoint.
@@ -2761,6 +2822,8 @@ class RunController:
 
         Recomposes the DispatchContext (the leader-inbox peek is memoised per
         tick, so this costs no extra RPC within the dispatching tick)."""
+        if self._cancel_evt.is_set():
+            raise RuntimeError("run cancelled before external dispatch")
         book = self._tasks.get(task_id)
         if book is None:
             raise RuntimeError(f"external package: unknown task {task_id!r}")
@@ -2779,6 +2842,10 @@ class RunController:
             package["inputs"] = await self._resolve_remote_delegate_inputs(
                 agent, book.task,
             )
+            if self._cancel_evt.is_set():
+                # Headless param-fill can outlive a user abort; never ship a
+                # delegate after cancel (would race finalize + wipe markers).
+                raise RuntimeError("run cancelled during remote param resolve")
         return package
 
     async def _resolve_remote_delegate_inputs(
@@ -2969,6 +3036,12 @@ class RunController:
             "### Reply format (STRICT)\n"
             f"Reply with ONLY a single JSON object: {{{schema}}}"
         )
+        if self._cancel_evt.is_set():
+            logger.info(
+                "remote_param_headless_fill_cancelled",
+                run_id=self.run.id, task_id=task_id,
+            )
+            return {}
         try:
             output = await self._headless_capture_leader(leader, prompt)
         except Exception as exc:
@@ -2978,10 +3051,25 @@ class RunController:
                 leader_kind=leader.kind.value, error=str(exc),
             )
             return {}
+        if self._cancel_evt.is_set():
+            return {}
         parsed = _extract_first_json_object(output)
         if not isinstance(parsed, dict):
+            logger.info(
+                "remote_param_headless_fill_unparsed",
+                run_id=self.run.id, task_id=task_id,
+                leader_kind=leader.kind.value,
+                output_chars=len(output or ""),
+            )
             return {}
-        return {str(k): str(v) for k, v in parsed.items()}
+        filled = {str(k): str(v) for k, v in parsed.items()}
+        logger.info(
+            "remote_param_headless_fill_ok",
+            run_id=self.run.id, task_id=task_id,
+            leader_kind=leader.kind.value,
+            filled_keys=sorted(k for k, v in filled.items() if str(v).strip()),
+        )
+        return filled
 
     async def _headless_capture_leader(
         self, leader: FlowAgent, prompt: str,
@@ -2990,11 +3078,15 @@ class RunController:
 
         Dispatches by kind:
         * OpenClaw → ``openclaw agent --local … --message`` (dedicated session-id)
-        * Hermes / every TUI kind → :func:`_non_openclaw_dispatch_argv` (same
-          table as AI decompose — Claude/Codex/Gemini/…)
+        * Cursor → stream-json capture (must NOT ``communicate()`` — process
+          often stays alive after the ``result`` event; same as AI decompose)
+        * Hermes / every other TUI kind → :func:`_non_openclaw_dispatch_argv`
         * custom → ``agent.command + [prompt]``
         """
-        from app.services.task_decompose import _non_openclaw_dispatch_argv
+        from app.services.task_decompose import (
+            _non_openclaw_dispatch_argv,
+            capture_cursor_stream_json_result,
+        )
 
         if leader.kind == AgentKind.openclaw:
             executable = self._resolve_openclaw_executable()
@@ -3014,7 +3106,7 @@ class RunController:
             cwd, _ = await self._hermes_dispatch_cwd(leader)
             argv = list(leader.command) + [prompt]
         else:
-            # Hermes + every TUI platform (claude/codex/gemini/…).
+            # Hermes + every TUI platform (claude/codex/gemini/cursor/…).
             cwd, _ = await self._hermes_dispatch_cwd(leader)
             argv = _non_openclaw_dispatch_argv(
                 kind=leader.kind,
@@ -3038,12 +3130,25 @@ class RunController:
             ) from exc
         subprocess_registry.register(proc)
         try:
+            if leader.kind == AgentKind.cursor:
+                return await capture_cursor_stream_json_result(
+                    proc,
+                    timeout_sec=_PARAM_FILL_HEADLESS_TIMEOUT_SEC,
+                    log_context={
+                        "run_id": self.run.id,
+                        "leader": leader.id,
+                        "purpose": "remote_param_fill",
+                    },
+                )
             stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(), timeout=_OPENCLAW_HEADLESS_TIMEOUT_SEC,
+                proc.communicate(), timeout=_PARAM_FILL_HEADLESS_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError as exc:
             subprocess_registry.kill_group(proc)
-            await proc.communicate()
+            try:
+                await proc.communicate()
+            except Exception:
+                pass
             raise RuntimeError("headless param-fill timeout") from exc
         except asyncio.CancelledError:
             subprocess_registry.kill_group(proc)
@@ -4416,6 +4521,10 @@ class RunController:
                 spec={"agents": [], "tasks": []}, owner_user=self.run.user,
                 cleanup_team_on_finish=False,
             )
+        # Abort can land while this controller still holds a stale
+        # ``run.inputs`` blob; the user may have clicked 撤销合入 in that
+        # window. Pull DB markers forward so finalize cannot clobber them.
+        coalesce_reverted_merge_markers(self.run, self.storage)
         ipt = FinalizeInput(
             run=self.run, flow=self.flow, agents=list(self._agents.values()),
             leader_agent_id=self._leader_id,
@@ -4437,6 +4546,8 @@ class RunController:
             )
             return outcome.final_status  # fall back to controller's view
         # finalize_run already mutated run.status + run.pending_merges; persist.
+        # Re-coalesce in case 撤销合入 raced during finalize itself.
+        coalesce_reverted_merge_markers(self.run, self.storage)
         try:
             self.storage.run_update(self.run)
         except Exception as exc:

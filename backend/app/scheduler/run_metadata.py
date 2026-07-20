@@ -56,6 +56,41 @@ EXTERNAL_CALLBACK_KEY = "_csflow_external_callback"
 EXTERNAL_CALLBACK_SENT_KEY = "_csflow_external_callback_sent_at"
 
 
+def coalesce_reverted_merge_markers(run: Any, storage: Any) -> None:
+    """Union DB ``REVERTED_MERGE_AGENT_IDS_KEY`` into *run.inputs* in place.
+
+    The live :class:`RunController` may hold a stale ``run.inputs`` while the
+    API writes 撤销合入 markers (common on abort: user reverts, then finalize
+    persists the in-memory blob and would otherwise wipe the marker). Call
+    before any ``run_update`` that might overwrite inputs from a long-lived
+    controller object. Duck-typed to stay import-cycle-free.
+    """
+    run_id = getattr(run, "id", None)
+    if not run_id or storage is None or not hasattr(storage, "run_get"):
+        return
+    try:
+        db_run = storage.run_get(run_id)
+    except Exception:
+        return
+    if db_run is None:
+        return
+    local = dict(getattr(run, "inputs", None) or {})
+    db_inputs = getattr(db_run, "inputs", None) or {}
+
+    def _as_set(raw: Any) -> set[str]:
+        if not isinstance(raw, list):
+            return set()
+        return {str(a).strip() for a in raw if str(a or "").strip()}
+
+    merged = _as_set(local.get(REVERTED_MERGE_AGENT_IDS_KEY)) | _as_set(
+        db_inputs.get(REVERTED_MERGE_AGENT_IDS_KEY),
+    )
+    if not merged:
+        return
+    local[REVERTED_MERGE_AGENT_IDS_KEY] = sorted(merged)
+    run.inputs = local
+
+
 def run_is_unattended(run: Any) -> bool:
     """Whether *run* executes without a human in the loop.
 
@@ -83,5 +118,6 @@ __all__ = [
     "PRESERVE_WORKTREE_AGENT_IDS_KEY",
     "REVERTED_MERGE_AGENT_IDS_KEY",
     "UNATTENDED_KEY",
+    "coalesce_reverted_merge_markers",
     "run_is_unattended",
 ]
