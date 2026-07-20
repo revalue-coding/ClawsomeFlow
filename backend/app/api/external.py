@@ -195,10 +195,10 @@ async def delegate_flow(
             "NOT_FOUND", f"flow {payload.flow_id!r} not found", status_code=404,
         )
 
-    # Reuse the canonical trigger helpers so a delegated run is byte-for-byte
-    # a normal unattended run (runtime prompt injection included).
+    # Delegated runs are unattended like MCP triggers, but the origin brief
+    # is attached ONLY to the Flow description (once). Injecting it into every
+    # task description nested full external sheets and bloated peer webhooks.
     from app.api.runs import (
-        _inject_runtime_prompt_into_spec,
         _normalize_runtime_prompt,
         _prepend_runtime_prompt,
         _runtime_prompt_from_inputs,
@@ -231,10 +231,7 @@ async def delegate_flow(
     runtime_prompt = _normalize_runtime_prompt(payload.runtime_prompt)
     if runtime_prompt is None:
         runtime_prompt = _runtime_prompt_from_inputs(payload.inputs or {})
-    spec = _inject_runtime_prompt_into_spec(
-        spec=FlowSpec.model_validate(flow.spec),
-        runtime_prompt=runtime_prompt,
-    )
+    spec = FlowSpec.model_validate(flow.spec)
     flow_description = (
         _prepend_runtime_prompt(flow.description, runtime_prompt)
         if runtime_prompt else flow.description

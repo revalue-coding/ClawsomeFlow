@@ -279,6 +279,34 @@ def test_build_external_task_text_has_no_clawteam_protocol() -> None:
     assert "do not open or fetch them locally" not in text
 
 
+def test_build_external_task_text_zh_and_notify_brief() -> None:
+    from app.scheduler.prompts import (
+        build_delegate_runtime_prompt,
+        build_external_notify_brief,
+    )
+
+    zh = build_external_task_text(_ctx(), lang="zh")
+    assert "ClawsomeFlow 外部任务" in zh
+    assert "结果提交" in zh
+    brief = build_external_notify_brief(
+        {
+            "taskId": "t1",
+            "subject": "行程",
+            "description": "设计路线",
+            "outputRequirement": "路线表",
+            "flowDescription": "旅行计划",
+        },
+        lang="zh",
+    )
+    assert "设计路线" in brief
+    assert "ClawsomeFlow External Task" not in brief
+    assert build_delegate_runtime_prompt({
+        "subject": "整合",
+        "description": "汇总前序结果",
+        "outputRequirement": "可执行方案",
+    }).startswith("整合")
+
+
 def test_build_external_task_text_webhook_includes_remote_notes() -> None:
     import dataclasses
 
@@ -645,13 +673,14 @@ def test_dispatch_remote_csflow_forwards_configured_inputs(
     assert captured["headers"] == {"Authorization": "Bearer sec-123"}
     body = captured["json"]
     assert body["flowId"] == "flow-abc"
-    assert body["runtimePrompt"] == "runtime prompt text"
+    # Slim brief from package fields — not the full external task sheet.
+    assert body["runtimePrompt"] == "s"
     assert body["inputs"] == {"需求描述": "抓取周报", "目标目录": "/data"}
 
 
 def test_build_external_dispatch_notification_payload() -> None:
     """The human-channel notify payload is a TASK notification: identity +
-    channel + full task sheet as content (never a 'run finished' body)."""
+    compact task brief as content (never a 'run finished' body)."""
     from app.services.external_tasks import build_external_dispatch_notification
     from app.services.run_notify import render_message_text
 
@@ -661,10 +690,13 @@ def test_build_external_dispatch_notification_payload() -> None:
         package={
             "taskId": "t1", "subject": "Review the PCB",
             "channel": "human", "assignee": "Alice",
+            "description": "do the review",
+            "outputRequirement": "a verdict",
+            "flowDescription": "Board bring-up",
         },
-        message="## ClawsomeFlow External Task\ndo the review\n"
-                "## Output Summary Requirement\na verdict",
+        message="## ClawsomeFlow External Task\n(should not appear when package is set)",
         flow_name="Board bring-up",
+        lang="en",
     )
     assert payload["event"] == "run_external_task"
     assert payload["taskId"] == "t1"
@@ -673,6 +705,7 @@ def test_build_external_dispatch_notification_payload() -> None:
     assert payload["assignee"] == "Alice"
     assert payload["runUrl"].endswith(f"/runs/{run.id}")
     assert "do the review" in payload["content"]
+    assert "ClawsomeFlow External Task" not in payload["content"]
 
     text = render_message_text(payload, lang="en")
     assert "external task dispatched" in text
@@ -680,6 +713,36 @@ def test_build_external_dispatch_notification_payload() -> None:
     assert "run finished" not in text  # the old buggy headline
     assert "Task briefing" in text
     assert "Review the PCB" in text
+
+
+def test_resolve_external_callback_base_url_rewrites_poisoned_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import Config, save_config
+    from app.services.external_tasks import resolve_external_callback_base_url
+
+    cfg = Config(csflow_port=17017, external_callback_base_url="http://127.0.0.1:10208")
+    save_config(cfg)
+    assert resolve_external_callback_base_url() == "http://127.0.0.1:17017"
+
+
+def test_prepare_rewrites_poisoned_callback_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import Config, save_config
+
+    save_config(Config(csflow_port=17017))
+    run = FlowRun(
+        flow_id="f", flow_version=1, team_name="tm",
+        status=RunStatus.completed, user="alice",
+        inputs={EXTERNAL_CALLBACK_KEY: json.dumps({
+            "url": "http://127.0.0.1:10208/api/external/tasks/r/t/complete",
+            "token": "tok",
+        })},
+    )
+    prepared = prepare_delegate_callback(run)
+    assert prepared is not None
+    assert prepared["url"].startswith("http://127.0.0.1:17017/")
 
 
 # ── delegate callback preparation ───────────────────────────────────────
@@ -697,9 +760,10 @@ def test_prepare_delegate_callback_terminal_with_marker() -> None:
     assert prepared is not None
     assert prepared["url"] == "http://origin/cb"
     assert prepared["ok"] is True
-    # Dedupe marker stamped into the SAME run.inputs dict (same commit).
+    # In-flight dedupe marker stamped in the same commit; send clears it on
+    # exhausted failure so a later run_update can retry.
     assert EXTERNAL_CALLBACK_SENT_KEY in run.inputs
-    # Second call is a no-op.
+    # Second call is a no-op while the marker is present.
     assert prepare_delegate_callback(run) is None
 
 

@@ -250,7 +250,7 @@ class SqliteStorage:
             total = s.exec(count_stmt).one()
             return items, int(total)
 
-    def run_update(self, run: FlowRun) -> FlowRun:
+    def run_update(self, run: FlowRun, *, skip_side_effects: bool = False) -> FlowRun:
         # Webhook hook (app.services.run_notify): run_update is the single
         # choke point every status flip goes through, so the notify decisions
         # (terminal: dedupe marker stamped into run.inputs in the same commit;
@@ -259,6 +259,9 @@ class SqliteStorage:
         # here — and the actual POST fires on a daemon thread afterwards.
         # Full no-op unless the Flow has webhook channels configured
         # (spec.variables[csflow.notify_webhooks]).
+        #
+        # ``skip_side_effects=True`` persists fields only (used when clearing
+        # a failed delegate-callback SENT marker — must not re-enter prepare).
         from app.services.external_tasks import (
             prepare_delegate_callback,
             send_delegate_callback,
@@ -277,32 +280,36 @@ class SqliteStorage:
         # own errors; the outer guards are belt-and-suspenders. Channels are
         # loaded ONCE here (own session, before ours opens) from the CURRENT
         # Flow so live config edits + scheduled runs both take effect.
-        try:
-            channels = flow_channels_for_run(run)
-        except Exception as exc:  # pragma: no cover — defensive
-            self._log_notify_guard(exc)
-            channels = []
-        try:
-            notification = (
-                prepare_terminal_notification(run, channels=channels)
-                if channels else None
-            )
-        except Exception as exc:  # pragma: no cover — defensive
-            self._log_notify_guard(exc)
-            notification = None
-        # Delegated-run result callback (external execution nodes): decision +
-        # dedupe marker land in the same commit, POST fires on a daemon thread
-        # after — exactly the run_notify pattern (same single choke point).
-        try:
-            delegate_callback = prepare_delegate_callback(run)
-        except Exception as exc:  # pragma: no cover — defensive
-            self._log_notify_guard(exc)
-            delegate_callback = None
+        channels: list = []
+        notification = None
+        delegate_callback = None
+        if not skip_side_effects:
+            try:
+                channels = flow_channels_for_run(run)
+            except Exception as exc:  # pragma: no cover — defensive
+                self._log_notify_guard(exc)
+                channels = []
+            try:
+                notification = (
+                    prepare_terminal_notification(run, channels=channels)
+                    if channels else None
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                self._log_notify_guard(exc)
+                notification = None
+            # Delegated-run result callback (external execution nodes): decision +
+            # dedupe marker land in the same commit, POST fires on a daemon thread
+            # after — exactly the run_notify pattern (same single choke point).
+            try:
+                delegate_callback = prepare_delegate_callback(run)
+            except Exception as exc:  # pragma: no cover — defensive
+                self._log_notify_guard(exc)
+                delegate_callback = None
         with self._session() as s:
             current = s.get(FlowRun, run.id)
             if current is None:
                 raise KeyError(run.id)
-            if notification is None and channels:
+            if not skip_side_effects and notification is None and channels:
                 try:
                     notification = prepare_checkpoint_notification(
                         run, old_status=current.status, channels=channels,

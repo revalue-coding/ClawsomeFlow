@@ -221,11 +221,61 @@ def find_completion_event(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _callback_url(run_id: str, task_id: str, *, config: Config | None = None) -> str:
+def resolve_external_callback_base_url(config: Config | None = None) -> str:
+    """Absolute base URL peers use to call back into THIS instance.
+
+    Prefer ``Config.external_callback_base_url`` when it is a reachable
+    non-poisoned value. SSH-tunnel Host pollution historically wrote
+    ``http://127.0.0.1:<forwarded-port>`` (not the real listen port) into
+    config — that makes same-host peers get Connection refused. Fall back
+    to ``http://127.0.0.1:{csflow_port}`` when unset or when the configured
+    URL is loopback on a port other than ``csflow_port``.
+    """
+    from urllib.parse import urlsplit
+
     cfg = config or load_config()
+    port = int(getattr(cfg, "csflow_port", 17017) or 17017)
+    fallback = f"http://127.0.0.1:{port}"
+    configured = (getattr(cfg, "external_callback_base_url", None) or "").strip().rstrip("/")
+    if not configured:
+        return fallback
+    try:
+        parts = urlsplit(configured)
+        host = (parts.hostname or "").lower()
+        cfg_port = parts.port or (443 if parts.scheme == "https" else 80)
+        if host in ("127.0.0.1", "localhost", "::1") and int(cfg_port) != port:
+            return fallback
+    except Exception:
+        return fallback
+    return configured
+
+
+def sanitize_external_callback_base_url(config: Config | None = None) -> Config:
+    """Clear a poisoned loopback callback base from config (upgrade / doctor).
+
+    Returns the (possibly updated) config. Idempotent.
+    """
+    from app.config import save_config
+
+    cfg = config or load_config()
+    configured = (getattr(cfg, "external_callback_base_url", None) or "").strip()
+    if not configured:
+        return cfg
+    resolved = resolve_external_callback_base_url(cfg)
+    # If resolution discarded the configured value, persist the cleanup.
+    if configured.rstrip("/") != resolved.rstrip("/") and resolved.startswith(
+        "http://127.0.0.1:"
+    ):
+        updated = cfg.model_copy(update={"external_callback_base_url": None})
+        save_config(updated)
+        return updated
+    return cfg
+
+
+def _callback_url(run_id: str, task_id: str, *, config: Config | None = None) -> str:
     path = f"/api/external/tasks/{run_id}/{task_id}/complete"
-    base = (getattr(cfg, "external_callback_base_url", None) or "").strip()
-    return f"{base.rstrip('/')}{path}" if base else path
+    base = resolve_external_callback_base_url(config)
+    return f"{base.rstrip('/')}{path}"
 
 
 async def dispatch_external_task(
@@ -316,7 +366,7 @@ async def dispatch_external_task(
         return
     if ext.channel == ExternalChannel.remote_csflow:
         remote_run_id = await _post_delegate(
-            ext=ext, cfg=cfg, message=message, outbound_package=outbound_package,
+            ext=ext, cfg=cfg, outbound_package=outbound_package,
         )
         publish_run_event(
             storage,
@@ -345,11 +395,12 @@ async def _post_delegate(
     *,
     ext: Any,
     cfg: Config,
-    message: str,
     outbound_package: dict[str, Any],
 ) -> str | None:
     """Delegate the task to a remote ClawsomeFlow; returns the remote run id."""
     import httpx
+
+    from app.scheduler.prompts import build_delegate_runtime_prompt
 
     ref = (ext.pair_token_ref or "").strip()
     secret = (getattr(cfg, "external_remote_targets", None) or {}).get(ref)
@@ -358,10 +409,12 @@ async def _post_delegate(
             f"pair_token_ref {ref!r} not found in config.external_remote_targets"
         )
     url = f"{str(ext.base_url).rstrip('/')}/api/external/delegate"
+    # Slim origin brief only — never the full external task sheet (that used
+    # to nest into every peer task description and blow up webhook text).
+    runtime_prompt = build_delegate_runtime_prompt(outbound_package)
     body = {
         "flowId": ext.flow_id,
-        # The rendered task text drives the remote Flow as its runtime prompt.
-        "runtimePrompt": message,
+        "runtimePrompt": runtime_prompt or None,
         "callbackUrl": outbound_package["callbackUrl"],
         "callbackToken": outbound_package["callbackToken"],
         "sourceRunId": outbound_package["runId"],
@@ -404,21 +457,31 @@ def build_external_dispatch_notification(
     package: dict[str, Any],
     message: str,
     flow_name: str | None = None,
+    lang: str | None = None,
 ) -> dict[str, Any]:
     """Webhook payload announcing "an external task was dispatched".
 
     This is NOT a run-terminal notification — the ``run_external_task`` event
     tells the recipient (typically the assignee's chat) that a task now waits
-    on an external executor. It carries the task identity (subject/channel/
-    assignee) plus the full task sheet (description, upstream inputs, output
-    requirement, result-submission how-to) as ``content``, and where to act
-    (``runUrl`` — the local Run page for the human channel).
+    on an external executor. ``content`` is a compact task brief (zh/en), not
+    the full English protocol sheet.
     """
-    cfg = load_config()
-    base = (getattr(cfg, "external_callback_base_url", None) or "").strip()
-    if not base:
-        base = f"http://127.0.0.1:{getattr(cfg, 'csflow_port', 17017)}"
+    from app.scheduler.prompts import build_external_notify_brief
+    from app.services.run_notify import resolve_notify_language
+
+    base = resolve_external_callback_base_url()
     status = run.status.value if hasattr(run.status, "value") else str(run.status)
+    # Prefer structured package fields; fall back to message only when empty.
+    resolved_lang = lang or resolve_notify_language(
+        {
+            "flowName": flow_name,
+            "taskSubject": package.get("subject") or "",
+            "content": message or "",
+        },
+    )
+    brief = build_external_notify_brief(package, lang=resolved_lang)
+    if not brief:
+        brief = (message or "").strip()
     return {
         "event": "run_external_task",
         "runId": run.id,
@@ -431,9 +494,7 @@ def build_external_dispatch_notification(
         "channel": package.get("channel") or "",
         "assignee": package.get("assignee") or "",
         "runUrl": f"{base.rstrip('/')}/runs/{run.id}",
-        # Full task sheet: flow goal, upstream inputs, task description
-        # (incl. output requirement), result-submission instructions.
-        "content": (message or "").strip()[:_NOTIFY_CONTENT_MAX_CHARS],
+        "content": brief[:_NOTIFY_CONTENT_MAX_CHARS],
     }
 
 
@@ -599,8 +660,10 @@ def prepare_delegate_callback(run: FlowRun) -> dict[str, Any] | None:
     """Called inside the storage ``run_update`` commit (single choke point).
 
     When *run* carries the delegate marker and just reached a terminal
-    status, stamp the sent-dedupe marker into ``run.inputs`` (new dict, same
-    commit) and return the prepared callback. Never raises.
+    status, stamp the in-flight dedupe marker into ``run.inputs`` (same
+    commit) and return the prepared callback. On HTTP success the marker
+    stays; on exhausted failures :func:`send_delegate_callback` clears it
+    so a later ``run_update`` (or upgrade retry) can try again.
     """
     try:
         if run.status not in TERMINAL_RUN_STATUSES:
@@ -614,6 +677,12 @@ def prepare_delegate_callback(run: FlowRun) -> dict[str, Any] | None:
         token = str(info.get("token") or "").strip()
         if not url or not token:
             return None
+        # Rewrite poisoned loopback callback URLs (SSH-tunnel Host) to the
+        # real listen port before POSTing — same-host peers otherwise fail.
+        url = _rewrite_poisoned_callback_url(url)
+        if url != str(info.get("url") or "").strip():
+            info["url"] = url
+            inputs[EXTERNAL_CALLBACK_KEY] = json.dumps(info)
         inputs[EXTERNAL_CALLBACK_SENT_KEY] = iso_utc(datetime.now(timezone.utc))
         run.inputs = inputs
         status = run.status.value if hasattr(run.status, "value") else str(run.status)
@@ -629,11 +698,119 @@ def prepare_delegate_callback(run: FlowRun) -> dict[str, Any] | None:
         return None
 
 
+def _rewrite_poisoned_callback_url(url: str) -> str:
+    """If *url* is loopback on a non-listen port, retarget to csflow_port."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    cfg = load_config()
+    port = int(getattr(cfg, "csflow_port", 17017) or 17017)
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        cfg_port = parts.port or (443 if parts.scheme == "https" else 80)
+        if host in ("127.0.0.1", "localhost", "::1") and int(cfg_port) != port:
+            netloc = f"127.0.0.1:{port}"
+            return urlunsplit((parts.scheme or "http", netloc, parts.path,
+                               parts.query, parts.fragment))
+    except Exception:
+        return url
+    return url
+
+
+def _clear_delegate_callback_sent(run_id: str) -> None:
+    """Clear the in-flight dedupe marker after exhausted callback failures.
+
+    Uses ``skip_side_effects`` so clearing SENT cannot re-enter prepare/send
+    (which would busy-loop on a persistently unreachable callback URL).
+    """
+    try:
+        from app.storage import get_storage
+
+        storage = get_storage()
+        run = storage.run_get(run_id)
+        if run is None:
+            return
+        inputs = dict(run.inputs or {})
+        if EXTERNAL_CALLBACK_SENT_KEY not in inputs:
+            return
+        inputs.pop(EXTERNAL_CALLBACK_SENT_KEY, None)
+        run.inputs = inputs
+        storage.run_update(run, skip_side_effects=True)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("delegate_callback_clear_sent_failed", error=str(exc))
+
+
+def retry_poisoned_delegate_callbacks(
+    storage: "StorageBackend | None" = None,
+    *,
+    limit_per_status: int = 100,
+) -> int:
+    """Re-fire delegate callbacks whose URL was a poisoned SSH-tunnel loopback.
+
+    Historical bug: ``prepare_delegate_callback`` stamped SENT before HTTP
+    success, and callback bases like ``http://127.0.0.1:<forwarded-port>``
+    refused connections. Clears SENT, rewrites the URL to ``csflow_port``,
+    and touches ``run_update`` so prepare+send run again. Idempotent for
+    already-correct URLs with SENT set. Returns how many runs were touched.
+    """
+    from app.storage import get_storage
+
+    store = storage or get_storage()
+    touched = 0
+    for status in TERMINAL_RUN_STATUSES:
+        status_val = status.value if hasattr(status, "value") else str(status)
+        try:
+            runs, _total = store.run_list(
+                status=status_val, limit=limit_per_status, offset=0,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "delegate_callback_retry_list_failed",
+                status=status_val, error=str(exc),
+            )
+            continue
+        for run in runs:
+            inputs = dict(run.inputs or {})
+            raw = inputs.get(EXTERNAL_CALLBACK_KEY)
+            if not raw:
+                continue
+            try:
+                info = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except Exception:
+                continue
+            url = str(info.get("url") or "").strip()
+            if not url:
+                continue
+            rewritten = _rewrite_poisoned_callback_url(url)
+            if rewritten == url:
+                continue
+            info["url"] = rewritten
+            inputs[EXTERNAL_CALLBACK_KEY] = json.dumps(info)
+            inputs.pop(EXTERNAL_CALLBACK_SENT_KEY, None)
+            run.inputs = inputs
+            try:
+                store.run_update(run)
+                touched += 1
+                logger.info(
+                    "delegate_callback_retry_scheduled",
+                    run_id=run.id, url=rewritten,
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "delegate_callback_retry_failed",
+                    run_id=run.id, error=str(exc),
+                )
+    return touched
+
+
 def send_delegate_callback(prepared: dict[str, Any]) -> threading.Thread:
     """POST the delegated run's result back to the origin instance.
 
     Runs on a daemon thread with a few retries; the origin's completion
-    endpoint is idempotent per ticket so duplicates are harmless."""
+    endpoint is idempotent per ticket so duplicates are harmless. On
+    exhausted failure the in-flight SENT marker is cleared so a later
+    ``run_update`` / upgrade retry can try again.
+    """
 
     def _send() -> None:
         summary = ""
@@ -678,6 +855,8 @@ def send_delegate_callback(prepared: dict[str, Any]) -> threading.Thread:
             )
             if attempt < _CALLBACK_ATTEMPTS:
                 time.sleep(_CALLBACK_RETRY_DELAY_SEC)
+        # All attempts failed — allow a later retry.
+        _clear_delegate_callback_sent(prepared["run_id"])
 
     thread = threading.Thread(
         target=_send, name="csflow-delegate-callback", daemon=True,
@@ -697,6 +876,9 @@ __all__ = [
     "latest_dispatch_event",
     "mint_ticket",
     "prepare_delegate_callback",
+    "resolve_external_callback_base_url",
+    "retry_poisoned_delegate_callbacks",
+    "sanitize_external_callback_base_url",
     "send_delegate_callback",
     "verify_ticket",
 ]

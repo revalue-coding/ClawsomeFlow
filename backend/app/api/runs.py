@@ -2849,18 +2849,18 @@ async def approve_checkpoint_item(
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
-    if run.status != RunStatus.awaiting_user_checkpoint:
-        raise ApiError(
-            "NOT_AWAITING_CHECKPOINT",
-            f"run is not awaiting checkpoint (status={_status_str(run.status)})",
-            status_code=409,
-        )
     sched = get_scheduler()
     controller = sched.get_controller(run.id)
     if controller is None:
         raise ApiError(
             "CHECKPOINT_UNAVAILABLE",
             "controller is not active; checkpoint action cannot be applied",
+            status_code=409,
+        )
+    if controller.checkpoint_snapshot() is None:
+        raise ApiError(
+            "NOT_AWAITING_CHECKPOINT",
+            f"run has no active checkpoint (status={_status_str(run.status)})",
             status_code=409,
         )
     try:
@@ -2894,12 +2894,6 @@ async def rerun_checkpoint_item(
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
-    if run.status != RunStatus.awaiting_user_checkpoint:
-        raise ApiError(
-            "NOT_AWAITING_CHECKPOINT",
-            f"run is not awaiting checkpoint (status={_status_str(run.status)})",
-            status_code=409,
-        )
     # Feedback is required for local agents but OPTIONAL for external-node
     # items (one-click re-dispatch has no feedback slot); the controller
     # enforces the per-owner-kind rule and raises ValueError when a local
@@ -2911,6 +2905,12 @@ async def rerun_checkpoint_item(
         raise ApiError(
             "CHECKPOINT_UNAVAILABLE",
             "controller is not active; checkpoint action cannot be applied",
+            status_code=409,
+        )
+    if controller.checkpoint_snapshot() is None:
+        raise ApiError(
+            "NOT_AWAITING_CHECKPOINT",
+            f"run has no active checkpoint (status={_status_str(run.status)})",
             status_code=409,
         )
     try:
@@ -2949,18 +2949,18 @@ async def mark_checkpoint_item_read(
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
-    if run.status != RunStatus.awaiting_user_checkpoint:
-        raise ApiError(
-            "NOT_AWAITING_CHECKPOINT",
-            f"run is not awaiting checkpoint (status={_status_str(run.status)})",
-            status_code=409,
-        )
     sched = get_scheduler()
     controller = sched.get_controller(run.id)
     if controller is None:
         raise ApiError(
             "CHECKPOINT_UNAVAILABLE",
             "controller is not active; checkpoint action cannot be applied",
+            status_code=409,
+        )
+    if controller.checkpoint_snapshot() is None:
+        raise ApiError(
+            "NOT_AWAITING_CHECKPOINT",
+            f"run has no active checkpoint (status={_status_str(run.status)})",
             status_code=409,
         )
     try:

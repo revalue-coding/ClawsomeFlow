@@ -533,7 +533,11 @@ class RemoteCallInfo(_CamelModel):
     pair_secret: str = ""
 
 
-@router.post("/{flow_id}/remote-call-info", response_model=RemoteCallInfo)
+@router.post(
+    "/{flow_id}/remote-call-info",
+    response_model=RemoteCallInfo,
+    response_model_exclude={"base_url"},
+)
 def remote_call_info(
     flow_id: Annotated[str, Path()],
     user: UserDep,

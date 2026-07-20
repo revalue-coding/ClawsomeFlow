@@ -246,14 +246,17 @@ export function RunDetail() {
         const r = await api.getRun(id);
         if (cancelled) return;
         setRun(r);
-        if (r.status === "awaiting_user_checkpoint") {
+        // Fetch checkpoint whenever the run is active — status may be
+        // awaiting_external / running while a checkpoint is also open; cards
+        // must coexist from independent data sources.
+        if (!TERMINAL.has(r.status)) {
           try {
             const cp = await api.getRunCheckpoint(id);
             if (!cancelled) setCheckpointSnapshot(cp ?? null);
           } catch {
             if (!cancelled) setCheckpointSnapshot(null);
           }
-        } else {
+        } else if (!cancelled) {
           setCheckpointSnapshot(null);
         }
         try {
@@ -281,7 +284,7 @@ export function RunDetail() {
       try {
         const r = await api.getRun(id);
         setRun(r);
-        if (r.status === "awaiting_user_checkpoint") {
+        if (!TERMINAL.has(r.status)) {
           try {
             const cp = await api.getRunCheckpoint(id);
             setCheckpointSnapshot(cp ?? null);
@@ -357,7 +360,7 @@ export function RunDetail() {
   async function refreshRunAndCheckpoint(runId: string) {
     const r = await api.getRun(runId);
     setRun(r);
-    if (r.status === "awaiting_user_checkpoint") {
+    if (!TERMINAL.has(r.status)) {
       try {
         const cp = await api.getRunCheckpoint(runId);
         setCheckpointSnapshot(cp ?? null);
@@ -795,7 +798,9 @@ export function RunDetail() {
         </Card>
       )}
 
-      {run.status === "awaiting_user_checkpoint" && (
+      {/* Checkpoint card is keyed off live snapshot/events — NOT run.status —
+          so it coexists with awaiting_external / external todo cards. */}
+      {Boolean(activeCheckpoint) && !TERMINAL.has(run.status) && (
         <Card className="border-brand-200">
           <CardTitle hint={t("runDetail.checkpoint.hint")}>
             {t("runDetail.checkpoint.title")}
@@ -3176,7 +3181,7 @@ function ExternalTasksCard({
                 <div className="mt-2">
                   <button
                     type="button"
-                    className="cursor-pointer text-xs text-ink-600 underline-offset-2 hover:underline"
+                    className="cursor-pointer text-sm font-semibold text-brand-700 underline underline-offset-2 hover:text-brand-800"
                     aria-expanded={sheetOpen}
                     onClick={() =>
                       setOpenSheets((prev) => {

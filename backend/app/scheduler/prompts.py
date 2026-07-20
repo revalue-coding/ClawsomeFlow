@@ -853,7 +853,9 @@ def _upstream_outputs_block_external(ctx: DispatchContext) -> str:
     return "\n".join(lines)
 
 
-def build_external_task_text(ctx: DispatchContext) -> str:
+def build_external_task_text(
+    ctx: DispatchContext, *, lang: str | None = None,
+) -> str:
     """Human-readable task sheet for an external executor.
 
     Unlike the worker/leader builders this contains NO ClawTeam protocol
@@ -862,38 +864,165 @@ def build_external_task_text(ctx: DispatchContext) -> str:
     WebUI card). Upstream summaries are included without worktree/branch
     paths — external nodes do not own a local workspace.
 
-    Webhook channel additionally gets :data:`WEBHOOK_REMOTE_NOTES` so a
-    partner host does not chase foreign absolute paths.
+    ``lang`` is ``zh`` / ``en`` (default ``en``). Webhook channel additionally
+    gets :data:`WEBHOOK_REMOTE_NOTES` so a partner host does not chase foreign
+    absolute paths.
     """
     from app.models import ExternalChannel
 
-    blocks = [
-        (
+    resolved = "zh" if (lang or "").strip().lower() == "zh" else "en"
+    if resolved == "zh":
+        intro = (
+            "## ClawsomeFlow 外部任务\n"
+            "请完成下方任务后，通过 Run 详情页的任务卡片或回调 API 回传结果。\n"
+            f"Run：`{ctx.run_id}`  ·  团队：`{ctx.team_name}`"
+        )
+        submit = (
+            "## 结果提交\n"
+            "- 提交简要完成摘要（含交付物链接/引用）。\n"
+            "- 若无法完成，请提交失败原因，不要一直挂起。"
+        )
+        notes_h = "## 远程执行备注"
+        goal_h = "## Flow 目标"
+        inputs_h = "## 运行参数"
+        task_h = f"## 任务 #{ctx.task.id}：{ctx.task.subject}"
+        none_desc = "_(无额外说明)_"
+        none_goal = "_(Flow 无描述)_"
+        none_inputs = "  _(无)_"
+    else:
+        intro = (
             "## ClawsomeFlow External Task\n"
-            "This task is part of a ClawsomeFlow run and is assigned to an "
-            "external executor (you). Complete the work described below, then "
-            "submit the result back to ClawsomeFlow (WebUI task card, or the "
-            "callback API for integrated systems).\n"
+            "Complete the work below, then submit the result via the Run "
+            "detail card or the callback API.\n"
             f"Run ID: `{ctx.run_id}`  ·  Team: `{ctx.team_name}`"
-        ),
-        _flow_goal_block(ctx),
-        _upstream_outputs_block_external(ctx),
-        _task_block(ctx),
-        (
+        )
+        submit = (
             "## Result Submission\n"
-            "- Provide a concise completion summary (include links or "
-            "references to deliverables when applicable).\n"
-            "- If the task cannot be completed, submit a failure with the "
-            "blocking reason instead of leaving it open."
-        ),
+            "- Provide a concise completion summary (links/refs when useful).\n"
+            "- If blocked, submit a failure with the reason — do not leave it open."
+        )
+        notes_h = "## Notes for remote executors"
+        goal_h = "## Flow Goal"
+        inputs_h = "## Runtime inputs"
+        task_h = f"## Task #{ctx.task.id}: {ctx.task.subject}"
+        none_desc = "_(no additional description)_"
+        none_goal = "_(Flow has no description)_"
+        none_inputs = "  _(none)_"
+
+    desc = ctx.flow_description.strip() or none_goal
+    inputs_lines = [
+        f"  - **{k}**: `{v}`" for k, v in _public_flow_inputs(ctx.flow_inputs).items()
+    ]
+    inputs_body = "\n".join(inputs_lines) if inputs_lines else none_inputs
+    task_desc = ctx.task.description.strip() or none_desc
+    blocks = [
+        intro,
+        f"{goal_h}\n{desc}\n{inputs_h}\n{inputs_body}",
+        _upstream_outputs_block_external(ctx),
+        f"{task_h}\n{task_desc}",
+        submit,
     ]
     ext = getattr(ctx.agent, "external", None)
     if ext is not None and ext.channel == ExternalChannel.webhook:
-        blocks.append(f"## Notes for remote executors\n{WEBHOOK_REMOTE_NOTES}")
+        blocks.append(f"{notes_h}\n{WEBHOOK_REMOTE_NOTES}")
     remote_block = _remote_param_report_block_external(ctx)
     if remote_block:
         blocks.append(remote_block)
     return "\n\n".join(b for b in blocks if b).strip() + "\n"
+
+
+def build_external_notify_brief(
+    package: dict[str, object], *, lang: str | None = None,
+) -> str:
+    """Compact, task-focused webhook body (zh/en) — no nested sheets.
+
+    Prefer structured package fields over the full task sheet so Feishu/
+    Telegram messages stay short and do not repeat origin-delegate wrappers.
+    """
+    resolved = "zh" if (lang or "").strip().lower() == "zh" else "en"
+    subject = str(package.get("subject") or "").strip()
+    task_id = str(package.get("taskId") or "").strip()
+    description = str(package.get("description") or "").strip()
+    # Strip accidentally nested origin sheets from description.
+    for marker in (
+        "## ClawsomeFlow External Task",
+        "## ClawsomeFlow 外部任务",
+        "## Run-time User Parameters",
+    ):
+        if marker in description:
+            description = description.split(marker, 1)[0].strip()
+    requirement = str(package.get("outputRequirement") or "").strip()
+    flow_goal = str(package.get("flowDescription") or "").strip()
+    for marker in (
+        "## ClawsomeFlow External Task",
+        "## ClawsomeFlow 外部任务",
+        "## Run-time User Parameters",
+    ):
+        if marker in flow_goal:
+            flow_goal = flow_goal.split(marker, 1)[0].strip()
+
+    upstream = package.get("upstreamOutputs")
+    upstream_lines: list[str] = []
+    if isinstance(upstream, list):
+        for item in upstream:
+            if not isinstance(item, dict):
+                continue
+            u_subj = str(item.get("subject") or item.get("taskId") or "").strip()
+            u_sum = str(item.get("summary") or "").strip()
+            if u_subj or u_sum:
+                upstream_lines.append(
+                    f"- {u_subj}: {u_sum}" if u_sum else f"- {u_subj}"
+                )
+
+    if resolved == "zh":
+        lines = []
+        if task_id or subject:
+            lines.append(f"**任务** {task_id}{' · ' if task_id and subject else ''}{subject}".strip())
+        if flow_goal:
+            lines.extend(["", f"**目标** {flow_goal}"])
+        if description:
+            lines.extend(["", description])
+        if requirement:
+            lines.extend(["", f"**输出要求** {requirement}"])
+        if upstream_lines:
+            lines.extend(["", "**上游产出**", *upstream_lines])
+        lines.extend(["", "完成后请在 Run 详情页提交结果。"])
+        return "\n".join(lines).strip()
+
+    lines = []
+    if task_id or subject:
+        lines.append(
+            f"**Task** {task_id}{' · ' if task_id and subject else ''}{subject}".strip()
+        )
+    if flow_goal:
+        lines.extend(["", f"**Goal** {flow_goal}"])
+    if description:
+        lines.extend(["", description])
+    if requirement:
+        lines.extend(["", f"**Output** {requirement}"])
+    if upstream_lines:
+        lines.extend(["", "**Upstream**", *upstream_lines])
+    lines.extend(["", "Submit the result on the Run detail page when done."])
+    return "\n".join(lines).strip()
+
+
+def build_delegate_runtime_prompt(package: dict[str, object]) -> str:
+    """Slim origin brief for a remote_csflow peer (not the full task sheet).
+
+    Injecting the full external sheet as ``runtimePrompt`` nested it into every
+    peer task description and produced duplicated webhook noise.
+    """
+    subject = str(package.get("subject") or "").strip()
+    description = str(package.get("description") or "").strip()
+    requirement = str(package.get("outputRequirement") or "").strip()
+    parts: list[str] = []
+    if subject:
+        parts.append(subject)
+    if description:
+        parts.append(description)
+    if requirement:
+        parts.append(f"Output requirement: {requirement}")
+    return "\n\n".join(parts).strip()
 
 
 def _remote_param_report_block_external(ctx: DispatchContext) -> str:
@@ -1026,6 +1155,8 @@ __all__ = [
     "WEBHOOK_REMOTE_NOTES",
     "WorkerReport",
     "build_external_task_package",
+    "build_delegate_runtime_prompt",
+    "build_external_notify_brief",
     "build_external_task_text",
     "build_leader_dispatch",
     "build_openclaw_self_merge",

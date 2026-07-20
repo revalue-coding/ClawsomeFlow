@@ -571,6 +571,31 @@ def test_run_upgrade_generates_api_token_for_pretoken_config(
     assert load_config(force_reload=True).api_token == token1
 
 
+def test_run_upgrade_clears_poisoned_external_callback_base_url(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSH-tunnel Host pollution wrote loopback:<forwarded-port>; upgrade clears it."""
+    from app.config import load_config, save_config
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+    poisoned = Config(
+        csflow_port=17017,
+        external_callback_base_url="http://127.0.0.1:10208",
+    )
+    save_config(poisoned)
+
+    report = upgrade.run_upgrade(
+        config=poisoned,
+        target_version="1.0.0",
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+    assert report.ok is True
+    assert load_config(force_reload=True).external_callback_base_url in (None, "")
+
+
 def test_run_upgrade_creates_hermes_agent_table(
     tmp_clawsomeflow_home: Path,
     monkeypatch: pytest.MonkeyPatch,

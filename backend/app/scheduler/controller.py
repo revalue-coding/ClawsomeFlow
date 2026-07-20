@@ -1094,12 +1094,14 @@ class RunController:
             recovered = await self._runtime_socket_error_recovery_tick()
             activity = activity or recovered
 
-        # 3. Manual checkpoint gate: while waiting for user review, do not
-        #    dispatch any task (global pause for this run).
-        checkpoint_waiting, checkpoint_changed = await self._checkpoint_gate_tick()
+        # 3. Manual checkpoint refresh/clear. While a checkpoint is open,
+        #    local-agent dispatch stays paused (worktree/session safety —
+        #    DEV.md serial checkpoint contract). External nodes have no
+        #    worktree and may still dispatch so parallel external cards are
+        #    not blocked behind an unrelated review. Checkpoint-blocked
+        #    downstreams stay withheld via ``_partition_ready_tasks_for_checkpoint``.
+        _checkpoint_waiting, checkpoint_changed = await self._checkpoint_gate_tick()
         activity = activity or checkpoint_changed
-        if checkpoint_waiting:
-            return activity
         if self._cancel_evt.is_set():
             return activity
 
@@ -1113,7 +1115,9 @@ class RunController:
                     downstream_task=downstream_book.task,
                     checkpoint_task=checkpoint_book.task,
                 )
-                return activity or opened
+                activity = activity or opened
+            if self._dispatch_checkpoint is not None:
+                dispatchable = self._filter_dispatchable_during_checkpoint(dispatchable)
             if not dispatchable:
                 return activity
             if self._first_dispatch_task_id is None:
@@ -1279,12 +1283,30 @@ class RunController:
             "all_approved": self._checkpoint_all_approved(cp),
         }
 
+    def _filter_dispatchable_during_checkpoint(
+        self, dispatchable: list[_TaskBook],
+    ) -> list[_TaskBook]:
+        """While a checkpoint is open, only external-owned tasks may dispatch.
+
+        Local agents share a per-agent worktree/session: starting new work
+        mid-review could mutate files the user is approving, or race a
+        checkpoint rerun on the same owner. External nodes are process-free
+        and ticket-scoped per task, so they are safe to continue.
+        """
+        out: list[_TaskBook] = []
+        for book in dispatchable:
+            owner = self._agents.get(book.task.owner_agent_id)
+            if owner is not None and owner.kind == AgentKind.external:
+                out.append(book)
+        return out
+
     async def _checkpoint_gate_tick(self) -> tuple[bool, bool]:
-        """Checkpoint gate before dispatch.
+        """Refresh/clear the active manual checkpoint.
 
         Returns:
             (waiting, changed)
-            - waiting=True  => run is blocked on manual checkpoint and must not dispatch.
+            - waiting=True  => a checkpoint is open (local dispatch paused;
+              external may still dispatch — see tick step 4).
             - changed=True  => checkpoint state/status changed this tick.
         """
         if self._dispatch_checkpoint is None:
@@ -3900,7 +3922,17 @@ class RunController:
         if agent.kind == AgentKind.external:
             # External executors never talk to ClawTeam — the sheet carries
             # no protocol steps (completion goes through the receipt API).
-            return build_external_task_text(ctx)
+            # Language follows the operator WebUI pill (Config.ui_language).
+            lang = None
+            try:
+                from app.config import load_config
+
+                raw = (load_config().ui_language or "").strip().lower()
+                if raw in ("zh", "en"):
+                    lang = raw
+            except Exception:  # pragma: no cover — defensive
+                lang = None
+            return build_external_task_text(ctx, lang=lang)
         if agent.is_leader and task.is_leader_summary:
             return build_leader_dispatch(ctx)
         return build_worker_dispatch(ctx)

@@ -34,8 +34,9 @@ must import the constants from here.
   JSON string ``{"url": ..., "token": ...}``; when the run reaches a terminal
   status the storage ``run_update`` hook POSTs the leader report back to that
   URL (see ``app.services.external_tasks.prepare_delegate_callback``).
-* :data:`EXTERNAL_CALLBACK_SENT_KEY` — ISO timestamp dedupe marker stamped
-  when the delegate callback fired (same pattern as the run-notify marker).
+* :data:`EXTERNAL_CALLBACK_SENT_KEY` — ISO timestamp in-flight/success dedupe
+  marker for the delegate callback (stamped when prepare queues the POST;
+  cleared on exhausted failure so a later ``run_update`` / upgrade can retry).
 
 NOTE: the string values are a persisted on-disk contract (existing user DBs
 contain them) — never rename the values, only the Python symbols.

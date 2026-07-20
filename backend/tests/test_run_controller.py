@@ -4608,6 +4608,121 @@ async def test_checkpoint_local_agent_rerun_still_requires_feedback(
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_pauses_local_but_allows_parallel_external(
+    fake_lookup,
+) -> None:
+    """While a checkpoint is open: local ready tasks stay paused (worktree
+    safety); independent external ready tasks still dispatch."""
+    from app.models import ExternalChannel, ExternalNodeConfig
+
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(
+                id="alice", kind=AgentKind.claude, repo="/tmp/main",
+                merge_strategy=MergeStrategy.manual,
+            ),
+            FlowAgent(
+                id="bob", kind=AgentKind.claude, repo="/tmp/main",
+                merge_strategy=MergeStrategy.manual,
+            ),
+            FlowAgent(
+                id="charlie", kind=AgentKind.claude, repo="/tmp/main",
+                merge_strategy=MergeStrategy.manual,
+            ),
+            FlowAgent(
+                id="ext-node", kind=AgentKind.external,
+                external=ExternalNodeConfig(channel=ExternalChannel.human),
+            ),
+            FlowAgent(
+                id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                is_leader=True, merge_strategy=MergeStrategy.manual,
+            ),
+        ],
+        tasks=[
+            FlowTask(
+                id="t1", owner_agent_id="alice", subject="upstream",
+                description="done", requires_human_checkpoint=True,
+            ),
+            FlowTask(
+                id="t2", owner_agent_id="bob", subject="downstream",
+                description="blocked by checkpoint", depends_on=["t1"],
+            ),
+            FlowTask(
+                id="t_local", owner_agent_id="charlie", subject="parallel local",
+                description="must NOT dispatch during checkpoint",
+            ),
+            FlowTask(
+                id="t_ext", owner_agent_id="ext-node", subject="parallel external",
+                description="MAY dispatch during checkpoint",
+            ),
+            FlowTask(
+                id="ts", owner_agent_id="leader", subject="summary",
+                description="wrap", depends_on=["t2", "t_local", "t_ext"],
+                is_leader_summary=True,
+            ),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    run.status = RunStatus.running
+    sessions: dict[str, _RecordingSession] = {}
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        s = _RecordingSession(agent=agent, team_name=run.team_name, run_id=run.id)
+        sessions[agent.id] = s
+        return s
+
+    snapshots: list[TaskSnapshot] = [
+        TaskSnapshot(
+            task_id="t1", owner_agent_id="alice", status="completed",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="t2", owner_agent_id="bob", status="pending",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="t_local", owner_agent_id="charlie", status="pending",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="t_ext", owner_agent_id="ext-node", status="pending",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="ts", owner_agent_id="leader", status="blocked",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    async def inbox_provider() -> list[dict[str, str]]:
+        return []
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=factory,
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=inbox_provider,
+    )
+    # Mirror completed t1 into local books so partition sees a completed
+    # checkpoint upstream (snapshot apply path).
+    await rc.tick()
+    assert run.status == RunStatus.awaiting_user_checkpoint
+    assert rc.checkpoint_snapshot() is not None
+    # Downstream gated by checkpoint — never dispatched.
+    assert sessions.get("bob") is None or sessions["bob"].dispatched == []
+    # Parallel local agent must stay paused while reviewing.
+    assert sessions.get("charlie") is None or sessions["charlie"].dispatched == []
+    # Parallel external may dispatch (no worktree race).
+    assert "ext-node" in sessions
+    assert sessions["ext-node"].dispatched
+    assert sessions["ext-node"].dispatched[-1][0] == "t_ext"
+
+
+@pytest.mark.asyncio
 async def test_tick_flips_awaiting_external_and_back(fake_lookup) -> None:
     """While every in-flight task is external-owned the run shows
     ``awaiting_external``; as soon as a local task is in flight it returns to

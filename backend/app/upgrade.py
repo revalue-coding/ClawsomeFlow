@@ -566,6 +566,23 @@ def run_upgrade(
         report.errors.append(f"secrets init: {exc}")
         logger.exception("upgrade_secrets_init_failed", error=str(exc))
 
+    # 0a2. Clear SSH-tunnel-poisoned ``external_callback_base_url`` (loopback
+    # on a forwarded port ≠ csflow_port) and re-fire any terminal delegated
+    # runs whose callback URL still points at that dead port. Idempotent.
+    try:
+        from app.services.external_tasks import (
+            retry_poisoned_delegate_callbacks,
+            sanitize_external_callback_base_url,
+        )
+
+        cfg = sanitize_external_callback_base_url(cfg)
+        retried = retry_poisoned_delegate_callbacks()
+        if retried:
+            logger.info("upgrade_delegate_callbacks_retried", count=retried)
+    except Exception as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"external callback sanitize: {exc}")
+        logger.warning("upgrade_external_callback_sanitize_failed", error=str(exc))
+
     # 0b. Managed Hermes profiles read only their own config (no global to
     # reference live), so backfill inference config into any profile that lacks
     # it from the operator's active/root profile. Idempotent + best-effort.

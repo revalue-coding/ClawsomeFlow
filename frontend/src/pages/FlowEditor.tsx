@@ -2194,8 +2194,11 @@ export function FlowEditor() {
                   void (async () => {
                     try {
                       const info = await api.remoteCallInfo(id);
+                      // Omit baseUrl from the paste blob — origin operator
+                      // types the reachable URL on the subtask form.
+                      const { baseUrl: _omitBaseUrl, ...paste } = info;
                       await navigator.clipboard.writeText(
-                        JSON.stringify(info, null, 2),
+                        JSON.stringify(paste, null, 2),
                       );
                       alert(t("flowEditor.remoteCallInfoCopied"), {
                         title: t("flowEditor.remoteCallInfoTitle"),
@@ -4078,16 +4081,6 @@ function TaskFormBody({
                       onChange({ externalRemoteCallInfo: e.target.value })
                     }
                   />
-                  {row.externalFlowId && (
-                    <div className="text-xs text-ink-500 mt-1">
-                      {t("flowEditor.taskFields.externalRemoteConfigured", {
-                        flowId: row.externalFlowId,
-                        fields:
-                          row.externalRemoteParamFields.join("、") ||
-                          t("flowEditor.taskFields.externalRemoteNoParams"),
-                      })}
-                    </div>
-                  )}
                 </div>
                 <div className="md:col-span-2">
                   <label className="label">
@@ -4104,9 +4097,6 @@ function TaskFormBody({
                       onChange({ externalBaseUrl: e.target.value })
                     }
                   />
-                  <div className="text-xs text-ink-500 mt-1">
-                    {t("flowEditor.taskFields.externalBaseUrlHint")}
-                  </div>
                 </div>
                 {row.externalRemoteParamFields.length > 0 && (
                   <div className="md:col-span-2">
@@ -6094,7 +6084,6 @@ function specToRows(spec: FlowSpec): TaskRow[] {
           ? JSON.stringify(
               {
                 kind: "csflow.remote_call_info",
-                baseUrl: a?.external?.baseUrl ?? "",
                 flowId: a?.external?.flowId ?? "",
                 flowName: a?.external?.remoteFlowName ?? "",
                 flowDescription: a?.external?.remoteFlowDescription ?? "",
