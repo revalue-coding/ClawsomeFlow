@@ -1128,6 +1128,23 @@ export const api = {
       "POST",
       `/api/runs/${id}/pending-prs/${encodeURIComponent(agentId)}/merge`,
     ),
+  getFailedAutoMerges: (id: string) =>
+    request<{ items: PendingPrAgent[] }>("GET", `/api/runs/${id}/failed-auto-merges`),
+  getFailedAutoMergeDiff: (id: string, agentId: string) =>
+    request<PendingMergeDiff>(
+      "GET",
+      `/api/runs/${id}/failed-auto-merges/${encodeURIComponent(agentId)}/diff`,
+    ),
+  mergeFailedAutoMerge: (id: string, agentId: string) =>
+    request<{ agentId: string; success: boolean; message: string }>(
+      "POST",
+      `/api/runs/${id}/failed-auto-merges/${encodeURIComponent(agentId)}/merge`,
+    ),
+  discardFailedAutoMerge: (id: string, agentId: string) =>
+    request<RunSummary>(
+      "POST",
+      `/api/runs/${id}/failed-auto-merges/${encodeURIComponent(agentId)}/discard`,
+    ),
   discardPendingPr: (id: string, agentId: string) =>
     request<RunSummary>(
       "POST",

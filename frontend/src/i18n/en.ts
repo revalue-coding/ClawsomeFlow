@@ -828,6 +828,28 @@ const en = {
     runDiffRevertFailed: "Revert failed: {{reason}}",
     postRunModuleComplaintBlocked:
       "Complaint workflow is processing — this action is temporarily unavailable. Please try again after it finishes.",
+    failedAutoMergeTitle: "Incomplete auto-merge",
+    failedAutoMergeHint:
+      "These agents were expected to merge into the baseline at task end, but no effective merge was detected. Worktrees are preserved: view changes, merge into the baseline, or discard the worktree (changes stay out of the baseline).",
+    failedAutoMergeViewDiff: "View changes",
+    failedAutoMergeMerge: "Merge into baseline",
+    failedAutoMergeMerging: "Merging…",
+    failedAutoMergeMergeConfirmTitle: "Merge into baseline branch",
+    failedAutoMergeMergeConfirmBody:
+      "Merge {{agent}}'s worktree branch into baseline branch {{target}}. On success the entry is removed and the change appears under \"Changes from this run\". Continue?",
+    failedAutoMergeMergeConfirmOk: "Merge",
+    failedAutoMergeMergeSuccess:
+      "Merged into baseline branch {{target}} — see \"Changes from this run\".",
+    failedAutoMergeMergeFailed: "Merge failed: {{reason}}",
+    failedAutoMergeDiscard: "Discard worktree",
+    failedAutoMergeDiscarding: "Discarding…",
+    failedAutoMergeDiscardConfirmTitle: "Discard worktree",
+    failedAutoMergeDiscardConfirmBody:
+      "Discard {{agent}}'s worktree; changes that never merged will not enter the project repo. Continue?",
+    failedAutoMergeDiscardConfirmOk: "Discard",
+    failedAutoMergeDiscardFailed: "Discard failed: {{reason}}",
+    failedAutoMergeDiffModalTitle: "Pending changes — {{agent}}",
+    failedAutoMergeDiffEmpty: "Nothing left to merge (the worktree may have been removed).",
     pendingPrTitle: "Pending PRs",
     pendingPrHint:
       "These agents' changes were neither auto-merged into the baseline branch nor submitted as a PR. Their worktrees are preserved: view all changes, open a PR against the baseline in one click, or discard the worktree. Opening a PR requires a configured remote and the gh CLI (the environment is the developer's responsibility).",

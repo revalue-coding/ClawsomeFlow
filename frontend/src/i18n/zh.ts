@@ -816,6 +816,28 @@ const zh = {
     runDiffRevertFailed: "撤销失败：{{reason}}",
     postRunModuleComplaintBlocked:
       "投诉处理中，暂时无法执行此操作。请等待投诉流程完成后再试。",
+    failedAutoMergeTitle: "未完成的自动合入",
+    failedAutoMergeHint:
+      "以下 Agent 本应在任务结束时自动合入基线分支，但检测未成功合入；worktree 已保留。可查看修改、手动合入基线，或丢弃 worktree（不会把改动写进基线）。",
+    failedAutoMergeViewDiff: "查看修改",
+    failedAutoMergeMerge: "合入基线分支",
+    failedAutoMergeMerging: "合入中…",
+    failedAutoMergeMergeConfirmTitle: "合入基线分支",
+    failedAutoMergeMergeConfirmBody:
+      "将把 {{agent}} 的 worktree 分支合入基线分支 {{target}}。成功后条目移除，可在「本次执行的修改」中查看。继续？",
+    failedAutoMergeMergeConfirmOk: "合入",
+    failedAutoMergeMergeSuccess:
+      "已合入基线分支 {{target}}，可在「本次执行的修改」中查看。",
+    failedAutoMergeMergeFailed: "合入失败：{{reason}}",
+    failedAutoMergeDiscard: "丢弃 worktree",
+    failedAutoMergeDiscarding: "丢弃中…",
+    failedAutoMergeDiscardConfirmTitle: "丢弃 worktree",
+    failedAutoMergeDiscardConfirmBody:
+      "将丢弃 {{agent}} 的 worktree，未合入基线的改动不会进入项目仓库。确认？",
+    failedAutoMergeDiscardConfirmOk: "确认丢弃",
+    failedAutoMergeDiscardFailed: "丢弃失败：{{reason}}",
+    failedAutoMergeDiffModalTitle: "{{agent}} 的待合入修改",
+    failedAutoMergeDiffEmpty: "没有可合入的改动（worktree 可能已被清理）。",
     pendingPrTitle: "待提交 PR",
     pendingPrHint:
       "以下 Agent 的修改未自动合入基线分支，也尚未提交 PR。其 worktree 已保留，您可以查看全部修改、一键向基线分支提交 PR，或丢弃该 worktree。提交 PR 需要该仓库已配置远程仓库及 gh CLI（环境由开发者自行保证）。",

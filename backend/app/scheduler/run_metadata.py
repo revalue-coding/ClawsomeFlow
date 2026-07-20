@@ -20,6 +20,11 @@ must import the constants from here.
   PR / discard them from the Run detail "PR" module. Written at finalize time,
   so it doubles as the "this run executed in developer mode" record (a Flow
   later switched to dev mode never grows this marker retroactively).
+* :data:`FAILED_AUTO_MERGE_AGENT_IDS_KEY` — easy / developer manual runs: agent
+  ids that were supposed to self-merge in-task but did not land on the baseline
+  while the worktree still has mergeable content. Worktrees survive terminal
+  cleanup for the Run detail "failed auto-merge" module (view diff / merge /
+  discard). Written at finalize when entering ``awaiting_user_complaint``.
 * :data:`UNATTENDED_KEY` — set at trigger time (value ``"true"``) to mark a run
   as **unattended**: no human in the loop, so the scheduler skips the merge
   review, complaint and human-checkpoint phases and drives straight to a
@@ -51,6 +56,7 @@ POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"
 PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
 REVERTED_MERGE_AGENT_IDS_KEY = "_csflow_reverted_merge_agent_ids"
 DEV_PENDING_PR_AGENT_IDS_KEY = "_csflow_dev_pending_pr_agent_ids"
+FAILED_AUTO_MERGE_AGENT_IDS_KEY = "_csflow_failed_auto_merge_agent_ids"
 UNATTENDED_KEY = "_csflow_unattended"
 EXTERNAL_CALLBACK_KEY = "_csflow_external_callback"
 EXTERNAL_CALLBACK_SENT_KEY = "_csflow_external_callback_sent_at"
@@ -109,8 +115,17 @@ def run_is_unattended(run: Any) -> bool:
     return str(inputs.get(UNATTENDED_KEY, "")).strip().lower() == "true"
 
 
+def read_failed_auto_merge_agent_ids(run: Any) -> set[str]:
+    """Agent ids in the failed in-task auto-merge module (easy/dev manual runs)."""
+    raw = (getattr(run, "inputs", None) or {}).get(FAILED_AUTO_MERGE_AGENT_IDS_KEY)
+    if not isinstance(raw, list):
+        return set()
+    return {str(a).strip() for a in raw if str(a or "").strip()}
+
+
 __all__ = [
     "DEV_PENDING_PR_AGENT_IDS_KEY",
+    "FAILED_AUTO_MERGE_AGENT_IDS_KEY",
     "EXTERNAL_CALLBACK_KEY",
     "EXTERNAL_CALLBACK_SENT_KEY",
     "POST_COMPLAINT_STATUS_KEY",
@@ -119,5 +134,6 @@ __all__ = [
     "REVERTED_MERGE_AGENT_IDS_KEY",
     "UNATTENDED_KEY",
     "coalesce_reverted_merge_markers",
+    "read_failed_auto_merge_agent_ids",
     "run_is_unattended",
 ]

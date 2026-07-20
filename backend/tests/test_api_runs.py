@@ -2182,7 +2182,7 @@ def _make_openclaw_flow(owner: str = "alice") -> Flow:
     return get_storage().flow_create(flow)
 
 
-def test_run_diff_lists_only_merged_non_openclaw_agents(
+def test_run_diff_lists_merged_agents_including_openclaw(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     flow = _make_openclaw_flow()
@@ -2202,8 +2202,13 @@ def test_run_diff_lists_only_merged_non_openclaw_agents(
                     "merge_count": 1, "commit_count": 2, "files_changed": 3,
                     "insertions": 10, "deletions": 4, "patch": "", "patch_truncated": False,
                 }
+            if agent == "ocw":
+                return {
+                    "repo_root": "/tmp/r", "branch": f"clawteam/{run.team_name}/ocw",
+                    "merge_count": 1, "commit_count": 1, "files_changed": 2,
+                    "insertions": 5, "deletions": 0, "patch": "", "patch_truncated": False,
+                }
             # leader has a merge commit but ZERO net file changes (empty merge)
-            # → must be omitted (filter on files_changed, not merge_count).
             return {
                 "repo_root": "/tmp/r", "branch": f"clawteam/{run.team_name}/{agent}",
                 "merge_count": 1, "commit_count": 1, "files_changed": 0,
@@ -2216,12 +2221,12 @@ def test_run_diff_lists_only_merged_non_openclaw_agents(
     r = app_client.get(f"/api/runs/{run.id}/run-diff")
     assert r.status_code == 200, r.text
     items = r.json()["items"]
-    assert [i["agentId"] for i in items] == ["alice"]
+    # leader is queried (it owns a worktree too) but filtered out here because
+    # its merge brought zero net file changes.
+    assert [i["agentId"] for i in items] == ["alice", "ocw"]
     assert items[0]["commitCount"] == 2
-    assert items[0]["filesChanged"] == 3
-    assert items[0]["insertions"] == 10
-    # OpenClaw agent must never be queried.
-    assert "ocw" not in queried
+    assert "ocw" in queried
+    assert "leader" in queried
 
 
 def test_run_agent_diff_returns_patch(
@@ -2348,12 +2353,30 @@ def test_run_diff_revert_failure_409(
     assert r.json()["error"] == "MERGE_REVERT_FAILED"
 
 
-def test_run_diff_revert_openclaw_agent_404(app_client: TestClient) -> None:
+def test_run_diff_revert_openclaw_agent(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     flow = _make_openclaw_flow()
     run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+
+    class _FakeCli:
+        async def revert_agent_merges(self, *, team, agent, repo, target_branch):
+            del team, repo, target_branch
+            assert agent == "ocw"
+            return {
+                "ok": True,
+                "target_branch": "main",
+                "merge_shas": ["abc123"],
+                "revert_head": "def456",
+                "message": "ok",
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
     r = app_client.post(f"/api/runs/{run.id}/run-diff/ocw/revert")
-    assert r.status_code == 404
-    assert r.json()["error"] == "AGENT_NOT_FOUND"
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
 
 
 @pytest.mark.parametrize(

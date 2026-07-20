@@ -911,3 +911,82 @@ def test_revert_blocked_while_active_allowed_awaiting_complaint(
     assert refreshed.inputs.get(DEV_PENDING_PR_AGENT_IDS_KEY) == ["bob"]
     from app.scheduler.run_metadata import PRESERVE_WORKTREE_AGENT_IDS_KEY
     assert PRESERVE_WORKTREE_AGENT_IDS_KEY not in (refreshed.inputs or {})
+
+
+# ── failed in-task auto-merge module ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_compute_failed_auto_merge_skips_effective_baseline_merge() -> None:
+    flow, run = _make_flow_and_run(mode="easy", alice_auto_merge=True)
+
+    class _Cli:
+        async def run_merged_agent_patch(self, *, agent, **kw):
+            del kw
+            if agent == "alice":
+                return {"files_changed": 2, "merge_count": 1}
+            return {"files_changed": 0, "merge_count": 0}
+
+        async def workspace_agent_patch(self, *, agent, **kw):
+            del kw
+            if agent == "bob":
+                return {"patch": "+line", "uncommitted_patch": "", "branch_ahead": 1}
+            return None
+
+    ids = await fin.compute_failed_auto_merge_agent_ids(
+        flow=flow, run=run, cli=_Cli(), storage=get_storage(),
+    )
+    assert ids == ["bob"]
+
+
+@pytest.mark.asyncio
+async def test_compute_failed_auto_merge_includes_leader() -> None:
+    """The leader summary task is treated like any other: a missed self-merge
+    with leftover worktree content surfaces the leader too."""
+    flow, run = _make_flow_and_run(mode="easy", alice_auto_merge=True)
+
+    class _Cli:
+        async def run_merged_agent_patch(self, *, agent, **kw):
+            del kw
+            # everyone effectively merged EXCEPT the leader
+            if agent == "leader":
+                return {"files_changed": 0, "merge_count": 0}
+            return {"files_changed": 3, "merge_count": 1}
+
+        async def workspace_agent_patch(self, *, agent, **kw):
+            del kw
+            if agent == "leader":
+                return {"patch": "+summary", "uncommitted_patch": "", "branch_ahead": 1}
+            return None
+
+    ids = await fin.compute_failed_auto_merge_agent_ids(
+        flow=flow, run=run, cli=_Cli(), storage=get_storage(),
+    )
+    assert ids == ["leader"]
+
+
+def test_list_failed_auto_merges_api(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import runs as runs_mod
+    from app.scheduler.run_metadata import FAILED_AUTO_MERGE_AGENT_IDS_KEY
+
+    flow, run = _make_flow_and_run(
+        mode="easy",
+        status=RunStatus.awaiting_user_complaint,
+        inputs={FAILED_AUTO_MERGE_AGENT_IDS_KEY: ["alice"]},
+    )
+
+    async def _fake_row(**kw):
+        del kw
+        return {
+            "branch_name": f"clawteam/{run.team_name}/alice",
+            "base_branch": "main",
+            "repo_root": "/tmp/r",
+            "worktree_path": "/tmp/wt-alice",
+        }
+
+    monkeypatch.setattr(runs_mod, "_find_pending_pr_workspace_row", _fake_row)
+    r = app_client.get(f"/api/runs/{run.id}/failed-auto-merges")
+    assert r.status_code == 200, r.text
+    assert [i["agentId"] for i in r.json()["items"]] == ["alice"]

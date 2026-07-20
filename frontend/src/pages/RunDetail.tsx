@@ -1121,6 +1121,14 @@ export function RunDetail() {
       {/* Dev-mode PR module — worktrees awaiting a PR decision (same window
           as Run diff; hides itself unless the backend returns pending items) */}
       {POST_RUN_MODULES_VISIBLE.has(run.status) && (
+        <FailedAutoMergeCard
+          runId={run.id}
+          runStatus={run.status}
+          onMerged={() => setRunDiffRefresh((v) => v + 1)}
+        />
+      )}
+
+      {POST_RUN_MODULES_VISIBLE.has(run.status) && (
         <PendingPrCard
           runId={run.id}
           runStatus={run.status}
@@ -2546,10 +2554,10 @@ function DiffView({ patch }: { patch: string }) {
 }
 
 
-/** Post-run "Run diff" module: lists each non-OpenClaw agent whose branch
- *  actually landed content on a baseline branch this run, with a per-agent
- *  diff modal. Rendered from awaiting_user_complaint through terminal runs.
- *  Mutating actions (revert) are blocked during complaint_processing. */
+/** Post-run "Run diff" module: agents whose branch merged into a baseline
+ *  during this run (includes OpenClaw). Rendered from awaiting_user_complaint
+ *  through terminal runs. Mutating actions (revert) blocked during
+ *  complaint_processing. */
 function RunDiffCard({
   runId,
   runStatus,
@@ -2700,6 +2708,203 @@ function RunDiffCard({
 
 
 type PendingPrBusy = { agentId: string; action: "submit" | "merge" | "discard" };
+
+type FailedAutoMergeBusy = { agentId: string; action: "merge" | "discard" };
+
+/** Easy/dev runs: agents that should have self-merged in-task but did not. */
+function FailedAutoMergeCard({
+  runId,
+  runStatus,
+  onMerged,
+}: {
+  runId: string;
+  runStatus: string;
+  onMerged?: () => void;
+}) {
+  const { t } = useTranslation();
+  const { confirm, alert } = useDialog();
+  const actionsBlocked = runStatus === "complaint_processing";
+  const [items, setItems] = useState<PendingPrAgent[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState<FailedAutoMergeBusy | null>(null);
+  const [diffAgent, setDiffAgent] = useState<string | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [diffData, setDiffData] = useState<PendingMergeDiff | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.getFailedAutoMerges(runId);
+      setItems(res.items ?? []);
+    } catch {
+      setItems([]);
+    } finally {
+      setLoaded(true);
+    }
+  }, [runId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const openDiff = useCallback(
+    async (agentId: string) => {
+      setDiffAgent(agentId);
+      setDiffLoading(true);
+      setDiffError(null);
+      setDiffData(null);
+      try {
+        const data = await api.getFailedAutoMergeDiff(runId, agentId);
+        setDiffData(data);
+      } catch (e) {
+        setDiffError(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        setDiffLoading(false);
+      }
+    },
+    [runId],
+  );
+
+  const onMergeToBaseline = useCallback(
+    async (item: PendingPrAgent) => {
+      if (actionsBlocked) {
+        void alert(t("runDetail.postRunModuleComplaintBlocked"));
+        return;
+      }
+      const ok = await confirm(
+        t("runDetail.failedAutoMergeMergeConfirmBody", {
+          agent: item.agentId,
+          target: item.targetBranch,
+        }),
+        {
+          title: t("runDetail.failedAutoMergeMergeConfirmTitle"),
+          okText: t("runDetail.failedAutoMergeMergeConfirmOk"),
+        },
+      );
+      if (!ok) return;
+      setBusy({ agentId: item.agentId, action: "merge" });
+      try {
+        const res = await api.mergeFailedAutoMerge(runId, item.agentId);
+        if (res.success) {
+          void alert(
+            t("runDetail.failedAutoMergeMergeSuccess", { target: item.targetBranch }),
+          );
+          await load();
+          onMerged?.();
+        } else {
+          void alert(
+            t("runDetail.failedAutoMergeMergeFailed", { reason: res.message }),
+          );
+        }
+      } catch (e) {
+        const reason = e instanceof ApiError ? e.message : String(e);
+        void alert(t("runDetail.failedAutoMergeMergeFailed", { reason }));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [runId, confirm, alert, t, load, onMerged, actionsBlocked],
+  );
+
+  const onDiscard = useCallback(
+    async (item: PendingPrAgent) => {
+      if (actionsBlocked) {
+        void alert(t("runDetail.postRunModuleComplaintBlocked"));
+        return;
+      }
+      const ok = await confirm(
+        t("runDetail.failedAutoMergeDiscardConfirmBody", { agent: item.agentId }),
+        {
+          title: t("runDetail.failedAutoMergeDiscardConfirmTitle"),
+          okText: t("runDetail.failedAutoMergeDiscardConfirmOk"),
+          danger: true,
+        },
+      );
+      if (!ok) return;
+      setBusy({ agentId: item.agentId, action: "discard" });
+      try {
+        await api.discardFailedAutoMerge(runId, item.agentId);
+        await load();
+      } catch (e) {
+        const reason = e instanceof ApiError ? e.message : String(e);
+        void alert(t("runDetail.failedAutoMergeDiscardFailed", { reason }));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [runId, confirm, alert, t, load, actionsBlocked],
+  );
+
+  if (!loaded || items.length === 0) return null;
+
+  return (
+    <Card className="border-amber-200">
+      <CardTitle>{t("runDetail.failedAutoMergeTitle")}</CardTitle>
+      <div className="text-xs text-ink-500 mb-3">{t("runDetail.failedAutoMergeHint")}</div>
+      <div className="space-y-2">
+        {items.map((item) => {
+          const rowBusy = busy?.agentId === item.agentId ? busy.action : null;
+          return (
+            <div
+              key={item.agentId}
+              className="flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50/40 px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="truncate font-medium text-ink-900">{item.agentId}</div>
+                <div className="truncate text-xs text-ink-500 font-mono">
+                  {item.branch} → {item.targetBranch}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  className="btn-outline"
+                  onClick={() => void openDiff(item.agentId)}
+                >
+                  {t("runDetail.failedAutoMergeViewDiff")}
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={rowBusy !== null}
+                  onClick={() => void onMergeToBaseline(item)}
+                >
+                  {rowBusy === "merge"
+                    ? t("runDetail.failedAutoMergeMerging")
+                    : t("runDetail.failedAutoMergeMerge")}
+                </button>
+                <button
+                  type="button"
+                  className="btn-outline"
+                  disabled={rowBusy !== null}
+                  onClick={() => void onDiscard(item)}
+                >
+                  {rowBusy === "discard"
+                    ? t("runDetail.failedAutoMergeDiscarding")
+                    : t("runDetail.failedAutoMergeDiscard")}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <Modal
+        open={diffAgent !== null}
+        onClose={() => setDiffAgent(null)}
+        title={t("runDetail.failedAutoMergeDiffModalTitle", { agent: diffAgent ?? "" })}
+        width="max-w-5xl"
+      >
+        <PendingMergeDiffBody
+          loading={diffLoading}
+          error={diffError}
+          data={diffData}
+          hideBaseAhead
+          emptyText={t("runDetail.failedAutoMergeDiffEmpty")}
+        />
+      </Modal>
+    </Card>
+  );
+}
 
 /** Developer-mode PR module: agents whose worktree branch neither self-merged
  *  into the baseline nor went out as a PR yet. Backend gates visibility (dev

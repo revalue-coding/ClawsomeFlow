@@ -1037,17 +1037,28 @@ class ClawTeamCli:
             timeout=CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS,
         ):
             async with async_main_repo_file_lock(repo_root):
-                # Merges of this agent's branch that live on the target branch.
+                # Same merge enumeration as :meth:`run_merged_agent_patch` (--all),
+                # then keep only merges already on ``target``'s history so we
+                # revert exactly what Run-diff attributes to this run/agent.
                 log_code, log_out, log_err = await _run_in_cwd(
-                    ["git", "log", target, "--merges", "--format=%H%x1f%s"],
+                    ["git", "log", "--all", "--merges", "--format=%H%x1f%s"],
                     cwd=repo_root, env=env,
                 )
                 if log_code != 0:
                     result["message"] = (
-                        f"cannot read history of {target!r}: {(log_err or '').strip()[:300]}"
+                        f"cannot read merge history: {(log_err or '').strip()[:300]}"
                     )
                     return result
                 matched = _match_agent_merge_shas(log_out, branch)
+                on_target: list[str] = []
+                for sha in matched:
+                    anc_code, _, _ = await _run_in_cwd(
+                        ["git", "merge-base", "--is-ancestor", sha, target],
+                        cwd=repo_root, env=env,
+                    )
+                    if anc_code == 0:
+                        on_target.append(sha)
+                matched = on_target
                 # Keep only merges that brought real file changes (skip empty).
                 effective: list[str] = []
                 for sha in matched:

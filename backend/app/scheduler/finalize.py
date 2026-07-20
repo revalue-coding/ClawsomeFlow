@@ -63,9 +63,11 @@ from app.models import (
 )
 from app.scheduler.run_metadata import (
     DEV_PENDING_PR_AGENT_IDS_KEY,
+    FAILED_AUTO_MERGE_AGENT_IDS_KEY,
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
+    read_failed_auto_merge_agent_ids,
     run_is_unattended,
 )
 from app.storage import StorageBackend
@@ -253,6 +255,14 @@ async def finalize_run(
             )
             if dev_pending_pr:
                 merged_inputs[DEV_PENDING_PR_AGENT_IDS_KEY] = dev_pending_pr
+            failed_auto = await compute_failed_auto_merge_agent_ids(
+                flow=ipt.flow,
+                run=ipt.run,
+                cli=cli,
+                storage=storage,
+            )
+            if failed_auto:
+                merged_inputs[FAILED_AUTO_MERGE_AGENT_IDS_KEY] = failed_auto
             ipt.run.inputs = merged_inputs
             if ipt.run.finished_at is None:
                 ipt.run.finished_at = datetime.now(timezone.utc)
@@ -264,6 +274,7 @@ async def finalize_run(
                 run_id=ipt.run.id,
                 team=ipt.run.team_name,
                 mode=mode,
+                failed_auto_merge=len(failed_auto),
             )
             return out
 
@@ -926,6 +937,105 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
     return [a.id for a in spec.agents if a.id in pending]
 
 
+async def compute_failed_auto_merge_agent_ids(
+    *,
+    flow: Flow,
+    run: FlowRun,
+    cli: ClawTeamCli,
+    storage: StorageBackend,
+) -> list[str]:
+    """Easy / dev manual runs: agents that should have self-merged but did not.
+
+    Detection (per agent, spec order):
+
+    * Owns at least one task (incl. the leader summary task) where
+      :func:`task_self_merges` is True.
+    * No effective merge on the baseline for this run
+      (:meth:`ClawTeamCli.run_merged_agent_patch` → ``files_changed == 0``).
+    * Worktree still exists with mergeable content (three-dot patch, uncommitted
+      diff, or ``branch_ahead > 0``).
+
+    Agents already in the dev pending-PR set (``devAutoMerge=false`` tasks) are
+    excluded — that module owns their worktree. OpenClaw and the leader are
+    included when they failed to self-merge.
+    """
+    variables = (flow.spec or {}).get("variables") or {}
+    mode = flow_mode(variables)
+    if mode not in ("easy", "dev"):
+        return []
+    try:
+        spec = FlowSpec.model_validate(flow.spec)
+    except Exception:
+        return []
+    dev_pending = set(compute_dev_pending_pr_agent_ids(flow=flow, run=run))
+    agents_by_id = {a.id: a for a in spec.agents}
+    expected: set[str] = set()
+    for task in spec.tasks:
+        # Leader summary task is treated like any other: the leader owns a
+        # worktree, may modify + self-merge it, so a missed self-merge must be
+        # surfaced too.
+        agent = agents_by_id.get(task.owner_agent_id)
+        if agent is None:
+            continue
+        if agent.merge_strategy == MergeStrategy.skip:
+            continue
+        if not task_self_merges(
+            mode=mode,
+            run_is_scheduled=run_is_unattended(run),
+            task=task,
+            agent=agent,
+        ):
+            continue
+        expected.add(agent.id)
+
+    out: list[str] = []
+    for agent_id in [a.id for a in spec.agents if a.id in expected]:
+        if agent_id in dev_pending:
+            continue
+        agent = agents_by_id[agent_id]
+        repo = _resolve_agent_repo_for_run(
+            run=run, agent_id=agent_id, storage=storage,
+        )
+        try:
+            merged = await cli.run_merged_agent_patch(
+                team=run.team_name,
+                agent=agent_id,
+                repo=repo,
+                include_patch=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "failed_auto_merge_probe_merged_failed",
+                run_id=run.id, agent_id=agent_id, error=str(exc),
+            )
+            merged = None
+        if merged and int(merged.get("files_changed") or 0) > 0:
+            continue
+        try:
+            wt = await cli.workspace_agent_patch(
+                team=run.team_name, agent=agent_id, repo=repo,
+            )
+        except Exception as exc:
+            logger.warning(
+                "failed_auto_merge_probe_worktree_failed",
+                run_id=run.id, agent_id=agent_id, error=str(exc),
+            )
+            wt = None
+        if wt is None:
+            continue
+        patch = str(wt.get("patch") or "").strip()
+        uncommitted = str(wt.get("uncommitted_patch") or "").strip()
+        branch_ahead = int(wt.get("branch_ahead") or 0)
+        if not patch and not uncommitted and branch_ahead <= 0:
+            continue
+        out.append(agent_id)
+        logger.info(
+            "failed_auto_merge_agent_detected",
+            run_id=run.id, agent_id=agent_id, mode=mode,
+        )
+    return out
+
+
 def _emit(
     storage: StorageBackend, run_id: str, event_type: str, *,
     agent_id: str | None = None,
@@ -992,12 +1102,18 @@ async def _maybe_cleanup_team_after_terminal(
     dev_pending_pr_ids = (
         set() if abnormal_terminal else read_dev_pending_pr_agent_ids(run)
     )
+    failed_auto_merge_ids = (
+        set() if abnormal_terminal else read_failed_auto_merge_agent_ids(run)
+    )
     preserve_due_to_conflicts = run.status == RunStatus.completed_with_conflicts
-    if preserve_worktree_dirs or preserve_due_to_conflicts or dev_pending_pr_ids:
-        combined_preserve = preserved_agent_ids | dev_pending_pr_ids
+    if preserve_worktree_dirs or preserve_due_to_conflicts or dev_pending_pr_ids or failed_auto_merge_ids:
+        combined_preserve = (
+            preserved_agent_ids | dev_pending_pr_ids | failed_auto_merge_ids
+        )
         selective = not preserve_worktree_dirs and (
             (preserve_due_to_conflicts and bool(preserved_agent_ids))
             or bool(dev_pending_pr_ids)
+            or bool(failed_auto_merge_ids)
         )
         if selective and combined_preserve:
             await _cleanup_non_openclaw_worktrees_except_preserved(
@@ -1012,8 +1128,10 @@ async def _maybe_cleanup_team_after_terminal(
             reason = "preserve_worktree_dirs"
         elif preserve_due_to_conflicts:
             reason = "completed_with_conflicts"
-        else:
+        elif dev_pending_pr_ids:
             reason = "dev_pending_pr"
+        else:
+            reason = "failed_auto_merge"
         logger.info(
             "team_cleanup_skipped_preserve_worktree",
             run_id=run.id,

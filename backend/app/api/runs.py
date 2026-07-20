@@ -68,6 +68,7 @@ from app.models import (
     FlowRunSchedule,
     FlowRunScheduleExecution,
     FlowSpec,
+    MergeStrategy,
     RunEvent,
     RunStatus,
     iso_utc,
@@ -84,6 +85,7 @@ from app.scheduler.finalize import (
 from app.scheduler.naming import team_name_for_run
 from app.scheduler.run_metadata import (
     DEV_PENDING_PR_AGENT_IDS_KEY,
+    FAILED_AUTO_MERGE_AGENT_IDS_KEY,
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
@@ -1643,10 +1645,13 @@ async def get_checkpoint_item_diff(
 
 
 def _run_diff_agents(run: FlowRun, storage: StorageBackend) -> list[FlowAgent]:
-    """Non-OpenClaw agents of *run*'s flow, in spec order.
+    """Agents eligible for the post-run Run-diff module (spec order).
 
-    OpenClaw agents self-merge in-task and are excluded from the Run-diff view
-    per product spec. Returns ``[]`` when the flow/spec can't be loaded.
+    Includes OpenClaw (in-task self-merge) AND the leader — the leader owns a
+    worktree for its summary task and may modify + merge it into the baseline
+    exactly like any worker, so the user must be able to see and revert it.
+    Excludes only ``merge_strategy=skip`` nodes (external executors, which own
+    no worktree/branch). Returns ``[]`` when the flow/spec can't be loaded.
     """
     flow = storage.flow_get(run.flow_id)
     if flow is None:
@@ -1655,7 +1660,7 @@ def _run_diff_agents(run: FlowRun, storage: StorageBackend) -> list[FlowAgent]:
         spec = FlowSpec.model_validate(flow.spec)
     except Exception:
         return []
-    return [a for a in spec.agents if a.kind != AgentKind.openclaw]
+    return [a for a in spec.agents if a.merge_strategy != MergeStrategy.skip]
 
 
 @router.get("/runs/{run_id}/run-diff", response_model=RunDiffView)
@@ -1664,7 +1669,7 @@ async def get_run_diff(
     user: UserDep,
     storage: StorageDep,
 ) -> RunDiffView:
-    """List each non-OpenClaw agent whose branch actually merged content into a
+    """List each eligible agent whose branch actually merged content into a
     baseline branch during this run (the post-run "Run diff" module).
 
     Reconstructed read-only from baseline-repo merge history (see
@@ -1748,7 +1753,7 @@ async def get_run_agent_diff(
     if agent is None:
         raise ApiError(
             "AGENT_NOT_FOUND",
-            f"agent {agent_id!r} is not a diffable (non-OpenClaw) agent of this run",
+            f"agent {agent_id!r} is not eligible for Run diff in this run",
             status_code=404,
         )
     repo = str(agent.repo or "").strip() or None
@@ -1826,7 +1831,7 @@ async def revert_run_agent_merge(
     if agent is None:
         raise ApiError(
             "AGENT_NOT_FOUND",
-            f"agent {agent_id!r} is not a diffable (non-OpenClaw) agent of this run",
+            f"agent {agent_id!r} is not eligible for Run diff in this run",
             status_code=404,
         )
     if agent_id in _read_reverted_merge_agent_ids(run):
@@ -2453,6 +2458,280 @@ async def merge_pending_pr(
         run=run, storage=storage, agent_id=agent_id, remaining=remaining,
     )
     return MergeResponse(agent_id=agent_id, success=True, message="merged")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Failed in-task auto-merge module (easy / dev manual runs)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _list_failed_auto_merge_agent_ids(run: FlowRun) -> list[str]:
+    raw = (run.inputs or {}).get(FAILED_AUTO_MERGE_AGENT_IDS_KEY)
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        aid = str(item or "").strip()
+        if aid and aid not in seen:
+            out.append(aid)
+            seen.add(aid)
+    return out
+
+
+def _remove_failed_auto_merge_agent(
+    *, run: FlowRun, storage: StorageBackend, agent_id: str,
+) -> list[str]:
+    remaining = [a for a in _list_failed_auto_merge_agent_ids(run) if a != agent_id]
+    merged_inputs = dict(run.inputs or {})
+    if remaining:
+        merged_inputs[FAILED_AUTO_MERGE_AGENT_IDS_KEY] = remaining
+    else:
+        merged_inputs.pop(FAILED_AUTO_MERGE_AGENT_IDS_KEY, None)
+    run.inputs = merged_inputs
+    storage.run_update(run)
+    return remaining
+
+
+def _flow_easy_or_dev_mode(flow: Flow | None) -> bool:
+    if flow is None:
+        return False
+    from app.flow_modes import flow_mode
+
+    return flow_mode((flow.spec or {}).get("variables") or {}) in ("easy", "dev")
+
+
+def _ensure_failed_auto_merge_actionable(run: FlowRun) -> None:
+    if run.status not in _PR_MODULE_ACTIONABLE_STATUSES:
+        raise ApiError(
+            "AUTO_MERGE_NOT_ACTIONABLE",
+            f"failed auto-merge actions are not available in status "
+            f"{_status_str(run.status)}",
+            status_code=409,
+        )
+
+
+async def _failed_auto_merge_post_action_cleanup(
+    *, run: FlowRun, storage: StorageBackend, agent_id: str, remaining: list[str],
+) -> None:
+    await _pending_pr_post_action_cleanup(
+        run=run, storage=storage, agent_id=agent_id, remaining=remaining,
+    )
+
+
+@router.get("/runs/{run_id}/failed-auto-merges", response_model=PendingPrListView)
+async def list_failed_auto_merges(
+    run_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> PendingPrListView:
+    """Agents that should have self-merged in-task but did not (easy/dev runs)."""
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if run.status not in _PR_MODULE_VISIBLE_STATUSES:
+        return PendingPrListView()
+    pending_ids = _list_failed_auto_merge_agent_ids(run)
+    if not pending_ids:
+        return PendingPrListView()
+    flow = storage.flow_get(run.flow_id)
+    if not _flow_easy_or_dev_mode(flow):
+        return PendingPrListView()
+    items: list[PendingPrAgentView] = []
+    for agent_id in pending_ids:
+        agent = _spec_agent_for_run(run=run, agent_id=agent_id, storage=storage)
+        if agent is None:
+            continue
+        row = await _find_pending_pr_workspace_row(
+            run=run, agent_id=agent_id, storage=storage,
+        )
+        if row is None:
+            continue
+        target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+        items.append(
+            PendingPrAgentView(
+                agent_id=agent_id,
+                branch=str(row.get("branch_name") or ""),
+                base_branch=str(row.get("base_branch") or ""),
+                target_branch=target,
+                repo_root=str(row.get("repo_root") or ""),
+                worktree_path=str(row.get("worktree_path") or ""),
+            )
+        )
+    return PendingPrListView(items=items)
+
+
+@router.get(
+    "/runs/{run_id}/failed-auto-merges/{agent_id}/diff",
+    response_model=PendingMergeDiffView,
+)
+async def get_failed_auto_merge_diff(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> PendingMergeDiffView:
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if agent_id not in _list_failed_auto_merge_agent_ids(run):
+        raise ApiError(
+            "AUTO_MERGE_NOT_PENDING",
+            f"agent {agent_id!r} has no failed auto-merge entry in this run",
+            status_code=404,
+        )
+    agent = _spec_agent_for_run(run=run, agent_id=agent_id, storage=storage)
+    target = DEFAULT_TARGET_BRANCH
+    if agent is not None:
+        target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+    repo = _resolve_agent_repo_for_run(run=run, agent_id=agent_id, storage=storage)
+    cli = get_clawteam_cli()
+    try:
+        result = await cli.workspace_agent_patch(
+            team=run.team_name, agent=agent_id, repo=repo,
+        )
+    except Exception as exc:
+        logger.warning(
+            "failed_auto_merge_diff_failed",
+            run_id=run.id, agent_id=agent_id, error=str(exc),
+        )
+        raise ApiError(
+            "DIFF_UNAVAILABLE",
+            f"failed to compute diff for agent {agent_id!r}",
+            status_code=502,
+        ) from exc
+    if result is None:
+        raise ApiError(
+            "WORKSPACE_NOT_FOUND",
+            f"no worktree found for agent {agent_id!r} (it may have been cleaned up)",
+            status_code=404,
+        )
+    return PendingMergeDiffView(
+        agent_id=agent_id,
+        branch=str(result.get("branch") or ""),
+        base_branch=str(result.get("base_branch") or ""),
+        target_branch=target,
+        repo_root=str(result.get("repo_root") or ""),
+        patch=str(result.get("patch") or ""),
+        patch_truncated=bool(result.get("patch_truncated")),
+        uncommitted_patch=str(result.get("uncommitted_patch") or ""),
+        uncommitted_truncated=bool(result.get("uncommitted_truncated")),
+        base_ahead=int(result.get("base_ahead") or 0),
+        branch_ahead=int(result.get("branch_ahead") or 0),
+    )
+
+
+@router.post(
+    "/runs/{run_id}/failed-auto-merges/{agent_id}/merge",
+    response_model=MergeResponse,
+)
+async def merge_failed_auto_merge(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> MergeResponse:
+    """Merge a failed auto-merge agent's worktree into its baseline branch."""
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    _ensure_failed_auto_merge_actionable(run)
+    if agent_id not in _list_failed_auto_merge_agent_ids(run):
+        raise ApiError(
+            "AUTO_MERGE_NOT_PENDING",
+            f"agent {agent_id!r} has no failed auto-merge entry in this run",
+            status_code=404,
+        )
+    flow = storage.flow_get(run.flow_id)
+    if not _flow_easy_or_dev_mode(flow):
+        raise ApiError(
+            "NOT_EASY_OR_DEV_MODE",
+            "the Flow is not in easy or developer mode",
+            status_code=409,
+        )
+    agent = _spec_agent_for_run(run=run, agent_id=agent_id, storage=storage)
+    target = DEFAULT_TARGET_BRANCH
+    if agent is not None:
+        target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+    source_branch = f"clawteam/{run.team_name}/{agent_id}"
+    merge_repo = _resolve_agent_repo_for_run(run=run, agent_id=agent_id, storage=storage)
+    row = await _find_pending_pr_workspace_row(
+        run=run, agent_id=agent_id, storage=storage,
+    )
+    if row is not None:
+        wt = str(FsPath(str(row.get("worktree_path") or "")).expanduser())
+        if wt:
+            await _clear_worktree_uncommitted(
+                run=run, storage=storage, agent_id=agent_id, worktree=wt,
+            )
+    cli = get_clawteam_cli()
+    ok, msg = await cli.workspace_merge(
+        team=run.team_name, agent=agent_id, repo=merge_repo, target=target,
+    )
+    if ok:
+        _emit_run_event(
+            storage, run.id, "failed_auto_merge_merged", agent_id=agent_id,
+            payload={"source_branch": source_branch, "target_branch": target,
+                     "repo_root": merge_repo},
+        )
+    else:
+        failure_kind = classify_merge_failure(msg)
+        _emit_run_event(
+            storage, run.id,
+            "merge_conflict" if failure_kind == "conflict" else "merge_error",
+            agent_id=agent_id,
+            payload={"source_branch": source_branch, "target_branch": target,
+                     "repo_root": merge_repo, "stderr": (msg or "")[:1000],
+                     "failure_kind": failure_kind, "context": "failed_auto_merge"},
+        )
+    if not ok:
+        reason = (msg or "").strip()[:900]
+        return MergeResponse(agent_id=agent_id, success=False, message=reason)
+    remaining = _remove_failed_auto_merge_agent(
+        run=run, storage=storage, agent_id=agent_id,
+    )
+    await _failed_auto_merge_post_action_cleanup(
+        run=run, storage=storage, agent_id=agent_id, remaining=remaining,
+    )
+    return MergeResponse(agent_id=agent_id, success=True, message="merged")
+
+
+@router.post(
+    "/runs/{run_id}/failed-auto-merges/{agent_id}/discard",
+    response_model=RunSummary,
+)
+async def discard_failed_auto_merge(
+    run_id: Annotated[str, Path()],
+    agent_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunSummary:
+    """Discard worktree without merging (failed auto-merge module)."""
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    _ensure_failed_auto_merge_actionable(run)
+    if agent_id not in _list_failed_auto_merge_agent_ids(run):
+        raise ApiError(
+            "AUTO_MERGE_NOT_PENDING",
+            f"agent {agent_id!r} has no failed auto-merge entry in this run",
+            status_code=404,
+        )
+    _emit_run_event(
+        storage, run.id, "failed_auto_merge_discarded", agent_id=agent_id, payload={},
+    )
+    remaining = _remove_failed_auto_merge_agent(
+        run=run, storage=storage, agent_id=agent_id,
+    )
+    await _failed_auto_merge_post_action_cleanup(
+        run=run, storage=storage, agent_id=agent_id, remaining=remaining,
+    )
+    refreshed = storage.run_get(run.id) or run
+    return _to_summary(refreshed)
 
 
 @router.post("/runs/{run_id}/merge", response_model=MergeResponse)
