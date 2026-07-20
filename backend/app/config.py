@@ -142,6 +142,11 @@ class Config(BaseModel):
         ),
     )
 
+    # WebUI language preference ("zh" | "en"), synced from the browser pill.
+    # Used by chat-platform webhook rendering so notify text matches the
+    # operator's UI language. None → auto (CJK heuristic + platform fallback).
+    ui_language: str | None = None
+
     @property
     def openclaw_home_path(self) -> Path:
         """Resolve openclaw_home to an absolute Path."""

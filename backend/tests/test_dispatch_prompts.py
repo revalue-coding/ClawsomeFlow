@@ -56,6 +56,21 @@ def _ctx(**overrides) -> prompts.DispatchContext:
         worker_reports=[],
         upstream_outputs=[],
     )
+    # Compat: tests may still pass remote_param_fields=tuple → one synthetic target.
+    if "remote_param_fields" in overrides and "remote_param_targets" not in overrides:
+        fields = overrides.pop("remote_param_fields")
+        if fields:
+            overrides["remote_param_targets"] = (
+                prompts.RemoteParamTarget(
+                    downstream_task_id="remote-task",
+                    agent_id="remote-agent",
+                    flow_name="Remote Flow",
+                    flow_description="Assemble the itinerary.",
+                    param_fields=tuple(fields),
+                ),
+            )
+        else:
+            overrides["remote_param_targets"] = ()
     base.update(overrides)
     return prompts.DispatchContext(**base)
 
@@ -620,10 +635,39 @@ def test_worker_dispatch_injects_remote_param_report_block() -> None:
         _ctx(remote_param_fields=("需求描述", "目标目录"))
     )
     assert "## Remote Parameter Report" in msg
-    assert f"{prompts.REMOTE_PARAMS_HEADER}: t1" in msg
+    assert f"{prompts.REMOTE_PARAMS_HEADER}: t1 remote-task" in msg
     assert "`需求描述`" in msg and "`目标目录`" in msg
+    assert "Remote Flow" in msg
+    assert "Assemble the itinerary." in msg
     # The normal completion message MUST still be present (unchanged).
     assert "task t1 done:" in msg
+
+
+def test_worker_dispatch_lists_each_downstream_remote_target() -> None:
+    """Multiple param-bearing remote_csflow downstreams → one inbox each."""
+    targets = (
+        prompts.RemoteParamTarget(
+            downstream_task_id="remote-a",
+            agent_id="ra",
+            flow_name="Flow A",
+            flow_description="Goal A",
+            param_fields=("fa",),
+        ),
+        prompts.RemoteParamTarget(
+            downstream_task_id="remote-b",
+            agent_id="rb",
+            flow_name="Flow B",
+            flow_description="Goal B",
+            param_fields=("fb1", "fb2"),
+        ),
+    )
+    msg = prompts.build_worker_dispatch(_ctx(remote_param_targets=targets))
+    assert "2 downstream remote ClawsomeFlow node(s)" in msg
+    assert f"{prompts.REMOTE_PARAMS_HEADER}: t1 remote-a" in msg
+    assert f"{prompts.REMOTE_PARAMS_HEADER}: t1 remote-b" in msg
+    assert "Flow A" in msg and "Goal A" in msg
+    assert "Flow B" in msg and "Goal B" in msg
+    assert "`fa`" in msg and "`fb1`" in msg and "`fb2`" in msg
 
 
 def test_external_task_text_injects_remote_param_report_block() -> None:
@@ -639,7 +683,7 @@ def test_external_task_text_injects_remote_param_report_block() -> None:
     )
     msg = prompts.build_external_task_text(ctx)
     assert "## Remote Parameter Report" in msg
-    assert f"{prompts.REMOTE_PARAMS_HEADER}: tx" in msg
+    assert f"{prompts.REMOTE_PARAMS_HEADER}: tx remote-task" in msg
     assert "`field_a`" in msg
 
 

@@ -618,7 +618,13 @@ def _mk_flow_with_params(owner: str = "alice") -> Flow:
         ],
         variables={"csflow.runtime.param_fields": '["需求描述", "目标目录"]'},
     )
-    return storage.flow_create(Flow(name="target", owner_user=owner).with_spec(spec))
+    return storage.flow_create(
+        Flow(
+            name="target",
+            description="Assemble a travel itinerary from upstream notes.",
+            owner_user=owner,
+        ).with_spec(spec),
+    )
 
 
 def test_remote_call_info_mints_token_and_returns_param_fields(app_client) -> None:
@@ -627,16 +633,36 @@ def test_remote_call_info_mints_token_and_returns_param_fields(app_client) -> No
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["flowId"] == flow.id
+    assert body["flowName"] == "target"
+    assert body["flowDescription"] == "Assemble a travel itinerary from upstream notes."
     assert body["paramFields"] == ["需求描述", "目标目录"]
     assert body["pairTokenName"] == f"remote-{flow.id}"
     assert body["pairSecret"]
-    assert body["baseUrl"].startswith("http")
+    # baseUrl is always empty in the paste blob — origin operator types the
+    # reachable URL on the subtask form (SSH tunnels poison request Host).
+    assert body["baseUrl"] == ""
     # The inbound pairing credential is now stored in config (idempotent).
     cfg = load_config()
     assert cfg.external_pair_tokens.get(f"remote-{flow.id}") == body["pairSecret"]
+    # Host-derived URL must never be persisted as the callback base.
+    assert cfg.external_callback_base_url in (None, "")
     # Second call reuses the same secret (idempotent).
     resp2 = app_client.post(f"/api/flows/{flow.id}/remote-call-info")
     assert resp2.json()["pairSecret"] == body["pairSecret"]
+    assert resp2.json()["baseUrl"] == ""
+
+
+def test_remote_call_info_never_echoes_callback_base_url(app_client) -> None:
+    """external_callback_base_url is for inbound callbacks, not peer reachability."""
+    flow = _mk_flow_with_params()
+    save_config(
+        load_config().model_copy(
+            update={"external_callback_base_url": "http://peer.example:17017"},
+        ),
+    )
+    resp = app_client.post(f"/api/flows/{flow.id}/remote-call-info")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["baseUrl"] == ""
 
 
 def test_register_remote_target_stores_secret_off_spec(app_client) -> None:

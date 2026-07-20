@@ -146,8 +146,8 @@ In the Flow editor: Owner source → **External execution**, then pick an owner 
 
 ### Remote ClawsomeFlow (copy-paste wiring — no hand-typed CLI)
 
-1. **Peer**: open the target Flow's editor and click **Copy remote call info** next to the title — you get a JSON blob (base URL, Flow ID, param fields, pairing credential). Send it to the origin.
-2. **Origin**: in the subtask pick **Remote ClawsomeFlow**, paste the blob into **Remote Flow call info** and save the subtask — base URL / Flow ID / credential are registered automatically; the secret is stored locally, never in the Flow spec.
+1. **Peer**: open the target Flow's editor and click **Copy remote call info** next to the title — you get a JSON blob (Flow ID, param fields, pairing credential). Send it to the origin.
+2. **Origin**: in the subtask pick **Remote ClawsomeFlow**, paste the blob into **Remote Flow call info**, **fill in the remote base URL yourself** (a host:port the origin service process can reach directly, e.g. `http://192.168.1.10:17017` — not an SSH-tunnel forwarded `127.0.0.1` port), then save the subtask — Flow ID / credential are registered automatically; the secret is stored locally, never in the Flow spec.
 
 Nothing extra to configure across machines — both ends are plain, fully symmetric ClawsomeFlow services (no hub). Security model: **remotes can reach only the `/api/external` collaboration surface** (one-time ticket / pairing-credential auth); the WebUI and every other API accept loopback connections only, enforced by source IP — administer remotely over an SSH tunnel (`ssh -L 17017:127.0.0.1:17017`). Full loopback lockdown: `csflow external expose off`.
 

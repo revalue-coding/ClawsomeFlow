@@ -112,20 +112,24 @@ interface TaskRow {
   /** External execution node (ownerKind="external") channel configuration. */
   externalChannel: ExternalChannelDraft;
   externalEndpointUrl: string;
-  /** remote_csflow: base_url / flow_id / pair_token_ref are populated by the
-   *  backend when the operator pastes the target Flow's "remote call info"
-   *  (see externalRemoteCallInfo). Hidden from the form. */
+  /** remote_csflow: reachable base URL the ORIGIN scheduler uses to POST
+   *  /api/external/delegate — filled by the operator (never trust Host from
+   *  "复制远程调用信息"; SSH tunnels poison 127.0.0.1:forwarded-port). */
   externalBaseUrl: string;
   externalFlowId: string;
   externalPairTokenRef: string;
   /** remote_csflow only: the pasted "remote call info" JSON text (produced by
    *  the target Flow's "复制远程调用信息" button). Parsed + registered server-side
-   *  which fills base_url/flow_id/pair_token_ref/remoteParamFields. */
+   *  which fills flow_id/pair_token_ref/remoteParamFields; base URL stays
+   *  operator-supplied via externalBaseUrl. */
   externalRemoteCallInfo: string;
   /** remote_csflow only: the remote Flow's declared param-field names,
    *  captured from the pasted info. Guides externalInputs + drives the
    *  upstream param-report protocol. */
   externalRemoteParamFields: string[];
+  /** remote_csflow only: peer Flow name + overall goal from call info. */
+  externalRemoteFlowName: string;
+  externalRemoteFlowDescription: string;
   /** remote_csflow only: JSON object text of the operator's OWN param values
    *  for the remote Flow (its 参数字段). Optional — upstream reports fill the
    *  rest. Parsed into FlowAgent.external.inputs on save. */
@@ -254,6 +258,8 @@ function blankRow(): TaskRow {
     externalPairTokenRef: "",
     externalRemoteCallInfo: "",
     externalRemoteParamFields: [],
+    externalRemoteFlowName: "",
+    externalRemoteFlowDescription: "",
     externalInputs: "",
     externalAssignee: "",
     dependsOn: [],
@@ -4083,6 +4089,25 @@ function TaskFormBody({
                     </div>
                   )}
                 </div>
+                <div className="md:col-span-2">
+                  <label className="label">
+                    {t("flowEditor.taskFields.externalBaseUrl")}
+                  </label>
+                  <input
+                    className="input font-mono text-xs"
+                    value={row.externalBaseUrl}
+                    readOnly={ownerLocked}
+                    placeholder={t(
+                      "flowEditor.taskFields.externalBaseUrlPlaceholder",
+                    )}
+                    onChange={(e) =>
+                      onChange({ externalBaseUrl: e.target.value })
+                    }
+                  />
+                  <div className="text-xs text-ink-500 mt-1">
+                    {t("flowEditor.taskFields.externalBaseUrlHint")}
+                  </div>
+                </div>
                 {row.externalRemoteParamFields.length > 0 && (
                   <div className="md:col-span-2">
                     <label className="label">{t("flowEditor.taskFields.externalInputs")}</label>
@@ -5045,11 +5070,13 @@ function validate(
         });
       } else if (
         r.externalChannel === "remote_csflow"
-        && !remoteCsflowConfigured(r)
-        && !r.externalRemoteCallInfo.trim()
+        && (
+          !r.externalBaseUrl.trim()
+          || (!remoteCsflowConfigured(r) && !r.externalRemoteCallInfo.trim())
+        )
       ) {
-        // Not yet wired: need a pasted call-info blob (registered on
-        // "保存子任务"). Already-wired rows keep baseUrl/flowId/pairTokenRef.
+        // Need a reachable base URL (operator-typed) plus a pasted call-info
+        // blob when not yet wired. Already-wired rows keep flowId/pairTokenRef.
         issues.push({
           rowKey: r.rowKey,
           message: messages.externalRemoteFieldsRequired(subjectLabel),
@@ -5222,17 +5249,28 @@ function isPlaceholderPairSecret(secret: string | undefined | null): boolean {
 
 /**
  * On "保存子任务": if the operator pasted a fresh remote-call-info blob,
- * register the outbound credential and fill baseUrl/flowId/pairTokenRef/
- * remoteParamFields. Already-wired rows with a placeholder secret are left
- * alone (no re-register). Returns the updated row, or an error message.
+ * register the outbound credential and fill flowId/pairTokenRef/
+ * remoteParamFields. The reachable base URL is ALWAYS taken from the
+ * operator-typed ``externalBaseUrl`` field (paste blob baseUrl is ignored
+ * when empty / untrusted). Already-wired rows with a placeholder secret
+ * skip re-register but still accept a base URL edit.
  */
 async function registerRemoteCallInfoOnSave(
   row: TaskRow,
   t: (key: string, opts?: Record<string, string>) => string,
 ): Promise<{ ok: true; row: TaskRow } | { ok: false; error: string }> {
+  const userBaseUrl = row.externalBaseUrl.trim().replace(/\/+$/, "");
+  if (!userBaseUrl) {
+    return {
+      ok: false,
+      error: t("flowEditor.taskFields.externalBaseUrlRequired"),
+    };
+  }
   const raw = row.externalRemoteCallInfo.trim();
   if (!raw) {
-    if (remoteCsflowConfigured(row)) return { ok: true, row };
+    if (remoteCsflowConfigured({ ...row, externalBaseUrl: userBaseUrl })) {
+      return { ok: true, row: { ...row, externalBaseUrl: userBaseUrl } };
+    }
     return {
       ok: false,
       error: t("flowEditor.taskFields.externalRemoteCallInfoEmpty"),
@@ -5249,15 +5287,25 @@ async function registerRemoteCallInfoOnSave(
   }
   if (isPlaceholderPairSecret(parsed.pairSecret)) {
     // Display-only blob from a previous save — keep the already-registered
-    // wiring. If somehow nothing is configured yet, ask for a fresh paste.
-    if (remoteCsflowConfigured(row)) return { ok: true, row };
+    // wiring (credential) and accept a base-URL correction.
+    if (
+      row.externalFlowId.trim()
+      && row.externalPairTokenRef.trim()
+    ) {
+      return { ok: true, row: { ...row, externalBaseUrl: userBaseUrl } };
+    }
     return {
       ok: false,
       error: t("flowEditor.taskFields.externalRemoteCallInfoEmpty"),
     };
   }
   try {
-    const res = await api.registerRemoteTarget(parsed);
+    // Operator-typed URL wins — blob baseUrl is often empty or an SSH-tunnel
+    // Host that the origin process cannot reach.
+    const res = await api.registerRemoteTarget({
+      ...parsed,
+      baseUrl: userBaseUrl,
+    });
     // Target Flow with no param fields → clear any leftover manual inputs;
     // the param hand-off UI/protocol is skipped entirely in that case.
     const fields = res.paramFields || [];
@@ -5265,10 +5313,12 @@ async function registerRemoteCallInfoOnSave(
       ok: true,
       row: {
         ...row,
-        externalBaseUrl: res.baseUrl,
+        externalBaseUrl: userBaseUrl,
         externalFlowId: res.flowId,
         externalPairTokenRef: res.pairTokenRef,
         externalRemoteParamFields: fields,
+        externalRemoteFlowName: (res.flowName || "").trim(),
+        externalRemoteFlowDescription: (res.flowDescription || "").trim(),
         externalInputs: fields.length > 0 ? row.externalInputs : "",
       },
     };
@@ -5343,6 +5393,14 @@ function rowsToSpec(
                 r.externalChannel === "remote_csflow"
                 && r.externalRemoteParamFields.length > 0
                   ? r.externalRemoteParamFields
+                  : null,
+              remoteFlowName:
+                r.externalChannel === "remote_csflow"
+                  ? r.externalRemoteFlowName.trim() || null
+                  : null,
+              remoteFlowDescription:
+                r.externalChannel === "remote_csflow"
+                  ? r.externalRemoteFlowDescription.trim() || null
                   : null,
               assignee: r.externalAssignee.trim() || null,
             },
@@ -5976,6 +6034,8 @@ function proposalToRows(
       externalPairTokenRef: "",
       externalRemoteCallInfo: "",
       externalRemoteParamFields: [],
+      externalRemoteFlowName: "",
+      externalRemoteFlowDescription: "",
       externalInputs: "",
       externalAssignee: "",
       dependsOn,
@@ -6036,6 +6096,8 @@ function specToRows(spec: FlowSpec): TaskRow[] {
                 kind: "csflow.remote_call_info",
                 baseUrl: a?.external?.baseUrl ?? "",
                 flowId: a?.external?.flowId ?? "",
+                flowName: a?.external?.remoteFlowName ?? "",
+                flowDescription: a?.external?.remoteFlowDescription ?? "",
                 paramFields: a?.external?.remoteParamFields ?? [],
                 pairTokenName: a?.external?.pairTokenRef ?? "",
                 pairSecret: REMOTE_CALL_INFO_SECRET_PLACEHOLDER,
@@ -6045,6 +6107,8 @@ function specToRows(spec: FlowSpec): TaskRow[] {
             )
           : "",
       externalRemoteParamFields: a?.external?.remoteParamFields ?? [],
+      externalRemoteFlowName: a?.external?.remoteFlowName ?? "",
+      externalRemoteFlowDescription: a?.external?.remoteFlowDescription ?? "",
       externalInputs: a?.external?.inputs
         ? JSON.stringify(a.external.inputs, null, 2)
         : "",

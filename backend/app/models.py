@@ -363,6 +363,11 @@ class ExternalNodeConfig(_ApiBase):
     # report and (b) know which keys to union/fill before delegating. Names
     # only — never secrets. Safe default None → old specs load unchanged.
     remote_param_fields: list[str] | None = None
+    # remote_csflow only: peer Flow display name + overall goal (description),
+    # captured from "remote call info" so upstream param-report prompts can
+    # name each downstream target. Safe default None → old specs load.
+    remote_flow_name: str | None = None
+    remote_flow_description: str | None = None
     # human channel (display hint only)
     assignee: str | None = None
 

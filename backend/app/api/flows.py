@@ -17,7 +17,7 @@ import json
 import re
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Path, Query, Request
+from fastapi import APIRouter, Body, Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from sqlalchemy.exc import IntegrityError
@@ -525,35 +525,29 @@ class RemoteCallInfo(_CamelModel):
     base_url: str = ""
     flow_id: str = ""
     flow_name: str = ""
+    #: Peer Flow overall goal (``Flow.description``) — origin stores it on
+    #: the node so upstream param-report prompts can identify each target.
+    flow_description: str = ""
     param_fields: list[str] = []
     pair_token_name: str = ""
     pair_secret: str = ""
 
 
-def _derive_base_url(request: Request) -> str:
-    """Best-effort reachable base URL for callbacks, from the request Host."""
-    host = (request.headers.get("host") or "").strip()
-    scheme = request.url.scheme or "http"
-    if host:
-        return f"{scheme}://{host}".rstrip("/")
-    from app.config import load_config as _lc
-
-    port = getattr(_lc(), "csflow_port", 17017)
-    return f"http://127.0.0.1:{port}"
-
-
 @router.post("/{flow_id}/remote-call-info", response_model=RemoteCallInfo)
 def remote_call_info(
     flow_id: Annotated[str, Path()],
-    request: Request,
     user: UserDep,
     storage: StorageDep,
 ) -> RemoteCallInfo:
     """Produce the paste-able "remote call info" for THIS Flow (peer side).
 
-    Idempotently mints an inbound pairing credential named ``remote-{flowId}``
-    and (if unset) records a callback base URL derived from the request Host,
-    so a remote origin can be wired up entirely by copy-paste — no CLI.
+    Idempotently mints an inbound pairing credential named ``remote-{flowId}``.
+    ``baseUrl`` in the blob is always empty — the origin operator must type
+    the reachable host:port on the remote_csflow subtask form. We never derive
+    it from the request Host (SSH tunnels / reverse proxies make Host
+    unreliable) and we do not echo ``external_callback_base_url`` here either
+    (that setting is for *inbound* callbacks to THIS instance, not the URL
+    the origin uses to reach the peer).
     """
     from app.config import load_config, save_config
 
@@ -573,20 +567,17 @@ def remote_call_info(
         secret = _secrets.token_urlsafe(32)
         tokens[token_name] = secret
         updates["external_pair_tokens"] = tokens
-    base_url = (cfg.external_callback_base_url or "").strip()
-    if not base_url:
-        base_url = _derive_base_url(request)
-        updates["external_callback_base_url"] = base_url
     if updates:
         save_config(cfg.model_copy(update=updates))
     logger.info(
         "remote_call_info_issued",
-        flow_id=flow.id, pair_token_name=token_name, base_url=base_url,
+        flow_id=flow.id, pair_token_name=token_name,
     )
     return RemoteCallInfo(
-        base_url=base_url,
+        base_url="",
         flow_id=flow.id,
-        flow_name=flow.name,
+        flow_name=flow.name or "",
+        flow_description=(flow.description or "").strip(),
         param_fields=_spec_param_fields(flow),
         pair_token_name=token_name,
         pair_secret=secret,
@@ -597,6 +588,7 @@ class RegisterRemoteResponse(_CamelModel):
     base_url: str
     flow_id: str
     flow_name: str
+    flow_description: str = ""
     param_fields: list[str] = []
     pair_token_ref: str
 
@@ -630,7 +622,8 @@ def register_remote_target(
     return RegisterRemoteResponse(
         base_url=info.base_url.strip().rstrip("/"),
         flow_id=info.flow_id.strip(),
-        flow_name=info.flow_name,
+        flow_name=(info.flow_name or "").strip(),
+        flow_description=(info.flow_description or "").strip(),
         param_fields=[str(f).strip() for f in (info.param_fields or []) if str(f).strip()],
         pair_token_ref=ref,
     )

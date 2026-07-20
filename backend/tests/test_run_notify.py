@@ -509,25 +509,54 @@ def _sample_payload(**overrides) -> dict:
 
 
 def test_render_message_text_terminal_and_checkpoint() -> None:
-    text = render_message_text(_sample_payload())
+    text = render_message_text(_sample_payload(), lang="en")
     assert "ClawsomeFlow run finished" in text
     assert "Flow: My Flow" in text
     assert "Run: run_1" in text
     assert "Status: completed" in text
     cp = render_message_text(_sample_payload(
         event="run_checkpoint", status="awaiting_user_review", finishedAt=None,
-    ))
+    ), lang="en")
     assert "action required" in cp
     assert "Finished:" not in cp
 
 
+def test_render_message_text_zh_when_ui_language_zh(monkeypatch) -> None:
+    from app.config import load_config, save_config
+    from app.services.run_notify import resolve_notify_language
+
+    save_config(load_config().model_copy(update={"ui_language": "zh"}))
+    payload = _sample_payload(flowName="行程编排")
+    assert resolve_notify_language(payload) == "zh"
+    text = render_message_text(payload)
+    assert "运行已结束" in text
+    assert "状态: completed" in text
+
+
+def test_resolve_notify_language_cjk_and_platform_fallback(monkeypatch) -> None:
+    from app.config import load_config, save_config
+    from app.services.run_notify import resolve_notify_language
+
+    save_config(load_config().model_copy(update={"ui_language": None}))
+    assert resolve_notify_language({"flowName": "Weekly Report"}) == "en"
+    assert resolve_notify_language({"flowName": "周报汇总"}) == "zh"
+    assert resolve_notify_language(
+        {"flowName": "Weekly"}, fmt="feishu",
+    ) == "zh"
+
+
 def test_build_webhook_request_shapes() -> None:
     payload = _sample_payload()
-    text = render_message_text(payload)
+    # Pin English so platform-format ZH fallback (feishu/…) can't flip the text.
+    text = render_message_text(payload, lang="en")
     url = "https://example.com/hook"
 
     req = build_webhook_request(url, payload, "generic")
     assert req["json"] is payload  # raw passthrough, historical contract
+
+    # Force en via ui_language so feishu's ZH platform fallback doesn't apply.
+    from app.config import load_config, save_config
+    save_config(load_config().model_copy(update={"ui_language": "en"}))
 
     assert build_webhook_request(url, payload, "feishu")["json"] == {
         "msg_type": "text", "content": {"text": text},
@@ -573,10 +602,13 @@ def test_build_webhook_request_telegram_chat_id_from_query() -> None:
 
 
 def test_build_webhook_request_ntfy_plain_text() -> None:
+    from app.config import load_config, save_config
+
+    save_config(load_config().model_copy(update={"ui_language": "en"}))
     payload = _sample_payload()
     req = build_webhook_request("https://ntfy.sh/topic", payload, "ntfy")
     assert "json" not in req
-    assert req["content"].decode("utf-8") == render_message_text(payload)
+    assert req["content"].decode("utf-8") == render_message_text(payload, lang="en")
     title = req["headers"]["Title"]
     title.encode("latin-1")  # header value must stay latin-1 safe
     assert "completed" in title
@@ -646,7 +678,7 @@ def test_enrich_terminal_extracts_leader_final_reply() -> None:
     enrich_run_content(payload)
     assert payload["content"] == "All 3 tasks done; report attached."
     # And it shows up in the rendered chat text under a Leader report header.
-    text = render_message_text(payload)
+    text = render_message_text(payload, lang="en")
     assert "Leader report" in text
     assert "All 3 tasks done" in text
 
@@ -675,7 +707,7 @@ def test_enrich_checkpoint_extracts_pending_output() -> None:
     enrich_run_content(payload)
     assert "Research: Found 3 options." in payload["content"]
     assert "Draft: Draft ready for review." in payload["content"]
-    text = render_message_text(payload)
+    text = render_message_text(payload, lang="en")
     assert "Checkpoint output" in text
 
 

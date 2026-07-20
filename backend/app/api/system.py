@@ -822,6 +822,38 @@ def ui_capabilities(request: Request, _user: UserDep = "") -> UiCapabilitiesResp
     )
 
 
+class UiLanguageResponse(_CamelModel):
+    language: str | None = None
+
+
+class UiLanguagePayload(_CamelModel):
+    language: Literal["zh", "en"]
+
+
+@router.get("/ui-language", response_model=UiLanguageResponse)
+def get_ui_language(_user: UserDep = "") -> UiLanguageResponse:
+    """Return the persisted WebUI language preference (for webhook i18n)."""
+    from app.config import load_config as _lc
+
+    lang = (_lc().ui_language or "").strip().lower()
+    return UiLanguageResponse(language=lang if lang in ("zh", "en") else None)
+
+
+@router.put("/ui-language", response_model=UiLanguageResponse)
+def put_ui_language(
+    payload: Annotated[UiLanguagePayload, Body()],
+    _user: UserDep = "",
+) -> UiLanguageResponse:
+    """Persist the WebUI language pill so server-side webhooks match it."""
+    from app.config import load_config as _lc, save_config
+
+    lang = payload.language
+    cfg = _lc()
+    if (cfg.ui_language or "") != lang:
+        save_config(cfg.model_copy(update={"ui_language": lang}))
+    return UiLanguageResponse(language=lang)
+
+
 @router.post("/validate-directory", response_model=ValidateDirectoryResponse)
 def validate_directory(
     payload: Annotated[ValidateDirectoryPayload, Body()],

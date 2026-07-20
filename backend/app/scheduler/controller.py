@@ -78,6 +78,7 @@ from app.scheduler.prompts import (
     REMOTE_ORIGIN_NOTE,
     REMOTE_PARAMS_HEADER,
     DispatchContext,
+    RemoteParamTarget,
     UpstreamOutput,
     WorkerReport,
     build_external_task_package,
@@ -168,22 +169,50 @@ def _extract_first_json_object(text: str) -> Any:
     return None
 
 
-def _extract_remote_params_block(text: str, task_id: str) -> dict[str, str] | None:
-    """Parse a ``csflow-remote-params: <task_id>`` message body into a dict.
+def _extract_remote_params_block(
+    text: str,
+    task_id: str,
+    *,
+    downstream_task_id: str | None = None,
+) -> dict[str, str] | None:
+    """Parse a ``csflow-remote-params`` message body into a dict.
 
-    Matches the header (from prompts.REMOTE_PARAMS_HEADER) followed by the
-    task id, then extracts the first JSON object after it. Returns ``None``
-    when the header for this task id is absent, ``{}`` when present but the
-    JSON can't be parsed."""
+    Preferred header (per-downstream)::
+
+        csflow-remote-params: <upstream_task_id> <downstream_task_id>
+
+    Legacy header (still accepted when *downstream_task_id* is set — the
+    whole JSON is returned and the caller filters to its fields)::
+
+        csflow-remote-params: <upstream_task_id>
+
+    Returns ``None`` when no matching header is found, ``{}`` when the
+    header is present but the JSON can't be parsed.
+    """
     if not text:
         return None
-    wanted = str(task_id).strip()
-    header_re = re.compile(
-        rf"{re.escape(REMOTE_PARAMS_HEADER)}\s*:\s*{re.escape(wanted)}\b",
-        re.IGNORECASE,
-    )
-    m = header_re.search(text)
-    if not m:
+    upstream = str(task_id).strip()
+    if not upstream:
+        return None
+    downstream = (downstream_task_id or "").strip()
+    m = None
+    if downstream:
+        specific_re = re.compile(
+            rf"{re.escape(REMOTE_PARAMS_HEADER)}\s*:\s*"
+            rf"{re.escape(upstream)}\s+{re.escape(downstream)}\b",
+            re.IGNORECASE,
+        )
+        m = specific_re.search(text)
+    if m is None:
+        # Legacy / single-target: header with ONLY the upstream task id
+        # (no second id token before end-of-line / JSON).
+        legacy_re = re.compile(
+            rf"{re.escape(REMOTE_PARAMS_HEADER)}\s*:\s*"
+            rf"{re.escape(upstream)}\b(?!\s+[A-Za-z0-9._-]+)",
+            re.IGNORECASE,
+        )
+        m = legacy_re.search(text)
+    if m is None:
         return None
     obj = _extract_first_json_object(text[m.end():])
     if not isinstance(obj, dict):
@@ -2752,11 +2781,15 @@ class RunController:
             # No declared param schema → legacy behaviour: send static inputs.
             return user_inputs
 
-        # 1) Union of upstream-reported param values (local 2nd-inbox message
-        #    or external completion summary carrying the header block).
+        # 1) Per-upstream reports addressed to THIS downstream task
+        #    (``csflow-remote-params: <dep> <this_task>``; legacy single-block
+        #    still accepted). remote_csflow upstreams cannot emit that block
+        #    (their hand-off is a leader report) → collect their summaries for
+        #    the headless-leader fallback below.
         inbox = await self._fetch_leader_inbox_structured()
         union: dict[str, str] = {}
         remote_upstream_summaries: list[str] = []
+        field_set = set(fields)
         for dep_id in task.depends_on:
             dep_book = self._tasks.get(dep_id)
             if dep_book is None:
@@ -2764,15 +2797,16 @@ class RunController:
             dep_owner = self._agents.get(dep_book.task.owner_agent_id)
             dep_owner_id = dep_owner.id if dep_owner else dep_book.task.owner_agent_id
             reported = self._collect_remote_param_report(
-                inbox, owner_agent_id=dep_owner_id, task_id=dep_id,
+                inbox,
+                owner_agent_id=dep_owner_id,
+                task_id=dep_id,
+                downstream_task_id=task.id,
             )
             for key, val in reported.items():
                 k = str(key).strip()
                 v = str(val).strip()
-                if k in fields and v and not union.get(k):
+                if k in field_set and v and not union.get(k):
                     union[k] = v
-            # Remember remote_csflow upstream summaries for the headless
-            # fallback (they cannot self-report the params block).
             if (
                 dep_owner is not None
                 and dep_owner.kind == AgentKind.external
@@ -2794,9 +2828,10 @@ class RunController:
             elif union.get(f):
                 resolved[f] = union[f]
 
-        # 3) Headless-leader fallback for still-empty fields when a remote
-        #    upstream might hold them. Any leader kind can fill (best-effort;
-        #    never blocks the run).
+        # 3) Headless-leader fallback ONLY when an upstream is itself
+        #    remote_csflow (cannot self-report params) AND fields are still
+        #    missing. Prompt includes THIS node's Flow name/goal so the
+        #    leader can judge field contents. Any leader kind; best-effort.
         missing = [f for f in fields if not str(resolved.get(f, "")).strip()]
         if missing and remote_upstream_summaries:
             try:
@@ -2804,6 +2839,8 @@ class RunController:
                     fields=missing,
                     context_summaries=remote_upstream_summaries,
                     task_id=task.id,
+                    flow_name=(ext.remote_flow_name or "").strip(),
+                    flow_description=(ext.remote_flow_description or "").strip(),
                 )
             except Exception as exc:  # pragma: no cover — defensive
                 logger.warning(
@@ -2841,19 +2878,31 @@ class RunController:
         *,
         owner_agent_id: str,
         task_id: str,
+        downstream_task_id: str,
     ) -> dict[str, str]:
-        """Parse the latest ``csflow-remote-params: <task_id>`` JSON block from
-        the given upstream owner's inbox messages. Returns {} if absent."""
+        """Parse the latest params JSON for ``(upstream, downstream)``.
+
+        Prefers ``csflow-remote-params: <upstream> <downstream>``; falls back
+        to the legacy single-block ``csflow-remote-params: <upstream>``.
+        Scans every inbox message from *owner_agent_id* (an upstream may
+        send one message per downstream target). Returns {} if absent.
+        """
         wanted = str(task_id).strip()
-        matches = [
-            r for r in reports
-            if r.from_agent == owner_agent_id
-            and _extract_remote_params_block(r.summary or "", wanted) is not None
-        ]
+        downstream = str(downstream_task_id).strip()
+        matches: list[WorkerReport] = []
+        for r in reports:
+            if r.from_agent != owner_agent_id:
+                continue
+            if _extract_remote_params_block(
+                r.summary or "", wanted, downstream_task_id=downstream,
+            ) is not None:
+                matches.append(r)
         if not matches:
             return {}
         ordered = self._reports_chronological(matches)
-        parsed = _extract_remote_params_block(ordered[-1].summary or "", wanted)
+        parsed = _extract_remote_params_block(
+            ordered[-1].summary or "", wanted, downstream_task_id=downstream,
+        )
         return parsed or {}
 
     async def _headless_leader_fill_params(
@@ -2862,14 +2911,17 @@ class RunController:
         fields: list[str],
         context_summaries: list[str],
         task_id: str,
+        flow_name: str = "",
+        flow_description: str = "",
     ) -> dict[str, str]:
         """Best-effort: ask the leader, in a FRESH headless turn (no history),
         to derive param values from a remote node's returned content.
 
-        Any leader agent kind is supported (OpenClaw / Hermes / Claude / Codex /
-        … / custom) via the same headless CLI argv table used by AI decompose.
-        Failure → {} (fields stay placeholder). Never raises into the dispatch
-        loop.
+        Used only when THIS remote_csflow node's upstream is itself
+        remote_csflow (that upstream returns a leader report, not a params
+        block). The prompt names THIS node's Flow + overall goal so the
+        leader can judge field contents. Any leader kind supported via the
+        AI-decompose headless CLI table. Failure → {} (placeholders).
         """
         leader = self._agents.get(self._leader_id)
         if leader is None:
@@ -2880,10 +2932,13 @@ class RunController:
             return {}
         schema = ", ".join(f'"{f}": "<value or empty string>"' for f in fields)
         joined = "\n\n".join(f"- {s}" for s in context_summaries)
+        name = flow_name.strip() or "(unnamed Flow)"
+        goal = flow_description.strip() or "(no overall goal provided)"
         prompt = (
             "## ClawsomeFlow Remote Parameter Fill (fresh turn — no prior history)\n"
-            "A downstream remote ClawsomeFlow needs values for these parameter "
-            f"fields: {', '.join(fields)}.\n"
+            f"Remote Flow **{name}** (downstream task `{task_id}`) needs "
+            f"values for these parameter fields: {', '.join(fields)}.\n"
+            f"Overall goal of that Flow: {goal}\n"
             "Below is the content returned by an upstream remote node. Extract "
             "the values you can justify from it; leave a field as an empty "
             "string if the content does not provide it. Do NOT invent values, "
@@ -4013,25 +4068,24 @@ class RunController:
             upstream_outputs=upstream_outputs,
             self_merge=self_merge,
             merge_reference=merge_reference_enabled(mode=mode),
-            remote_param_fields=self._downstream_remote_param_fields(task.id),
+            remote_param_targets=self._downstream_remote_param_targets(task.id),
         )
 
-    def _downstream_remote_param_fields(self, task_id: str) -> tuple[str, ...]:
-        """Union of remote-Flow param field names requested by downstream
-        ``remote_csflow`` nodes that depend on ``task_id``.
+    def _downstream_remote_param_targets(
+        self, task_id: str,
+    ) -> tuple[RemoteParamTarget, ...]:
+        """Per-downstream remote_csflow targets that need param values.
 
-        Returns empty when:
-        * no downstream ``remote_csflow`` depends on this task, OR
-        * every such downstream has an empty ``remote_param_fields`` (the
-          target Flow declared no param fields).
+        One :class:`~app.scheduler.prompts.RemoteParamTarget` per direct
+        downstream ``remote_csflow`` whose ``remote_param_fields`` is
+        non-empty (target Flow declared params). Empty tuple → dispatch
+        renders NO remote-parameter-report block.
 
-        Empty → dispatch renders NO remote-parameter-report block and does
-        not ask the executor for a second inbox / appended params JSON.
-        The special param hand-off only kicks in when the target Flow
-        actually has param fields.
+        Identity is the downstream FlowTask id (for the inbox header's
+        second token). Flow name/description come from the pasted remote
+        call info so the upstream agent can judge field contents.
         """
-        fields: list[str] = []
-        seen: set[str] = set()
+        targets: list[RemoteParamTarget] = []
         for book in self._tasks.values():
             dep_task = book.task
             if task_id not in (dep_task.depends_on or []):
@@ -4044,13 +4098,25 @@ class RunController:
                 or owner.external.channel != ExternalChannel.remote_csflow
             ):
                 continue
-            # Target Flow with zero param fields → skip (no special handling).
-            for name in owner.external.remote_param_fields or []:
-                key = str(name).strip()
-                if key and key not in seen:
-                    seen.add(key)
-                    fields.append(key)
-        return tuple(fields)
+            fields = tuple(
+                str(name).strip()
+                for name in (owner.external.remote_param_fields or [])
+                if str(name).strip()
+            )
+            if not fields:
+                continue
+            targets.append(
+                RemoteParamTarget(
+                    downstream_task_id=dep_task.id,
+                    agent_id=owner.id,
+                    flow_name=(owner.external.remote_flow_name or "").strip(),
+                    flow_description=(
+                        owner.external.remote_flow_description or ""
+                    ).strip(),
+                    param_fields=fields,
+                )
+            )
+        return tuple(targets)
 
     def _render_report_summary(self, report: WorkerReport | None) -> str | None:
         if report is None:

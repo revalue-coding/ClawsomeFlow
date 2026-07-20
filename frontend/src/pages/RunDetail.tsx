@@ -3025,6 +3025,8 @@ type ExternalTaskItem = {
   subject: string;
   message: string;
   nonce: string;
+  /** Per-task output-summary requirement (from the Flow editor field). */
+  outputRequirement: string;
 };
 
 /** Outstanding external-node dispatches: latest dispatch per task, minus
@@ -3048,6 +3050,9 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
         subject: String(payload.subject ?? ""),
         message: String(payload.message ?? ""),
         nonce: String(payload.nonce ?? ""),
+        outputRequirement: String(
+          payload.outputRequirement ?? payload.output_requirement ?? "",
+        ).trim(),
       });
     } else if (e.type === "external_task_completed") {
       completedNonces.add(`${tid}:${String(payload.nonce ?? "")}`);
@@ -3074,12 +3079,44 @@ function ExternalTasksCard({
   const items = useMemo(() => collectExternalTasks(events), [events]);
   const [summaries, setSummaries] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState<string | null>(null);
-  if (items.length === 0) return null;
+  /** Optimistic dismiss so the card vanishes before the WS completion event. */
+  const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(() => new Set());
+  /** Controlled open state — native <details> resets on parent remount/WS ticks. */
+  const [openSheets, setOpenSheets] = useState<Set<string>>(() => new Set());
+  const [failModal, setFailModal] = useState<{
+    taskId: string;
+    nonce: string;
+  } | null>(null);
+  const [failReason, setFailReason] = useState("");
 
-  async function submit(taskId: string, status: "success" | "failed") {
+  const visibleItems = useMemo(
+    () =>
+      items.filter(
+        (it) => !dismissedKeys.has(`${it.taskId}:${it.nonce}`),
+      ),
+    [items, dismissedKeys],
+  );
+
+  if (visibleItems.length === 0) return null;
+
+  async function submit(
+    taskId: string,
+    nonce: string,
+    status: "success" | "failed",
+    summary: string,
+  ) {
+    const key = `${taskId}:${nonce}`;
     setSubmitting(taskId);
     try {
-      await api.completeExternalTask(runId, taskId, status, summaries[taskId] ?? "");
+      await api.completeExternalTask(runId, taskId, status, summary);
+      // Drop the card immediately; WS will confirm with external_task_completed.
+      setDismissedKeys((prev) => {
+        const next = new Set(prev);
+        next.add(key);
+        return next;
+      });
+      setFailModal(null);
+      setFailReason("");
     } catch (e) {
       void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
@@ -3099,90 +3136,195 @@ function ExternalTasksCard({
   return (
     <Card className="border-violet-200">
       <CardTitle hint={t("runDetail.external.hint")}>
-        {t("runDetail.external.title")} ({items.length})
+        {t("runDetail.external.title")} ({visibleItems.length})
       </CardTitle>
       <div className="space-y-3">
-        {items.map((item) => (
-          <div
-            key={`external-${item.taskId}-${item.nonce}`}
-            className="rounded-md border border-violet-200 bg-violet-50/30 px-4 py-3"
-          >
-            {/* Headline names the dispatch type (e.g. 外部任务 - 人工) so the
-                user immediately sees WHO this task went to. */}
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-ink-900">
-                {t("runDetail.external.itemTitle", {
-                  channel: channelLabel(item.channel),
-                })}
+        {visibleItems.map((item) => {
+          const sheetKey = `${item.taskId}:${item.nonce}`;
+          const sheetOpen = openSheets.has(sheetKey);
+          const isHuman = item.channel === "human";
+          return (
+            <div
+              key={`external-${sheetKey}`}
+              className="rounded-md border border-violet-200 bg-violet-50/30 px-4 py-3"
+            >
+              {/* Headline names the dispatch type (e.g. 外部任务 - 人工) so the
+                  user immediately sees WHO this task went to. */}
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-ink-900">
+                  {t("runDetail.external.itemTitle", {
+                    channel: channelLabel(item.channel),
+                  })}
+                </div>
+                <div className="flex items-center gap-2">
+                  {item.assignee && (
+                    <span className="pill-info">
+                      {t("runDetail.external.assignee")}: {item.assignee}
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                {item.assignee && (
-                  <span className="pill-info">
-                    {t("runDetail.external.assignee")}: {item.assignee}
-                  </span>
-                )}
+              <div className="mt-1 text-sm font-medium text-ink-900">
+                <span className="font-mono">{item.taskId}</span>
+                {item.subject ? ` · ${item.subject}` : ""}
               </div>
-            </div>
-            <div className="mt-1 text-sm font-medium text-ink-900">
-              <span className="font-mono">{item.taskId}</span>
-              {item.subject ? ` · ${item.subject}` : ""}
-            </div>
-            <div className="mt-1 text-xs text-ink-500">
-              {t("runDetail.external.nodeLabel")}:{" "}
-              <span className="font-mono">{item.agentId}</span>
-            </div>
-            {item.message && (
-              <details className="mt-2">
-                <summary className="cursor-pointer text-xs text-ink-600">
-                  {t("runDetail.external.showTaskSheet")}
-                </summary>
-                <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2 text-xs text-ink-700">
-                  {item.message}
-                </pre>
-              </details>
-            )}
-            {item.channel !== "human" && (
-              <div className="mt-2 text-xs text-ink-600">
-                {item.channel === "webhook"
-                  ? t("runDetail.external.waitingWebhook")
-                  : t("runDetail.external.waitingRemote")}
+              <div className="mt-1 text-xs text-ink-500">
+                {t("runDetail.external.nodeLabel")}:{" "}
+                <span className="font-mono">{item.agentId}</span>
               </div>
-            )}
-            {/* Manual submission — the primary path for the human channel and
-                an operator override for webhook / remote channels. */}
-            <div className="mt-3 space-y-2">
-              <textarea
-                className="textarea h-20"
-                placeholder={t("runDetail.external.summaryPlaceholder")}
-                value={summaries[item.taskId] ?? ""}
-                onChange={(e) =>
-                  setSummaries((prev) => ({ ...prev, [item.taskId]: e.target.value }))
-                }
-              />
-              <div className="flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  className="btn-outline"
-                  disabled={submitting === item.taskId}
-                  onClick={() => void submit(item.taskId, "failed")}
-                >
-                  {t("runDetail.external.submitFailed")}
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  disabled={submitting === item.taskId}
-                  onClick={() => void submit(item.taskId, "success")}
-                >
-                  {submitting === item.taskId
-                    ? t("runDetail.external.submitting")
-                    : t("runDetail.external.submitSuccess")}
-                </button>
-              </div>
+              {item.message && (
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    className="cursor-pointer text-xs text-ink-600 underline-offset-2 hover:underline"
+                    aria-expanded={sheetOpen}
+                    onClick={() =>
+                      setOpenSheets((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(sheetKey)) next.delete(sheetKey);
+                        else next.add(sheetKey);
+                        return next;
+                      })
+                    }
+                  >
+                    {t("runDetail.external.showTaskSheet")}
+                  </button>
+                  {sheetOpen && (
+                    <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2 text-xs text-ink-700">
+                      {item.message}
+                    </pre>
+                  )}
+                </div>
+              )}
+              {!isHuman && (
+                <div className="mt-2 text-xs text-ink-600">
+                  {item.channel === "webhook"
+                    ? t("runDetail.external.waitingWebhook")
+                    : t("runDetail.external.waitingRemote")}
+                </div>
+              )}
+              {isHuman ? (
+                <div className="mt-3 space-y-2">
+                  <textarea
+                    className="textarea h-20"
+                    placeholder={
+                      item.outputRequirement
+                      || t("runDetail.external.summaryPlaceholder")
+                    }
+                    value={summaries[item.taskId] ?? ""}
+                    onChange={(e) =>
+                      setSummaries((prev) => ({
+                        ...prev,
+                        [item.taskId]: e.target.value,
+                      }))
+                    }
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      className="btn-outline"
+                      disabled={submitting === item.taskId}
+                      onClick={() => {
+                        setFailModal({ taskId: item.taskId, nonce: item.nonce });
+                        setFailReason("");
+                      }}
+                    >
+                      {t("runDetail.external.submitFailed")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={submitting === item.taskId}
+                      onClick={() =>
+                        void submit(
+                          item.taskId,
+                          item.nonce,
+                          "success",
+                          summaries[item.taskId] ?? "",
+                        )
+                      }
+                    >
+                      {submitting === item.taskId
+                        ? t("runDetail.external.submitting")
+                        : t("runDetail.external.submitSuccess")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 flex items-center justify-end">
+                  <button
+                    type="button"
+                    className="btn-outline"
+                    disabled={submitting === item.taskId}
+                    onClick={() => {
+                      setFailModal({ taskId: item.taskId, nonce: item.nonce });
+                      setFailReason("");
+                    }}
+                  >
+                    {t("runDetail.external.submitFailed")}
+                  </button>
+                </div>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+      <Modal
+        open={!!failModal}
+        onClose={() => {
+          if (submitting) return;
+          setFailModal(null);
+          setFailReason("");
+        }}
+        title={t("runDetail.external.failReasonTitle")}
+        width="max-w-md"
+      >
+        <div className="space-y-3">
+          <textarea
+            className="textarea h-28"
+            placeholder={t("runDetail.external.failReasonPlaceholder")}
+            value={failReason}
+            onChange={(e) => setFailReason(e.target.value)}
+            autoFocus
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-outline"
+              disabled={!!submitting}
+              onClick={() => {
+                setFailModal(null);
+                setFailReason("");
+              }}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              disabled={!!submitting}
+              onClick={() => {
+                if (!failModal) return;
+                const reason = failReason.trim();
+                if (!reason) {
+                  void alert(t("runDetail.external.failReasonEmpty"));
+                  return;
+                }
+                void submit(
+                  failModal.taskId,
+                  failModal.nonce,
+                  "failed",
+                  reason,
+                );
+              }}
+            >
+              {submitting
+                ? t("runDetail.external.submitting")
+                : t("runDetail.external.failReasonSubmit")}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </Card>
   );
 }

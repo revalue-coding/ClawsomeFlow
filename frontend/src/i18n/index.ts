@@ -68,9 +68,29 @@ function reflectLang(lng: string) {
 reflectLang(i18n.language);
 i18n.on("languageChanged", reflectLang);
 
+/** Best-effort: persist UI language to the backend so webhook text matches. */
+function syncUiLanguageToServer(lang: SupportedLang) {
+  // Dynamic import avoids any i18n ↔ api circular dependency at module load.
+  void import("@/lib/api")
+    .then(({ api }) => api.setUiLanguage(lang))
+    .catch(() => {
+      /* offline / pre-login — localStorage still wins for the SPA */
+    });
+}
+
 export function changeLang(lang: SupportedLang) {
   void i18n.changeLanguage(lang);
+  syncUiLanguageToServer(lang);
 }
+
+// Keep server-side notify language in sync after the SPA finishes detecting
+// the stored pill (first paint / subsequent visits).
+i18n.on("languageChanged", (lng) => {
+  const short = (lng || "").split("-")[0];
+  if ((SUPPORTED_LANGS as readonly string[]).includes(short)) {
+    syncUiLanguageToServer(short as SupportedLang);
+  }
+});
 
 export function currentLang(): SupportedLang {
   const l = i18n.language?.split("-")[0];

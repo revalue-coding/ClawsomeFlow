@@ -215,6 +215,10 @@ export interface ExternalNodeConfig {
   /** remote_csflow channel: the remote Flow's declared param-field NAMES,
    *  captured from its "remote call info". Names only — never secrets. */
   remoteParamFields?: string[] | null;
+  /** remote_csflow channel: peer Flow display name (from remote call info). */
+  remoteFlowName?: string | null;
+  /** remote_csflow channel: peer Flow overall goal / description. */
+  remoteFlowDescription?: string | null;
   /** human channel: display-only assignee hint. */
   assignee?: string | null;
 }
@@ -226,6 +230,7 @@ export interface RemoteCallInfo {
   baseUrl: string;
   flowId: string;
   flowName: string;
+  flowDescription?: string;
   paramFields: string[];
   pairTokenName: string;
   pairSecret: string;
@@ -236,6 +241,7 @@ export interface RegisterRemoteResponse {
   baseUrl: string;
   flowId: string;
   flowName: string;
+  flowDescription?: string;
   paramFields: string[];
   pairTokenRef: string;
 }
@@ -1788,6 +1794,12 @@ export const api = {
     request<OwnerKindsFast>("GET", "/api/system/owner-kinds/fast"),
   getUiCapabilities: () =>
     request<UiCapabilities>("GET", "/api/system/ui-capabilities"),
+  getUiLanguage: () =>
+    request<{ language: "zh" | "en" | null }>("GET", "/api/system/ui-language"),
+  setUiLanguage: (language: "zh" | "en") =>
+    request<{ language: "zh" | "en" | null }>("PUT", "/api/system/ui-language", {
+      language,
+    }),
 
   // Profiles
   listProfiles: () =>

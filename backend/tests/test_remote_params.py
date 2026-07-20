@@ -37,6 +37,29 @@ def test_extract_remote_params_block_matches_header_and_task_id() -> None:
     assert parsed == {"需求描述": "抓取周报", "目标目录": ""}
 
 
+def test_extract_remote_params_block_prefers_per_downstream_header() -> None:
+    text = (
+        f"{REMOTE_PARAMS_HEADER}: t-up remote-a\n"
+        '{"fa": "1"}\n'
+        f"{REMOTE_PARAMS_HEADER}: t-up remote-b\n"
+        '{"fb": "2"}'
+    )
+    assert _extract_remote_params_block(
+        text, "t-up", downstream_task_id="remote-a",
+    ) == {"fa": "1"}
+    assert _extract_remote_params_block(
+        text, "t-up", downstream_task_id="remote-b",
+    ) == {"fb": "2"}
+
+
+def test_extract_remote_params_block_legacy_fallback_for_downstream() -> None:
+    """Old single-block form still works when asking for a specific downstream."""
+    text = f'{REMOTE_PARAMS_HEADER}: t-up\n{{"shared": "v"}}'
+    assert _extract_remote_params_block(
+        text, "t-up", downstream_task_id="remote-a",
+    ) == {"shared": "v"}
+
+
 def test_extract_remote_params_block_ignores_other_task_id() -> None:
     text = f"{REMOTE_PARAMS_HEADER}: other\n{{\"a\": \"1\"}}"
     assert _extract_remote_params_block(text, "t-upstream") is None

@@ -674,7 +674,7 @@ def test_build_external_dispatch_notification_payload() -> None:
     assert payload["runUrl"].endswith(f"/runs/{run.id}")
     assert "do the review" in payload["content"]
 
-    text = render_message_text(payload)
+    text = render_message_text(payload, lang="en")
     assert "external task dispatched" in text
     assert "Human" in text
     assert "run finished" not in text  # the old buggy headline

@@ -42,6 +42,7 @@ JSON). See :data:`WEBHOOK_FORMATS` / :func:`detect_webhook_format` /
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -216,38 +217,95 @@ def flow_channels_for_run(run: FlowRun) -> list[dict[str, Any]]:
 
 
 #: Channel value → human-readable label in external-dispatch notifications.
-_EXTERNAL_CHANNEL_LABELS = {
+_EXTERNAL_CHANNEL_LABELS_EN = {
     "human": "Human",
     "webhook": "Generic interface (webhook)",
     "remote_csflow": "Remote ClawsomeFlow",
 }
+_EXTERNAL_CHANNEL_LABELS_ZH = {
+    "human": "人工",
+    "webhook": "通用接口（webhook）",
+    "remote_csflow": "远程ClawsomeFlow",
+}
+
+#: Chat platforms whose default audience is Chinese-speaking.
+_ZH_PLATFORM_FORMATS = frozenset({"feishu", "dingtalk", "wecom", "serverchan"})
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
-def _external_channel_label(payload: dict[str, Any]) -> str:
+def resolve_notify_language(
+    payload: dict[str, Any],
+    *,
+    fmt: str | None = None,
+) -> str:
+    """Pick ``zh`` or ``en`` for chat-platform webhook text.
+
+    Order (fast + good):
+    1. ``Config.ui_language`` synced from the WebUI language pill
+    2. CJK characters in Flow name / payload content → ``zh``
+    3. Chinese chat platforms (飞书/钉钉/企微/Server酱) → ``zh``
+    4. else ``en``
+    """
+    try:
+        from app.config import load_config
+
+        lang = (load_config().ui_language or "").strip().lower()
+        if lang in ("zh", "en"):
+            return lang
+    except Exception:  # pragma: no cover — defensive
+        pass
+    sample = " ".join(
+        str(payload.get(k) or "")
+        for k in ("flowName", "flowId", "content", "taskSubject")
+    )
+    if _CJK_RE.search(sample):
+        return "zh"
+    if (fmt or "").strip().lower() in _ZH_PLATFORM_FORMATS:
+        return "zh"
+    return "en"
+
+
+def _external_channel_label(payload: dict[str, Any], *, lang: str) -> str:
     channel = str(payload.get("channel") or "")
-    return _EXTERNAL_CHANNEL_LABELS.get(channel, channel or "external")
+    table = _EXTERNAL_CHANNEL_LABELS_ZH if lang == "zh" else _EXTERNAL_CHANNEL_LABELS_EN
+    return table.get(channel, channel or "external")
 
 
-def _headline(payload: dict[str, Any]) -> str:
+def _headline(payload: dict[str, Any], *, lang: str) -> str:
     event = payload.get("event")
     status = str(payload.get("status") or "")
     if event == "run_checkpoint":
-        return "⏸️ ClawsomeFlow run paused — action required"
+        return (
+            "⏸️ ClawsomeFlow 运行已暂停 — 需要处理"
+            if lang == "zh"
+            else "⏸️ ClawsomeFlow run paused — action required"
+        )
     if event == "run_external_task":
         # An external task was dispatched — this is a TASK notification, not a
         # run-terminal one (rendering it as "run finished" was a bug).
+        channel = _external_channel_label(payload, lang=lang)
         return (
-            "📤 ClawsomeFlow external task dispatched — "
-            f"{_external_channel_label(payload)}"
+            f"📤 ClawsomeFlow 外部任务已派发 — {channel}"
+            if lang == "zh"
+            else f"📤 ClawsomeFlow external task dispatched — {channel}"
         )
     if event == "run_terminal_test":
-        return "🔔 ClawsomeFlow webhook test"
+        return (
+            "🔔 ClawsomeFlow 通知渠道测试"
+            if lang == "zh"
+            else "🔔 ClawsomeFlow webhook test"
+        )
     icon = {
         "completed": "✅",
         "completed_with_conflicts": "⚠️",
         "aborted": "⏹️",
     }.get(status, "❌")
-    return f"{icon} ClawsomeFlow run finished"
+    return (
+        f"{icon} ClawsomeFlow 运行已结束"
+        if lang == "zh"
+        else f"{icon} ClawsomeFlow run finished"
+    )
 
 
 def _short_title(payload: dict[str, Any]) -> str:
@@ -273,40 +331,82 @@ def _short_title(payload: dict[str, Any]) -> str:
 _CONTENT_MAX_CHARS = 3000
 
 
-def render_message_text(payload: dict[str, Any]) -> str:
+def render_message_text(
+    payload: dict[str, Any],
+    *,
+    lang: str | None = None,
+    fmt: str | None = None,
+) -> str:
     """Human-readable plain-text message shared by all chat formats."""
+    resolved = lang or resolve_notify_language(payload, fmt=fmt)
     event = payload.get("event")
-    lines = [_headline(payload)]
+    lines = [_headline(payload, lang=resolved)]
+
+    labels = (
+        {
+            "flow": "Flow",
+            "run": "Run",
+            "team": "团队",
+            "task": "任务",
+            "channel": "通道",
+            "assignee": "指派给",
+            "submit": "提交地址",
+            "status": "状态",
+            "trigger": "触发：定时",
+            "started": "开始",
+            "finished": "结束",
+            "checkpoint": "检查点输出",
+            "briefing": "任务说明",
+            "report": "Leader 报告",
+        }
+        if resolved == "zh"
+        else {
+            "flow": "Flow",
+            "run": "Run",
+            "team": "Team",
+            "task": "Task",
+            "channel": "Channel",
+            "assignee": "Assignee",
+            "submit": "Submit at",
+            "status": "Status",
+            "trigger": "Trigger: scheduled",
+            "started": "Started",
+            "finished": "Finished",
+            "checkpoint": "Checkpoint output",
+            "briefing": "Task briefing",
+            "report": "Leader report",
+        }
+    )
 
     def add(label: str, value: Any) -> None:
         if value not in (None, ""):
             lines.append(f"{label}: {value}")
 
-    add("Flow", payload.get("flowName") or payload.get("flowId"))
-    add("Run", payload.get("runId"))
-    add("Team", payload.get("teamName"))
+    add(labels["flow"], payload.get("flowName") or payload.get("flowId"))
+    add(labels["run"], payload.get("runId"))
+    add(labels["team"], payload.get("teamName"))
     if event == "run_external_task":
         # Task-dispatch notification: identify the TASK (not the run status).
         task_line = str(payload.get("taskSubject") or "").strip()
         task_id = str(payload.get("taskId") or "").strip()
-        add("Task", f"{task_id} · {task_line}" if task_line else task_id)
-        add("Channel", _external_channel_label(payload))
-        add("Assignee", payload.get("assignee"))
-        add("Submit at", payload.get("runUrl"))
+        add(labels["task"], f"{task_id} · {task_line}" if task_line else task_id)
+        add(labels["channel"], _external_channel_label(payload, lang=resolved))
+        add(labels["assignee"], payload.get("assignee"))
+        add(labels["submit"], payload.get("runUrl"))
     else:
-        add("Status", payload.get("status"))
+        add(labels["status"], payload.get("status"))
         if payload.get("isScheduled"):
-            lines.append("Trigger: scheduled")
-        add("Started", payload.get("startedAt"))
-        add("Finished", payload.get("finishedAt"))
+            lines.append(labels["trigger"])
+        add(labels["started"], payload.get("startedAt"))
+        add(labels["finished"], payload.get("finishedAt"))
     content = payload.get("content")
     if isinstance(content, str) and content.strip():
         label = (
-            "Checkpoint output"
+            labels["checkpoint"]
             if event == "run_checkpoint"
-            else "Task briefing"
+            else labels["briefing"]
             if event == "run_external_task"
-            else "Leader report"
+            else labels["report"]
         )
         lines.append("")
         lines.append(f"── {label} ──")
@@ -325,7 +425,7 @@ def build_webhook_request(
     """
     if fmt == "generic":
         return {"url": url, "json": payload}
-    text = render_message_text(payload)
+    text = render_message_text(payload, fmt=fmt)
     title = _short_title(payload)
     if fmt == "feishu":
         return {"url": url, "json": {"msg_type": "text", "content": {"text": text}}}
