@@ -60,7 +60,7 @@ The hard part of multi-agent work is rarely "the model isn't smart enough." It's
 ClawsomeFlow's take is blunt: **put coordination into a durable harness** — open executors (human / remote execution unit / webhook / agent CLI), short-context nodes, checkpoints, repo locks, observability, and reuse — so the process holds together as capability grows.
 
 | | Typical "one agent + one chat" | ClawsomeFlow |
-|---|---|---|
+|---|---|
 | **Who can execute** | Mostly the model in front of you | Humans, remote instances, webhooks, many agent platforms |
 | **Long projects** | Context rots; hard to pause / resume safely | Flows built for long cycles + human waits + re-runs |
 | **Cost** | One context carries everything | Split into nodes → shorter contexts, lower token spend |
@@ -241,7 +241,7 @@ Got questions about using ClawsomeFlow, or curious about building an **OPC (One-
 </p>
 
 <p align="center">
-  <img src="./docs/assets/wechat-group-qr.png?v=4" alt="ClawsomeFlow WeChat Group" width="240" />
+  <img src="./docs/assets/wechat-group-qr.png?v=5" alt="ClawsomeFlow WeChat Group" width="240" />
 </p>
 
 ---
