@@ -51,6 +51,8 @@ import {
   displayChatMessages,
   isSessionDivider,
   newClientMessageId,
+  latestSessionDividerIndex,
+  mergeTranscriptAfterReset,
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
@@ -1514,6 +1516,8 @@ function ChatRoom({ agentId }: { agentId: string }) {
   // returns to this chat and new messages arrived while away.
   const newDividerRef = useRef<HTMLDivElement | null>(null);
   const didJumpToNewDividerRef = useRef(false);
+  const sessionDividerRef = useRef<HTMLDivElement | null>(null);
+  const scrollToSessionDividerAfterResetRef = useRef(false);
   /** Divider index for the in-flight turn (armed at send/regenerate). */
   const turnDividerAtRef = useRef(-1);
   // Latest transcript, so the unmount cleanup can persist how many messages the
@@ -1529,6 +1533,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
         : messages;
     return displayChatMessages(raw);
   }, [messages, recovering]);
+  const lastSessionDividerIndex = useMemo(
+    () => latestSessionDividerIndex(displayMessages),
+    [displayMessages],
+  );
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const pendingFilesRef = useRef<File[]>([]);
   pendingFilesRef.current = pendingFiles;
@@ -1810,7 +1818,24 @@ function ChatRoom({ agentId }: { agentId: string }) {
     return () => window.cancelAnimationFrame(raf);
   }, [newDividerAt, messages.length, recovering, sending, handleScroll, scrollRef]);
 
+  // After reset, scroll so the persistent "新会话" divider sits in the upper
+  // viewport — old turns stay above, reachable by scrolling up.
   useEffect(() => {
+    if (!scrollToSessionDividerAfterResetRef.current) return;
+    const container = scrollRef.current;
+    const divider = sessionDividerRef.current;
+    if (!container || !divider) return;
+    const raf = window.requestAnimationFrame(() => {
+      scrollToNewMessagesDivider(container, divider);
+      handleScroll();
+      scrollToSessionDividerAfterResetRef.current = false;
+      didJumpToNewDividerRef.current = true;
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [messages, lastSessionDividerIndex, handleScroll, scrollRef]);
+
+  useEffect(() => {
+    if (scrollToSessionDividerAfterResetRef.current) return;
     if (newDividerAt >= 0 && !didJumpToNewDividerRef.current) return;
     stickIfAtBottom();
   }, [messages, recovering, stickIfAtBottom, newDividerAt]);
@@ -2179,14 +2204,20 @@ function ChatRoom({ agentId }: { agentId: string }) {
       await api.resetHermesAgentChat(agentId);
       setRecovering(false);
       setNewDividerAt(-1);
+      didJumpToNewDividerRef.current = false;
       // Reset starts a fresh Hermes session but KEEPS the transcript, now with
-      // a session-divider row. Re-fetch so the divider + prior history render
-      // instead of wiping the panel.
+      // a session-divider row. Re-fetch and merge so local-only history is not
+      // wiped when the server only recorded the divider row.
       const hist = await api.getHermesAgentChatHistory(agentId);
       const server: ChatMsg[] = hist.messages.map(serverMsgToChatMsg);
-      setMessages(server);
-      saveChatHistory(chatScope, server);
-      saveLastSeenCount(chatScope, settledCount(server));
+      const merged = mergeTranscriptAfterReset(messagesRef.current, server);
+      setMessages(merged);
+      saveChatHistory(chatScope, merged);
+      saveLastSeenCount(chatScope, settledCount(merged));
+      if (latestSessionDividerIndex(merged) >= 0) {
+        suppressNextStickyScroll();
+        scrollToSessionDividerAfterResetRef.current = true;
+      }
     } catch (e) {
       setError(errText(e));
     } finally {
@@ -2345,7 +2376,9 @@ function ChatRoom({ agentId }: { agentId: string }) {
                   </div>
                 )}
                 {isSessionDivider(m) ? (
-                  <SessionDivider label={t("chat.sessionDivider")} />
+                  <div ref={i === lastSessionDividerIndex ? sessionDividerRef : undefined}>
+                    <SessionDivider label={t("chat.sessionDivider")} />
+                  </div>
                 ) : (
                   <ChatBubble
                     msg={m}

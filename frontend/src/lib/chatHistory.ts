@@ -218,6 +218,36 @@ export function scrollToNewMessagesDivider(
   container.scrollTo({ top: targetTop });
 }
 
+/** Index in {@link displayChatMessages} of the latest persistent session divider. */
+export function latestSessionDividerIndex(msgs: PersistedMessage[]): number {
+  const display = displayChatMessages(msgs);
+  for (let i = display.length - 1; i >= 0; i -= 1) {
+    if (isSessionDivider(display[i])) return i;
+  }
+  return -1;
+}
+
+/**
+ * Merge transcript after ``重置对话``: server history is authoritative when it
+ * includes real messages; when the server only persisted the new divider (e.g.
+ * pre-migration local-only cache), keep the in-memory transcript and append
+ * the divider instead of wiping prior turns.
+ */
+export function mergeTranscriptAfterReset<T extends PersistedMessage>(
+  prev: T[],
+  server: T[],
+): T[] {
+  if (server.length === 0) return prev;
+  const onlyDividerOnServer =
+    server.length === 1 && isSessionDivider(server[server.length - 1]);
+  if (onlyDividerOnServer) {
+    const div = server[server.length - 1];
+    if (prev.some((m) => typeof m.id === "number" && m.id === div.id)) return prev;
+    return [...prev, div];
+  }
+  return reconcileTranscript(prev, server);
+}
+
 /** Whether two transcript rows are the same message. Prefer stable ids; fall
  *  back to (role, kind, content) for optimistic rows that have no id yet. */
 function sameMessageIdentity(a: PersistedMessage, b: PersistedMessage): boolean {
