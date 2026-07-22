@@ -534,6 +534,19 @@ class SqliteStorage:
                 s.commit()
             return len(ids)
 
+    def run_schedule_execution_list_running(self) -> list[FlowRunScheduleExecution]:
+        """All executions still ``status == "running"`` (interrupted by a prior
+        process). The worker resumes these on startup — re-running their
+        remaining items from the persisted plan."""
+        with self._session() as s:
+            return list(
+                s.exec(
+                    select(FlowRunScheduleExecution).where(
+                        FlowRunScheduleExecution.status == "running"
+                    )
+                ).all()
+            )
+
     def run_schedule_execution_reap_orphans(self) -> int:
         """Reconcile orphaned in-flight schedule executions to a terminal state.
 

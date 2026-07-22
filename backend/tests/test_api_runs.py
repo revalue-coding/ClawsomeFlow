@@ -686,6 +686,59 @@ async def test_run_schedule_parallel_continues_when_one_flow_fails(
     assert latest.skipped_items == 0
 
 
+@pytest.mark.asyncio
+async def test_schedule_execution_resumes_remaining_items_after_restart(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schedule execution a prior process left ``running`` resumes its
+    not-yet-done items from the persisted plan — a multi-Run schedule survives a
+    restart (already-succeeded items are not re-run)."""
+    del app_client
+    from app.models import FlowRunScheduleExecution
+    from app.services import run_schedules as schedule_mod
+
+    flow_a = _make_flow(owner="alice")
+    flow_b = _make_flow(owner="alice")
+    storage = get_storage()
+    execution = storage.run_schedule_execution_create(FlowRunScheduleExecution(
+        schedule_id="sched-resume", schedule_name="s", user="alice",
+        run_mode="serial", execute_mode="once", status="running", total_items=2,
+        item_results=[
+            {"index": 0, "flow_id": flow_a.id, "flow_name": "a", "status": "succeeded",
+             "reason": "", "reason_code": "completed", "run_id": "run-old-0", "inputs": {}},
+            {"index": 1, "flow_id": flow_b.id, "flow_name": "b", "status": "pending",
+             "reason": "", "reason_code": "", "run_id": "", "inputs": {"k": "v"}},
+        ],
+    ))
+
+    triggered: list[str] = []
+
+    async def fake_trigger(*, schedule, item, storage):
+        del schedule, storage
+        triggered.append(item.flow_id)
+        return f"run-new-{item.index}", "", ""
+
+    async def fake_wait(*, run_id, storage, stop_evt):
+        del run_id, storage, stop_evt
+        return RunStatus.completed
+
+    monkeypatch.setattr(schedule_mod, "_trigger_configured_run", fake_trigger)
+    monkeypatch.setattr(schedule_mod, "_wait_run_terminal", fake_wait)
+
+    worker = schedule_mod.get_run_schedule_worker()
+    await worker._resume_schedule_execution(execution.id)
+
+    # Only the pending item (flow_b) was re-run; the succeeded item was skipped.
+    assert triggered == [flow_b.id]
+    refreshed = storage.run_schedule_execution_get(execution.id)
+    assert refreshed.status == "succeeded"
+    assert refreshed.finished_at is not None
+    by_idx = {int(e["index"]): e for e in refreshed.item_results}
+    assert by_idx[0]["status"] == "succeeded"  # untouched
+    assert by_idx[1]["status"] == "succeeded"  # resumed to completion
+    assert by_idx[1]["run_id"] == "run-new-1"
+
+
 # ── List + detail ----------------------------------------------------
 
 

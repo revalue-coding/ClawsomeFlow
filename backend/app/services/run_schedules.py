@@ -308,7 +308,11 @@ def _item_result(
     reason: str = "",
     reason_code: str = "",
     run_id: str | None = None,
+    inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # ``inputs`` is stored so a partially-run execution is SELF-DESCRIBING and
+    # can be resumed after a restart even if the schedule row is gone (once-mode
+    # deletes it). It is NOT exposed by the API view (fixed field set).
     return {
         "index": index,
         "flow_id": flow_id,
@@ -317,7 +321,40 @@ def _item_result(
         "reason": reason,
         "reason_code": reason_code,
         "run_id": run_id or "",
+        "inputs": inputs or {},
     }
+
+
+# Item statuses that are DONE (never re-run on resume). "pending" / "running"
+# entries are re-run when a schedule execution resumes after a restart.
+_ITEM_DONE_STATUSES = frozenset({"succeeded", "failed", "skipped"})
+
+
+def _plan_from_item_results(
+    item_results: list[dict[str, Any]],
+) -> list[_PlannedScheduleItem]:
+    """Reconstruct the planned items from a persisted execution's entries.
+
+    Used to resume a schedule execution after a restart without depending on the
+    (possibly-deleted) schedule row — the plan + inputs live in item_results.
+    """
+    planned: list[_PlannedScheduleItem] = []
+    for e in item_results or []:
+        flow_id = str(e.get("flow_id") or "").strip()
+        if not flow_id:
+            continue
+        raw_inputs = e.get("inputs")
+        planned.append(
+            _PlannedScheduleItem(
+                index=int(e.get("index", 0)),
+                flow_id=flow_id,
+                flow_name=str(e.get("flow_name") or ""),
+                inputs=raw_inputs if isinstance(raw_inputs, dict) else {},
+                raw_item={},
+            )
+        )
+    planned.sort(key=lambda p: p.index)
+    return planned
 
 
 def _precheck_schedule_items(
@@ -622,6 +659,27 @@ def _execution_status_from_results(results: list[dict[str, Any]]) -> str:
     return "failed"
 
 
+def _terminal_failure_detail(terminal: RunStatus | None) -> tuple[str, str]:
+    """(reason_code, reason) for a non-success terminal / missing run."""
+    if isinstance(terminal, RunStatus):
+        return str(terminal.value), f"run finished with status {terminal.value}"
+    return (
+        "run_missing_or_worker_stopped",
+        "run disappeared before reaching terminal status",
+    )
+
+
+class _ScheduleStub:
+    """Minimal duck-typed schedule for resuming an execution whose schedule row
+    may be gone (once-mode deletes it). Carries only what the drive / trigger
+    need: id, user, run_mode."""
+
+    def __init__(self, *, id: str, user: str, run_mode: str) -> None:
+        self.id = id
+        self.user = user
+        self.run_mode = run_mode
+
+
 class RunScheduleWorker:
     """Background poller that triggers due ``FlowRunSchedule`` rows."""
 
@@ -634,18 +692,27 @@ class RunScheduleWorker:
     def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
-        # Reconcile orphaned in-flight executions left behind by a previous
-        # process: they can never finish on their own and would otherwise show
-        # forever and dodge the history-clear (which preserves running rows).
-        try:
-            reaped = get_storage().run_schedule_execution_reap_orphans()
-            if reaped:
-                logger.info("run_schedule_execution_orphans_reaped", count=reaped)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "run_schedule_execution_reap_failed", error=str(exc)
-            )
         self._stop_evt = asyncio.Event()
+        # RESUME schedule executions a previous process left ``running`` (a
+        # restart interrupted a multi-Run schedule mid-sequence): re-run their
+        # remaining items from the persisted plan so the sequence continues after
+        # the restart. Executions with no durable plan (legacy orphans) are
+        # finalized-failed inside the resume. Each resume is a background task.
+        try:
+            running = get_storage().run_schedule_execution_list_running()
+            for execution in running:
+                task = asyncio.create_task(
+                    self._resume_schedule_execution(execution.id),
+                    name=f"csflow-run-schedule-resume:{execution.id}",
+                )
+                self._execution_tasks.add(task)
+                task.add_done_callback(self._execution_tasks.discard)
+            if running:
+                logger.info(
+                    "run_schedule_executions_resumed_on_start", count=len(running),
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("run_schedule_execution_resume_start_failed", error=str(exc))
         self._task = asyncio.create_task(
             self._run_loop(),
             name="csflow-run-schedule-worker",
@@ -699,9 +766,6 @@ class RunScheduleWorker:
 
     async def _execute_schedule(self, schedule_id: str) -> None:
         execution: FlowRunScheduleExecution | None = None
-        item_results: list[dict[str, Any]] = []
-        run_ids: list[str] = []
-        schedule: FlowRunSchedule | None = None
         try:
             storage = get_storage()
             schedule = storage.run_schedule_get(schedule_id)
@@ -740,245 +804,233 @@ class RunScheduleWorker:
                 storage=storage,
             )
             if blocked:
-                item_results = precheck_results
-            elif schedule.run_mode == _RUN_MODE_SERIAL:
-                for idx, item in enumerate(planned):
-                    run_id, reason_code, reason = await _trigger_configured_run(
-                        schedule=schedule,
-                        item=item,
-                        storage=storage,
-                    )
-                    if not run_id:
-                        item_results.append(
-                            _item_result(
-                                index=item.index,
-                                flow_id=item.flow_id,
-                                flow_name=item.flow_name,
-                                status="failed",
-                                reason=reason or "failed to start run",
-                                reason_code=reason_code or "trigger_failed",
-                            )
-                        )
-                        for rest in planned[idx + 1:]:
-                            item_results.append(
-                                _item_result(
-                                    index=rest.index,
-                                    flow_id=rest.flow_id,
-                                    flow_name=rest.flow_name,
-                                    status="skipped",
-                                    reason="stopped after previous serial failure",
-                                    reason_code="stopped_after_serial_failure",
-                                )
-                            )
-                        break
-                    run_ids.append(run_id)
-                    terminal = await _wait_run_terminal(
-                        run_id=run_id,
-                        storage=storage,
-                        stop_evt=self._stop_evt,
-                    )
-                    if terminal in _RUN_SUCCESS_STATUSES:
-                        item_results.append(
-                            _item_result(
-                                index=item.index,
-                                flow_id=item.flow_id,
-                                flow_name=item.flow_name,
-                                status="succeeded",
-                                reason_code=str(terminal.value),
-                                run_id=run_id,
-                            )
-                        )
-                        continue
-                    fail_code = (
-                        str(terminal.value)
-                        if isinstance(terminal, RunStatus)
-                        else "run_missing_or_worker_stopped"
-                    )
-                    fail_reason = (
-                        f"run finished with status {terminal.value}"
-                        if isinstance(terminal, RunStatus)
-                        else "run disappeared before reaching terminal status"
-                    )
-                    item_results.append(
-                        _item_result(
-                            index=item.index,
-                            flow_id=item.flow_id,
-                            flow_name=item.flow_name,
-                            status="failed",
-                            reason=fail_reason,
-                            reason_code=fail_code,
-                            run_id=run_id,
-                        )
-                    )
-                    for rest in planned[idx + 1:]:
-                        item_results.append(
-                            _item_result(
-                                index=rest.index,
-                                flow_id=rest.flow_id,
-                                flow_name=rest.flow_name,
-                                status="skipped",
-                                reason="stopped after previous serial failure",
-                                reason_code="stopped_after_serial_failure",
-                            )
-                        )
-                    break
-            else:
-                to_wait: list[tuple[_PlannedScheduleItem, str]] = []
-                for item in planned:
-                    run_id, reason_code, reason = await _trigger_configured_run(
-                        schedule=schedule,
-                        item=item,
-                        storage=storage,
-                    )
-                    if not run_id:
-                        item_results.append(
-                            _item_result(
-                                index=item.index,
-                                flow_id=item.flow_id,
-                                flow_name=item.flow_name,
-                                status="failed",
-                                reason=reason or "failed to start run",
-                                reason_code=reason_code or "trigger_failed",
-                            )
-                        )
-                        continue
-                    run_ids.append(run_id)
-                    to_wait.append((item, run_id))
-                if to_wait:
-                    waited = await asyncio.gather(
-                        *[
-                            _wait_run_terminal(
-                                run_id=run_id,
-                                storage=storage,
-                                stop_evt=self._stop_evt,
-                            )
-                            for _, run_id in to_wait
-                        ]
-                    )
-                    for (item, run_id), terminal in zip(to_wait, waited, strict=False):
-                        if terminal in _RUN_SUCCESS_STATUSES:
-                            item_results.append(
-                                _item_result(
-                                    index=item.index,
-                                    flow_id=item.flow_id,
-                                    flow_name=item.flow_name,
-                                    status="succeeded",
-                                    reason_code=str(terminal.value),
-                                    run_id=run_id,
-                                )
-                            )
-                            continue
-                        fail_code = (
-                            str(terminal.value)
-                            if isinstance(terminal, RunStatus)
-                            else "run_missing_or_worker_stopped"
-                        )
-                        fail_reason = (
-                            f"run finished with status {terminal.value}"
-                            if isinstance(terminal, RunStatus)
-                            else "run disappeared before reaching terminal status"
-                        )
-                        item_results.append(
-                            _item_result(
-                                index=item.index,
-                                flow_id=item.flow_id,
-                                flow_name=item.flow_name,
-                                status="failed",
-                                reason=fail_reason,
-                                reason_code=fail_code,
-                                run_id=run_id,
-                            )
-                        )
-
-            item_results.sort(key=lambda x: int(x.get("index", 0)))
-            succeeded_items = sum(1 for item in item_results if item.get("status") == "succeeded")
-            failed_items = sum(1 for item in item_results if item.get("status") == "failed")
-            skipped_items = sum(1 for item in item_results if item.get("status") == "skipped")
-            if execution is not None:
-                execution.status = _execution_status_from_results(item_results)
-                execution.run_ids = run_ids
-                execution.item_results = item_results
-                execution.succeeded_items = succeeded_items
-                execution.failed_items = failed_items
-                execution.skipped_items = skipped_items
-                execution.total_items = len(item_results)
-                execution.finished_at = _now_utc()
+                execution.item_results = precheck_results
+                execution.total_items = len(precheck_results)
                 storage.run_schedule_execution_update(execution)
-        except asyncio.CancelledError:
-            logger.warning("run_schedule_execution_cancelled", schedule_id=schedule_id)
-            if execution is not None:
-                item_results.append(
+                self._finalize_schedule_execution(execution, storage)
+            else:
+                # Persist the durable plan (pending entries carry inputs) BEFORE
+                # running so a restart mid-execution can resume the remaining
+                # items even if the (once-mode) schedule row is already gone.
+                execution.item_results = [
                     _item_result(
-                        index=max([int(i.get("index", -1)) for i in item_results], default=-1) + 1,
-                        flow_id="",
-                        flow_name="",
-                        status="failed",
-                        reason="schedule worker stopped before execution finished",
-                        reason_code="worker_stopped",
+                        index=p.index, flow_id=p.flow_id, flow_name=p.flow_name,
+                        status="pending", inputs=p.inputs,
                     )
+                    for p in planned
+                ]
+                execution.total_items = len(planned)
+                storage.run_schedule_execution_update(execution)
+                interrupted = await self._drive_schedule_plan(
+                    execution=execution, schedule=schedule,
+                    planned=planned, storage=storage,
                 )
-                execution.status = "failed"
-                execution.run_ids = run_ids
-                execution.item_results = item_results
-                execution.succeeded_items = sum(
-                    1 for item in item_results if item.get("status") == "succeeded"
-                )
-                execution.failed_items = sum(
-                    1 for item in item_results if item.get("status") == "failed"
-                )
-                execution.skipped_items = sum(
-                    1 for item in item_results if item.get("status") == "skipped"
-                )
-                execution.total_items = len(item_results)
-                execution.finished_at = _now_utc()
-                try:
-                    storage.run_schedule_execution_update(execution)
-                except Exception:
-                    logger.exception(
-                        "run_schedule_execution_update_failed_on_cancel",
-                        schedule_id=schedule_id,
-                    )
+                if interrupted:
+                    # Worker stopping — leave the execution ``running`` so startup
+                    # resumes the remaining items. Do NOT finalize.
+                    return
+                self._finalize_schedule_execution(execution, storage)
+        except asyncio.CancelledError:
+            # Drain / worker stop mid-execution: keep the execution ``running``
+            # (its persisted plan + incremental progress let startup resume the
+            # remaining items). Do NOT mark it failed.
+            logger.warning(
+                "run_schedule_execution_cancelled_resumable", schedule_id=schedule_id,
+            )
             raise
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception(
-                "run_schedule_execute_failed",
-                schedule_id=schedule_id,
-                error=str(exc),
+                "run_schedule_execute_failed", schedule_id=schedule_id, error=str(exc),
             )
             if execution is not None:
-                item_results.append(
-                    _item_result(
-                        index=max([int(i.get("index", -1)) for i in item_results], default=-1) + 1,
-                        flow_id="",
-                        flow_name="",
-                        status="failed",
-                        reason=f"internal error: {exc}",
-                        reason_code="internal_error",
-                    )
-                )
-                execution.status = "failed"
-                execution.run_ids = run_ids
-                execution.item_results = item_results
-                execution.succeeded_items = sum(
-                    1 for item in item_results if item.get("status") == "succeeded"
-                )
-                execution.failed_items = sum(
-                    1 for item in item_results if item.get("status") == "failed"
-                )
-                execution.skipped_items = sum(
-                    1 for item in item_results if item.get("status") == "skipped"
-                )
-                execution.total_items = len(item_results)
-                execution.finished_at = _now_utc()
                 try:
-                    storage.run_schedule_execution_update(execution)
+                    execution.status = "failed"
+                    execution.finished_at = _now_utc()
+                    get_storage().run_schedule_execution_update(execution)
                 except Exception:
                     logger.exception(
-                        "run_schedule_execution_update_failed",
-                        schedule_id=schedule_id,
+                        "run_schedule_execution_update_failed", schedule_id=schedule_id,
                     )
         finally:
             self._running_schedule_ids.discard(schedule_id)
+
+    def _set_schedule_item_result(
+        self, execution, storage, entry: dict[str, Any],
+    ) -> None:
+        """Upsert one item result (by index) into the execution + persist it, so
+        progress is durable for resume after a restart."""
+        idx = int(entry.get("index", -1))
+        results = [
+            e for e in (execution.item_results or [])
+            if int(e.get("index", -2)) != idx
+        ]
+        results.append(entry)
+        results.sort(key=lambda e: int(e.get("index", 0)))
+        execution.item_results = results
+        rid = str(entry.get("run_id") or "").strip()
+        if rid and rid not in (execution.run_ids or []):
+            execution.run_ids = [*(execution.run_ids or []), rid]
+        storage.run_schedule_execution_update(execution)
+
+    def _skip_remaining_serial(self, execution, storage, remaining) -> None:
+        for rest in remaining:
+            self._set_schedule_item_result(execution, storage, _item_result(
+                index=rest.index, flow_id=rest.flow_id, flow_name=rest.flow_name,
+                status="skipped", reason="stopped after previous serial failure",
+                reason_code="stopped_after_serial_failure", inputs=rest.inputs,
+            ))
+
+    def _finalize_schedule_execution(self, execution, storage) -> None:
+        results = execution.item_results or []
+        execution.status = _execution_status_from_results(results)
+        execution.succeeded_items = sum(1 for e in results if e.get("status") == "succeeded")
+        execution.failed_items = sum(1 for e in results if e.get("status") == "failed")
+        execution.skipped_items = sum(1 for e in results if e.get("status") == "skipped")
+        execution.total_items = len(results)
+        execution.finished_at = _now_utc()
+        storage.run_schedule_execution_update(execution)
+
+    async def _drive_schedule_plan(
+        self, *, execution, schedule, planned, storage,
+    ) -> bool:
+        """Run the not-yet-done planned items, persisting progress incrementally.
+
+        Skips items already ``succeeded`` / ``failed`` / ``skipped`` (so a resumed
+        execution does not re-run finished items). Returns True if the worker was
+        asked to stop mid-run — the execution is left ``running`` with its
+        in-flight items still ``running``/``pending`` so startup can resume them.
+        """
+        done_idx = {
+            int(e.get("index", -1)) for e in (execution.item_results or [])
+            if e.get("status") in _ITEM_DONE_STATUSES
+        }
+        if schedule.run_mode == _RUN_MODE_SERIAL:
+            for pos, item in enumerate(planned):
+                if item.index in done_idx:
+                    continue
+                if self._stop_evt.is_set():
+                    return True
+                run_id, reason_code, reason = await _trigger_configured_run(
+                    schedule=schedule, item=item, storage=storage,
+                )
+                if not run_id:
+                    self._set_schedule_item_result(execution, storage, _item_result(
+                        index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                        status="failed", reason=reason or "failed to start run",
+                        reason_code=reason_code or "trigger_failed", inputs=item.inputs,
+                    ))
+                    self._skip_remaining_serial(execution, storage, planned[pos + 1:])
+                    return False
+                self._set_schedule_item_result(execution, storage, _item_result(
+                    index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                    status="running", run_id=run_id, inputs=item.inputs,
+                ))
+                terminal = await _wait_run_terminal(
+                    run_id=run_id, storage=storage, stop_evt=self._stop_evt,
+                )
+                if terminal is None and self._stop_evt.is_set():
+                    return True  # interrupted; item stays "running" → resumable
+                if terminal in _RUN_SUCCESS_STATUSES:
+                    self._set_schedule_item_result(execution, storage, _item_result(
+                        index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                        status="succeeded", reason_code=str(terminal.value),
+                        run_id=run_id, inputs=item.inputs,
+                    ))
+                    continue
+                fail_code, fail_reason = _terminal_failure_detail(terminal)
+                self._set_schedule_item_result(execution, storage, _item_result(
+                    index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                    status="failed", reason=fail_reason, reason_code=fail_code,
+                    run_id=run_id, inputs=item.inputs,
+                ))
+                self._skip_remaining_serial(execution, storage, planned[pos + 1:])
+                return False
+            return False
+        # parallel
+        to_wait: list[tuple[_PlannedScheduleItem, str]] = []
+        for item in planned:
+            if item.index in done_idx:
+                continue
+            run_id, reason_code, reason = await _trigger_configured_run(
+                schedule=schedule, item=item, storage=storage,
+            )
+            if not run_id:
+                self._set_schedule_item_result(execution, storage, _item_result(
+                    index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                    status="failed", reason=reason or "failed to start run",
+                    reason_code=reason_code or "trigger_failed", inputs=item.inputs,
+                ))
+                continue
+            self._set_schedule_item_result(execution, storage, _item_result(
+                index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                status="running", run_id=run_id, inputs=item.inputs,
+            ))
+            to_wait.append((item, run_id))
+        if not to_wait:
+            return False
+        waited = await asyncio.gather(*[
+            _wait_run_terminal(run_id=rid, storage=storage, stop_evt=self._stop_evt)
+            for _, rid in to_wait
+        ])
+        interrupted = False
+        for (item, rid), terminal in zip(to_wait, waited, strict=False):
+            if terminal is None and self._stop_evt.is_set():
+                interrupted = True
+                continue  # leave "running" → resumable
+            if terminal in _RUN_SUCCESS_STATUSES:
+                self._set_schedule_item_result(execution, storage, _item_result(
+                    index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                    status="succeeded", reason_code=str(terminal.value),
+                    run_id=rid, inputs=item.inputs,
+                ))
+            else:
+                fail_code, fail_reason = _terminal_failure_detail(terminal)
+                self._set_schedule_item_result(execution, storage, _item_result(
+                    index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                    status="failed", reason=fail_reason, reason_code=fail_code,
+                    run_id=rid, inputs=item.inputs,
+                ))
+        return interrupted
+
+    async def _resume_schedule_execution(self, execution_id: str) -> None:
+        """Resume a schedule execution a prior process left ``running`` — re-run
+        its not-yet-done items (from the persisted plan) and finalize. Works even
+        if the schedule row is gone (once-mode)."""
+        schedule_stub: _ScheduleStub | None = None
+        try:
+            storage = get_storage()
+            execution = storage.run_schedule_execution_get(execution_id)
+            if execution is None or execution.status != "running":
+                return
+            planned = _plan_from_item_results(execution.item_results or [])
+            if not planned:
+                # No durable plan (legacy orphan) → finalize failed so it doesn't
+                # display/hang forever (matches the old reap behaviour).
+                execution.status = "failed"
+                execution.finished_at = _now_utc()
+                storage.run_schedule_execution_update(execution)
+                return
+            self._running_schedule_ids.add(execution.schedule_id)
+            schedule_stub = _ScheduleStub(
+                id=execution.schedule_id, user=execution.user,
+                run_mode=execution.run_mode,
+            )
+            interrupted = await self._drive_schedule_plan(
+                execution=execution, schedule=schedule_stub,
+                planned=planned, storage=storage,
+            )
+            if interrupted:
+                return
+            self._finalize_schedule_execution(execution, storage)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception(
+                "run_schedule_resume_failed", execution_id=execution_id, error=str(exc),
+            )
+        finally:
+            if schedule_stub is not None:
+                self._running_schedule_ids.discard(schedule_stub.id)
 
 
 _worker_singleton: RunScheduleWorker | None = None
