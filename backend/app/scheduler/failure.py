@@ -158,22 +158,16 @@ def detect_failures(
                 ))
                 continue
 
-    # Signal 3: leader inbox FAILED:<task_id>:<reason>.
-    # Treated as additive (in case 1-2 didn't fire — e.g. worker still alive
-    # but report says blocked).
-    # IMPORTANT: tasks that the worker has already marked ``completed`` in
-    # ClawTeam are not re-failed here. The worker dispatch prompt now
-    # instructs agents to mark the task completed **even on failure** and
-    # carry the failure context to the leader via the "task X done:
-    # FAILED — ..." inbox prefix. That structured form is intentionally
-    # NOT parsed as a failure signal (it doesn't start with "FAILED"), so
-    # the scheduler advances and the leader sees the failure in its
-    # summary input. We still keep the legacy "FAILED:<tid>:<reason>"
-    # form as a last-resort signal for cases where the agent died before
-    # marking the task completed.
-    completed_task_ids = {
-        snap.task_id for snap in snapshots if snap.status == "completed"
-    }
+    # Signal 3: leader inbox FAILED:<task_id>:<reason>. The worker/receipt
+    # protocol REQUIRES a node that cannot complete to send this (see
+    # scheduler/prompts.py — "MUST"). It is authoritative: a ``FAILED:<tid>`` is
+    # treated as a failure **even if the node is currently marked ``completed``**
+    # in ClawTeam (an agent may finish the ClawTeam task yet report the WORK
+    # failed). The controller then pauses the Flow + resets the node rather than
+    # advancing to downstream tasks. Stale FAILED messages from a pre-pause
+    # attempt are suppressed on resume by the controller
+    # (``_resume_suppressed_failed_msgs``), so a re-run that succeeds is not
+    # re-failed by an old message.
     if leader_inbox_messages:
         already = {(r.task_id, r.reason) for r in out}
         for msg in leader_inbox_messages:
@@ -181,10 +175,6 @@ def detect_failures(
             if parsed is None:
                 continue
             tid, reason = parsed
-            if tid in completed_task_ids:
-                # Worker already moved the task to completed — no retry
-                # needed, leader will read the failure context from inbox.
-                continue
             owner = flow_tasks.get(tid).owner_agent_id if tid in flow_tasks else "?"
             key = (tid, FailureReason.leader_inbox_failed)
             if key in already:

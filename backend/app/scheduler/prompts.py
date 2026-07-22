@@ -578,40 +578,39 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
         f"{next_no}. **End this turn**"
     )
 
-    # ── Failure path (mandatory) ────────────────────────────────────────
-    # Even if any step above fails (commit conflict, merge can't resolve,
-    # external tool down, etc.) we MUST mark the ClawTeam task completed
-    # and let the leader decide what to do — otherwise the scheduler sits
-    # waiting on a pending task and the whole Run stalls. The leader gets
-    # the failure details via inbox and surfaces them in the summary.
-    #
-    # For a leader-summary task, ``build_leader_dispatch`` is the normal
-    # entry — but tests also exercise ``build_worker_dispatch`` with a
-    # summary task, and that path must not generate an inbox send (the
-    # leader inboxing itself is pointless). Drop the inbox line in that
-    # corner case while still emitting the mark-complete instruction.
+    # ── Failure path (MANDATORY) ────────────────────────────────────────
+    # A node that cannot complete its task MUST report the failure with the
+    # explicit ``FAILED:<task_id>:<reason>`` inbox signal. The scheduler treats
+    # that signal as authoritative — EVEN IF the ClawTeam task is marked
+    # completed — and responds by PAUSING the Flow, resetting THIS node for
+    # re-dispatch, and NEVER dispatching downstream tasks. The user fixes the
+    # problem and resumes, which re-runs this node. So on failure the node MUST
+    # NOT pretend success: it must emit the FAILED signal (and must not mark the
+    # task completed as if it succeeded).
     if ctx.task.is_leader_summary:
+        # Production summaries go through build_leader_dispatch (own failure
+        # reply). This build_worker_dispatch summary path is a test corner and
+        # must not inbox the leader-to-itself, so no FAILED signal line here.
         failure_section = (
             "\n\n## On Failure (mandatory — do not skip)\n"
-            "If you cannot complete the summary task, do not leave it pending. Instead:\n"
-            "1. Commit a partial deliverable with a clear blocker note.\n"
-            f"2. **VERY IMPORTANT: you MUST execute** "
-            f"`clawteam task update {team} {ct_task_id} --status completed` "
-            "(so scheduler can continue finalize).\n"
-            "3. End your turn."
+            "If you cannot complete the summary task successfully, do NOT mark it "
+            "`completed` as if it succeeded — report the blocker in your leader "
+            "final reply and end your turn."
         )
     else:
         failure_section = (
-            "\n\n## On Failure (mandatory — do not skip)\n"
-            "If this task is still blocked after reasonable attempts, do not leave it "
-            "in `pending`/`in_progress`. Instead:\n"
-            f"1. `clawteam inbox send {team} {leader} "
-            f"\"task {task_id} done: FAILED — <one-line reason + what you tried>\"`"
-            " (keep the same exact header prefix).\n"
-            f"2. **VERY IMPORTANT: you MUST execute** "
-            f"`clawteam task update {team} {ct_task_id} --status completed` "
-            "(so scheduler can continue downstream/finalize).\n"
-            "3. End your turn. Do not retry on your own."
+            "\n\n## On Failure (MANDATORY — the whole Flow depends on this)\n"
+            "If you CANNOT complete this task successfully — even if you already "
+            "committed partial work — you MUST report the failure so the Flow "
+            "pauses for the user to fix it (downstream tasks will NOT run, and this "
+            "task will be re-dispatched to you after the fix). Do exactly this:\n"
+            f"1. **MUST** `clawteam inbox send {team} {leader} "
+            f"\"FAILED:{task_id}: <one-line reason + what you tried>\"` "
+            f"(the message MUST start with the exact literal `FAILED:{task_id}:`).\n"
+            "2. Do NOT mark this task `completed` — a failed task must never be "
+            "reported as done.\n"
+            "3. End your turn. Do NOT retry on your own; the user will fix the "
+            "problem and resume."
         )
     return "## Completion Checklist\n" + "\n".join(steps) + failure_section
 

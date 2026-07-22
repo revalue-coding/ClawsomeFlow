@@ -2108,14 +2108,13 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
     assert not _reset_to_pending("t_ext")
 
 
-def test_backend_failure_pauses_manual_but_terminates_unattended(fake_lookup) -> None:
-    """A backend-detected failure PAUSES a manual run (human resumes) but must
-    TERMINATE an unattended run so its result/callback returns (no human to
-    resume; pausing would strand a delegated caller forever)."""
+def test_backend_failure_always_pauses_even_unattended(fake_lookup) -> None:
+    """A detected node failure ALWAYS pauses (never terminates) — the user must
+    fix + 继续执行. This holds even for unattended runs, which are then NOT
+    auto-resumed (only drain-pauses are). So both a manual and an unattended run
+    pause on failure."""
     spec = _make_spec()
 
-    # Manual run → pause. (_backend_stop_after_failure only sets events, no DB
-    # write, so an in-memory copy suffices for the unattended variant.)
     manual = _persist_flow_and_run(spec)
     rc_manual = RunController(
         run=manual, spec=spec, flow_description="d",
@@ -2125,15 +2124,15 @@ def test_backend_failure_pauses_manual_but_terminates_unattended(fake_lookup) ->
     assert rc_manual._pause_evt.is_set()
     assert not rc_manual._cancel_evt.is_set()
 
-    # Unattended run (e.g. delegated / scheduled / MCP) → terminate.
+    # Unattended (delegated / scheduled / MCP) also PAUSES on failure.
     unattended = manual.model_copy(update={"inputs": {"_csflow_unattended": "true"}})
     rc_unatt = RunController(
         run=unattended, spec=spec, flow_description="d",
         worktree_lookup=fake_lookup, snapshot_provider=_empty_snapshots,
     )
     rc_unatt._backend_stop_after_failure(detail="boom")
-    assert rc_unatt._cancel_evt.is_set()
-    assert not rc_unatt._pause_evt.is_set()
+    assert rc_unatt._pause_evt.is_set()
+    assert not rc_unatt._cancel_evt.is_set()
 
 
 @pytest.mark.asyncio

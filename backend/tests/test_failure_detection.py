@@ -104,6 +104,21 @@ def test_leader_inbox_failed() -> None:
     assert "env broken" in failures[0].detail
 
 
+def test_leader_inbox_failed_fires_even_when_task_completed() -> None:
+    """A FAILED:<tid> report is authoritative even if the node is marked
+    completed (an agent may finish the ClawTeam task yet report its work failed).
+    The scheduler must still flag it so the Flow pauses instead of advancing."""
+    snaps = [_snap(status="completed")]
+    failures = F.detect_failures(
+        team_name="csflow-x",
+        flow_tasks={"t1": _ftask()}, snapshots=snaps,
+        leader_agent_id="leader",
+        leader_inbox_messages=["FAILED: t1: work broke after commit"],
+    )
+    assert len(failures) == 1
+    assert failures[0].reason == F.FailureReason.leader_inbox_failed
+
+
 def test_leader_inbox_dedup_with_other_signals() -> None:
     snaps = [_snap(metadata={"csflow_failed": "boom"})]
     failures = F.detect_failures(

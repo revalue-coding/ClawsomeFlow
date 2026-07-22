@@ -499,20 +499,16 @@ class RunController:
         return self._pause_evt.is_set() and not self._cancel_evt.is_set()
 
     def _backend_stop_after_failure(self, *, detail: str) -> None:
-        """Stop the run after a backend-detected failure.
+        """A detected node failure ALWAYS pauses the Flow (never terminates).
 
-        A **manual** (attended) run PAUSES — the human resumes / terminates, and
-        the failed task is reset to pending on resume so it re-runs. An
-        **unattended** run (scheduled / MCP / delegated) has NO human in the loop,
-        so it must reach a TERMINAL status instead: pausing it would strand its
-        caller forever (the delegate callback / run-notify webhook / scheduled
-        report only fire on a terminal status). This preserves the pre-pause
-        behaviour for unattended runs — the caller always gets a result.
+        The user must fix the problem and then 继续执行 — so this holds even for
+        unattended (scheduled / delegated / MCP) runs: a genuine failure needs
+        human attention, so it is NEVER auto-resumed (only a ``drain`` pause is;
+        the failure reason is ``failure`` ≠ ``drain``). The failed node is reset
+        to pending so it re-runs on resume, and its downstream tasks are never
+        dispatched (their dependency is no longer completed).
         """
-        if run_is_unattended(self.run):
-            self.cancel()
-        else:
-            self.pause(reason=_PAUSE_REASON_FAILURE, detail=detail)
+        self.pause(reason=_PAUSE_REASON_FAILURE, detail=detail)
 
     def _backend_stop_after_internal_error(self, *, detail: str) -> None:
         """Scenario-9 stop (scheduler exception in the loop).
@@ -1500,6 +1496,13 @@ class RunController:
             activity = activity or opened_eager
 
         # 4. Dispatch the (potentially updated) ready set.
+        # If a stop was requested this tick (e.g. a node just reported FAILED and
+        # `_handle_failure` paused the run), do NOT start any new dispatch — the
+        # loop is about to exit and downstream tasks must never be dispatched
+        # after a failure. (Resetting the failed node to pending already removes
+        # its downstream from the ready set; this is the belt-and-suspenders.)
+        if self._stop_requested():
+            return activity
         ready = self._ready_tasks()
         if ready:
             dispatchable, checkpoint_target = self._partition_ready_tasks_for_checkpoint(ready)
@@ -2777,15 +2780,61 @@ class RunController:
 
     async def _handle_failure(self, rec: FailureRecord) -> None:
         book = self._tasks.get(rec.task_id)
-        if book is None or book.state == _TaskState.completed:
+        if book is None:
             return
         agent = self._agents.get(rec.agent_id) or self._agents.get(book.task.owner_agent_id)
         if agent is None:
             return
+        # An EXPLICIT worker/receipt failure report (a node said it could not
+        # complete: the FAILED:<tid> inbox signal, or the csflow_failed metadata
+        # marker) is authoritative EVEN IF the node is marked ``completed`` — an
+        # agent may finish the ClawTeam task yet report its WORK failed. A
+        # non-explicit signal (timeout) on an already-completed task is ignored.
+        explicit = rec.reason.value in ("leader_inbox_failed", "worker_reported")
+        if book.state == _TaskState.completed and not explicit:
+            return
+        book.last_failure = rec
+        if explicit:
+            # Do NOT retry and do NOT advance to downstream tasks. Reset the node
+            # to pending (re-dispatchable on 继续执行 — and this also blocks its
+            # downstream, whose dependency is no longer completed) and PAUSE
+            # immediately so the user can fix the problem. The pause is
+            # reason=failure → never auto-resumed, even for unattended runs.
+            synced = await self._reset_clawteam_task(
+                book.task.id, locked_by=rec.agent_id or agent.id,
+            )
+            if not synced:
+                self._emit_event(
+                    "task_status_sync_failed", agent_id=agent.id,
+                    task_id=book.task.id,
+                    payload={"target_status": "pending", "context": "explicit_failure_reset"},
+                )
+            book.state = _TaskState.pending
+            book.dispatched_at = None
+            self.dispatch_clock.reset(book.task.id)
+            self._failed_task_ids.add(book.task.id)
+            self._emit_event(
+                "task_failure_detected", agent_id=agent.id, task_id=book.task.id,
+                payload={
+                    "reason": rec.reason.value, "detail": rec.detail,
+                    "on_failure": agent.on_failure.value,
+                    "effective_action": "pause",
+                },
+            )
+            self._emit_event(
+                "task_failed", agent_id=agent.id, task_id=book.task.id,
+                payload={
+                    "reason": rec.reason.value, "detail": rec.detail,
+                    "effective_action": "pause", "reset_to_pending": True,
+                },
+            )
+            self._backend_stop_after_failure(
+                detail=f"task {book.task.id} failed ({rec.reason.value}): {rec.detail}"[:1000],
+            )
+            return
         decision = apply_on_failure(
             record=rec, agent=agent, current_retry_count=book.retries,
         )
-        book.last_failure = rec
         # User-visible failure diagnosis event (also persisted in RunEvent stream)
         # so transient failures (that may later retry successfully) are still
         # visible in UI/history with concrete reason + detail.

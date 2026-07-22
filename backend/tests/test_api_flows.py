@@ -332,6 +332,28 @@ def test_update_blocked_by_active_run(client: TestClient, repo: str) -> None:
     assert client.get(f"/api/flows/{flow_id}").json()["version"] == 1
 
 
+def test_update_blocked_by_paused_run(client: TestClient, repo: str) -> None:
+    """Editing a Flow while one of its Runs is PAUSED is refused — the paused
+    Run's compiled team + worktrees are tied to the current spec, so an edit
+    would desync the resume. (paused is non-terminal → counted as active.)"""
+    flow_id = client.post("/api/flows", json=_flow_payload(repo)).json()["id"]
+    get_storage().run_create(
+        FlowRun(
+            flow_id=flow_id,
+            flow_version=1,
+            team_name=f"csflow-{flow_id[-8:]}",
+            status=RunStatus.paused,
+            user="alice",
+        )
+    )
+    payload = _flow_payload(repo, name="edited")
+    payload["version"] = 1
+    resp = client.put(f"/api/flows/{flow_id}", json=payload)
+    assert resp.status_code == 409
+    assert resp.json()["error"] == "RUNS_IN_PROGRESS"
+    assert client.get(f"/api/flows/{flow_id}").json()["version"] == 1
+
+
 def test_delete_blocked_by_schedule(
     client: TestClient, repo: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
