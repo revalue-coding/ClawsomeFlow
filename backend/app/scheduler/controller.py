@@ -523,18 +523,28 @@ class RunController:
         # general re-derivation point — no per-scenario logic:
         #   * completed  → keep completed (+ pre-seed the book & audit set so the
         #     first tick doesn't re-emit task_completed / re-audit finished work);
-        #   * in_progress owned by a LOCAL agent → its tmux executor was killed at
-        #     pause and can never finish on its own, so reset to pending → it
-        #     re-dispatches into its existing worktree on the first tick;
-        #   * in_progress owned by an EXTERNAL node → its remote/human/webhook
-        #     executor was NOT killed; the outstanding receipt ticket resolves it,
-        #     so leave it (ClawTeam status is the source of truth for
-        #     already-arrived vs still-waiting) — never re-dispatched;
-        #   * pending / blocked → leave (the tick dispatches ready ones).
+        #   * LOCAL agent, NOT completed and runnable (all deps completed) →
+        #     reset to pending so it re-runs from scratch in its existing
+        #     worktree. This deliberately covers BOTH ``in_progress`` (its tmux
+        #     executor was killed at pause) AND ``blocked`` tasks whose deps are
+        #     done — i.e. a task a detected FAILURE marked blocked before the
+        #     pause. Guaranteeing every such task can restart from pending is the
+        #     invariant that makes resume work regardless of WHY the backend
+        #     stopped (interrupt or failure) — no per-cause logic.
+        #   * LOCAL agent still waiting on incomplete deps → leave (not runnable
+        #     yet; the tick dispatches it once its deps complete).
+        #   * EXTERNAL node in_progress → leave: its remote/human/webhook executor
+        #     was NOT killed; the outstanding receipt ticket resolves it (ClawTeam
+        #     status is the source of truth for already-arrived vs still-waiting)
+        #     — never re-dispatched.
         try:
             snaps = await self._fetch_snapshots()
         except Exception:  # pragma: no cover - defensive
             snaps = []
+        completed_ids = {
+            s.task_id for s in snaps or []
+            if (s.status or "").strip().lower() == "completed"
+        }
         reset_task_ids: list[str] = []
         for s in snaps or []:
             book = self._tasks.get(s.task_id)
@@ -545,20 +555,35 @@ class RunController:
                 book.state = _TaskState.completed
                 self._completed_audited.add(s.task_id)
                 continue
-            if status == "in_progress":
-                owner = (
-                    self._agents.get(s.owner_agent_id)
-                    or self._agents.get(book.task.owner_agent_id)
-                )
-                if owner is not None and owner.kind == AgentKind.external:
-                    book.state = _TaskState.in_progress
-                    continue
+            owner = (
+                self._agents.get(s.owner_agent_id)
+                or self._agents.get(book.task.owner_agent_id)
+            )
+            # ONLY an in-flight EXTERNAL task is left untouched — it holds a live
+            # receipt ticket that will resolve it. A FAILED external task (blocked,
+            # ticket already consumed) falls through to the runnable-reset rule
+            # below and is re-dispatched (fresh ticket / notification) like any
+            # other node, so no kind of task can strand the resume.
+            if (
+                owner is not None
+                and owner.kind == AgentKind.external
+                and status == "in_progress"
+            ):
+                book.state = _TaskState.in_progress
+                continue
+            # Non-completed. Reset to pending if it is runnable now: ``in_progress``
+            # (interrupted — always had its deps met) or a failure-``blocked`` task
+            # whose deps are all completed. A task still gated on incomplete deps is
+            # left as-is.
+            deps_done = all(d in completed_ids for d in book.task.depends_on)
+            if status == "in_progress" or (status == "blocked" and deps_done):
                 synced = await self._reset_clawteam_task(
                     s.task_id, locked_by=s.owner_agent_id or book.task.owner_agent_id,
                 )
                 book.state = _TaskState.pending
                 book.dispatched_at = None
                 self.dispatch_clock.reset(s.task_id)
+                self._failed_task_ids.discard(s.task_id)
                 reset_task_ids.append(s.task_id)
                 if not synced:
                     self._emit_event(
@@ -567,6 +592,8 @@ class RunController:
                         task_id=s.task_id,
                         payload={"target_status": "pending", "context": "resume_reset"},
                     )
+            elif status == "blocked":
+                book.state = _TaskState.blocked
         resumed_agents: list[str] = []
         for agent in self._agents.values():
             if agent.kind == AgentKind.external:

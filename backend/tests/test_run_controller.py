@@ -2001,10 +2001,12 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
 ) -> None:
     """prepare_resume is the single re-derivation point after a pause.
 
-    From the fresh ClawTeam snapshot: completed stays completed; an in_progress
-    LOCAL task (its tmux executor was killed at pause) is reset to pending so it
-    re-dispatches; an in_progress EXTERNAL task is left (its outstanding receipt
-    ticket resolves it — never re-dispatched).
+    From the fresh ClawTeam snapshot: completed stays completed; ANY runnable
+    non-completed LOCAL task is reset to pending so it re-runs — covering both an
+    interrupted ``in_progress`` task AND a failure-``blocked`` task whose deps are
+    done (so a failure-paused node reliably restarts). A ``blocked`` task still
+    gated on incomplete deps is left blocked. An in_progress EXTERNAL task is left
+    (its outstanding receipt ticket resolves it — never re-dispatched).
     """
     spec = FlowSpec(
         agents=[
@@ -2021,6 +2023,12 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
                      description="", depends_on=[]),
             FlowTask(id="t_ext", owner_agent_id="ext", subject="x",
                      description="", depends_on=[]),
+            # Failure-blocked, deps satisfied → must re-run from pending.
+            FlowTask(id="t_failed", owner_agent_id="alice", subject="x",
+                     description="", depends_on=[]),
+            # Blocked, waiting on an incomplete dep (t_local) → stays blocked.
+            FlowTask(id="t_depblk", owner_agent_id="alice", subject="x",
+                     description="", depends_on=["t_local"]),
             FlowTask(id="ts", owner_agent_id="leader", subject="y",
                      description="", depends_on=["t_local"], is_leader_summary=True),
         ],
@@ -2051,6 +2059,12 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
             TaskSnapshot(task_id="t_ext", owner_agent_id="ext",
                          status="in_progress", locked_by_agent=None,
                          metadata={}, dispatched_at_epoch=0),
+            TaskSnapshot(task_id="t_failed", owner_agent_id="alice",
+                         status="blocked", locked_by_agent=None,
+                         metadata={}, dispatched_at_epoch=None),
+            TaskSnapshot(task_id="t_depblk", owner_agent_id="alice",
+                         status="blocked", locked_by_agent=None,
+                         metadata={}, dispatched_at_epoch=None),
         ]
 
     rc = RunController(
@@ -2064,20 +2078,22 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
     )
     await rc.prepare_resume()
 
+    def _reset_to_pending(flow_id: str) -> bool:
+        ct = compile_result.flow_to_clawteam[flow_id]
+        return any(u["task_id"] == ct and u.get("status") == "pending" for u in updates)
+
     # Local in_progress → reset to pending (re-dispatches on first tick).
     assert rc._tasks["t_local"].state == _TaskState.pending
-    assert any(
-        u["task_id"] == compile_result.flow_to_clawteam["t_local"]
-        and u.get("status") == "pending"
-        for u in updates
-    )
-    # External in_progress → left as-is; NOT reset (no task_update to pending).
+    assert _reset_to_pending("t_local")
+    # Failure-blocked with deps done → reset to pending (the node re-runs).
+    assert rc._tasks["t_failed"].state == _TaskState.pending
+    assert _reset_to_pending("t_failed")
+    # Blocked on an incomplete dep → left blocked (not runnable yet).
+    assert rc._tasks["t_depblk"].state == _TaskState.blocked
+    assert not _reset_to_pending("t_depblk")
+    # External in_progress → left as-is; NOT reset.
     assert rc._tasks["t_ext"].state == _TaskState.in_progress
-    assert not any(
-        u["task_id"] == compile_result.flow_to_clawteam["t_ext"]
-        and u.get("status") == "pending"
-        for u in updates
-    )
+    assert not _reset_to_pending("t_ext")
 
 
 @pytest.mark.asyncio
