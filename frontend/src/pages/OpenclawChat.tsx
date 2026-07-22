@@ -30,6 +30,7 @@ import { useTranslation } from "react-i18next";
 import {
   ApiError,
   ChatAttachmentMeta,
+  ChatHistoryMessage,
   isNetworkError,
   ExternalOpenclawImportCandidate,
   ExternalOpenclawImportFailure,
@@ -53,7 +54,7 @@ import {
 } from "@/components/ui";
 import { useDialog } from "@/components/dialog";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
-import { CopyButton, NewMessagesDivider, PendingReply } from "@/components/ChatBubble";
+import { CopyButton, NewMessagesDivider, PendingReply, SessionDivider } from "@/components/ChatBubble";
 import { AgentCardAvatar } from "@/components/AgentCardAvatar";
 import {
   AgentManagementHeader,
@@ -65,7 +66,6 @@ import { cn } from "@/lib/cn";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
 import { alertIfNativeDirectoryBlocked, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
 import {
-  clearChatHistory,
   formatChatTime,
   loadChatHistory,
   loadLastSeenCount,
@@ -79,6 +79,8 @@ import {
   reentryDividerIndex,
   turnDividerIndex,
   displayChatMessages,
+  isSessionDivider,
+  newClientMessageId,
 } from "@/lib/chatHistory";
 import { useSessionBackedModalFlag, useSessionBackedState } from "@/lib/sessionState";
 import { useOpRecovery } from "@/lib/useOpRecovery";
@@ -96,6 +98,26 @@ interface Message {
   content: string;
   attachments?: ChatAttachmentMeta[];
   ts?: number;
+  /** Stable server id (persisted rows); the render keys + dedup off it. */
+  id?: number;
+  /** "session_divider" for the persistent reset marker. */
+  kind?: string;
+  /** Stable client id for optimistic rows before the server id arrives. */
+  cid?: string;
+}
+
+/** Map a server chat-history row into a local Message, carrying the stable id +
+ *  kind so render keys and reconcile are identity-based. */
+function serverMsgToMessage(m: ChatHistoryMessage): Message {
+  return {
+    role: m.role,
+    content:
+      m.role === "assistant" ? normalizeAssistantContent(m.content) : m.content,
+    attachments: m.attachments ?? [],
+    ts: m.ts,
+    id: m.id,
+    kind: m.kind,
+  };
 }
 
 type SettingsTab = "skills" | "cron" | "hooks" | "agents";
@@ -2462,24 +2484,11 @@ function ChatRoom({
       try {
         const hist = await api.getOpenclawAgentChatHistory(agentId);
         if (cancelled) return;
-        const server: Message[] = hist.messages.map((m) => ({
-          role: m.role,
-          content:
-            m.role === "assistant"
-              ? normalizeAssistantContent(m.content)
-              : m.content,
-          attachments: m.attachments ?? [],
-          ts: m.ts,
-        }));
-        // Prefer the server-recorded timestamp; only fall back to the local cache
-        // (matched by position + content) for rows the server predates.
-        const merged = reconcileTranscript(cached, server).map((m, i) => {
-          if (typeof m.ts === "number") return m;
-          const c = cached[i];
-          return c && c.role === m.role && c.content === m.content && c.ts
-            ? { ...m, ts: c.ts }
-            : m;
-        });
+        const server: Message[] = hist.messages.map(serverMsgToMessage);
+        // Server rows carry the authoritative ts; the reconcile keeps only a
+        // genuine in-flight tail (which already carries a client ts), so no
+        // positional ts-backfill is needed.
+        const merged = reconcileTranscript(cached, server);
         setMessages(merged);
         if (merged.length > 0) saveChatHistory(agentId, merged);
         // Draw the "new messages" divider above anything that arrived while the
@@ -2572,15 +2581,7 @@ function ChatRoom({
       try {
         const hist = await api.getOpenclawAgentChatHistory(agentId);
         if (cancelled) return;
-        const server: Message[] = hist.messages.map((m) => ({
-          role: m.role,
-          content:
-            m.role === "assistant"
-              ? normalizeAssistantContent(m.content)
-              : m.content,
-          attachments: m.attachments ?? [],
-          ts: m.ts,
-        }));
+        const server: Message[] = hist.messages.map(serverMsgToMessage);
         const last = server[server.length - 1];
         if (last && last.role === "assistant" && last.content.trim() !== "") {
           setMessages(server);
@@ -2709,11 +2710,12 @@ function ChatRoom({
               content: text,
               attachments: turnAttachments,
               ts: Date.now(),
+              cid: newClientMessageId(),
             },
           ]
         : cleaned;
       // Add an empty assistant message to stream into (timestamped once it lands).
-      return [...base, { role: "assistant" as const, content: "" }];
+      return [...base, { role: "assistant" as const, content: "", cid: newClientMessageId() }];
     });
     scrollToBottom(); // the user just acted — jump to the latest
     const controller = new AbortController();
@@ -2760,6 +2762,7 @@ function ChatRoom({
               setMessages((m) => {
                 const out = m.slice();
                 out[out.length - 1] = {
+                  ...out[out.length - 1],
                   role: "assistant",
                   content: out[out.length - 1].content + delta,
                   ts: Date.now(),
@@ -2784,6 +2787,7 @@ function ChatRoom({
         setMessages((m) => {
           const out = m.slice();
           out[out.length - 1] = {
+            ...out[out.length - 1],
             role: "assistant",
             content: `(error) ${e instanceof Error ? e.message : String(e)}`,
             ts: Date.now(),
@@ -2804,6 +2808,7 @@ function ChatRoom({
           const last = out[out.length - 1];
           if (last && last.role === "assistant" && !last.content) {
             out[out.length - 1] = {
+              ...last,
               role: "assistant",
               content: t("chat.stopped"),
               ts: Date.now(),
@@ -2816,15 +2821,7 @@ function ChatRoom({
         // buffering). Pull authoritative history once the turn finishes.
         try {
           const hist = await api.getOpenclawAgentChatHistory(agentId);
-          const server: Message[] = hist.messages.map((m) => ({
-            role: m.role,
-            content:
-              m.role === "assistant"
-                ? normalizeAssistantContent(m.content)
-                : m.content,
-            attachments: m.attachments ?? [],
-            ts: m.ts,
-          }));
+          const server: Message[] = hist.messages.map(serverMsgToMessage);
           const last = server[server.length - 1];
           if (last && last.role === "assistant") {
             setMessages((prev) => {
@@ -2896,9 +2893,15 @@ function ChatRoom({
     try {
       await api.resetOpenclawAgentChat(agentId);
       setRecovering(false);
-      setMessages([]);
       setNewDividerAt(-1);
-      clearChatHistory(agentId);
+      // Reset starts a fresh backend session but KEEPS the transcript, now with
+      // a session-divider row. Re-fetch so the divider + prior history render
+      // instead of wiping the panel.
+      const hist = await api.getOpenclawAgentChatHistory(agentId);
+      const server: Message[] = hist.messages.map(serverMsgToMessage);
+      setMessages(server);
+      saveChatHistory(agentId, server);
+      saveLastSeenCount(agentId, settledCount(server));
     } catch (e) {
       setActionError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -3084,22 +3087,26 @@ function ChatRoom({
             className="min-h-[280px] flex-1 overflow-auto px-5 py-4 space-y-4 bg-ink-50/40"
           >
             {displayMessages.map((m, i, list) => (
-              <Fragment key={i}>
+              <Fragment key={m.id ?? m.cid ?? i}>
                 {i === newDividerAt && (
                   <div ref={newDividerRef}>
                     <NewMessagesDivider label={t("chat.newMessages")} />
                   </div>
                 )}
-                <Bubble
-                  msg={m}
-                  pending={
-                    (streaming || recovering) &&
-                    i === list.length - 1 &&
-                    m.role === "assistant" &&
-                    !m.content
-                  }
-                  noTextReply={t("chat.noTextReply")}
-                />
+                {isSessionDivider(m) ? (
+                  <SessionDivider label={t("chat.sessionDivider")} />
+                ) : (
+                  <Bubble
+                    msg={m}
+                    pending={
+                      (streaming || recovering) &&
+                      i === list.length - 1 &&
+                      m.role === "assistant" &&
+                      !m.content
+                    }
+                    noTextReply={t("chat.noTextReply")}
+                  />
+                )}
               </Fragment>
             ))}
             {!streaming &&

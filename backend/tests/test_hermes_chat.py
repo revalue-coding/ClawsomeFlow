@@ -284,7 +284,7 @@ def test_finalize_persists_discovered_session_id_after_legacy_continue() -> None
     job.final_text = "ok"
     job.hermes_session_id = "20260101_000000_legacy"
 
-    asyncio.run(hermes_api._finalize_chat_history(job, "sk-bind"))
+    asyncio.run(hermes_api._finalize_chat_history(job, "sk-bind", "conv-bind"))
 
     assert chat_sessions.get_session_id("sk-bind") == "20260101_000000_legacy"
 
@@ -676,12 +676,17 @@ def test_reset_endpoint_clears_persisted_hermes_session(
     assert chat_sessions.get_session_id(sk) is None
 
 
-def test_chat_endpoint_legacy_resume_without_persisted_session_id(
+def test_chat_endpoint_resume_keys_off_saved_session_id_not_history(
     client: TestClient,
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upgrade compat: UI history exists but no saved Hermes id → resume + ``-c``."""
+    """Resume is decided SOLELY by a saved Hermes session id, not by UI history.
+
+    Reset now KEEPS the transcript (appends a session_divider instead of
+    clearing), so history length can no longer signal resume — otherwise the
+    turn right after a reset would wrongly continue the old session. Here
+    history exists but no id is saved → the next turn starts fresh."""
     monkeypatch.setenv("CSFLOW_USER", "alice")
     get_storage().hermes_create(
         HermesAgent(id="math", name="Math", profile_root="x", created_by_user="alice")
@@ -714,7 +719,7 @@ def test_chat_endpoint_legacy_resume_without_persisted_session_id(
     )
 
     assert r.status_code == 200, r.text
-    assert seen["resume"] is True
+    assert seen["resume"] is False
     assert seen["resume_session_id"] is None
 
 

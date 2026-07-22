@@ -538,6 +538,22 @@ def test_api_open_dashboard(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     assert r.json()["url"] == "http://127.0.0.1:9119/chat"
 
 
+def test_interpret_gateway_status_running() -> None:
+    ok, msg = svc._interpret_gateway_status("✓ User gateway service is running\n")
+    assert ok is True
+    assert "running" in msg
+
+
+def test_interpret_gateway_status_startup_issue() -> None:
+    text = (
+        "✗ User gateway service is stopped\n"
+        "  ⚠ Last startup issue: telegram: token already in use\n"
+    )
+    ok, msg = svc._interpret_gateway_status(text)
+    assert ok is False
+    assert "token already in use" in msg
+
+
 def test_start_gateway_runs_install_then_start(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -546,16 +562,42 @@ def test_start_gateway_runs_install_then_start(monkeypatch: pytest.MonkeyPatch) 
         if args == ["gateway", "install"]:
             return 0, "installed", ""
         if args == ["gateway", "start"]:
-            return 0, "gateway listening at http://127.0.0.1:9120", ""
+            return 0, "✓ User service started", ""
+        if args == ["gateway", "status"]:
+            return 0, "✓ User gateway service is running\n", ""
         raise AssertionError(f"unexpected args: {args}")
 
     monkeypatch.setattr(svc, "_hermes_profile", _fake_profile)
+    monkeypatch.setattr(svc.time, "sleep", lambda _sec: None)
     msg = svc.start_gateway("helper")
     assert calls[0][0] == ["helper", "gateway", "install"]
     assert calls[0][1]["stdin"] == "y\ny\n"
     assert calls[1][0] == ["helper", "gateway", "start"]
     assert "stdin" not in calls[1][1]
-    assert "gateway listening" in msg
+    assert calls[2][0] == ["helper", "gateway", "status"]
+    assert "running" in msg
+
+
+def test_start_gateway_verify_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_profile(agent_id: str, args: list[str], **_kw):  # noqa: ANN001
+        if args == ["gateway", "install"]:
+            return 0, "installed", ""
+        if args == ["gateway", "start"]:
+            return 0, "✓ User service started", ""
+        if args == ["gateway", "status"]:
+            return (
+                0,
+                "✗ User gateway service is stopped\n"
+                "  ⚠ Last startup issue: telegram: token already in use\n",
+                "",
+            )
+        return 1, "", "unexpected"
+
+    monkeypatch.setattr(svc, "_hermes_profile", _fake_profile)
+    monkeypatch.setattr(svc.time, "sleep", lambda _sec: None)
+    with pytest.raises(svc.ProfileOpFailed) as exc:
+        svc.start_gateway("helper")
+    assert "token already in use" in str(exc.value)
 
 
 def test_start_gateway_start_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:

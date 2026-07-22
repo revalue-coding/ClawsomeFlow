@@ -716,6 +716,10 @@ export interface ChatHistoryMessage {
   attachments?: ChatAttachmentMeta[];
   /** Epoch ms the message was recorded server-side (authoritative timestamp). */
   ts?: number;
+  /** Stable server id — the UI keys render + dedup off it. */
+  id?: number;
+  /** "session_divider" for the persistent reset marker; normal messages omit it. */
+  kind?: string;
 }
 
 export type ChatAttachmentRoute = "path_injection" | "native";

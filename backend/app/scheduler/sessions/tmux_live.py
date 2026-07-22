@@ -96,7 +96,7 @@ _CODEX_TUI_OVERRIDES: tuple[str, ...] = (
 #       qwen 0.18   → gemini fork: ``--approval-mode yolo``; ``--continue`` only
 #                     works when ``--chat-recording`` was set at spawn, so we add
 #                     it to both fresh and resume.
-#       kimi 1.47   → ``--yolo``; resume ``--continue``.
+#       kimi-code   → ``--yolo``; resume ``--continue`` (official ``install.sh``).
 #       opencode 1.17 → has NO ``--yolo`` (rejects unknown top-level flags → spawn
 #                     would exit 1); interactive auto-approval is config-only
 #                     (``"permission": "allow"`` written by opencode_config), so we

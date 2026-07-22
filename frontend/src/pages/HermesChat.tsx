@@ -34,10 +34,9 @@ import {
   AgentToolbarIconButton,
   AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
-import { ChatBubble, NewMessagesDivider } from "@/components/ChatBubble";
+import { ChatBubble, NewMessagesDivider, SessionDivider } from "@/components/ChatBubble";
 import { DesktopIcon, EditIcon, ExternalLinkIcon, RefreshIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import {
-  clearChatHistory,
   loadChatHistory,
   loadLastSeenCount,
   normalizeAssistantContent,
@@ -50,6 +49,8 @@ import {
   reentryDividerIndex,
   turnDividerIndex,
   displayChatMessages,
+  isSessionDivider,
+  newClientMessageId,
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
@@ -1398,6 +1399,26 @@ interface ChatMsg {
   content: string;
   attachments?: ChatAttachmentMeta[];
   ts?: number;
+  /** Stable server id (persisted rows); the render keys + dedup off it. */
+  id?: number;
+  /** "session_divider" for the persistent reset marker. */
+  kind?: string;
+  /** Stable client id for optimistic rows before the server id arrives. */
+  cid?: string;
+}
+
+/** Map a server chat-history row into a local ChatMsg, carrying the stable id +
+ *  kind so render keys and reconcile are identity-based. */
+function serverMsgToChatMsg(m: ChatHistoryMessage): ChatMsg {
+  return {
+    role: m.role,
+    content:
+      m.role === "assistant" ? normalizeAssistantContent(m.content) : m.content,
+    attachments: m.attachments ?? [],
+    ts: m.ts,
+    id: m.id,
+    kind: m.kind,
+  };
 }
 
 type GatewayNotice = {
@@ -1666,6 +1687,9 @@ function ChatRoom({ agentId }: { agentId: string }) {
         content: m.content,
         attachments: m.attachments ?? [],
         ts: m.ts,
+        id: m.id,
+        kind: m.kind,
+        cid: m.cid,
       }));
       if (cached.length > 0) setMessages(cached);
       try {
@@ -1681,24 +1705,10 @@ function ChatRoom({ agentId }: { agentId: string }) {
         setProfileRoot(detail.profileRoot);
         // Server is authoritative: a tab switch can leave the cache holding a
         // stale empty assistant bubble while the real answer sits on the server.
-        const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
-          role: m.role,
-          content:
-            m.role === "assistant"
-              ? normalizeAssistantContent(m.content)
-              : m.content,
-          attachments: m.attachments ?? [],
-          ts: m.ts,
-        }));
-        // Prefer the server-recorded timestamp; only fall back to the local cache
-        // (matched by position + content) for rows the server predates.
-        const merged = reconcileTranscript(cached, server).map((m, i) => {
-          if (typeof m.ts === "number") return m;
-          const c = cached[i];
-          return c && c.role === m.role && c.content === m.content && c.ts
-            ? { ...m, ts: c.ts }
-            : m;
-        });
+        const server: ChatMsg[] = hist.messages.map(serverMsgToChatMsg);
+        // Server rows carry the authoritative ts; the reconcile keeps only a
+        // genuine in-flight tail (which already carries a client ts).
+        const merged = reconcileTranscript(cached, server);
         setMessages(merged);
         if (merged.length > 0) saveChatHistory(chatScope, merged);
         // Draw the "new messages" divider above anything that arrived while the
@@ -1818,15 +1828,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
       try {
         const hist = await api.getHermesAgentChatHistory(agentId);
         if (cancelled) return;
-        const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
-          role: m.role,
-          content:
-            m.role === "assistant"
-              ? normalizeAssistantContent(m.content)
-              : m.content,
-          attachments: m.attachments ?? [],
-          ts: m.ts,
-        }));
+        const server: ChatMsg[] = hist.messages.map(serverMsgToChatMsg);
         const last = server[server.length - 1];
         if (last && last.role === "assistant" && last.content.trim() !== "") {
           setMessages(server);
@@ -1843,7 +1845,12 @@ function ChatRoom({ agentId }: { agentId: string }) {
         const next = [...prev];
         const ts = Date.now();
         if (next.length > 0 && next[next.length - 1].role === "assistant") {
-          next[next.length - 1] = { role: "assistant", content: normalized, ts };
+          next[next.length - 1] = {
+            ...next[next.length - 1],
+            role: "assistant",
+            content: normalized,
+            ts,
+          };
         } else {
           next.push({ role: "assistant", content: normalized, ts });
         }
@@ -2009,10 +2016,11 @@ function ChatRoom({ agentId }: { agentId: string }) {
               content: message,
               attachments: turnAttachments,
               ts: Date.now(),
+              cid: newClientMessageId(),
             },
           ]
         : cleaned;
-      return [...base, { role: "assistant" as const, content: "" }];
+      return [...base, { role: "assistant" as const, content: "", cid: newClientMessageId() }];
     });
     scrollToBottom(); // the user just acted — jump to the latest
     const controller = new AbortController();
@@ -2054,6 +2062,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
               setMessages((prev) => {
                 const next = [...prev];
                 next[next.length - 1] = {
+                  ...next[next.length - 1],
                   role: "assistant",
                   content: next[next.length - 1].content + obj.delta,
                   ts: Date.now(),
@@ -2087,6 +2096,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
           const last = next[next.length - 1];
           if (last && last.role === "assistant" && !last.content) {
             next[next.length - 1] = {
+              ...last,
               role: "assistant",
               content: t("chat.stopped"),
               ts: Date.now(),
@@ -2097,15 +2107,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
       } else {
         try {
           const hist = await api.getHermesAgentChatHistory(agentId);
-          const server: ChatMsg[] = hist.messages.map((m: ChatHistoryMessage) => ({
-            role: m.role,
-            content:
-              m.role === "assistant"
-                ? normalizeAssistantContent(m.content)
-                : m.content,
-            attachments: m.attachments ?? [],
-            ts: m.ts,
-          }));
+          const server: ChatMsg[] = hist.messages.map(serverMsgToChatMsg);
           const last = server[server.length - 1];
           if (last && last.role === "assistant") {
             setMessages((prev) => {
@@ -2175,10 +2177,16 @@ function ChatRoom({ agentId }: { agentId: string }) {
     lastTurnDeliveryFailedRef.current = false;
     try {
       await api.resetHermesAgentChat(agentId);
-      clearChatHistory(chatScope);
       setRecovering(false);
-      setMessages([]);
       setNewDividerAt(-1);
+      // Reset starts a fresh Hermes session but KEEPS the transcript, now with
+      // a session-divider row. Re-fetch so the divider + prior history render
+      // instead of wiping the panel.
+      const hist = await api.getHermesAgentChatHistory(agentId);
+      const server: ChatMsg[] = hist.messages.map(serverMsgToChatMsg);
+      setMessages(server);
+      saveChatHistory(chatScope, server);
+      saveLastSeenCount(chatScope, settledCount(server));
     } catch (e) {
       setError(errText(e));
     } finally {
@@ -2330,22 +2338,26 @@ function ChatRoom({ agentId }: { agentId: string }) {
             className="min-h-[280px] flex-1 space-y-4 overflow-auto bg-ink-50/40 px-5 py-4"
           >
             {displayMessages.map((m, i, list) => (
-              <Fragment key={i}>
+              <Fragment key={m.id ?? m.cid ?? i}>
                 {i === newDividerAt && (
                   <div ref={newDividerRef}>
                     <NewMessagesDivider label={t("chat.newMessages")} />
                   </div>
                 )}
-                <ChatBubble
-                  msg={m}
-                  pending={
-                    (sending || recovering) &&
-                    i === list.length - 1 &&
-                    m.role === "assistant" &&
-                    !m.content
-                  }
-                  noTextReply={t("chat.noTextReply")}
-                />
+                {isSessionDivider(m) ? (
+                  <SessionDivider label={t("chat.sessionDivider")} />
+                ) : (
+                  <ChatBubble
+                    msg={m}
+                    pending={
+                      (sending || recovering) &&
+                      i === list.length - 1 &&
+                      m.role === "assistant" &&
+                      !m.content
+                    }
+                    noTextReply={t("chat.noTextReply")}
+                  />
+                )}
               </Fragment>
             ))}
             {!sending &&

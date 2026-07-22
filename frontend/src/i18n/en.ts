@@ -355,6 +355,7 @@ const en = {
     graphLegendTask: "Task",
     graphLegendRoot: "Root task",
     graphLegendCheckpoint: "Checkpoint task",
+    graphLegendExternal: "External execution node",
     graphLegendSummary: "Summary",
     aiDecompose: "AI Decompose Tasks (optional)",
     save: "Save Flow",
@@ -787,6 +788,7 @@ const en = {
     boardProgressDone: "{{count}} done",
     boardProgressWaiting: "{{count}} waiting",
     boardLegendSummary: "Leader summary",
+    boardLegendExternal: "External node",
     boardLegendCheckpoint: "Checkpoint",
     terminal: {
       loading: "Loading subtask terminal output…",
@@ -1038,6 +1040,7 @@ const en = {
     waitingResponse: "Agent is replying…",
     stillThinking: "I'm still thinking — thanks for your patience.",
     newMessages: "New messages below",
+    sessionDivider: "New session",
     copy: "Copy",
     copied: "Copied",
     stop: "Stop",

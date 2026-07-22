@@ -2158,6 +2158,12 @@ async def delete_agent(
     else:
         _ensure_owner(row, user)
     await svc.delete_agent(agent_id, mode=mode, storage=storage)
+    # Persisted chat transcript now outlives the process — drop it so a deleted
+    # agent leaves no orphan history behind (best-effort).
+    try:
+        await chat_history.clear_messages(_conversation_key(user, agent_id))
+    except Exception:  # pragma: no cover - cleanup is best-effort
+        logger.warning("openclaw_chat_history_cleanup_failed", agent_id=agent_id)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2853,6 +2859,10 @@ class ChatMessage(_CamelModel):
     attachments: list[ChatAttachment] | None = None
     # Epoch ms the message was recorded server-side (chat-history responses only).
     ts: int | None = None
+    # Stable server id (chat-history only); the UI keys render + dedup off it.
+    id: int | None = None
+    # "session_divider" for the persistent reset marker; normal messages omit it.
+    kind: str | None = None
 
 
 class ChatAttachment(_CamelModel):
@@ -2882,10 +2892,22 @@ class ChatAttachmentUploadResponse(_CamelModel):
 
 
 def _session_key(user: str, agent_id: str) -> str:
-    """Per-(user, agent) chat session, isolated from Flow dispatch sessions."""
+    """Per-(user, agent) *runtime* chat session (the OpenClaw ``--session-id``).
+
+    Carries the in-memory ``-r{n}`` revision suffix so a reset rotates the
+    OpenClaw context. NOTE: this is deliberately NOT used to key persisted
+    history — use :func:`_conversation_key` for that (revision-free) so a reset
+    keeps the transcript. The revision counter is in-memory (reset on restart),
+    which is harmless now that history is keyed off the stable conversation key.
+    """
     revision = _CHAT_SESSION_REVISIONS.get((user, agent_id), 0)
     suffix = "" if revision <= 0 else f"-r{revision}"
     return f"{openclaw_user_chat_session_id(user, agent_id)}{suffix}"
+
+
+def _conversation_key(user: str, agent_id: str) -> str:
+    """Stable, revision-free key for persisted chat history (UI transcript)."""
+    return openclaw_user_chat_session_id(user, agent_id)
 
 
 def _bump_session_revision(user: str, agent_id: str) -> str:
@@ -3520,6 +3542,7 @@ async def _chat_via_cli(
     agent_id: str,
     payload: ChatPayload,
     session_key: str,
+    conversation_key: str,
     turn: dict[str, str],
 ):
     # Register a progress turn + start the trajectory follower BEFORE running the
@@ -3543,7 +3566,9 @@ async def _chat_via_cli(
             chat_progress.finish_progress(session_key, status="error")
             raise
         assistant_text = _normalize_assistant_text(_extract_chunk_text(response))
-        await chat_history.append_message(session_key, role="assistant", content=assistant_text)
+        await chat_history.append_message(
+            conversation_key, role="assistant", content=assistant_text
+        )
         chat_progress.finish_progress(session_key, status="done", final=assistant_text)
         return response
 
@@ -3555,7 +3580,7 @@ async def _chat_via_cli(
         try:
             response = await _run_completion_once()
             text = _normalize_assistant_text(_extract_chunk_text(response))
-            await chat_history.append_message(session_key, role="assistant", content=text)
+            await chat_history.append_message(conversation_key, role="assistant", content=text)
             chat_progress.finish_progress(session_key, status="done", final=text)
         except ApiError as exc:
             chat_progress.finish_progress(session_key, status="error", error=exc.message)
@@ -3609,7 +3634,7 @@ async def chat_history_view(
     storage: StorageDep,
 ) -> ChatHistoryResponse:
     _ensure_chat_target_access(agent_id, user, storage)
-    rows = await chat_history.list_messages(_session_key(user, agent_id))
+    rows = await chat_history.list_messages(_conversation_key(user, agent_id))
     return ChatHistoryResponse(messages=[ChatMessage(**m) for m in rows])
 
 
@@ -3665,7 +3690,8 @@ async def chat_with_agent(
     row = _ensure_chat_target_access(agent_id, user, storage)
     # NOTE: the workspace is intentionally NOT auto-committed before a chat turn.
     # Committing chat-driven workspace changes is the agent's own responsibility.
-    session_key = _session_key(user, agent_id)
+    session_key = _session_key(user, agent_id)  # runtime --session-id (revisioned)
+    conversation_key = _conversation_key(user, agent_id)  # persisted transcript
     incoming = [m.model_dump(mode="python") for m in payload.messages]
     try:
         turn = _pick_latest_user_message(incoming)
@@ -3691,9 +3717,9 @@ async def chat_with_agent(
 
     # Previous turn may have persisted the user row then failed before an
     # assistant reply — drop that orphan so it cannot linger in UI history.
-    await chat_history.drop_trailing_unanswered_user(session_key)
+    await chat_history.drop_trailing_unanswered_user(conversation_key)
     await chat_history.append_message(
-        session_key,
+        conversation_key,
         role=turn["role"],
         content=original_user_text,
         attachments=_attachments_for_history(
@@ -3705,6 +3731,7 @@ async def chat_with_agent(
         agent_id=agent_id,
         payload=payload,
         session_key=session_key,
+        conversation_key=conversation_key,
         turn=turn,
     )
 
@@ -3727,9 +3754,15 @@ async def reset_chat_session(
     user: UserDep,
     storage: StorageDep,
 ) -> None:
-    """Reset the per-(user, agent) session by sending exactly ``/reset``."""
+    """Reset the per-(user, agent) session by sending exactly ``/reset``.
+
+    Starts a fresh OpenClaw context but KEEPS the persisted transcript, marking
+    the boundary with a ``session_divider`` row (history is keyed off the
+    revision-free conversation key, so a runtime rotation never hides it).
+    """
     _ensure_chat_target_access(agent_id, user, storage)
     session_key = _session_key(user, agent_id)
+    conversation_key = _conversation_key(user, agent_id)
     # Stop any in-flight turn (agent + trajectory follower) before rotating the
     # session, so a reset can't leave a runaway turn writing to the old session.
     chat_progress.kill_turn(session_key)
@@ -3754,7 +3787,9 @@ async def reset_chat_session(
             )
         else:
             raise
-    await chat_history.clear_messages(session_key)
     if should_fallback_rotate:
-        rotated = _bump_session_revision(user, agent_id)
-        await chat_history.clear_messages(rotated)
+        # Rotate the runtime --session-id so the next turn gets a fresh OpenClaw
+        # context (the CLI wouldn't accept /reset). History is unaffected.
+        _bump_session_revision(user, agent_id)
+    # Keep the transcript; mark a new-session boundary for the UI.
+    await chat_history.append_divider(conversation_key)

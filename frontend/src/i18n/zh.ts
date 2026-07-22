@@ -352,6 +352,7 @@ const zh = {
     graphLegendTask: "任务",
     graphLegendRoot: "起始任务",
     graphLegendCheckpoint: "检查点任务",
+    graphLegendExternal: "外部执行节点",
     graphLegendSummary: "Summary",
     aiDecompose: "AI 拆解任务（可选）",
     save: "保存 Flow",
@@ -777,6 +778,7 @@ const zh = {
     boardProgressDone: "{{count}} 已完成",
     boardProgressWaiting: "{{count}} 等待中",
     boardLegendSummary: "Leader 汇总",
+    boardLegendExternal: "外部执行节点",
     boardLegendCheckpoint: "检查点",
     terminal: {
       loading: "正在加载子任务终端输出…",
@@ -1022,6 +1024,7 @@ const zh = {
     waitingResponse: "智能体回复中…",
     stillThinking: "我还在努力思考，请耐心等待",
     newMessages: "以下是新消息",
+    sessionDivider: "新会话",
     copy: "复制",
     copied: "已复制",
     stop: "停止",

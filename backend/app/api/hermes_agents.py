@@ -308,6 +308,10 @@ class ChatMessage(_CamelModel):
     attachments: list[ChatAttachment] | None = None
     # Epoch ms the message was recorded server-side (chat-history responses only).
     ts: int | None = None
+    # Stable server id (chat-history only); the UI keys render + dedup off it.
+    id: int | None = None
+    # "session_divider" for the persistent reset marker; normal messages omit it.
+    kind: str | None = None
 
 
 class ChatHistoryResponse(_CamelModel):
@@ -363,6 +367,17 @@ def _get_owned(agent_id: str, user: str, storage: StorageBackend) -> HermesAgent
 
 
 def _session_key(user: str, agent_id: str) -> str:
+    """Runtime key for the Hermes turn registry + session binding."""
+    return hermes_user_chat_session_id(user, agent_id)
+
+
+def _conversation_key(user: str, agent_id: str) -> str:
+    """Key for persisted chat history (UI transcript).
+
+    Equal to :func:`_session_key` today (Hermes' key is already revision-free),
+    kept separate for parity with OpenClaw and so history/runtime can diverge
+    without touching call sites.
+    """
     return hermes_user_chat_session_id(user, agent_id)
 
 
@@ -725,6 +740,13 @@ async def delete_agent(
         )
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
+    # Drop the persisted chat transcript + session binding so a deleted agent
+    # leaves no orphan history behind (best-effort).
+    try:
+        chat_sessions.clear_session_id(_session_key(user, agent_id))
+        await chat_history.clear_messages(_conversation_key(user, agent_id))
+    except Exception:  # pragma: no cover - cleanup is best-effort
+        logger.warning("hermes_chat_history_cleanup_failed", agent_id=agent_id)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1064,7 +1086,7 @@ async def chat_history_view(
     agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep,
 ) -> ChatHistoryResponse:
     _get_owned(agent_id, user, storage)
-    rows = await chat_history.list_messages(_session_key(user, agent_id))
+    rows = await chat_history.list_messages(_conversation_key(user, agent_id))
     return ChatHistoryResponse(messages=[ChatMessage(**m) for m in rows])
 
 
@@ -1094,7 +1116,9 @@ async def upload_chat_attachment(
     )
 
 
-async def _finalize_chat_history(job: chat_svc.ChatJob, session_key: str) -> None:
+async def _finalize_chat_history(
+    job: chat_svc.ChatJob, session_key: str, conversation_key: str,
+) -> None:
     """Persist the final answer to chat history when the job completes, even if
     the SSE client disconnected. Skips killed/superseded jobs (status != done),
     so a reset never leaves a ghost reply behind."""
@@ -1106,7 +1130,7 @@ async def _finalize_chat_history(job: chat_svc.ChatJob, session_key: str) -> Non
             chat_sessions.set_session_id(session_key, job.hermes_session_id)
         if snap["final"]:
             await chat_history.append_message(
-                session_key, role="assistant", content=snap["final"],
+                conversation_key, role="assistant", content=snap["final"],
             )
             logger.info(
                 "hermes_chat_history_appended",
@@ -1163,20 +1187,20 @@ async def chat_with_agent(
         )
         runtime_message = injected
 
-    session_key = _session_key(user, agent_id)
+    session_key = _session_key(user, agent_id)  # runtime turn registry + binding
+    conversation_key = _conversation_key(user, agent_id)  # persisted transcript
     # Previous turn may have persisted the user row then failed before an
     # assistant reply — drop that orphan before resume/history decisions so a
     # failed-only transcript cannot force Hermes ``-c`` / resume.
-    await chat_history.drop_trailing_unanswered_user(session_key)
-    # Resume when we have a persisted Hermes session id, or when UI history shows
-    # prior turns (legacy path: no saved id yet → ``-c`` in hermes_chat).
-    # ``/reset`` clears both → next turn starts a fresh Hermes session.
+    await chat_history.drop_trailing_unanswered_user(conversation_key)
+    # Resume ONLY when we have a persisted Hermes session id. Reset now KEEPS the
+    # transcript (it appends a session_divider instead of clearing), so history
+    # length can no longer be used to decide resume — a reset drops the saved id,
+    # which is the sole signal that starts a fresh Hermes session next turn.
     saved_hermes_session_id = chat_sessions.get_session_id(session_key)
-    resume = saved_hermes_session_id is not None or (
-        len(await chat_history.list_messages(session_key)) > 0
-    )
+    resume = saved_hermes_session_id is not None
     await chat_history.append_message(
-        session_key,
+        conversation_key,
         role="user",
         content=message,
         attachments=_attachments_for_history(
@@ -1200,7 +1224,7 @@ async def chat_with_agent(
     # Record the final answer independently of the SSE client's lifetime so a
     # tab switch / disconnect still lands the reply in history (the status poll
     # and next page load recover it).
-    _spawn_detached(_finalize_chat_history(job, session_key))
+    _spawn_detached(_finalize_chat_history(job, session_key, conversation_key))
 
     async def _stream():
         while True:
@@ -1264,15 +1288,15 @@ async def reset_chat(
 ) -> None:
     _get_owned(agent_id, user, storage)
     session_key = _session_key(user, agent_id)
+    conversation_key = _conversation_key(user, agent_id)
     # Kill any in-flight turn FIRST so a "reset" can't leave a runaway hermes
-    # process that later appends a ghost reply into the cleared history.
+    # process that later appends a ghost reply into the transcript.
     chat_svc.kill_chat(session_key)
-    # Hermes' own /new reset starts a fresh session without deleting the old
-    # stored history. Mirror that: forget our binding so the next WebUI turn
-    # creates a new Hermes session, but leave Hermes' session DB/prunable history
-    # intact.
+    # Forget our session binding so the next WebUI turn creates a fresh Hermes
+    # session (resume is now keyed solely off the saved id). KEEP the persisted
+    # transcript and mark the boundary with a session_divider row.
     chat_sessions.clear_session_id(session_key)
-    await chat_history.clear_messages(session_key)
+    await chat_history.append_divider(conversation_key)
 
 
 __all__ = ["router"]

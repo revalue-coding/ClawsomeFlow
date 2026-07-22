@@ -1157,6 +1157,57 @@ def is_managed(agent_id: str, *, storage: StorageBackend) -> bool:
 
 # ``gateway install`` prompts twice on Linux (start now + start on login/boot).
 _GATEWAY_INSTALL_STDIN = "y\ny\n"
+_GATEWAY_STATUS_POLL_ATTEMPTS = 4
+_GATEWAY_STATUS_POLL_INTERVAL_SEC = 1.5
+
+
+def _read_gateway_status_text(agent_id: str) -> str:
+    rc, out, err = _hermes_profile(agent_id, ["gateway", "status"])
+    combined = f"{_strip_ansi(out)}\n{_strip_ansi(err)}".strip()
+    if rc != 0 and not combined:
+        return f"gateway status exited with code {rc}"
+    return combined
+
+
+def _interpret_gateway_status(text: str) -> tuple[bool, str]:
+    """Return (running_ok, human_message). ``gateway start`` can exit 0 while
+    systemd is crash-looping (e.g. Telegram token already bound to another profile)."""
+    issue: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if "Last startup issue:" in line:
+            issue = line.split("Last startup issue:", 1)[1].strip()
+            break
+    running = "User gateway service is running" in text
+    stopped = "User gateway service is stopped" in text
+    if running and not issue:
+        return True, "User gateway service is running"
+    if issue:
+        return False, issue
+    if stopped:
+        return False, "User gateway service is stopped"
+    if "activating (auto-restart)" in text or "Restart pending" in text:
+        return False, "gateway service failed to stay running"
+    if running:
+        return True, "User gateway service is running"
+    tail = next((ln.strip() for ln in reversed(text.splitlines()) if ln.strip()), "")
+    return False, tail or "gateway status could not be verified"
+
+
+def _verify_gateway_running(agent_id: str) -> str:
+    last_text = ""
+    for attempt in range(_GATEWAY_STATUS_POLL_ATTEMPTS):
+        if attempt:
+            time.sleep(_GATEWAY_STATUS_POLL_INTERVAL_SEC)
+        last_text = _read_gateway_status_text(agent_id)
+        ok, msg = _interpret_gateway_status(last_text)
+        if ok:
+            return msg
+    _ok, msg = _interpret_gateway_status(last_text)
+    raise ProfileOpFailed(
+        f"Gateway did not start: {msg}",
+        details={"status": last_text[:2000]},
+    )
 
 
 def start_gateway(agent_id: str) -> str:
@@ -1187,8 +1238,7 @@ def start_gateway(agent_id: str) -> str:
             details={"command": f"hermes -p {aid} gateway start"},
         )
 
-    message = (_strip_ansi(out) or _strip_ansi(err)).strip()
-    return message or "gateway started"
+    return _verify_gateway_running(aid)
 
 
 def restart_gateway(agent_id: str) -> None:

@@ -66,6 +66,22 @@ export function NewMessagesDivider({ label }: { label: string }) {
   );
 }
 
+/** Persistent boundary marking where a "重置对话" (reset) started a new session.
+ *  Unlike {@link NewMessagesDivider} this is part of the stored transcript and
+ *  stays put across reloads. Rendered with a stronger, labelled pill so it reads
+ *  as a durable section break rather than a transient unread marker. */
+export function SessionDivider({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-ink-400">
+      <span className="h-px flex-1 bg-ink-200" />
+      <span className="shrink-0 rounded-full border border-ink-200 bg-ink-50 px-2 py-0.5">
+        {label}
+      </span>
+      <span className="h-px flex-1 bg-ink-200" />
+    </div>
+  );
+}
+
 /** Placeholder shown in the assistant bubble while a turn is still running:
  *  typing dots for the first 10s, then a looping character-by-character
  *  reassurance line so a slow

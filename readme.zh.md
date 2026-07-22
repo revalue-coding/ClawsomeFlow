@@ -14,9 +14,9 @@
   <b>简体中文</b>
 </p>
 
-<p>真实业务的复杂性往往不能只靠一个agent解决，总有人要对接物理世界、审批不可逆操作、或做关键决策，真实的协作也往往跨机器、跨工具，而不是困在一台电脑、一份skill或一次对话里。ClawsomeFlow彻底打破本地agent协作的局限，把协作扩展到远程，扩展到泛agent工具， <b>各类CLI Agent、真人、远程ClawsomeFlow、自定义agent工具，甚至任意一个可以称之为“执行单元”的概念</b> 都能放进一张协作网中，结合Harness工程，实现复杂、长周期项目的有效协同。</p>
+<p>真实业务的复杂性往往不能只靠一个agent解决，总有人要对接物理世界、审批不可逆操作、或做关键决策，真实的协作也往往跨机器、跨工具，而不是困在一台电脑、一份skill或一次对话里。ClawsomeFlow彻底打破本地agent协作的局限，把协作扩展到远程，扩展到泛agent执行单元， <b>各类CLI Agent、真人、远程ClawsomeFlow、自定义agent工具，甚至任意一个可以称之为“执行单元”的概念</b> 都能放进一张协作网中，结合Harness工程，实现复杂、长周期项目的有效协同。</p>
 
-<p>ClawsomeFlow并不打算替代你原有的agent或流程，只会让它更具扩展性！</p>
+<p>ClawsomeFlow并不打算替代你原有的agent或流程，只会让它更具稳健性和扩展性！</p>
 
 <p>
   <a href="#-快速开始">快速开始</a> ·
@@ -219,7 +219,7 @@ csflow mcp print-config --platform hermes     # YAML：mcp_servers: …
 | **Cursor** | `cursor` | TUI | ✅ 完整支持 |
 | **OpenCode** | `opencode` | TUI | 🧪 测试中 |
 | **Gemini CLI** | `gemini` | TUI | 🧪 测试中 |
-| **Kimi CLI** | `kimi` | TUI | 🧪 测试中 |
+| **Kimi CLI** | `kimi` | TUI | 🧪 测试中（推荐 [官方 install.sh](https://code.kimi.com/kimi-code/install.sh) 安装 kimi-code） |
 | **Qwen Code** | `qwen` | TUI | 🧪 测试中 |
 | **Qoder CLI** | `qoder` | TUI | 🧪 测试中 |
 | **CodeBuddy Code** | `codebuddy` | TUI | 🧪 测试中 |

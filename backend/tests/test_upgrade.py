@@ -985,3 +985,36 @@ def test_run_upgrade_warns_when_mcp_sdk_repair_fails(
     )
     assert report.ok is True
     assert any("mcp sdk compatibility" in w for w in report.repair_warnings)
+
+
+def test_run_upgrade_creates_chat_message_table(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """Upgrade parity: the persisted chat-history table is auto-created by the
+    schema step (SQLModel.create_all), so upgrade-only users get durable chat
+    history without a bespoke migration (pre-state → upgrade → table exists)."""
+    from app.storage import get_storage
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+
+    report = upgrade.run_upgrade(
+        config=fake_config,
+        target_version="1.0.0",
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+    assert report.ok is True
+    assert report.schema_ready is True
+
+    store = get_storage(fake_config)
+    with store._engine.begin() as conn:  # noqa: SLF001 - test reaches into engine
+        tables = {
+            str(r[0])
+            for r in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "chatmessagerow" in tables

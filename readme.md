@@ -212,7 +212,7 @@ Developer mode gives **software-development collaboration projects** a more flex
 | **Cursor** | `cursor` | TUI | ✅ Full support |
 | **OpenCode** | `opencode` | TUI | 🧪 Testing |
 | **Gemini CLI** | `gemini` | TUI | 🧪 Testing |
-| **Kimi CLI** | `kimi` | TUI | 🧪 Testing |
+| **Kimi CLI** | `kimi` | TUI | 🧪 Testing ([official install.sh](https://code.kimi.com/kimi-code/install.sh) kimi-code recommended) |
 | **Qwen Code** | `qwen` | TUI | 🧪 Testing |
 | **Qoder CLI** | `qoder` | TUI | 🧪 Testing |
 | **CodeBuddy Code** | `codebuddy` | TUI | 🧪 Testing |

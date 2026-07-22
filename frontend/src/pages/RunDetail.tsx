@@ -113,6 +113,7 @@ type TaskBoardNode = {
   level: number;
   x: number;
   y: number;
+  isExternal: boolean;
 };
 
 type TaskBoardEdge = {
@@ -1992,6 +1993,19 @@ function TaskDependencyBoard({
                         ★
                       </text>
                     )}
+                    {n.isExternal && !n.isLeaderSummary && (
+                      <text
+                        x={n.x}
+                        y={n.y + 3.2}
+                        textAnchor="middle"
+                        fontSize={9}
+                        fontWeight="700"
+                        fill="#1e1033"
+                        pointerEvents="none"
+                      >
+                        ⎔
+                      </text>
+                    )}
                     {/* Always-on subject label under the node. */}
                     <text
                       x={n.x}
@@ -2084,6 +2098,12 @@ function TaskDependencyBoard({
             <span className="inline-flex items-center gap-1.5">
               <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#f5b942]" />
               {t("runDetail.boardLegendSummary")}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-flex h-2.5 w-2.5 items-center justify-center rounded-full border border-violet-400/80 bg-violet-500/30 text-[7px] font-bold text-violet-100">
+                ⎔
+              </span>
+              {t("runDetail.boardLegendExternal")}
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="inline-flex h-2.5 w-2.5 items-center justify-center rounded-full bg-[#facc15] text-[7px] font-bold text-[#0b1220]">
@@ -3750,6 +3770,10 @@ function buildTaskBoard(
   }
 
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
+  const agents = Array.isArray(run.specSnapshot?.agents) ? run.specSnapshot.agents : [];
+  const externalAgentIds = new Set(
+    agents.filter((a) => String(a.kind ?? "") === "external").map((a) => a.id),
+  );
   const states = new Map<string, TaskRuntimeState>();
   const checkpointStates = collectCheckpointBoardStates(events, activeCheckpoint);
   const dispatchOrder = new Map<string, number>();
@@ -3995,6 +4019,7 @@ function buildTaskBoard(
       level: row.level,
       x: p.x + offsetX,
       y: p.y + offsetY,
+      isExternal: externalAgentIds.has(row.task.ownerAgentId),
     };
   });
   const nodeById = new Map(visibleNodes.map((n2) => [n2.id, n2] as const));

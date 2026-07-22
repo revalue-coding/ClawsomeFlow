@@ -754,10 +754,11 @@ def _non_openclaw_dispatch_argv(
     # `--approval-mode yolo` auto-approves.
     if kind == AgentKind.qwen:
         return ["qwen", "--approval-mode", "yolo", message]
-    # kimi: `--print -p <prompt>` is the headless print mode (auto-approves);
-    # `--yolo` is belt-and-suspenders.
+    # kimi-code (official ``install.sh`` binary): ``-p`` is one-shot prompt mode;
+    # it must not be combined with ``--yolo`` / ``--auto`` (kimi-code rejects that).
+    # Interactive tmux spawns still use ``--yolo`` / ``--continue`` (see tmux_live).
     if kind == AgentKind.kimi:
-        return ["kimi", "--yolo", "--print", "-p", message]
+        return ["kimi", "-p", message]
     # opencode: `run <prompt>` is non-interactive; `--dangerously-skip-permissions`
     # (available on the `run` subcommand) auto-approves every tool call.
     if kind == AgentKind.opencode:

@@ -10,7 +10,7 @@ versions, verified against the installed binaries:
             resume ``--resume latest`` (no ``--continue``).
 * qwen    → ``--approval-mode yolo --chat-recording`` (recording needed for resume);
             resume ``--continue``.
-* kimi    → ``--yolo``; resume ``--continue``.
+* kimi    → ``--yolo``; resume ``--continue`` (kimi-code from ``install.sh``).
 * opencode→ no permission flag (ClawTeam's ``--yolo`` is REJECTED → spawn fails;
             interactive auto-approval is config-only); resume ``--continue``.
 * pi      → no tool-permission popup at all (read/bash/edit/write auto-execute);
@@ -169,7 +169,7 @@ def test_new_platform_headless_dispatch_commands() -> None:
         "qwen", "--approval-mode", "yolo", "m",
     ]
     assert _non_openclaw_dispatch_argv(kind=AgentKind.kimi, message="m") == [
-        "kimi", "--yolo", "--print", "-p", "m",
+        "kimi", "-p", "m",
     ]
     assert _non_openclaw_dispatch_argv(kind=AgentKind.opencode, message="m") == [
         "opencode", "run", "--dangerously-skip-permissions", "m",

@@ -1645,9 +1645,17 @@ async def test_reset_session_sends_plain_slash_reset_only(
     assert r.status_code == 204, r.text
     assert calls[-1]["message"] == "/reset"
     assert calls[-1]["session_key"] == "user-chat-alice-chat-reset"
+    # Reset starts a fresh backend session but KEEPS the transcript, appending a
+    # session_divider boundary instead of wiping history.
     post_hist = client.get("/api/openclaw/agents/chat-reset/chat-history")
     assert post_hist.status_code == 200
-    assert post_hist.json()["messages"] == []
+    msgs = post_hist.json()["messages"]
+    assert [{"role": m["role"], "content": m["content"]} for m in msgs] == [
+        {"role": "user", "content": "before-reset"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "system", "content": ""},
+    ]
+    assert msgs[-1]["kind"] == "session_divider"
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ from app.models import (
     TERMINAL_RUN_STATUSES,
     AgentStoreOrder,
     AgentStoreOwnership,
+    ChatMessageRow,
     Flow,
     FlowRun,
     FlowRunSchedule,
@@ -633,6 +634,67 @@ class SqliteStorage:
                 stmt = stmt.where(RunEvent.id > since_id)
             stmt = stmt.order_by(RunEvent.id).limit(limit)
             return list(s.exec(stmt).all())
+
+    # ---- Chat history (single-agent direct chat) ----
+
+    def chat_message_append(self, row: ChatMessageRow) -> ChatMessageRow:
+        with self._session() as s:
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            return row
+
+    def chat_message_list(
+        self, *, conversation_key: str, limit: int = 500,
+    ) -> list[ChatMessageRow]:
+        """Return the trailing ``limit`` messages for one conversation, oldest first."""
+        with self._session() as s:
+            # Take the newest `limit` rows (id DESC) then flip to chronological order,
+            # so a long transcript is bounded on the read path without dropping order.
+            stmt = (
+                select(ChatMessageRow)
+                .where(ChatMessageRow.conversation_key == conversation_key)
+                .order_by(ChatMessageRow.id.desc())
+                .limit(limit)
+            )
+            rows = list(s.exec(stmt).all())
+            rows.reverse()
+            return rows
+
+    def chat_message_delete_conversation(self, *, conversation_key: str) -> int:
+        with self._session() as s:
+            count = int(s.exec(
+                select(func.count())
+                .select_from(ChatMessageRow)
+                .where(ChatMessageRow.conversation_key == conversation_key)
+            ).one())
+            if count:
+                s.exec(
+                    delete(ChatMessageRow).where(
+                        ChatMessageRow.conversation_key == conversation_key
+                    )
+                )
+                s.commit()
+            return count
+
+    def chat_message_pop_trailing_user(self, *, conversation_key: str) -> bool:
+        """Delete the newest row iff it is an unanswered normal user message.
+
+        Never pops a ``session_divider`` (or any non-user / non-normal) row, so a
+        reset-inserted divider survives a subsequent send.
+        """
+        with self._session() as s:
+            row = s.exec(
+                select(ChatMessageRow)
+                .where(ChatMessageRow.conversation_key == conversation_key)
+                .order_by(ChatMessageRow.id.desc())
+                .limit(1)
+            ).first()
+            if row is None or row.role != "user" or (row.kind or "") != "":
+                return False
+            s.delete(row)
+            s.commit()
+            return True
 
     def history_cleanup(self, *, before: datetime | None = None) -> dict[str, object]:
         """Delete old terminal execution history to reclaim disk space.

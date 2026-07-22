@@ -4389,6 +4389,9 @@ interface GraphPalette {
   checkpointFill: string;
   checkpointStroke: string;
   checkpointGlyph: string;
+  externalFill: string;
+  externalStroke: string;
+  externalGlyph: string;
   /** Always-on node subject label under each dot. */
   label: string;
   labelDim: string;
@@ -4414,6 +4417,9 @@ const GRAPH_PALETTE_LIGHT: GraphPalette = {
   checkpointFill: "#fbbf24",
   checkpointStroke: "#92400e",
   checkpointGlyph: "#78350f",
+  externalFill: "#f5f3ff",
+  externalStroke: "#7c3aed",
+  externalGlyph: "#6d28d9",
   label: "#475569",
   labelDim: "#a8b3c4",
   grid: "rgba(15, 23, 42, 0.10)",
@@ -4437,6 +4443,9 @@ const GRAPH_PALETTE_DARK: GraphPalette = {
   checkpointFill: "#fbbf24",
   checkpointStroke: "#78350f",
   checkpointGlyph: "#451a03",
+  externalFill: "#2e1065",
+  externalStroke: "#a78bfa",
+  externalGlyph: "#ddd6fe",
   label: "#94a3b8",
   labelDim: "#4b5a6e",
   grid: "rgba(148, 163, 184, 0.14)",
@@ -4589,7 +4598,8 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
           })}
           {nodes.map((n) => {
             const summary = n.isSummary;
-            const root = n.isRoot;
+            const external = !summary && n.isExternal;
+            const root = !summary && !external && n.isRoot;
             const checkpoint = !summary && n.requiresHumanCheckpoint;
             const isHover = hover === n.id;
             // Dim nodes outside the hovered node's direct neighbourhood so a
@@ -4610,6 +4620,8 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
             //   - Worker:  neutral grey (intermediate steps)
             const fill = summary
               ? C.summaryFill
+              : external
+              ? C.externalFill
               : root
               ? C.rootFill
               : isHover
@@ -4617,6 +4629,8 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
               : C.workerFill;
             const stroke = summary
               ? C.summaryStroke
+              : external
+              ? C.externalStroke
               : root
               ? C.rootStroke
               : isHover
@@ -4646,7 +4660,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                   r={r}
                   fill={fill}
                   stroke={stroke}
-                  strokeWidth={summary ? 2.4 : root ? 2 : 1.8}
+                  strokeWidth={summary ? 2.4 : external ? 2 : root ? 2 : 1.8}
                 />
                 {summary && (
                   <text
@@ -4659,7 +4673,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                     ★
                   </text>
                 )}
-                {root && !summary && (
+                {root && (
                   <text
                     y={4}
                     textAnchor="middle"
@@ -4668,6 +4682,17 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
                     fill={C.rootGlyph}
                   >
                     ▶
+                  </text>
+                )}
+                {external && (
+                  <text
+                    y={4}
+                    textAnchor="middle"
+                    fontSize={10}
+                    fontWeight="700"
+                    fill={C.externalGlyph}
+                  >
+                    ⎔
                   </text>
                 )}
                 {checkpoint && (
@@ -4733,6 +4758,12 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
           {t("flowEditor.graphLegendCheckpoint")}
         </span>
         <span className="inline-flex items-center gap-1.5">
+          <span className="inline-flex h-3 w-3 items-center justify-center rounded-full border-2 border-violet-600 bg-violet-50 text-[8px] font-bold text-violet-700">
+            ⎔
+          </span>
+          {t("flowEditor.graphLegendExternal")}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
           <span className="inline-block w-3 h-3 rounded-full border-2 border-orange-500 bg-orange-50" />
           {t("flowEditor.graphLegendSummary")}
         </span>
@@ -4750,6 +4781,8 @@ interface GraphNode {
   /** True iff this task has no incoming dependencies (root of the DAG).
    *  Used to tint the node so the user can tell where execution begins. */
   isRoot: boolean;
+  /** External execution node (human / webhook / remote ClawsomeFlow). */
+  isExternal: boolean;
   x: number;
   y: number;
   /** Connection count (in + out). Drives node size. */
@@ -4976,6 +5009,7 @@ function computeGraphLayout(tasks: TaskRow[]): {
       isSummary: r.isLeaderSummary,
       requiresHumanCheckpoint: !r.isLeaderSummary && !!r.requiresHumanCheckpoint,
       isRoot: !r.isLeaderSummary && deps.length === 0,
+      isExternal: isExternalKind(r.ownerKind),
       x: fn.x + offsetX,
       y: fn.y + offsetY,
       degree: degree.get(r.id) ?? 0,

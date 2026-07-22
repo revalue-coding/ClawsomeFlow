@@ -890,6 +890,32 @@ class TaskDecomposeRequest(_SQLBase, table=True):
     expires_at: datetime                        # = created_at + token TTL
 
 
+class ChatMessageRow(_SQLBase, table=True):
+    """One persisted single-agent direct-chat message (OpenClaw + Hermes WebUI).
+
+    History used to live only in an in-memory cache, so it vanished on every
+    service restart. It is now persisted here so the transcript survives
+    restarts and a ``重置对话`` (reset) can keep the prior conversation.
+
+    ``conversation_key`` is intentionally **revision-free** (the base
+    ``naming.*_user_chat_session_id``), decoupled from the runtime session id:
+    an OpenClaw reset rotates the ``--session-id`` (revision suffix) but the
+    transcript stays under the same conversation key, so old messages keep
+    showing with a ``session_divider`` row marking the boundary.
+    """
+
+    id: int | None = SQLField(default=None, primary_key=True)  # autoincrement
+    conversation_key: str = SQLField(index=True)
+    role: str = ""  # user | assistant | system
+    kind: str = SQLField(default="")  # "" = normal message, "session_divider"
+    content: str = ""
+    attachments: list[dict[str, Any]] = SQLField(
+        sa_column=Column(JSON, nullable=False), default_factory=list
+    )
+    ts: int = SQLField(default=0)  # epoch ms when the message was recorded
+    created_at: datetime = SQLField(default_factory=_now, nullable=False)
+
+
 class OpenclawAgentRequest(_SQLBase, table=True):
     """Legacy table for historical async OpenClaw creation requests."""
 
@@ -937,6 +963,7 @@ __all__ = [
     "AgentStoreOrder",
     "OpenclawAgentRequest",
     "TaskDecomposeRequest",
+    "ChatMessageRow",
     # helpers
     "_new_id",  # re-exported for tests
 ]
