@@ -46,11 +46,12 @@ const TERMINAL = new Set([
   "aborted",
   "orphaned",
 ]);
-// Pre-review states where the user may 暂停执行 (pause) or 终止执行流 (terminate).
-// Both controls vanish once a run reaches the merge-review / complaint phases.
+// States where the user may 暂停执行 (pause) or 终止执行流 (terminate). The
+// controls open only once breakpoint recovery is guaranteed (compile done →
+// running) and stay visible+enabled continuously until the merge-review phase —
+// deliberately NOT shown during pending/compiling. Kept in sync with the
+// backend `_PAUSE_ALLOWED` guard.
 const PAUSE_ALLOWED = new Set([
-  "pending",
-  "compiling",
   "running",
   "awaiting_external",
   "awaiting_user_checkpoint",
@@ -1323,7 +1324,7 @@ export function RunDetail() {
           </div>
         )}
         {boardTab === "list" ? (
-          <TaskDependencyBoard board={board} />
+          <TaskDependencyBoard board={board} paused={run.status === "paused"} />
         ) : (
           <RunTerminalBoard
             listTasks={terminalListTasks}
@@ -1426,7 +1427,7 @@ function BoardProgressChips({
     <div className="flex items-center gap-1.5 text-[11px] font-medium">
       <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2 py-0.5 text-sky-700">
         <span className="relative inline-flex h-1.5 w-1.5">
-          {running > 0 && (
+          {running > 0 && run.status !== "paused" && (
             <span className="absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-60 animate-ping" />
           )}
           <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-sky-500" />
@@ -1469,7 +1470,10 @@ function BoardProgressBar({
         style={{ width: `${donePct}%` }}
       />
       <div
-        className="h-full bg-sky-500 animate-pulse transition-[width] duration-700 ease-out"
+        className={
+          "h-full bg-sky-500 transition-[width] duration-700 ease-out"
+          + (run.status === "paused" ? "" : " animate-pulse")
+        }
         style={{ width: `${runningPct}%` }}
       />
     </div>
@@ -1677,8 +1681,10 @@ function clampBoardSplit(value: number): number {
 
 function TaskDependencyBoard({
   board,
+  paused = false,
 }: {
   board: TaskBoardModel;
+  paused?: boolean;
 }) {
   const { t } = useTranslation();
   const [hoverNodeId, setHoverNodeId] = useState<string | null>(null);
@@ -1837,18 +1843,24 @@ function TaskDependencyBoard({
                       <span
                         className={
                           n.state === "dispatched"
-                            ? "inline-flex items-center gap-1 rounded-full bg-[#38bdf8]/20 px-2 py-0.5 text-[10px] text-[#7dd3fc]"
+                            ? paused
+                              // Interrupted by pause + reset to pending — muted
+                              // amber "will re-run on continue", no live pulse.
+                              ? "inline-flex items-center gap-1 rounded-full bg-[#f5b942]/20 px-2 py-0.5 text-[10px] text-[#fcd34d]"
+                              : "inline-flex items-center gap-1 rounded-full bg-[#38bdf8]/20 px-2 py-0.5 text-[10px] text-[#7dd3fc]"
                             : "inline-flex items-center gap-1 rounded-full bg-[#10b981]/20 px-2 py-0.5 text-[10px] text-[#6ee7b7]"
                         }
                       >
-                        {n.state === "dispatched" && (
+                        {n.state === "dispatched" && !paused && (
                           <span className="relative inline-flex h-1.5 w-1.5">
                             <span className="absolute inline-flex h-full w-full rounded-full bg-[#38bdf8] opacity-60 animate-ping" />
                             <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[#38bdf8]" />
                           </span>
                         )}
                         {n.state === "dispatched"
-                          ? t("runDetail.boardNodeRunning")
+                          ? paused
+                            ? t("runDetail.boardNodePaused")
+                            : t("runDetail.boardNodeRunning")
                           : t("runDetail.boardNodeDone")}
                       </span>
                     </div>
@@ -2023,7 +2035,7 @@ function TaskDependencyBoard({
                     onMouseLeave={() => setHoverNodeId((cur) => (cur === n.id ? null : cur))}
                     style={{ cursor: "default" }}
                   >
-                    {n.state === "dispatched" && (
+                    {n.state === "dispatched" && !paused && (
                       <circle
                         cx={n.x}
                         cy={n.y}

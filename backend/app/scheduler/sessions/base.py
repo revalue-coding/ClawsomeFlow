@@ -265,7 +265,14 @@ class WorkerSession(abc.ABC):
         committed + in-flight work it holds.
         """
         self.worktree = worktree
-        if self._state != SessionState.Exited:
+        if self._state == SessionState.Exited:
+            return
+        # Reach Crashed via legal edges (Absent → Spawning → Crashed), mirroring
+        # ``adopt_existing``'s synthetic Absent → Spawning → Idle, so the state
+        # machine invariants stay intact.
+        if self._state == SessionState.Absent:
+            self._transition_force(SessionState.Spawning, reason=f"{reason}_probe")
+        if self._state != SessionState.Crashed:
             self._transition_force(SessionState.Crashed, reason=reason)
 
     async def resume(self) -> None:

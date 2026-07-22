@@ -778,6 +778,7 @@ const zh = {
     boardEdgeInboxEmpty: "（尚无 inbox 消息）",
     boardTaskListTitle: "已执行 / 执行中任务",
     boardNodeRunning: "执行中",
+    boardNodePaused: "已暂停 · 将重跑",
     boardNodeDone: "已完成",
     boardTaskDurationMinutes: "耗时 {{minutes}} 分钟",
     boardCheckpointBadge: "检查点",

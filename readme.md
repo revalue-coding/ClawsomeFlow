@@ -16,7 +16,7 @@
 
 <p>Real-world work rarely fits inside a single agent. Someone still has to touch the physical world, sign off on an irreversible action, or make the call that matters — and real collaboration usually spans machines and tools, rather than staying boxed into one computer, one skill, or one chat. ClawsomeFlow breaks agent collaboration out of that box: it reaches across machines and out into the wider world of agent tooling. <b>CLI agents, real people, remote ClawsomeFlow instances, custom agent tools of your own — anything you could reasonably call an "execution unit"</b> can take a seat in one shared collaboration graph, and Harness engineering keeps complex, long-running projects moving in sync.</p>
 
-<p>ClawsomeFlow isn't here to replace the agents or workflows you already have — it just helps them reach further.</p>
+<p>ClawsomeFlow isn't here to replace the agents or workflows you already have — it makes them more robust and extensible.</p>
 
 <p>
   <a href="#-quick-start">Quick Start</a> ·
@@ -49,7 +49,7 @@
 ## 🎯 Who Should Try It?
 
 - Operators and builders of **AI-native businesses** whose work crosses people, tools, and machines — not just a coding sandbox;
-- Practitioners tired of carrying a complex, long-running project on **one endless chat** — who want flows that are reusable, auditable, partially re-runnable, cost-controlled, and dependable in what they ship.
+- Practitioners tired of carrying a complex, long-running project on **one endless chat** — who want flows that are reusable, auditable, partially re-runnable, resumable from checkpoints, cost-controlled, and dependable in what they ship.
 
 ---
 
@@ -57,12 +57,12 @@
 
 The hard part of multi-agent work is rarely "the model isn't smart enough." It's that **collaboration has no harness**: the process lives inside a prompt, context balloons, people and other machines can't cleanly join in, and long projects drift past the point where anyone can review them.
 
-ClawsomeFlow's take is blunt: **put coordination into a durable harness** — open executors (human / remote execution unit / webhook / agent CLI), short-context nodes, checkpoints, repo locks, observability, and reuse — so the process holds together as capability grows.
+ClawsomeFlow's take is blunt: **put coordination into a durable harness** — open executors (human / remote execution unit / webhook / agent CLI), short-context nodes, checkpoints, repo locks, checkpoint resume, observability, and reuse — so the process holds together as capability grows.
 
 | | Typical "one agent + one chat" | ClawsomeFlow |
 |---|---|
 | **Who can execute** | Mostly the model in front of you | Humans, remote instances, webhooks, many agent platforms |
-| **Long projects** | Context rots; hard to pause / resume safely | Flows built for long cycles + human waits + re-runs |
+| **Long projects** | Context rots; hard to pause / resume safely | Flows built for long cycles + checkpoint resume |
 | **Cost** | One context carries everything | Split into nodes → shorter contexts, lower token spend |
 | **Control** | Hope the prompt holds | Checkpoints, reviewable & partially re-runnable subtasks, complaint loop, rollback |
 | **Concurrency** | Easy to collide on the same repo | Worktree isolation + built-in repo lock |
@@ -74,7 +74,7 @@ ClawsomeFlow's take is blunt: **put coordination into a durable harness** — op
 
 **🤝 Fuse many kinds of executor** — collaboration reaches past your laptop, out to remote peers and the wider world of agent tooling. Real people, CLI agents of every flavor, remote ClawsomeFlow instances, and your own custom agent tools all share **one DAG**, with the same dependency and completion semantics. Hand a subtask off to another machine, or wire in an executor you built yourself — a tiny webhook contract is all it takes, and the scheduler never changes.
 
-**🧩 Harness engineering** — what keeps long-running, multi-executor work stable, so capability can grow without the process falling apart: split into nodes for shorter context and lower token spend; human checkpoints, partial subtask re-runs, and a complaint-driven improvement loop; worktree isolation plus a **built-in cross-process repo lock** so parallel edits never corrupt the baseline; every dispatch, hand-off, and failure captured as a replayable RunEvent; and Flows you define once and re-run with parameters — dependable output across anything from hours to weeks.
+**🧩 Harness engineering** — what keeps long-running, multi-executor work stable, so capability can grow without the process falling apart: split into nodes for shorter context and lower token spend; human checkpoints, partial subtask re-runs, resume from any checkpoint, and a complaint-driven improvement loop; worktree isolation plus a **built-in cross-process repo lock** so parallel edits never corrupt the baseline; every dispatch, hand-off, and failure captured as a replayable RunEvent; and Flows you define once and re-run with parameters — dependable output from hours to months.
 
 ---
 

@@ -424,11 +424,6 @@ class RunController:
         self._pause_reason = ""
         self._pause_detail = ""
         self._pause_needs_confirmation = False
-        # Tasks reset to pending at pause because they were interrupted / failed
-        # (so 继续执行 re-dispatches them into their existing worktree). Recorded
-        # for the pause finalize audit; not load-bearing (ClawTeam is source of
-        # truth once reset).
-        self._paused_interrupted_task_ids: set[str] = set()
         self._poll_sec = _POLL_MIN_SEC
 
         self._session_factory = session_factory or self._default_session_factory
@@ -495,6 +490,16 @@ class RunController:
     def is_pausing(self) -> bool:
         return self._pause_evt.is_set() and not self._cancel_evt.is_set()
 
+    def _stop_requested(self) -> bool:
+        """A terminate (cancel) OR pause has been requested.
+
+        Used by :meth:`_wait_stop_event` to race a running tick: on a stop the
+        tick is cancelled, which is the single, general way in-flight background
+        work ends fast (any awaited subprocess honours CancelledError →
+        process-group kill). No per-operation stop checks are needed.
+        """
+        return self._cancel_evt.is_set() or self._pause_evt.is_set()
+
     async def prepare_resume(self) -> None:
         """Prepare a freshly-rebuilt controller to RESUME a paused run.
 
@@ -513,21 +518,55 @@ class RunController:
         """
         from app.scheduler.run_metadata import clear_pause_state
         clear_pause_state(self.run)
-        # Pre-seed already-completed task books from the live team so the first
-        # post-resume tick does not re-emit ``task_completed`` / re-audit work
-        # that finished before the pause. Providers are already wired by the
-        # supervisor's ``_rewire_existing_team`` before this runs.
+        # Reconcile from the fresh ClawTeam snapshot (providers are already wired
+        # by the supervisor's ``_rewire_existing_team``). This is the SINGLE,
+        # general re-derivation point — no per-scenario logic:
+        #   * completed  → keep completed (+ pre-seed the book & audit set so the
+        #     first tick doesn't re-emit task_completed / re-audit finished work);
+        #   * in_progress owned by a LOCAL agent → its tmux executor was killed at
+        #     pause and can never finish on its own, so reset to pending → it
+        #     re-dispatches into its existing worktree on the first tick;
+        #   * in_progress owned by an EXTERNAL node → its remote/human/webhook
+        #     executor was NOT killed; the outstanding receipt ticket resolves it,
+        #     so leave it (ClawTeam status is the source of truth for
+        #     already-arrived vs still-waiting) — never re-dispatched;
+        #   * pending / blocked → leave (the tick dispatches ready ones).
         try:
             snaps = await self._fetch_snapshots()
         except Exception:  # pragma: no cover - defensive
             snaps = []
+        reset_task_ids: list[str] = []
         for s in snaps or []:
             book = self._tasks.get(s.task_id)
             if book is None:
                 continue
-            if (s.status or "").strip().lower() == "completed":
+            status = (s.status or "").strip().lower()
+            if status == "completed":
                 book.state = _TaskState.completed
                 self._completed_audited.add(s.task_id)
+                continue
+            if status == "in_progress":
+                owner = (
+                    self._agents.get(s.owner_agent_id)
+                    or self._agents.get(book.task.owner_agent_id)
+                )
+                if owner is not None and owner.kind == AgentKind.external:
+                    book.state = _TaskState.in_progress
+                    continue
+                synced = await self._reset_clawteam_task(
+                    s.task_id, locked_by=s.owner_agent_id or book.task.owner_agent_id,
+                )
+                book.state = _TaskState.pending
+                book.dispatched_at = None
+                self.dispatch_clock.reset(s.task_id)
+                reset_task_ids.append(s.task_id)
+                if not synced:
+                    self._emit_event(
+                        "task_status_sync_failed",
+                        agent_id=s.owner_agent_id or book.task.owner_agent_id,
+                        task_id=s.task_id,
+                        payload={"target_status": "pending", "context": "resume_reset"},
+                    )
         resumed_agents: list[str] = []
         for agent in self._agents.values():
             if agent.kind == AgentKind.external:
@@ -545,8 +584,26 @@ class RunController:
                 resumed_agents.append(agent.id)
         self._emit_event(
             "run_resumed",
-            payload={"reused_worktree_agents": sorted(resumed_agents)},
+            payload={
+                "reused_worktree_agents": sorted(resumed_agents),
+                "reset_task_ids": sorted(reset_task_ids),
+            },
         )
+
+    async def _wait_stop_event(self) -> None:
+        """Block until a stop (cancel/pause) is requested."""
+        if self._stop_requested():
+            return
+        cancel_w = asyncio.ensure_future(self._cancel_evt.wait())
+        pause_w = asyncio.ensure_future(self._pause_evt.wait())
+        try:
+            await asyncio.wait(
+                {cancel_w, pause_w}, return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for w in (cancel_w, pause_w):
+                if not w.done():
+                    w.cancel()
 
     async def _wait_stop_or_timeout(self, timeout: float) -> None:
         """Sleep up to *timeout*, waking early on a stop request (cancel/pause)."""
@@ -564,51 +621,6 @@ class RunController:
             for w in (cancel_w, pause_w):
                 if not w.done():
                     w.cancel()
-
-    async def _reset_interrupted_tasks_for_pause(self) -> None:
-        """Reset interrupted / failed local-worker tasks to pending for resume.
-
-        Called from the pause branch of the run-loop ``finally``. Completed tasks
-        stay completed (durable in ClawTeam); dependency-blocked tasks stay
-        blocked (ClawTeam unblocks them when their deps complete). Only tasks the
-        pause actually interrupted (``in_progress``) or that a detected failure
-        marked blocked (``_failed_task_ids``) are reset to ``pending`` so
-        ``继续执行`` re-dispatches them into their existing worktree — which may
-        already hold both a completed sibling's commits and this task's partial
-        work. External-node tasks in flight are LEFT untouched: they hold an
-        outstanding dispatch ticket resolved by their receipt, not by re-dispatch.
-        """
-        for tid, book in list(self._tasks.items()):
-            if book.state == _TaskState.completed:
-                continue
-            owner = self._agents.get(book.task.owner_agent_id)
-            if owner is not None and owner.kind == AgentKind.external:
-                continue
-            interrupted = (
-                book.state == _TaskState.in_progress or tid in self._failed_task_ids
-            )
-            if not interrupted:
-                continue
-            synced = await self._reset_clawteam_task(
-                tid, locked_by=book.task.owner_agent_id,
-            )
-            book.state = _TaskState.pending
-            book.dispatched_at = None
-            self.dispatch_clock.reset(tid)
-            self._failed_task_ids.discard(tid)
-            self._paused_interrupted_task_ids.add(tid)
-            if not synced:
-                self._emit_event(
-                    "task_status_sync_failed",
-                    agent_id=book.task.owner_agent_id,
-                    task_id=tid,
-                    payload={"target_status": "pending", "context": "pause_reset"},
-                )
-        if self._paused_interrupted_task_ids:
-            self._emit_event(
-                "run_paused_tasks_reset",
-                payload={"task_ids": sorted(self._paused_interrupted_task_ids)},
-            )
 
     def checkpoint_snapshot(self) -> dict[str, Any] | None:
         """Return current manual-checkpoint snapshot (for API/UI polling)."""
@@ -1223,7 +1235,37 @@ class RunController:
                     while not self._cancel_evt.is_set() and not self._pause_evt.is_set():
                         if max_ticks is not None and ticks >= max_ticks:
                             break
-                        activity = await self.tick()
+                        # Run the tick as a cancellable task and race it against a
+                        # stop request. A pause/terminate mid-tick CANCELS the tick
+                        # — this is the single, GENERAL way we end all in-flight
+                        # background work fast: any awaited subprocess honours
+                        # CancelledError → process-group kill (the project-wide
+                        # convention), so no per-operation pause checks are needed
+                        # and future in-tick work is covered automatically. Resume
+                        # then re-derives from durable ClawTeam state and re-drives,
+                        # tolerating re-execution (dispatch is idempotent enough:
+                        # a re-fired external ticket's fresh nonce makes the latest
+                        # run authoritative; TUI re-inject just resumes the agent).
+                        tick_task = asyncio.ensure_future(self.tick())
+                        stop_task = asyncio.ensure_future(self._wait_stop_event())
+                        done, _pending = await asyncio.wait(
+                            {tick_task, stop_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if not stop_task.done():
+                            stop_task.cancel()
+                        if tick_task not in done:
+                            tick_task.cancel()
+                            try:
+                                await tick_task
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as exc:  # pragma: no cover - defensive
+                                logger.warning(
+                                    "tick_cancel_cleanup_error", error=str(exc),
+                                )
+                            break
+                        activity = tick_task.result()
                         ticks += 1
                         if self._terminal_check():
                             await self._persist_terminal_execution_log(
@@ -1266,9 +1308,10 @@ class RunController:
                     # Always try to stop live sessions first so abnormal exits do
                     # not leak orphaned agent processes. On a pause this releases
                     # tmux/agent processes; the worktrees stay on disk for resume.
+                    # (Interrupted local tasks are reconciled to pending at RESUME
+                    # time from the fresh ClawTeam snapshot — see prepare_resume —
+                    # not here, to avoid acting on possibly-stale in-memory state.)
                     await self._shutdown_remaining_sessions(reason="run_finalize")
-                    if self._pause_evt.is_set() and not self._cancel_evt.is_set():
-                        await self._reset_interrupted_tasks_for_pause()
                     outcome = self._build_outcome()
                     if loop_exc is not None:
                         outcome.reason = f"run loop exception: {loop_exc}"
@@ -3422,6 +3465,10 @@ class RunController:
                 pass
             raise RuntimeError("headless param-fill timeout") from exc
         except asyncio.CancelledError:
+            # A pause/terminate cancels the running tick → this await raises here;
+            # kill the process group so no headless agent is orphaned. (Generic
+            # kill-on-cancel — the same convention every subprocess follows; no
+            # pause-specific logic needed.)
             subprocess_registry.kill_group(proc)
             raise
         finally:

@@ -788,6 +788,7 @@ const en = {
     boardEdgeInboxEmpty: "(No inbox message yet)",
     boardTaskListTitle: "Executed / Running Tasks",
     boardNodeRunning: "Running",
+    boardNodePaused: "Paused · will re-run",
     boardNodeDone: "Done",
     boardTaskDurationMinutes: "{{minutes}} min",
     boardCheckpointBadge: "Checkpoint",

@@ -128,14 +128,17 @@ ConfigDep = Annotated[Config, Depends(_config_dep)]
 
 
 _TERMINAL = TERMINAL_RUN_STATUSES
-# Pre-review states from which the user may 暂停执行 (pause) or 终止执行流
-# (terminate). Both controls disappear once a run reaches the merge-review /
-# complaint phases (those are already restart-safe; the user acts on merges /
-# complaint there instead of stopping the whole run). ``paused`` itself is
-# terminatable (promote to aborted) but not re-pausable.
+# States from which the user may 暂停执行 (pause) or 终止执行流 (terminate). The
+# controls open only once breakpoint recovery is GUARANTEED — i.e. after the
+# ClawTeam team + tasks are compiled and the loop is driving (``running`` and
+# the states it flips to). They are deliberately NOT offered during
+# ``pending`` / ``compiling`` (the team isn't fully set up, so a pause could not
+# be resumed cleanly), and they disappear once a run reaches the merge-review /
+# complaint phases (already restart-safe; the user acts on merges / complaint
+# there). Between those two points the set is contiguous, so once the buttons
+# appear they never blink out mid-run. ``paused`` itself is terminatable
+# (promote to aborted) but not re-pausable.
 _PAUSE_ALLOWED = {
-    RunStatus.pending,
-    RunStatus.compiling,
     RunStatus.running,
     RunStatus.awaiting_external,
     RunStatus.awaiting_user_checkpoint,
