@@ -184,7 +184,10 @@ def test_tmux_live_session_registers_hermes_with_continue_flag() -> None:
 
 def test_tmux_live_session_temporary_hermes_skips_profile_binding() -> None:
     """A temporary (ad-hoc) Hermes agent has no managed profile → no `-p`
-    binding on spawn/resume and no ClawTeam runtime profile applied."""
+    binding and no ClawTeam runtime profile. It also DROPS `-c` on resume:
+    Hermes `-c` is profile+recency scoped, and a temp agent shares the default
+    profile, so `-c` could cross-resume another agent's / the operator's
+    most-recent session. Resume therefore runs fresh in the reused worktree."""
     from app.scheduler.sessions.tmux_live import TmuxLiveSession
 
     temp_hermes = FlowAgent(
@@ -196,7 +199,8 @@ def test_tmux_live_session_temporary_hermes_skips_profile_binding() -> None:
         agent=temp_hermes, team_name="csflow-x", run_id="run-x",
     )
     assert session._spawn_cmd == ["hermes", "--yolo"]
-    assert session._resume_cmd == ["hermes", "--yolo", "-c"]
+    assert session._resume_cmd == ["hermes", "--yolo"]
+    assert "-c" not in session._resume_cmd
     assert session._resolve_profile() is None
 
 

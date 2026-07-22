@@ -121,6 +121,12 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
         ["claude", "--permission-mode", "bypassPermissions"],
         ["claude", "--permission-mode", "bypassPermissions", "--continue"],
     ),
+    # codex ``resume --last`` continues the most-recent session; codex filters
+    # the picker + ``--last`` selection BY CWD unless ``--all`` is passed (which
+    # "disables cwd filtering"). Since each agent owns a unique worktree and the
+    # resume runs in it (clawteam ``cd <worktree> && codex …``), ``--last`` picks
+    # exactly this agent's session. DO NOT add ``--all`` here — it would drop the
+    # cwd filter and could resume another concurrent codex agent's session.
     AgentKind.codex:    (
         ["codex", *_CODEX_TUI_OVERRIDES],
         ["codex", *_CODEX_TUI_OVERRIDES, "resume", "--last"],
@@ -223,10 +229,24 @@ class TmuxLiveSession(WorkerSession):
                 # position-independent flag, so appending is safe for both the
                 # fresh and ``-c`` (continue) commands. This is the Hermes
                 # equivalent of OpenClaw's session-id binding and is REQUIRED so
-                # the agent's own identity/memory/skills are used.
-                # Temporary Hermes agents have NO managed profile → no ``-p``.
+                # the agent's own identity/memory/skills are used — AND it makes
+                # ``-c`` precise: Hermes ``-c`` resumes the most-recent session
+                # OF THE PROFILE (profile+recency scoped, NOT cwd-scoped), so a
+                # per-agent profile isolates it.
                 self._spawn_cmd += ["-p", agent.id]
                 self._resume_cmd += ["-p", agent.id]
+            elif agent.kind == AgentKind.hermes and agent.is_temporary:
+                # A TEMPORARY Hermes agent has NO managed profile, so it runs
+                # against the shared active/default profile. Because Hermes ``-c``
+                # is profile+recency scoped (unlike claude/codex, which are
+                # cwd-scoped and thus isolated by the per-agent worktree), a bare
+                # ``-c`` here could resume a DIFFERENT temp agent's — or the
+                # operator's own — most-recent session. There is no spawn-time
+                # session-name flag to bind it precisely, so we DROP ``-c`` and
+                # resume with a fresh conversation in the (reused) existing
+                # worktree: the committed + partial work on disk is kept, only the
+                # conversation restarts. Safer than a cross-session resume.
+                self._resume_cmd = [a for a in self._resume_cmd if a != "-c"]
             if agent.kind == AgentKind.nanobot:
                 # nanobot keys sessions by ``-s`` (default ``cli:direct``), NOT by
                 # cwd. Inject a stable, per-agent session id so (1) concurrent
