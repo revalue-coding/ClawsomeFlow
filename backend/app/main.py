@@ -63,20 +63,30 @@ def _sweep_orphaned_runs(storage, log) -> int:
 
 
 def _resume_unattended_paused_runs(storage, log) -> int:
-    """Auto-resume ``paused`` runs that have NO human in the loop.
+    """Auto-resume runs a pre-stop DRAIN parked, that have NO human in the loop.
 
-    Called once at startup, after the orphan sweep. A pre-stop drain parks every
-    in-flight run as ``paused`` (backend never terminates); a **manual** run then
-    waits for the user to click 继续执行, but an **unattended** run (scheduled /
-    MCP / delegated) has no human to do that — so we resume it automatically so
-    it drives to a terminal status and its result / delegate callback / webhook
-    fires. This is what lets a delegated (remote-triggered) run survive a
-    ClawsomeFlow restart and still return the correct result to its caller.
-    Idempotent + best-effort (a failed resume is logged, not fatal).
+    Called once at startup, after the orphan sweep. The pre-stop drain parks
+    every in-flight run as ``paused`` (backend never terminates); a **manual**
+    run then waits for the user to click 继续执行, but an **unattended** run
+    (scheduled / MCP / delegated) has no human to do that — so we resume it
+    automatically so it drives to a terminal status and its result / delegate
+    callback / webhook fires. This is what lets a delegated (remote-triggered) or
+    scheduled run survive a ClawsomeFlow restart and still complete + return.
+
+    IMPORTANT: only runs whose pause **reason is ``drain``** are auto-resumed. An
+    unattended run that a human explicitly PAUSED (reason ``user``) is a
+    deliberate intervention and must be left paused for the operator — we never
+    override a manual pause, even for an unattended run. (Genuine failures never
+    reach ``paused`` for unattended runs — they terminate — so ``drain`` is the
+    only auto-resumable reason.) Idempotent + best-effort.
     """
     from app.models import RunStatus
     from app.scheduler.engine import get_scheduler
-    from app.scheduler.run_metadata import run_is_unattended
+    from app.scheduler.run_metadata import (
+        PAUSE_REASON_DRAIN,
+        read_pause_state,
+        run_is_unattended,
+    )
 
     sched = get_scheduler()
     resumed = 0
@@ -90,6 +100,9 @@ def _resume_unattended_paused_runs(storage, log) -> int:
         for run in items:
             if not run_is_unattended(run):
                 continue  # manual run → wait for the user's 继续执行
+            blob = read_pause_state(run)
+            if not blob or blob.get("reason") != PAUSE_REASON_DRAIN:
+                continue  # human-paused (or unknown) → respect the manual pause
             flow = storage.flow_get(run.flow_id)
             if flow is None:
                 continue

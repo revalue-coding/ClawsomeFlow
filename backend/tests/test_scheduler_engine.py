@@ -325,14 +325,16 @@ async def test_cancelled_complaint_preserves_worktree_dirs_on_tail_cleanup(
     assert captured.get("preserve_worktree_dirs") is True
 
 
-def _persist_run(run_id: str, status: RunStatus) -> FlowRun:
+def _persist_run(
+    run_id: str, status: RunStatus, *, is_scheduled: bool = False,
+) -> FlowRun:
     storage = get_storage()
     flow = Flow(name="t", description="", owner_user="alice").with_spec(_spec())
     saved = storage.flow_create(flow)
     return storage.run_create(FlowRun(
         id=run_id, flow_id=saved.id, flow_version=1,
         team_name=team_name_for_run(run_id),
-        status=status, inputs={}, user="alice",
+        status=status, inputs={}, user="alice", is_scheduled=is_scheduled,
     ))
 
 
@@ -366,6 +368,9 @@ async def test_drain_to_terminal_pauses_active_orphans_residual_keeps_preserved(
 
     monkeypatch.setattr(engine.RunController, "run_loop", _pause_aware_loop)
 
+    # A SCHEDULED live run: governed by the schedule-execution lifecycle → drain
+    # TERMINATES it (aborted), not pause+auto-resume.
+    scheduled = _persist_run("run-sched-05", RunStatus.running, is_scheduled=True)
     # Residual run: ACTIVE_DRIVING in the DB but with NO live controller.
     residual = _persist_run("run-residual-02", RunStatus.running)
     # Preserved runs: survive a restart losslessly; must NOT be touched.
@@ -374,16 +379,19 @@ async def test_drain_to_terminal_pauses_active_orphans_residual_keeps_preserved(
 
     sched = engine.get_scheduler()
     sched.start_run(run=active, spec=spec, compile=False)
+    sched.start_run(run=scheduled, spec=spec, compile=False)
     await asyncio.sleep(0.02)
     assert sched.get_controller(active.id) is not None
 
     result = await sched.drain_to_terminal(timeout=3.0)
-    assert result == {"paused": 1, "reverted": 0, "orphaned": 1}
+    assert result == {"paused": 1, "reverted": 0, "aborted": 1, "orphaned": 1}
 
     storage = get_storage()
-    # Active run is PAUSED (resumable), not aborted, and keeps finished_at None.
+    # Manual active run is PAUSED (resumable), keeps finished_at None.
     assert storage.run_get(active.id).status == RunStatus.paused
     assert storage.run_get(active.id).finished_at is None
+    # Scheduled run is TERMINATED (aborted), not paused.
+    assert storage.run_get(scheduled.id).status == RunStatus.aborted
     # Residual (no live driver) → orphaned (accepted SIGKILL-class degradation).
     assert storage.run_get(residual.id).status == RunStatus.orphaned
     assert storage.run_get(residual.id).finished_at is not None
@@ -419,7 +427,7 @@ async def test_drain_to_terminal_reverts_inflight_complaint_task(
     result = await sched.drain_to_terminal(timeout=3.0)
     # Backend never terminates: an in-progress complaint reverts to the PRESERVED
     # awaiting_user_complaint so the user can re-submit after the restart.
-    assert result == {"paused": 0, "reverted": 1, "orphaned": 0}
+    assert result == {"paused": 0, "reverted": 1, "aborted": 0, "orphaned": 0}
 
     refreshed = storage.run_get(run.id)
     assert refreshed is not None
@@ -433,7 +441,7 @@ async def test_drain_to_terminal_noop_when_no_active_runs() -> None:
     _persist_run("run-review-only", RunStatus.awaiting_user_review)
     sched = engine.get_scheduler()
     result = await sched.drain_to_terminal(timeout=2.0)
-    assert result == {"paused": 0, "reverted": 0, "orphaned": 0}
+    assert result == {"paused": 0, "reverted": 0, "aborted": 0, "orphaned": 0}
 
 
 @pytest.mark.asyncio

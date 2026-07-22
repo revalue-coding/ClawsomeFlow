@@ -82,19 +82,34 @@ def test_sweep_orphaned_runs_reconciles_active_driving_only() -> None:
     assert any(e.type == "run_orphaned" for e in events)
 
 
-def test_resume_unattended_paused_runs_only_resumes_unattended(
+def test_resume_unattended_paused_runs_only_resumes_drain_paused_unattended(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Startup auto-resumes UNATTENDED paused runs (no human to click 继续执行)
-    so a delegated / scheduled run survives a restart and still returns; a manual
-    paused run is left alone for the user."""
+    """Startup auto-resumes only DRAIN-paused UNATTENDED runs (survive restart).
+    A manual run, and an unattended run a human explicitly PAUSED (reason=user),
+    are both left alone."""
     from app.models import RunStatus
     from app.scheduler import engine as engine_mod
     from app.storage import get_storage
 
-    unattended = _make_run("run-paused-unatt", RunStatus.paused)
-    unattended.inputs = {"_csflow_unattended": "true"}
-    get_storage().run_update(unattended)
+    storage = get_storage()
+
+    # Unattended, paused by drain → should auto-resume.
+    drain = _make_run("run-paused-drain", RunStatus.paused)
+    drain.inputs = {
+        "_csflow_unattended": "true",
+        "_csflow_pause_state": {"reason": "drain"},
+    }
+    storage.run_update(drain)
+
+    # Unattended, but a human explicitly paused it → must NOT auto-resume.
+    user_paused = _make_run("run-paused-user", RunStatus.paused)
+    user_paused.inputs = {
+        "_csflow_unattended": "true",
+        "_csflow_pause_state": {"reason": "user"},
+    }
+    storage.run_update(user_paused)
+
     _make_run("run-paused-manual", RunStatus.paused)  # no marker → manual
 
     resumed: list[str] = []
@@ -106,8 +121,8 @@ def test_resume_unattended_paused_runs_only_resumes_unattended(
         return object()
 
     monkeypatch.setattr(sched, "resume_run", _fake_resume)
-    n = _resume_unattended_paused_runs(get_storage(), get_logger("test"))
-    assert resumed == ["run-paused-unatt"]
+    n = _resume_unattended_paused_runs(storage, get_logger("test"))
+    assert resumed == ["run-paused-drain"]
     assert n == 1
 
 
