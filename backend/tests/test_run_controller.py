@@ -2067,6 +2067,12 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
                          metadata={}, dispatched_at_epoch=None),
         ]
 
+    # Stale FAILED reports from the pre-pause attempt still sit in the leader
+    # mailbox (peek is non-consuming). They must be suppressed on resume so the
+    # reset tasks are not immediately re-failed.
+    async def inbox_provider() -> list[str]:
+        return ["FAILED: t_local: boom", "FAILED: t_failed: crash"]
+
     rc = RunController(
         run=run, spec=spec, flow_description="d",
         worktree_lookup=fake_lookup,
@@ -2074,9 +2080,15 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
             agent=a, team_name=run.team_name, run_id=run.id,
         ),
         snapshot_provider=snap_provider,
+        leader_inbox_provider=inbox_provider,
         compile_result=compile_result,
     )
     await rc.prepare_resume()
+
+    # Stale FAILED messages captured → the tick's failure detector will ignore
+    # them (so re-run tasks aren't immediately re-failed on resume).
+    assert "FAILED: t_local: boom" in rc._resume_suppressed_failed_msgs
+    assert "FAILED: t_failed: crash" in rc._resume_suppressed_failed_msgs
 
     def _reset_to_pending(flow_id: str) -> bool:
         ct = compile_result.flow_to_clawteam[flow_id]

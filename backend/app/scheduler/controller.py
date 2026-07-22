@@ -424,6 +424,14 @@ class RunController:
         self._pause_reason = ""
         self._pause_detail = ""
         self._pause_needs_confirmation = False
+        # Stale leader-inbox ``FAILED:<tid>`` messages captured at RESUME time.
+        # ``mailbox_peek`` is non-consuming, so a FAILED report from the attempt
+        # that ran before the pause survives into the resumed run; without this
+        # a reset-to-pending task would be re-failed by Signal 3 on the first
+        # tick and immediately re-paused. We suppress exactly those pre-existing
+        # messages (a genuinely NEW failure after resume produces a fresh report
+        # / falls back to the timeout signal), so the re-run proceeds cleanly.
+        self._resume_suppressed_failed_msgs: set[str] = set()
         self._poll_sec = _POLL_MIN_SEC
 
         self._session_factory = session_factory or self._default_session_factory
@@ -518,6 +526,15 @@ class RunController:
         """
         from app.scheduler.run_metadata import clear_pause_state
         clear_pause_state(self.run)
+        # Snapshot the stale FAILED leader-inbox messages present right now so the
+        # failure detector ignores them post-resume (they'd otherwise re-fail a
+        # reset task — mailbox_peek is non-consuming). Best-effort.
+        try:
+            for msg in await self._fetch_leader_inbox():
+                if msg and str(msg).strip().upper().startswith("FAILED"):
+                    self._resume_suppressed_failed_msgs.add(msg)
+        except Exception:  # pragma: no cover - defensive
+            pass
         # Reconcile from the fresh ClawTeam snapshot (providers are already wired
         # by the supervisor's ``_rewire_existing_team``). This is the SINGLE,
         # general re-derivation point — no per-scenario logic:
@@ -1409,6 +1426,13 @@ class RunController:
         # 2. Failure detection + on_failure.
         if snapshots:
             inbox = await self._fetch_leader_inbox()
+            if self._resume_suppressed_failed_msgs:
+                # Drop pre-pause FAILED reports so a resumed run doesn't re-fail
+                # a task that is being re-run (see _resume_suppressed_failed_msgs).
+                inbox = [
+                    m for m in inbox
+                    if m not in self._resume_suppressed_failed_msgs
+                ]
             failures = detect_failures(
                 team_name=self.team_name,
                 flow_tasks={t.id: t for t in self.spec.tasks},
