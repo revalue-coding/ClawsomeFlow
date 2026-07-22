@@ -62,6 +62,50 @@ def _sweep_orphaned_runs(storage, log) -> int:
     return orphaned
 
 
+def _resume_unattended_paused_runs(storage, log) -> int:
+    """Auto-resume ``paused`` runs that have NO human in the loop.
+
+    Called once at startup, after the orphan sweep. A pre-stop drain parks every
+    in-flight run as ``paused`` (backend never terminates); a **manual** run then
+    waits for the user to click 继续执行, but an **unattended** run (scheduled /
+    MCP / delegated) has no human to do that — so we resume it automatically so
+    it drives to a terminal status and its result / delegate callback / webhook
+    fires. This is what lets a delegated (remote-triggered) run survive a
+    ClawsomeFlow restart and still return the correct result to its caller.
+    Idempotent + best-effort (a failed resume is logged, not fatal).
+    """
+    from app.models import RunStatus
+    from app.scheduler.engine import get_scheduler
+    from app.scheduler.run_metadata import run_is_unattended
+
+    sched = get_scheduler()
+    resumed = 0
+    offset = 0
+    while True:
+        items, _total = storage.run_list(
+            status=RunStatus.paused.value, limit=200, offset=offset,
+        )
+        if not items:
+            break
+        for run in items:
+            if not run_is_unattended(run):
+                continue  # manual run → wait for the user's 继续执行
+            flow = storage.flow_get(run.flow_id)
+            if flow is None:
+                continue
+            try:
+                sched.resume_run(run=run, flow=flow, storage=storage)
+                resumed += 1
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("unattended_paused_resume_failed", run_id=run.id, error=str(exc))
+        if len(items) < 200:
+            break
+        offset += len(items)
+    if resumed:
+        log.info("unattended_paused_resumed", resumed=resumed)
+    return resumed
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan: bootstrap layout + load config + warm singletons."""
@@ -83,6 +127,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             _sweep_orphaned_runs(get_storage(), log)
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("orphan_sweep_failed", error=str(exc))
+        # Auto-resume unattended (scheduled / MCP / delegated) paused runs so a
+        # run with no human in the loop still completes + returns after a restart.
+        # Manual paused runs are left for the user's 继续执行.
+        try:
+            _resume_unattended_paused_runs(get_storage(), log)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("unattended_paused_resume_sweep_failed", error=str(exc))
     if os.environ.get("CSFLOW_DISABLE_COMPLAINT_AUTO_SKIP_WORKER") != "1":
         try:
             from app.scheduler.engine import get_scheduler

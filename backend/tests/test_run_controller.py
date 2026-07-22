@@ -2108,6 +2108,34 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
     assert not _reset_to_pending("t_ext")
 
 
+def test_backend_failure_pauses_manual_but_terminates_unattended(fake_lookup) -> None:
+    """A backend-detected failure PAUSES a manual run (human resumes) but must
+    TERMINATE an unattended run so its result/callback returns (no human to
+    resume; pausing would strand a delegated caller forever)."""
+    spec = _make_spec()
+
+    # Manual run → pause.
+    manual = _persist_flow_and_run(spec)
+    rc_manual = RunController(
+        run=manual, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup, snapshot_provider=_empty_snapshots,
+    )
+    rc_manual._backend_stop_after_failure(detail="boom")
+    assert rc_manual._pause_evt.is_set()
+    assert not rc_manual._cancel_evt.is_set()
+
+    # Unattended run (e.g. delegated / scheduled / MCP) → terminate.
+    unattended = _persist_flow_and_run(spec)
+    unattended.inputs = {"_csflow_unattended": "true"}
+    rc_unatt = RunController(
+        run=unattended, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup, snapshot_provider=_empty_snapshots,
+    )
+    rc_unatt._backend_stop_after_failure(detail="boom")
+    assert rc_unatt._cancel_evt.is_set()
+    assert not rc_unatt._pause_evt.is_set()
+
+
 @pytest.mark.asyncio
 async def test_run_loop_finally_shuts_down_remaining_sessions(fake_lookup) -> None:
     spec = _make_spec()

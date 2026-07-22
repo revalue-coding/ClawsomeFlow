@@ -7,7 +7,11 @@ from fastapi.testclient import TestClient
 
 from app import __version__
 from app.logging_setup import get_logger
-from app.main import _sweep_orphaned_runs, create_app
+from app.main import (
+    _resume_unattended_paused_runs,
+    _sweep_orphaned_runs,
+    create_app,
+)
 
 
 def _make_run(run_id: str, status):
@@ -76,6 +80,35 @@ def test_sweep_orphaned_runs_reconciles_active_driving_only() -> None:
 
     events = storage.event_list(run_id=running.id, since_id=None, limit=50)
     assert any(e.type == "run_orphaned" for e in events)
+
+
+def test_resume_unattended_paused_runs_only_resumes_unattended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup auto-resumes UNATTENDED paused runs (no human to click 继续执行)
+    so a delegated / scheduled run survives a restart and still returns; a manual
+    paused run is left alone for the user."""
+    from app.models import RunStatus
+    from app.scheduler import engine as engine_mod
+    from app.storage import get_storage
+
+    unattended = _make_run("run-paused-unatt", RunStatus.paused)
+    unattended.inputs = {"_csflow_unattended": "true"}
+    get_storage().run_update(unattended)
+    _make_run("run-paused-manual", RunStatus.paused)  # no marker → manual
+
+    resumed: list[str] = []
+    sched = engine_mod.get_scheduler()
+
+    def _fake_resume(*, run, flow, storage=None):  # noqa: ANN001
+        del flow, storage
+        resumed.append(run.id)
+        return object()
+
+    monkeypatch.setattr(sched, "resume_run", _fake_resume)
+    n = _resume_unattended_paused_runs(get_storage(), get_logger("test"))
+    assert resumed == ["run-paused-unatt"]
+    assert n == 1
 
 
 @pytest.fixture

@@ -498,6 +498,38 @@ class RunController:
     def is_pausing(self) -> bool:
         return self._pause_evt.is_set() and not self._cancel_evt.is_set()
 
+    def _backend_stop_after_failure(self, *, detail: str) -> None:
+        """Stop the run after a backend-detected failure.
+
+        A **manual** (attended) run PAUSES — the human resumes / terminates, and
+        the failed task is reset to pending on resume so it re-runs. An
+        **unattended** run (scheduled / MCP / delegated) has NO human in the loop,
+        so it must reach a TERMINAL status instead: pausing it would strand its
+        caller forever (the delegate callback / run-notify webhook / scheduled
+        report only fire on a terminal status). This preserves the pre-pause
+        behaviour for unattended runs — the caller always gets a result.
+        """
+        if run_is_unattended(self.run):
+            self.cancel()
+        else:
+            self.pause(reason=_PAUSE_REASON_FAILURE, detail=detail)
+
+    def _backend_stop_after_internal_error(self, *, detail: str) -> None:
+        """Scenario-9 stop (scheduler exception in the loop).
+
+        Attended → PAUSE with a confirm-before-resume hint (internal state may be
+        inconsistent). Unattended → drive to terminal ``failed`` (``_forced_failed``)
+        so the caller / callback / webhook gets a result instead of hanging.
+        """
+        if run_is_unattended(self.run):
+            self._forced_failed = True
+        else:
+            self.pause(
+                reason=_PAUSE_REASON_INTERNAL_ERROR,
+                detail=detail,
+                needs_confirmation=True,
+            )
+
     def _stop_requested(self) -> bool:
         """A terminate (cancel) OR pause has been requested.
 
@@ -1322,13 +1354,11 @@ class RunController:
                         await self._wait_stop_or_timeout(self._poll_sec)
                 except SessionStartupError as exc:
                     loop_exc = exc
-                    # A scheduler-side startup failure — the run's internal state
-                    # may be inconsistent. The backend never terminates: park the
-                    # run (scenario 9) with a confirmation hint instead.
-                    self.pause(
-                        reason=_PAUSE_REASON_INTERNAL_ERROR,
+                    # Scenario 9 (scheduler-side startup failure). Attended runs
+                    # PARK (paused, confirm-before-resume). Unattended runs go
+                    # terminal instead — no human to resume, caller needs a result.
+                    self._backend_stop_after_internal_error(
                         detail=f"session startup failed ({exc.agent_id}/{exc.phase}): {exc.detail}"[:1000],
-                        needs_confirmation=True,
                     )
                     logger.warning(
                         "run_loop_session_startup_failed",
@@ -1338,10 +1368,8 @@ class RunController:
                     )
                 except Exception as exc:
                     loop_exc = exc
-                    self.pause(
-                        reason=_PAUSE_REASON_INTERNAL_ERROR,
+                    self._backend_stop_after_internal_error(
                         detail=f"scheduler exception: {exc}"[:1000],
-                        needs_confirmation=True,
                     )
                     logger.exception("run_loop_unhandled_exception", error=str(exc))
                     self._emit_event(
@@ -2817,14 +2845,12 @@ class RunController:
                     "reason": rec.reason.value,
                     "detail": rec.detail,
                     "policy": OnFailure.skip.value,
-                    "effective_action": "pause",
+                    "effective_action": (
+                        "abort" if run_is_unattended(self.run) else "pause"
+                    ),
                 },
             )
-            # The backend NEVER terminates a run — pause it instead. The failed
-            # task is reset to pending at pause time so 继续执行 re-runs it in its
-            # existing worktree; the user may still choose 终止执行流.
-            self.pause(
-                reason=_PAUSE_REASON_FAILURE,
+            self._backend_stop_after_failure(
                 detail=f"{rec.reason.value}: {rec.detail}"[:1000],
             )
         else:  # abort
@@ -2845,12 +2871,12 @@ class RunController:
                 payload={
                     "reason": rec.reason.value,
                     "detail": rec.detail,
-                    "effective_action": "pause",
+                    "effective_action": (
+                        "abort" if run_is_unattended(self.run) else "pause"
+                    ),
                 },
             )
-            # The backend NEVER terminates a run — pause it instead of aborting.
-            self.pause(
-                reason=_PAUSE_REASON_FAILURE,
+            self._backend_stop_after_failure(
                 detail=f"{rec.reason.value}: {rec.detail}"[:1000],
             )
 
