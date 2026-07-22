@@ -53,6 +53,7 @@ export function StatusPill({ status }: { status: string }) {
     running: "pill-info",
     awaiting_external: "pill-warning",
     awaiting_user_checkpoint: "pill-warning",
+    paused: "pill-warning",
     awaiting_user_review: "pill-warning",
     awaiting_user_complaint: "pill-warning",
     complaint_processing: "pill-info",

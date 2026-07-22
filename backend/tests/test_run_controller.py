@@ -768,7 +768,7 @@ async def test_failure_retry_marks_session_crashed_and_redispatches(
 
 
 @pytest.mark.asyncio
-async def test_abort_on_max_retries_then_terminate(
+async def test_pause_on_max_retries_then_resumable(
     fake_lookup,
 ) -> None:
     spec = _make_spec()
@@ -822,8 +822,11 @@ async def test_abort_on_max_retries_then_terminate(
     ]
     await rc.tick()
     assert rc._tasks["t1"].state == _TaskState.blocked
+    # Retries exhausted → the backend PAUSES (resumable) rather than terminating.
+    assert rc._pause_evt.is_set()
+    assert not rc._cancel_evt.is_set()
     outcome = rc._build_outcome()
-    assert outcome.final_status == RunStatus.aborted
+    assert outcome.final_status == RunStatus.paused
     assert "t1" in outcome.failed_task_ids
 
 
@@ -1206,12 +1209,15 @@ async def test_skip_policy_escalates_to_failed_and_aborts(
 
     book = rc._tasks["t1"]
     assert book.state == _TaskState.blocked
-    assert rc._cancel_evt.is_set()
+    # Backend never terminates: a failed task PAUSES the run (resumable) instead
+    # of cancelling it.
+    assert rc._pause_evt.is_set()
+    assert not rc._cancel_evt.is_set()
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=100)
     assert any(
         e.type == "task_failed"
         and e.task_id == "t1"
-        and (e.payload or {}).get("effective_action") == "abort"
+        and (e.payload or {}).get("effective_action") == "pause"
         for e in events
     )
     assert any(
@@ -1951,7 +1957,7 @@ async def test_empty_snapshot_emits_snapshot_unavailable_event(fake_lookup) -> N
 
 
 @pytest.mark.asyncio
-async def test_run_loop_unhandled_exception_marks_failed_and_emits_event(
+async def test_run_loop_unhandled_exception_pauses_and_emits_event(
     fake_lookup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = _make_spec()
@@ -1970,9 +1976,21 @@ async def test_run_loop_unhandled_exception_marks_failed_and_emits_event(
 
     monkeypatch.setattr(rc, "tick", _boom_tick)
     outcome = await rc.run_loop(max_ticks=2)
-    assert outcome.final_status == RunStatus.failed
+    # Scenario 9: the backend never terminates — a scheduler exception PAUSES the
+    # run (resumable) with a confirmation hint, instead of marking it failed.
+    assert outcome.final_status == RunStatus.paused
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=100)
     assert any(e.type == "run_loop_exception" for e in events)
+    from app.scheduler.run_metadata import (
+        PAUSE_REASON_INTERNAL_ERROR,
+        read_pause_state,
+    )
+    refreshed = get_storage().run_get(run.id)
+    assert refreshed.status == RunStatus.paused
+    blob = read_pause_state(refreshed)
+    assert blob is not None
+    assert blob.get("reason") == PAUSE_REASON_INTERNAL_ERROR
+    assert blob.get("needs_confirmation") is True
 
 
 @pytest.mark.asyncio
@@ -2301,7 +2319,7 @@ def test_worker_exit_report_emits_structured_exit_event(
 
 
 @pytest.mark.asyncio
-async def test_spawn_failure_immediately_fails_run_with_agent_error_event(fake_lookup) -> None:
+async def test_spawn_failure_pauses_run_with_agent_error_event(fake_lookup) -> None:
     spec = _make_spec()
     run = _persist_flow_and_run(spec)
 
@@ -2331,7 +2349,9 @@ async def test_spawn_failure_immediately_fails_run_with_agent_error_event(fake_l
         snapshot_provider=snap_provider,
     )
     outcome = await rc.run_loop(max_ticks=5)
-    assert outcome.final_status == RunStatus.failed
+    # A SessionStartupError is scenario 9 — the backend PAUSES (resumable) with a
+    # confirmation hint instead of terminating.
+    assert outcome.final_status == RunStatus.paused
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
     startup_failed = [e for e in events if e.type == "task_session_start_failed"]
     assert startup_failed, "missing task_session_start_failed event"

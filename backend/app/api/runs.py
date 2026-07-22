@@ -86,11 +86,13 @@ from app.scheduler.naming import team_name_for_run
 from app.scheduler.run_metadata import (
     DEV_PENDING_PR_AGENT_IDS_KEY,
     FAILED_AUTO_MERGE_AGENT_IDS_KEY,
+    PAUSE_REASON_USER,
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
     REVERTED_MERGE_AGENT_IDS_KEY,
     UNATTENDED_KEY,
+    read_pause_state,
 )
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
@@ -126,6 +128,19 @@ ConfigDep = Annotated[Config, Depends(_config_dep)]
 
 
 _TERMINAL = TERMINAL_RUN_STATUSES
+# Pre-review states from which the user may 暂停执行 (pause) or 终止执行流
+# (terminate). Both controls disappear once a run reaches the merge-review /
+# complaint phases (those are already restart-safe; the user acts on merges /
+# complaint there instead of stopping the whole run). ``paused`` itself is
+# terminatable (promote to aborted) but not re-pausable.
+_PAUSE_ALLOWED = {
+    RunStatus.pending,
+    RunStatus.compiling,
+    RunStatus.running,
+    RunStatus.awaiting_external,
+    RunStatus.awaiting_user_checkpoint,
+}
+_TERMINATE_ALLOWED = _PAUSE_ALLOWED | {RunStatus.paused}
 _MERGE_DECISION_ALLOWED = {
     RunStatus.awaiting_user_review,
     RunStatus.failed,
@@ -161,6 +176,15 @@ _REVERTED_MERGE_AGENT_IDS_KEY = REVERTED_MERGE_AGENT_IDS_KEY
 # ──────────────────────────────────────────────────────────────────────
 
 
+class RunPauseView(_CamelModel):
+    """Why a ``paused`` run is parked — drives the Run detail pause banner."""
+
+    reason: str = ""                 # user | failure | internal_error | drain
+    detail: str = ""
+    needs_confirmation: bool = False  # scenario 9: internal error → confirm before resume
+    at: str | None = None
+
+
 class RunSummary(_CamelModel):
     id: str
     flow_id: str
@@ -174,6 +198,8 @@ class RunSummary(_CamelModel):
     #: True only for runs launched by a timed schedule (run_schedules.py). The
     #: WebUI renders a "Scheduled" tag so timed runs are distinguishable in history.
     is_scheduled: bool = False
+    #: Present only while ``status == "paused"`` — why the run was parked.
+    pause: RunPauseView | None = None
 
 
 class PendingMergeView(_CamelModel):
@@ -478,6 +504,16 @@ def _public_run_inputs(inputs: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _to_summary(r: FlowRun) -> RunSummary:
+    pause_view: RunPauseView | None = None
+    if r.status == RunStatus.paused:
+        blob = read_pause_state(r)
+        if blob is not None:
+            pause_view = RunPauseView(
+                reason=str(blob.get("reason") or ""),
+                detail=str(blob.get("detail") or ""),
+                needs_confirmation=bool(blob.get("needs_confirmation")),
+                at=(str(blob["at"]) if blob.get("at") else None),
+            )
     return RunSummary(
         id=r.id, flow_id=r.flow_id, flow_version=r.flow_version,
         team_name=r.team_name,
@@ -487,6 +523,7 @@ def _to_summary(r: FlowRun) -> RunSummary:
         finished_at=iso_utc(r.finished_at) if r.finished_at else None,
         inputs=_public_run_inputs(r.inputs),
         is_scheduled=bool(r.is_scheduled),
+        pause=pause_view,
     )
 
 
@@ -569,6 +606,16 @@ def _to_detail(r: FlowRun, *, flow: Flow | None, cfg: Config) -> RunDetail:
             mode="json",
             by_alias=True,
         )
+    pause_view: RunPauseView | None = None
+    if r.status == RunStatus.paused:
+        blob = read_pause_state(r)
+        if blob is not None:
+            pause_view = RunPauseView(
+                reason=str(blob.get("reason") or ""),
+                detail=str(blob.get("detail") or ""),
+                needs_confirmation=bool(blob.get("needs_confirmation")),
+                at=(str(blob["at"]) if blob.get("at") else None),
+            )
     return RunDetail(
         id=r.id, flow_id=r.flow_id, flow_version=r.flow_version,
         team_name=r.team_name,
@@ -578,6 +625,7 @@ def _to_detail(r: FlowRun, *, flow: Flow | None, cfg: Config) -> RunDetail:
         finished_at=iso_utc(r.finished_at) if r.finished_at else None,
         inputs=_public_run_inputs(r.inputs),
         is_scheduled=bool(r.is_scheduled),
+        pause=pause_view,
         pending_merges=pending,
         clawteam_board_url=_board_url(r.team_name, cfg),
         spec_snapshot=spec_snapshot,
@@ -1417,23 +1465,99 @@ async def abort_run(
     user: UserDep,
     storage: StorageDep,
 ) -> RunSummary:
+    """终止执行流 — the user's irreversible terminate. Destructive finalize.
+
+    Allowed only from pre-review states + ``paused`` (:data:`_TERMINATE_ALLOWED`).
+    Once a run is in merge-review / complaint the user acts on merges / complaint
+    instead of terminating the whole run. This is the ONLY path that terminates a
+    run — the backend never does (it pauses).
+    """
     run = storage.run_get(run_id)
     if run is None:
         raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
     _ensure_owner(run, user)
-    if run.status in _TERMINAL:
+    if run.status not in _TERMINATE_ALLOWED:
         raise ApiError(
             "RUN_NOT_RUNNING",
-            f"run is already terminal ({_status_str(run.status)})",
+            f"run cannot be terminated in state {_status_str(run.status)}",
             status_code=409,
         )
     sched = get_scheduler()
     # Shared primitive: instant DB flip to aborted + cooperative cancel.
     cancelled = abort_run_to_terminal(run, sched=sched, storage=storage)
     if not cancelled:
-        # No live scheduler task to finalize cleanup; do best-effort here.
+        # No live scheduler task to finalize cleanup (e.g. terminating a paused
+        # run whose controller is already gone); do the destructive cleanup here.
         flow = storage.flow_get(run.flow_id)
         await _cleanup_terminal_tail(run=run, storage=storage, flow=flow)
+    refreshed = storage.run_get(run.id) or run
+    return _to_summary(refreshed)
+
+
+@router.post("/runs/{run_id}/pause", response_model=RunSummary)
+async def pause_run(
+    run_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunSummary:
+    """暂停执行 — resumable stop. Cooperative; the controller parks the run.
+
+    The live controller finishes its current tick, tears down sessions, resets
+    interrupted tasks to pending, preserves worktrees + team, and lands in
+    ``paused``. The user can later 继续执行 (resume) or 终止执行流 (terminate).
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if run.status not in _PAUSE_ALLOWED:
+        raise ApiError(
+            "RUN_NOT_PAUSABLE",
+            f"run cannot be paused in state {_status_str(run.status)}",
+            status_code=409,
+        )
+    sched = get_scheduler()
+    controller = sched.get_controller(run.id)
+    if controller is None:
+        raise ApiError(
+            "RUN_NOT_RUNNING",
+            "no live run to pause",
+            status_code=409,
+        )
+    controller.pause(reason=PAUSE_REASON_USER, detail="user requested pause")
+    refreshed = storage.run_get(run.id) or run
+    return _to_summary(refreshed)
+
+
+@router.post("/runs/{run_id}/continue", response_model=RunSummary)
+async def continue_run(
+    run_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> RunSummary:
+    """继续执行 — resume a paused run from where it left off.
+
+    Rebuilds a controller against the existing ClawTeam team + on-disk worktrees
+    (see :meth:`FlowScheduler.resume_run`) and re-drives the DAG: completed tasks
+    stay completed, interrupted / failed tasks re-run in their existing worktree,
+    and an external task's outstanding receipt is honoured (already-arrived →
+    progresses; still-waiting → keeps waiting, never re-dispatched).
+    """
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if run.status != RunStatus.paused:
+        raise ApiError(
+            "RUN_NOT_PAUSED",
+            f"run is not paused ({_status_str(run.status)})",
+            status_code=409,
+        )
+    flow = storage.flow_get(run.flow_id)
+    if flow is None:
+        raise ApiError("NOT_FOUND", f"flow {run.flow_id!r} not found", status_code=404)
+    sched = get_scheduler()
+    sched.resume_run(run=run, flow=flow, storage=storage)
     refreshed = storage.run_get(run.id) or run
     return _to_summary(refreshed)
 

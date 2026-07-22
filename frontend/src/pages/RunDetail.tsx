@@ -46,6 +46,15 @@ const TERMINAL = new Set([
   "aborted",
   "orphaned",
 ]);
+// Pre-review states where the user may 暂停执行 (pause) or 终止执行流 (terminate).
+// Both controls vanish once a run reaches the merge-review / complaint phases.
+const PAUSE_ALLOWED = new Set([
+  "pending",
+  "compiling",
+  "running",
+  "awaiting_external",
+  "awaiting_user_checkpoint",
+]);
 const LEADER_REPLY_VISIBLE = new Set([
   "awaiting_user_review",
   "awaiting_user_complaint",
@@ -209,6 +218,8 @@ export function RunDetail() {
     "connecting" | "open" | "closed" | "error"
   >("connecting");
   const [aborting, setAborting] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [complaintText, setComplaintText] = useState("");
   const [complaintSubmitting, setComplaintSubmitting] = useState(false);
   const [complaintActionCommitted, setComplaintActionCommitted] = useState(false);
@@ -407,6 +418,37 @@ export function RunDetail() {
       void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
       setAborting(false);
+    }
+  }
+
+  async function onPause() {
+    if (!run) return;
+    setPausing(true);
+    try {
+      const r = await api.pauseRun(run.id);
+      setRun({ ...run, status: r.status, pause: r.pause });
+    } catch (e) {
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setPausing(false);
+    }
+  }
+
+  async function onContinue() {
+    if (!run) return;
+    // Scenario 9 (internal error): make the user acknowledge the run may be in
+    // an inconsistent state before re-running.
+    if (run.pause?.needsConfirmation && !(await confirm(t("runDetail.resumeConfirm")))) {
+      return;
+    }
+    setContinuing(true);
+    try {
+      const r = await api.continueRun(run.id);
+      setRun({ ...run, status: r.status, pause: r.pause ?? null });
+    } catch (e) {
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setContinuing(false);
     }
   }
 
@@ -707,10 +749,6 @@ export function RunDetail() {
   const showComplaintPanel =
     run.status === "awaiting_user_complaint" ||
     (run.status === "complaint_processing" && Boolean(complaintNotice));
-  const abortLockedByComplaint =
-    complaintSubmitting
-    || complaintActionCommitted
-    || run.status === "complaint_processing";
   const boardHint = t("runDetail.boardHint").trim();
 
   return (
@@ -768,17 +806,57 @@ export function RunDetail() {
               ? t("runDetail.wsConnecting")
               : t("runDetail.wsOffline")}
           </span>
-          {!TERMINAL.has(run.status) && (
+          {PAUSE_ALLOWED.has(run.status) && (
+            <button
+              className="btn-outline"
+              onClick={onPause}
+              disabled={pausing}
+            >
+              {pausing ? t("runDetail.pausing") : t("runDetail.pause")}
+            </button>
+          )}
+          {run.status === "paused" && (
+            <button
+              className="btn-primary"
+              onClick={onContinue}
+              disabled={continuing}
+            >
+              {continuing ? t("runDetail.resuming") : t("runDetail.resume")}
+            </button>
+          )}
+          {(PAUSE_ALLOWED.has(run.status) || run.status === "paused") && (
             <button
               className="btn-danger"
               onClick={onAbort}
-              disabled={aborting || abortLockedByComplaint}
+              disabled={aborting}
             >
               {aborting ? t("runDetail.aborting") : t("runDetail.abort")}
             </button>
           )}
         </div>
       </div>
+
+      {/* Paused banner — why the run is parked + resume/terminate hint */}
+      {run.status === "paused" && (
+        <Card
+          className={
+            run.pause?.needsConfirmation ? "border-amber-300" : "border-sky-200"
+          }
+        >
+          <CardTitle>{t("runDetail.pausedTitle")}</CardTitle>
+          <div className="space-y-1 text-sm text-ink-600">
+            <p>{t(`runDetail.pauseReason.${run.pause?.reason || "user"}`)}</p>
+            {run.pause?.needsConfirmation && (
+              <p className="text-amber-700">{t("runDetail.pauseNeedsConfirm")}</p>
+            )}
+            {run.pause?.detail && (
+              <p className="font-mono text-xs text-ink-500 break-all">
+                {run.pause.detail}
+              </p>
+            )}
+          </div>
+        </Card>
+      )}
 
       {/* Pending merges */}
       {run.pendingMerges && run.pendingMerges.length > 0 && (

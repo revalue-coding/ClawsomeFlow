@@ -337,23 +337,34 @@ def _persist_run(run_id: str, status: RunStatus) -> FlowRun:
 
 
 @pytest.mark.asyncio
-async def test_drain_to_terminal_aborts_active_orphans_residual_keeps_preserved(
+async def test_drain_to_terminal_pauses_active_orphans_residual_keeps_preserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = _spec()
 
-    # A truly-active run: a live controller blocked in run_loop until cancel.
+    # A truly-active run: a live controller blocked in run_loop until a stop
+    # signal. The backend never terminates — drain PAUSES it (resumable).
     active = _persist_run("run-active-01", RunStatus.running)
 
-    async def _block_loop(self, *, max_ticks: int | None = None):
-        await self._cancel_evt.wait()
+    async def _pause_aware_loop(self, *, max_ticks: int | None = None):
+        cancel_w = asyncio.ensure_future(self._cancel_evt.wait())
+        pause_w = asyncio.ensure_future(self._pause_evt.wait())
+        await asyncio.wait({cancel_w, pause_w}, return_when=asyncio.FIRST_COMPLETED)
+        for w in (cancel_w, pause_w):
+            if not w.done():
+                w.cancel()
+        pausing = self._pause_evt.is_set() and not self._cancel_evt.is_set()
+        final = RunStatus.paused if pausing else RunStatus.aborted
+        self.run.status = final
+        self.run.finished_at = None if pausing else datetime.now(timezone.utc)
+        get_storage().run_update(self.run)
         return engine.RunOutcome(
-            final_status=RunStatus.aborted,
+            final_status=final,
             completed_task_ids=[], failed_task_ids=[], skipped_task_ids=[],
-            reason="cancelled",
+            reason="drain",
         )
 
-    monkeypatch.setattr(engine.RunController, "run_loop", _block_loop)
+    monkeypatch.setattr(engine.RunController, "run_loop", _pause_aware_loop)
 
     # Residual run: ACTIVE_DRIVING in the DB but with NO live controller.
     residual = _persist_run("run-residual-02", RunStatus.running)
@@ -367,11 +378,13 @@ async def test_drain_to_terminal_aborts_active_orphans_residual_keeps_preserved(
     assert sched.get_controller(active.id) is not None
 
     result = await sched.drain_to_terminal(timeout=3.0)
-    assert result == {"aborted": 1, "orphaned": 1}
+    assert result == {"paused": 1, "reverted": 0, "orphaned": 1}
 
     storage = get_storage()
-    assert storage.run_get(active.id).status == RunStatus.aborted
-    assert storage.run_get(active.id).finished_at is not None
+    # Active run is PAUSED (resumable), not aborted, and keeps finished_at None.
+    assert storage.run_get(active.id).status == RunStatus.paused
+    assert storage.run_get(active.id).finished_at is None
+    # Residual (no live driver) → orphaned (accepted SIGKILL-class degradation).
     assert storage.run_get(residual.id).status == RunStatus.orphaned
     assert storage.run_get(residual.id).finished_at is not None
     # Preserved states are left intact for post-restart merge/complaint.
@@ -381,7 +394,7 @@ async def test_drain_to_terminal_aborts_active_orphans_residual_keeps_preserved(
 
 
 @pytest.mark.asyncio
-async def test_drain_to_terminal_aborts_inflight_complaint_task(
+async def test_drain_to_terminal_reverts_inflight_complaint_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = _persist_run("run-complaint-active-01", RunStatus.complaint_processing)
@@ -404,12 +417,14 @@ async def test_drain_to_terminal_aborts_inflight_complaint_task(
     assert sched.complaint_in_progress(run.id) is True
 
     result = await sched.drain_to_terminal(timeout=3.0)
-    assert result == {"aborted": 1, "orphaned": 0}
+    # Backend never terminates: an in-progress complaint reverts to the PRESERVED
+    # awaiting_user_complaint so the user can re-submit after the restart.
+    assert result == {"paused": 0, "reverted": 1, "orphaned": 0}
 
     refreshed = storage.run_get(run.id)
     assert refreshed is not None
-    assert refreshed.status == RunStatus.aborted
-    assert refreshed.finished_at is not None
+    assert refreshed.status == RunStatus.awaiting_user_complaint
+    assert refreshed.finished_at is None
     assert sched.complaint_in_progress(run.id) is False
 
 
@@ -418,4 +433,70 @@ async def test_drain_to_terminal_noop_when_no_active_runs() -> None:
     _persist_run("run-review-only", RunStatus.awaiting_user_review)
     sched = engine.get_scheduler()
     result = await sched.drain_to_terminal(timeout=2.0)
-    assert result == {"aborted": 0, "orphaned": 0}
+    assert result == {"paused": 0, "reverted": 0, "orphaned": 0}
+
+
+@pytest.mark.asyncio
+async def test_resume_run_rewires_existing_team_without_recompile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _persist_run("run-resume-01", RunStatus.paused)
+    storage = get_storage()
+    flow = storage.flow_get(run.flow_id)
+    assert flow is not None
+
+    # Fake MCP whose task_list returns the EXISTING team's csflow-tagged tasks,
+    # from which resume must reconstruct the CompileResult id-mapping.
+    class _FakeMcp:
+        async def task_list(self, team):  # noqa: ANN001
+            del team
+            return [
+                {"id": "ct-ts", "metadata": {"csflow_task_id": "ts"},
+                 "status": "pending", "owner": "leader"},
+            ]
+
+    async def _fake_get_mcp(*, user):  # noqa: ANN001
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp,
+    )
+
+    captured: dict[str, object] = {}
+
+    async def _fake_prepare(self) -> None:
+        captured["prepared"] = True
+
+    async def _fake_loop(self, *, max_ticks=None):  # noqa: ANN001
+        captured["compile_result"] = self.compile_result
+        self.run.status = RunStatus.completed
+        get_storage().run_update(self.run)
+        return engine.RunOutcome(
+            final_status=RunStatus.completed,
+            completed_task_ids=[], failed_task_ids=[], skipped_task_ids=[],
+            reason="done",
+        )
+
+    monkeypatch.setattr(engine.RunController, "prepare_resume", _fake_prepare)
+    monkeypatch.setattr(engine.RunController, "run_loop", _fake_loop)
+
+    # Guard: resume must NEVER recompile (that would duplicate the team/tasks).
+    async def _boom_compile(**kwargs):  # noqa: ANN003
+        raise AssertionError("resume must not recompile the team")
+
+    monkeypatch.setattr(engine, "compile_flow_to_clawteam", _boom_compile)
+
+    sched = engine.get_scheduler()
+    sched.resume_run(run=run, flow=flow, storage=storage)
+    for _ in range(100):
+        if sched.get_controller(run.id) is None:
+            break
+        await asyncio.sleep(0.02)
+
+    assert captured.get("prepared") is True
+    cr = captured.get("compile_result")
+    assert cr is not None
+    assert cr.flow_to_clawteam == {"ts": "ct-ts"}
+    assert cr.clawteam_to_flow == {"ct-ts": "ts"}
+    assert storage.run_get(run.id).status == RunStatus.completed

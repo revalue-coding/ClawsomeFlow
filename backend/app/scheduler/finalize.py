@@ -102,7 +102,8 @@ class FinalizeInput:
     agents: list[FlowAgent]
     leader_agent_id: str
     has_failed_tasks: bool                       # propagated from controller
-    aborted: bool = False                        # cancel was requested
+    aborted: bool = False                        # cancel (terminate) was requested
+    paused: bool = False                         # resumable stop was requested
 
 
 @dataclass
@@ -148,6 +149,27 @@ async def finalize_run(
             if a.kind not in (AgentKind.openclaw, AgentKind.external)
         ]
         out = FinalizeOutcome(final_status=RunStatus.completed)
+
+        # Paused runs (user 暂停执行 / backend detected-failure / internal error /
+        # pre-stop drain) are parked NON-destructively: keep the ClawTeam team +
+        # every worktree on disk, keep run.inputs markers (incl. the pause-state
+        # blob the controller just stamped), and DO NOT run any team / worktree
+        # cleanup. ``继续执行`` reconstructs a controller and re-drives the DAG.
+        # Checked before the aborted/failed branch; the controller only sets
+        # ``paused`` when cancel (terminate) was NOT requested, so terminate
+        # always wins.
+        if ipt.paused:
+            out.final_status = RunStatus.paused
+            out.detail = "run paused (resumable)"
+            ipt.run.status = RunStatus.paused
+            # finished_at stays None — a paused run is not finished.
+            ipt.run.finished_at = None
+            logger.info(
+                "finalize_run_paused",
+                run_id=ipt.run.id,
+                team=ipt.run.team_name,
+            )
+            return out
 
         # Aborted/failed runs are force-terminated: skip all merge decision
         # branches and immediately cleanup run worktrees.

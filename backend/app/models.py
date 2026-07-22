@@ -210,6 +210,16 @@ class RunStatus(str, Enum):
     # a local task is dispatched or the external results arrive.
     awaiting_external = "awaiting_external"
     awaiting_user_checkpoint = "awaiting_user_checkpoint"
+    # A run the user (or the backend, on a detected failure / internal error /
+    # pre-stop drain) has parked mid-flight. Non-terminal + restart-survivable:
+    # the driving RunController is torn down but worktrees + the ClawTeam team
+    # are PRESERVED on disk, so ``继续执行`` rebuilds a controller and re-drives
+    # the DAG from where it left off (completed tasks stay completed;
+    # interrupted / failed tasks were reset to ``pending`` at pause time and
+    # re-dispatch into their existing worktree). The backend NEVER terminates a
+    # run on its own — every backend-side stop lands here, and only the user may
+    # promote a paused run to the terminal ``aborted`` via 终止执行流.
+    paused = "paused"
     awaiting_user_review = "awaiting_user_review"
     awaiting_user_complaint = "awaiting_user_complaint"
     complaint_processing = "complaint_processing"
@@ -242,7 +252,13 @@ TERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset({
 #: in-process state (data lives in the DB + on-disk worktrees), so the merge
 #: review / complaint APIs keep working after a restart. The startup orphan
 #: sweep and the pre-stop drain both SKIP these.
+#:
+#: ``paused`` is here too: its driving controller is gone, but the ClawTeam
+#: team + per-agent worktrees are preserved on disk and the DAG progress lives
+#: in ClawTeam, so ``继续执行`` reconstructs a controller and resumes. The
+#: sweep/drain must leave a paused run alone (no orphaning, no re-pausing).
 PRESERVED_NONTERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset({
+    RunStatus.paused,
     RunStatus.awaiting_user_review,
     RunStatus.awaiting_user_complaint,
 })

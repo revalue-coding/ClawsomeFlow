@@ -30,6 +30,7 @@ const ACTIVE_STATUSES = new Set([
   "running",
   "awaiting_external",
   "awaiting_user_checkpoint",
+  "paused",
   "awaiting_user_review",
   "awaiting_user_complaint",
   // NOTE: "complaint_processing" is intentionally NOT active — once the user

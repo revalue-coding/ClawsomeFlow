@@ -50,6 +50,9 @@ def test_sweep_orphaned_runs_reconciles_active_driving_only() -> None:
     checkpoint = _make_run("run-sweep-ckpt", RunStatus.awaiting_user_checkpoint)
     review = _make_run("run-sweep-review", RunStatus.awaiting_user_review)
     complaint = _make_run("run-sweep-complaint", RunStatus.awaiting_user_complaint)
+    # A paused run is PRESERVED — it must survive a restart so the user can
+    # 继续执行 after the process comes back (upgrade parity).
+    paused = _make_run("run-sweep-paused", RunStatus.paused)
     completed = _make_run("run-sweep-done", RunStatus.completed)
 
     log = get_logger("test")
@@ -64,6 +67,8 @@ def test_sweep_orphaned_runs_reconciles_active_driving_only() -> None:
     # PRESERVED + already-terminal states untouched.
     assert storage.run_get(review.id).status == RunStatus.awaiting_user_review
     assert storage.run_get(complaint.id).status == RunStatus.awaiting_user_complaint
+    assert storage.run_get(paused.id).status == RunStatus.paused
+    assert storage.run_get(paused.id).finished_at is None
     assert storage.run_get(completed.id).status == RunStatus.completed
 
     # Idempotent: a second sweep finds nothing new.
