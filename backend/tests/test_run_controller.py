@@ -1996,6 +1996,40 @@ async def test_run_loop_unhandled_exception_pauses_and_emits_event(
 
 
 @pytest.mark.asyncio
+async def test_run_loop_unhandled_exception_terminates_unattended_run(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario 9 for an UNATTENDED run: a scheduler exception can't PAUSE (no
+    human to resume) — it drives to terminal ``failed`` so the caller / callback /
+    webhook gets a result instead of hanging forever. Contrast the attended run,
+    which parks in ``paused`` with a confirm hint."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    run.inputs = {"_csflow_unattended": "true"}
+    get_storage().run_update(run)
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots,
+    )
+
+    async def _boom_tick():
+        raise RuntimeError("tick boom")
+
+    monkeypatch.setattr(rc, "tick", _boom_tick)
+    outcome = await rc.run_loop(max_ticks=2)
+    # Terminal failed (NOT paused): _forced_failed drove finalize to a result.
+    assert rc._forced_failed is True
+    assert outcome.final_status == RunStatus.failed
+    refreshed = get_storage().run_get(run.id)
+    assert refreshed.status == RunStatus.failed
+    assert refreshed.finished_at is not None
+
+
+@pytest.mark.asyncio
 async def test_prepare_resume_reconciles_from_clawteam_snapshot(
     fake_lookup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

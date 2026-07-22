@@ -1861,8 +1861,9 @@ async def get_run_agent_diff(
     """Full unified diff of what *agent_id* merged into a baseline this run.
 
     Powers the "View diff" modal in the Run-diff module. Read-only history
-    reconstruction (no checkout / no lock). 404 when the agent is unknown/OpenClaw
-    or nothing of theirs merged.
+    reconstruction (no checkout / no lock). 404 when the agent is unknown/
+    ineligible (``merge_strategy=skip`` external node) or nothing of theirs
+    merged. OpenClaw + leader ARE eligible (see :func:`_run_diff_agents`).
     """
     run = storage.run_get(run_id)
     if run is None:

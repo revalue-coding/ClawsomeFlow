@@ -2455,10 +2455,34 @@ def test_run_agent_diff_no_merged_changes_404(
     assert r.json()["error"] == "NO_MERGED_CHANGES"
 
 
-def test_run_agent_diff_openclaw_agent_404(app_client: TestClient) -> None:
+def test_run_agent_diff_openclaw_agent_eligible_no_merges_404(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # OpenClaw agents ARE eligible for Run diff (feat run-diff includes OpenClaw
+    # + leader). An OpenClaw agent that merged nothing yields NO_MERGED_CHANGES —
+    # NOT AGENT_NOT_FOUND (which would mean it was excluded from the module).
     flow = _make_openclaw_flow()
     run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+
+    class _FakeCli:
+        async def run_merged_agent_patch(self, *, team, agent, repo, **kw):
+            del team, agent, repo, kw
+            return None  # no merge history for this agent
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
     r = app_client.get(f"/api/runs/{run.id}/run-diff/ocw")
+    assert r.status_code == 404
+    assert r.json()["error"] == "NO_MERGED_CHANGES"
+
+
+def test_run_agent_diff_unknown_agent_404(app_client: TestClient) -> None:
+    # A genuinely unknown / ineligible agent id → AGENT_NOT_FOUND (short-circuits
+    # before any CLI call).
+    flow = _make_openclaw_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+    r = app_client.get(f"/api/runs/{run.id}/run-diff/does-not-exist")
     assert r.status_code == 404
     assert r.json()["error"] == "AGENT_NOT_FOUND"
 

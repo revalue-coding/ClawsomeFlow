@@ -86,8 +86,10 @@ def test_resume_unattended_paused_runs_only_resumes_drain_paused_unattended(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Startup auto-resumes only DRAIN-paused UNATTENDED runs (survive restart).
-    A manual run, and an unattended run a human explicitly PAUSED (reason=user),
-    are both left alone."""
+    A manual run, an unattended run a human explicitly PAUSED (reason=user), and
+    an unattended run paused by a detected node FAILURE (reason=failure) are all
+    left alone — a failure needs human attention, so it never auto-resumes even
+    when unattended."""
     from app.models import RunStatus
     from app.scheduler import engine as engine_mod
     from app.storage import get_storage
@@ -109,6 +111,15 @@ def test_resume_unattended_paused_runs_only_resumes_drain_paused_unattended(
         "_csflow_pause_state": {"reason": "user"},
     }
     storage.run_update(user_paused)
+
+    # Unattended, but paused by a detected node failure → must NOT auto-resume
+    # (the user has to fix the problem first, then resume manually).
+    failure_paused = _make_run("run-paused-failure", RunStatus.paused)
+    failure_paused.inputs = {
+        "_csflow_unattended": "true",
+        "_csflow_pause_state": {"reason": "failure"},
+    }
+    storage.run_update(failure_paused)
 
     _make_run("run-paused-manual", RunStatus.paused)  # no marker → manual
 
