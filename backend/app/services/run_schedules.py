@@ -895,36 +895,53 @@ class RunScheduleWorker:
     ) -> bool:
         """Run the not-yet-done planned items, persisting progress incrementally.
 
-        Skips items already ``succeeded`` / ``failed`` / ``skipped`` (so a resumed
-        execution does not re-run finished items). Returns True if the worker was
-        asked to stop mid-run — the execution is left ``running`` with its
-        in-flight items still ``running``/``pending`` so startup can resume them.
+        - Items already ``succeeded`` / ``failed`` / ``skipped`` are skipped.
+        - An item left ``running`` with a run_id (a run a prior process started)
+          is RE-ATTACHED: we simply WAIT for that run to reach a terminal status
+          — we never re-trigger it. The run itself resumes independently via the
+          ordinary run pause/auto-resume path, so the schedule sequence is fully
+          DECOUPLED from whether/how a run was re-executed mid-way (exactly like
+          the delegate callback, which also just fires on the run's terminal).
+        - Only ``pending`` items trigger a NEW run.
+        Returns True if the worker was asked to stop mid-run (execution left
+        ``running`` so startup resumes it).
         """
-        done_idx = {
-            int(e.get("index", -1)) for e in (execution.item_results or [])
-            if e.get("status") in _ITEM_DONE_STATUSES
-        }
+        def _entry_of(idx: int) -> dict[str, Any] | None:
+            for e in execution.item_results or []:
+                if int(e.get("index", -1)) == idx:
+                    return e
+            return None
+
+        def _in_flight_run_id(entry: dict[str, Any] | None) -> str:
+            if entry and entry.get("status") == "running":
+                return str(entry.get("run_id") or "").strip()
+            return ""
+
         if schedule.run_mode == _RUN_MODE_SERIAL:
             for pos, item in enumerate(planned):
-                if item.index in done_idx:
+                entry = _entry_of(item.index)
+                if entry and entry.get("status") in _ITEM_DONE_STATUSES:
                     continue
                 if self._stop_evt.is_set():
                     return True
-                run_id, reason_code, reason = await _trigger_configured_run(
-                    schedule=schedule, item=item, storage=storage,
-                )
-                if not run_id:
+                run_id = _in_flight_run_id(entry)
+                if not run_id:  # pending → start a NEW run
+                    run_id, reason_code, reason = await _trigger_configured_run(
+                        schedule=schedule, item=item, storage=storage,
+                    )
+                    if not run_id:
+                        self._set_schedule_item_result(execution, storage, _item_result(
+                            index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
+                            status="failed", reason=reason or "failed to start run",
+                            reason_code=reason_code or "trigger_failed", inputs=item.inputs,
+                        ))
+                        self._skip_remaining_serial(execution, storage, planned[pos + 1:])
+                        return False
                     self._set_schedule_item_result(execution, storage, _item_result(
                         index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
-                        status="failed", reason=reason or "failed to start run",
-                        reason_code=reason_code or "trigger_failed", inputs=item.inputs,
+                        status="running", run_id=run_id, inputs=item.inputs,
                     ))
-                    self._skip_remaining_serial(execution, storage, planned[pos + 1:])
-                    return False
-                self._set_schedule_item_result(execution, storage, _item_result(
-                    index=item.index, flow_id=item.flow_id, flow_name=item.flow_name,
-                    status="running", run_id=run_id, inputs=item.inputs,
-                ))
+                # else: re-attach to the in-flight run (it auto-resumes on its own).
                 terminal = await _wait_run_terminal(
                     run_id=run_id, storage=storage, stop_evt=self._stop_evt,
                 )
@@ -949,7 +966,12 @@ class RunScheduleWorker:
         # parallel
         to_wait: list[tuple[_PlannedScheduleItem, str]] = []
         for item in planned:
-            if item.index in done_idx:
+            entry = _entry_of(item.index)
+            if entry and entry.get("status") in _ITEM_DONE_STATUSES:
+                continue
+            run_id = _in_flight_run_id(entry)
+            if run_id:  # re-attach to the in-flight run
+                to_wait.append((item, run_id))
                 continue
             run_id, reason_code, reason = await _trigger_configured_run(
                 schedule=schedule, item=item, storage=storage,

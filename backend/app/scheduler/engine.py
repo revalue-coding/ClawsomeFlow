@@ -335,7 +335,6 @@ class FlowScheduler:
 
         paused = 0
         reverted = 0
-        aborted = 0
         orphaned = 0
         try:
             active_runs = store.list_active_driving_runs()
@@ -349,21 +348,13 @@ class FlowScheduler:
                 continue
             entry = self._runs.get(run.id)
             if entry is not None and not entry.task.done():
-                # Scheduled runs are governed by the schedule-execution lifecycle
-                # (its orphaned executions are reaped at next startup and the
-                # schedule re-fires on its next trigger), so TERMINATE them here
-                # rather than pause+auto-resume — otherwise a run would complete
-                # under an already-reaped execution. Delegated / MCP unattended
-                # runs (a caller is waiting on the callback / result) and manual
-                # runs are PAUSED so they survive the restart.
-                if getattr(run, "is_scheduled", False):
-                    try:
-                        entry.controller.cancel()
-                    except Exception as exc:  # pragma: no cover - defensive
-                        logger.warning("drain_cancel_failed", run_id=run.id, error=str(exc))
-                        continue
-                    aborted += 1
-                    continue
+                # EVERY live run is PAUSED (never terminated) — including
+                # scheduled runs, which are just ordinary runs. Manual runs wait
+                # for 继续执行; unattended runs (delegated / MCP / scheduled)
+                # auto-resume on the next startup. Anything downstream of a run
+                # (the delegate callback, the schedule sequence advancing to the
+                # next run) keys off the run reaching a TERMINAL status and is
+                # independent of how many times it paused/resumed.
                 try:
                     entry.controller.pause(
                         reason=_PAUSE_REASON_DRAIN,
@@ -413,13 +404,9 @@ class FlowScheduler:
         self._draining = False
 
         logger.info(
-            "scheduler_drained",
-            paused=paused, reverted=reverted, aborted=aborted, orphaned=orphaned,
+            "scheduler_drained", paused=paused, reverted=reverted, orphaned=orphaned,
         )
-        return {
-            "paused": paused, "reverted": reverted,
-            "aborted": aborted, "orphaned": orphaned,
-        }
+        return {"paused": paused, "reverted": reverted, "orphaned": orphaned}
 
     async def shutdown(self, *, timeout: float = 30.0) -> None:
         """Cancel every active Run and wait up to *timeout* for them to exit."""

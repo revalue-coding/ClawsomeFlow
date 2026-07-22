@@ -690,24 +690,31 @@ async def test_run_schedule_parallel_continues_when_one_flow_fails(
 async def test_schedule_execution_resumes_remaining_items_after_restart(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A schedule execution a prior process left ``running`` resumes its
-    not-yet-done items from the persisted plan — a multi-Run schedule survives a
-    restart (already-succeeded items are not re-run)."""
+    """A schedule execution a prior process left ``running`` resumes from the
+    persisted plan: a succeeded item is skipped, a still-``pending`` item starts
+    a fresh run, and an in-flight ``running`` item is RE-ATTACHED (waited on by
+    its existing run_id) — NEVER re-triggered. So sequencing is decoupled from
+    whether the in-flight run was re-executed mid-way."""
     del app_client
     from app.models import FlowRunScheduleExecution
     from app.services import run_schedules as schedule_mod
 
     flow_a = _make_flow(owner="alice")
     flow_b = _make_flow(owner="alice")
+    flow_c = _make_flow(owner="alice")
     storage = get_storage()
     execution = storage.run_schedule_execution_create(FlowRunScheduleExecution(
         schedule_id="sched-resume", schedule_name="s", user="alice",
-        run_mode="serial", execute_mode="once", status="running", total_items=2,
+        run_mode="serial", execute_mode="once", status="running", total_items=3,
         item_results=[
             {"index": 0, "flow_id": flow_a.id, "flow_name": "a", "status": "succeeded",
              "reason": "", "reason_code": "completed", "run_id": "run-old-0", "inputs": {}},
-            {"index": 1, "flow_id": flow_b.id, "flow_name": "b", "status": "pending",
-             "reason": "", "reason_code": "", "run_id": "", "inputs": {"k": "v"}},
+            # In-flight when the process died — its run auto-resumes on its own.
+            {"index": 1, "flow_id": flow_b.id, "flow_name": "b", "status": "running",
+             "reason": "", "reason_code": "", "run_id": "run-inflight-1", "inputs": {"k": "v"}},
+            # Never started.
+            {"index": 2, "flow_id": flow_c.id, "flow_name": "c", "status": "pending",
+             "reason": "", "reason_code": "", "run_id": "", "inputs": {}},
         ],
     ))
 
@@ -719,8 +726,8 @@ async def test_schedule_execution_resumes_remaining_items_after_restart(
         return f"run-new-{item.index}", "", ""
 
     async def fake_wait(*, run_id, storage, stop_evt):
-        del run_id, storage, stop_evt
-        return RunStatus.completed
+        del storage, stop_evt
+        return RunStatus.completed if run_id else None
 
     monkeypatch.setattr(schedule_mod, "_trigger_configured_run", fake_trigger)
     monkeypatch.setattr(schedule_mod, "_wait_run_terminal", fake_wait)
@@ -728,15 +735,18 @@ async def test_schedule_execution_resumes_remaining_items_after_restart(
     worker = schedule_mod.get_run_schedule_worker()
     await worker._resume_schedule_execution(execution.id)
 
-    # Only the pending item (flow_b) was re-run; the succeeded item was skipped.
-    assert triggered == [flow_b.id]
+    # Only the never-started item (flow_c) was triggered; the in-flight item
+    # (flow_b) was re-attached (NOT re-triggered), the succeeded item skipped.
+    assert triggered == [flow_c.id]
     refreshed = storage.run_schedule_execution_get(execution.id)
     assert refreshed.status == "succeeded"
     assert refreshed.finished_at is not None
     by_idx = {int(e["index"]): e for e in refreshed.item_results}
-    assert by_idx[0]["status"] == "succeeded"  # untouched
-    assert by_idx[1]["status"] == "succeeded"  # resumed to completion
-    assert by_idx[1]["run_id"] == "run-new-1"
+    assert by_idx[0]["status"] == "succeeded"           # untouched
+    assert by_idx[1]["status"] == "succeeded"            # re-attached to its run
+    assert by_idx[1]["run_id"] == "run-inflight-1"       # SAME run, not re-triggered
+    assert by_idx[2]["status"] == "succeeded"            # fresh run
+    assert by_idx[2]["run_id"] == "run-new-2"
 
 
 # ── List + detail ----------------------------------------------------
