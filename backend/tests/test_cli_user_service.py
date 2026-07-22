@@ -40,6 +40,8 @@ def test_ensure_user_service_file_writes_unit(
         "ExecStart=/home/test/.local/bin/csflow serve --host 127.0.0.1 --port 17017"
         in text
     )
+    # OOM guard: bias the killer away from the long-lived orchestrator.
+    assert "OOMScoreAdjust=-800" in text
 
 
 def test_restart_and_enable_runs_expected_systemctl_commands(monkeypatch) -> None:

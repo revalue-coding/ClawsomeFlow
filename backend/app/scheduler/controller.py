@@ -100,9 +100,12 @@ from app.scheduler.finalize import (
     run_terminal_tail_cleanup,
 )
 from app.scheduler.run_metadata import (
+    PAUSE_REASON_FAILURE,
+    PAUSE_REASON_INTERNAL_ERROR,
     POST_COMPLAINT_STATUS_KEY,
     coalesce_reverted_merge_markers,
     run_is_unattended,
+    write_pause_state,
 )
 from app.scheduler.naming import openclaw_session_id_for_run, team_name_for_run
 from app.repo_merge_lock import self_merge_instruction
@@ -128,6 +131,8 @@ from app.worktree.lookup import WorktreeInfo, WorktreeLookup, get_worktree_looku
 logger = get_logger("scheduler.controller")
 
 _POST_COMPLAINT_STATUS_KEY = POST_COMPLAINT_STATUS_KEY
+_PAUSE_REASON_INTERNAL_ERROR = PAUSE_REASON_INTERNAL_ERROR
+_PAUSE_REASON_FAILURE = PAUSE_REASON_FAILURE
 _TASK_PREFIX_RE = re.compile(
     r"^\s*task\s+([A-Za-z0-9._-]+)\s+done\s*:",
     re.IGNORECASE,
@@ -410,6 +415,15 @@ class RunController:
             None,
         )
         self._cancel_evt = asyncio.Event()
+        # Pause track (resumable stop) — distinct from cancel (terminal abort).
+        # Set by the user 暂停执行 button or by any backend-side stop (detected
+        # failure / internal error / pre-stop drain). Breaks the tick loop into
+        # the NON-destructive finalize path (worktrees + team preserved) →
+        # RunStatus.paused. ``cancel`` (terminate) always wins over pause.
+        self._pause_evt = asyncio.Event()
+        self._pause_reason = ""
+        self._pause_detail = ""
+        self._pause_needs_confirmation = False
         self._poll_sec = _POLL_MIN_SEC
 
         self._session_factory = session_factory or self._default_session_factory
@@ -443,8 +457,170 @@ class RunController:
     # ── public surface ───────────────────────────────────────────────
 
     def cancel(self) -> None:
-        """Request graceful shutdown — current tick finishes, no new dispatch."""
+        """Request TERMINAL shutdown (user 终止执行流) — destructive finalize.
+
+        Current tick finishes, no new dispatch, then finalize force-cleans the
+        team + worktrees and the run lands in the terminal ``aborted`` state.
+        Only the user may call this (directly or via the abort endpoint); the
+        backend uses :meth:`pause` instead.
+        """
         self._cancel_evt.set()
+
+    def pause(
+        self,
+        *,
+        reason: str,
+        detail: str = "",
+        needs_confirmation: bool = False,
+    ) -> None:
+        """Request a graceful, RESUMABLE stop (never terminal).
+
+        Breaks the tick loop into the NON-destructive finalize path: worktrees +
+        ClawTeam team are preserved and the run lands in ``RunStatus.paused`` so
+        ``继续执行`` can rebuild a controller and re-drive the DAG. The first
+        pause reason wins (idempotent). A concurrent :meth:`cancel` (terminate)
+        always takes precedence — the finalize path checks cancel first.
+        """
+        if not self._pause_evt.is_set():
+            self._pause_reason = reason
+            self._pause_detail = detail
+            self._pause_needs_confirmation = needs_confirmation
+        self._pause_evt.set()
+
+    def is_pausing(self) -> bool:
+        return self._pause_evt.is_set() and not self._cancel_evt.is_set()
+
+    def _stop_requested(self) -> bool:
+        """A terminate (cancel) OR pause has been requested.
+
+        Used by :meth:`_wait_stop_event` to race a running tick: on a stop the
+        tick is cancelled, which is the single, general way in-flight background
+        work ends fast (any awaited subprocess honours CancelledError →
+        process-group kill). No per-operation stop checks are needed.
+        """
+        return self._cancel_evt.is_set() or self._pause_evt.is_set()
+
+    async def prepare_resume(self) -> None:
+        """Prepare a freshly-rebuilt controller to RESUME a paused run.
+
+        Called (once) before :meth:`run_loop` on the resume path. For every
+        local (non-external) agent that already has a worktree on disk under this
+        run's team, seed the session to resume into that worktree so completed
+        work + interrupted-task partials are reused (never rebuilt). Agents with
+        no worktree (never spawned) stay Absent → fresh spawn. External-node
+        tasks are left to reconcile from ClawTeam: an in-flight external task
+        holds an outstanding dispatch ticket and is resolved by its receipt (its
+        ClawTeam status is the source of truth for "already arrived" vs "still
+        waiting") — never re-dispatched.
+
+        Also clears the pause-state marker so the UI banner disappears once the
+        run is running again.
+        """
+        from app.scheduler.run_metadata import clear_pause_state
+        clear_pause_state(self.run)
+        # Reconcile from the fresh ClawTeam snapshot (providers are already wired
+        # by the supervisor's ``_rewire_existing_team``). This is the SINGLE,
+        # general re-derivation point — no per-scenario logic:
+        #   * completed  → keep completed (+ pre-seed the book & audit set so the
+        #     first tick doesn't re-emit task_completed / re-audit finished work);
+        #   * in_progress owned by a LOCAL agent → its tmux executor was killed at
+        #     pause and can never finish on its own, so reset to pending → it
+        #     re-dispatches into its existing worktree on the first tick;
+        #   * in_progress owned by an EXTERNAL node → its remote/human/webhook
+        #     executor was NOT killed; the outstanding receipt ticket resolves it,
+        #     so leave it (ClawTeam status is the source of truth for
+        #     already-arrived vs still-waiting) — never re-dispatched;
+        #   * pending / blocked → leave (the tick dispatches ready ones).
+        try:
+            snaps = await self._fetch_snapshots()
+        except Exception:  # pragma: no cover - defensive
+            snaps = []
+        reset_task_ids: list[str] = []
+        for s in snaps or []:
+            book = self._tasks.get(s.task_id)
+            if book is None:
+                continue
+            status = (s.status or "").strip().lower()
+            if status == "completed":
+                book.state = _TaskState.completed
+                self._completed_audited.add(s.task_id)
+                continue
+            if status == "in_progress":
+                owner = (
+                    self._agents.get(s.owner_agent_id)
+                    or self._agents.get(book.task.owner_agent_id)
+                )
+                if owner is not None and owner.kind == AgentKind.external:
+                    book.state = _TaskState.in_progress
+                    continue
+                synced = await self._reset_clawteam_task(
+                    s.task_id, locked_by=s.owner_agent_id or book.task.owner_agent_id,
+                )
+                book.state = _TaskState.pending
+                book.dispatched_at = None
+                self.dispatch_clock.reset(s.task_id)
+                reset_task_ids.append(s.task_id)
+                if not synced:
+                    self._emit_event(
+                        "task_status_sync_failed",
+                        agent_id=s.owner_agent_id or book.task.owner_agent_id,
+                        task_id=s.task_id,
+                        payload={"target_status": "pending", "context": "resume_reset"},
+                    )
+        resumed_agents: list[str] = []
+        for agent in self._agents.values():
+            if agent.kind == AgentKind.external:
+                continue
+            sess = self._ensure_session_handle(agent)
+            try:
+                await self._refresh_worktree(sess)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "resume_worktree_probe_failed", agent_id=agent.id, error=str(exc),
+                )
+                sess.worktree = None
+            if sess.worktree is not None:
+                sess.seed_resume(sess.worktree)
+                resumed_agents.append(agent.id)
+        self._emit_event(
+            "run_resumed",
+            payload={
+                "reused_worktree_agents": sorted(resumed_agents),
+                "reset_task_ids": sorted(reset_task_ids),
+            },
+        )
+
+    async def _wait_stop_event(self) -> None:
+        """Block until a stop (cancel/pause) is requested."""
+        if self._stop_requested():
+            return
+        cancel_w = asyncio.ensure_future(self._cancel_evt.wait())
+        pause_w = asyncio.ensure_future(self._pause_evt.wait())
+        try:
+            await asyncio.wait(
+                {cancel_w, pause_w}, return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for w in (cancel_w, pause_w):
+                if not w.done():
+                    w.cancel()
+
+    async def _wait_stop_or_timeout(self, timeout: float) -> None:
+        """Sleep up to *timeout*, waking early on a stop request (cancel/pause)."""
+        if self._cancel_evt.is_set() or self._pause_evt.is_set():
+            return
+        cancel_w = asyncio.ensure_future(self._cancel_evt.wait())
+        pause_w = asyncio.ensure_future(self._pause_evt.wait())
+        try:
+            await asyncio.wait(
+                {cancel_w, pause_w},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for w in (cancel_w, pause_w):
+                if not w.done():
+                    w.cancel()
 
     def checkpoint_snapshot(self) -> dict[str, Any] | None:
         """Return current manual-checkpoint snapshot (for API/UI polling)."""
@@ -1056,10 +1232,40 @@ class RunController:
                 ticks = 0
                 loop_exc: Exception | None = None
                 try:
-                    while not self._cancel_evt.is_set():
+                    while not self._cancel_evt.is_set() and not self._pause_evt.is_set():
                         if max_ticks is not None and ticks >= max_ticks:
                             break
-                        activity = await self.tick()
+                        # Run the tick as a cancellable task and race it against a
+                        # stop request. A pause/terminate mid-tick CANCELS the tick
+                        # — this is the single, GENERAL way we end all in-flight
+                        # background work fast: any awaited subprocess honours
+                        # CancelledError → process-group kill (the project-wide
+                        # convention), so no per-operation pause checks are needed
+                        # and future in-tick work is covered automatically. Resume
+                        # then re-derives from durable ClawTeam state and re-drives,
+                        # tolerating re-execution (dispatch is idempotent enough:
+                        # a re-fired external ticket's fresh nonce makes the latest
+                        # run authoritative; TUI re-inject just resumes the agent).
+                        tick_task = asyncio.ensure_future(self.tick())
+                        stop_task = asyncio.ensure_future(self._wait_stop_event())
+                        done, _pending = await asyncio.wait(
+                            {tick_task, stop_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if not stop_task.done():
+                            stop_task.cancel()
+                        if tick_task not in done:
+                            tick_task.cancel()
+                            try:
+                                await tick_task
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as exc:  # pragma: no cover - defensive
+                                logger.warning(
+                                    "tick_cancel_cleanup_error", error=str(exc),
+                                )
+                            break
+                        activity = tick_task.result()
                         ticks += 1
                         if self._terminal_check():
                             await self._persist_terminal_execution_log(
@@ -1067,17 +1273,19 @@ class RunController:
                             )
                             break
                         self._adapt_poll(activity=activity)
-                        try:
-                            await asyncio.wait_for(
-                                self._cancel_evt.wait(), timeout=self._poll_sec,
-                            )
-                            # cancel_evt set during wait
-                            break
-                        except asyncio.TimeoutError:
-                            pass
+                        # Sleep until the next poll, waking early on a stop
+                        # request (terminate OR pause).
+                        await self._wait_stop_or_timeout(self._poll_sec)
                 except SessionStartupError as exc:
                     loop_exc = exc
-                    self._forced_failed = True
+                    # A scheduler-side startup failure — the run's internal state
+                    # may be inconsistent. The backend never terminates: park the
+                    # run (scenario 9) with a confirmation hint instead.
+                    self.pause(
+                        reason=_PAUSE_REASON_INTERNAL_ERROR,
+                        detail=f"session startup failed ({exc.agent_id}/{exc.phase}): {exc.detail}"[:1000],
+                        needs_confirmation=True,
+                    )
                     logger.warning(
                         "run_loop_session_startup_failed",
                         agent_id=exc.agent_id,
@@ -1086,7 +1294,11 @@ class RunController:
                     )
                 except Exception as exc:
                     loop_exc = exc
-                    self._forced_failed = True
+                    self.pause(
+                        reason=_PAUSE_REASON_INTERNAL_ERROR,
+                        detail=f"scheduler exception: {exc}"[:1000],
+                        needs_confirmation=True,
+                    )
                     logger.exception("run_loop_unhandled_exception", error=str(exc))
                     self._emit_event(
                         "run_loop_exception",
@@ -1094,11 +1306,14 @@ class RunController:
                     )
                 finally:
                     # Always try to stop live sessions first so abnormal exits do
-                    # not leak orphaned agent processes.
+                    # not leak orphaned agent processes. On a pause this releases
+                    # tmux/agent processes; the worktrees stay on disk for resume.
+                    # (Interrupted local tasks are reconciled to pending at RESUME
+                    # time from the fresh ClawTeam snapshot — see prepare_resume —
+                    # not here, to avoid acting on possibly-stale in-memory state.)
                     await self._shutdown_remaining_sessions(reason="run_finalize")
                     outcome = self._build_outcome()
                     if loop_exc is not None:
-                        outcome.final_status = RunStatus.failed
                         outcome.reason = f"run loop exception: {loop_exc}"
                     # Hand off to finalize_run for merge / cleanup / final status.
                     final_status = await self._invoke_finalize(outcome)
@@ -2551,10 +2766,16 @@ class RunController:
                     "reason": rec.reason.value,
                     "detail": rec.detail,
                     "policy": OnFailure.skip.value,
-                    "effective_action": "abort",
+                    "effective_action": "pause",
                 },
             )
-            self.cancel()
+            # The backend NEVER terminates a run — pause it instead. The failed
+            # task is reset to pending at pause time so 继续执行 re-runs it in its
+            # existing worktree; the user may still choose 终止执行流.
+            self.pause(
+                reason=_PAUSE_REASON_FAILURE,
+                detail=f"{rec.reason.value}: {rec.detail}"[:1000],
+            )
         else:  # abort
             synced = await self._mark_clawteam_task_blocked(
                 book.task.id, caller=rec.agent_id or agent.id,
@@ -2570,10 +2791,17 @@ class RunController:
             self._failed_task_ids.add(book.task.id)
             self._emit_event(
                 "task_failed", agent_id=agent.id, task_id=book.task.id,
-                payload={"reason": rec.reason.value, "detail": rec.detail},
+                payload={
+                    "reason": rec.reason.value,
+                    "detail": rec.detail,
+                    "effective_action": "pause",
+                },
             )
-            # Aborting Run: cancel everything.
-            self.cancel()
+            # The backend NEVER terminates a run — pause it instead of aborting.
+            self.pause(
+                reason=_PAUSE_REASON_FAILURE,
+                detail=f"{rec.reason.value}: {rec.detail}"[:1000],
+            )
 
     # ── session lifecycle ────────────────────────────────────────────
 
@@ -3237,6 +3465,10 @@ class RunController:
                 pass
             raise RuntimeError("headless param-fill timeout") from exc
         except asyncio.CancelledError:
+            # A pause/terminate cancels the running tick → this await raises here;
+            # kill the process group so no headless agent is orphaned. (Generic
+            # kill-on-cancel — the same convention every subprocess follows; no
+            # pause-specific logic needed.)
             subprocess_registry.kill_group(proc)
             raise
         finally:
@@ -4611,6 +4843,17 @@ class RunController:
         # ``run.inputs`` blob; the user may have clicked 撤销合入 in that
         # window. Pull DB markers forward so finalize cannot clobber them.
         coalesce_reverted_merge_markers(self.run, self.storage)
+        pausing = self._pause_evt.is_set() and not self._cancel_evt.is_set()
+        if pausing:
+            # Stamp WHY the run is parked so the UI can explain it; finalize's
+            # paused branch preserves run.inputs and persists this.
+            write_pause_state(
+                self.run,
+                reason=self._pause_reason or _PAUSE_REASON_FAILURE,
+                detail=self._pause_detail,
+                needs_confirmation=self._pause_needs_confirmation,
+                at=datetime.now(timezone.utc).isoformat(),
+            )
         ipt = FinalizeInput(
             run=self.run, flow=self.flow, agents=list(self._agents.values()),
             leader_agent_id=self._leader_id,
@@ -4619,6 +4862,7 @@ class RunController:
                 or bool(self._failed_task_ids)
             ),
             aborted=self._cancel_evt.is_set(),
+            paused=pausing,
         )
         try:
             res = await self._finalize_fn(
@@ -4673,6 +4917,13 @@ class RunController:
                 completed_task_ids=completed, failed_task_ids=failed,
                 skipped_task_ids=skipped,
                 reason=f"run aborted ({len(failed)} failed task(s))",
+            )
+        if self._pause_evt.is_set():
+            return RunOutcome(
+                final_status=RunStatus.paused,
+                completed_task_ids=completed, failed_task_ids=failed,
+                skipped_task_ids=skipped,
+                reason=f"run paused ({self._pause_reason or 'user'})",
             )
         if failed:
             return RunOutcome(

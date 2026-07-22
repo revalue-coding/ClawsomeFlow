@@ -19,6 +19,8 @@ import pytest
 from app.integrations.clawteam_cli import CliInvocationError
 from app.models import (
     AgentKind,
+    ExternalChannel,
+    ExternalNodeConfig,
     Flow,
     FlowAgent,
     FlowRun,
@@ -768,7 +770,7 @@ async def test_failure_retry_marks_session_crashed_and_redispatches(
 
 
 @pytest.mark.asyncio
-async def test_abort_on_max_retries_then_terminate(
+async def test_pause_on_max_retries_then_resumable(
     fake_lookup,
 ) -> None:
     spec = _make_spec()
@@ -822,8 +824,11 @@ async def test_abort_on_max_retries_then_terminate(
     ]
     await rc.tick()
     assert rc._tasks["t1"].state == _TaskState.blocked
+    # Retries exhausted → the backend PAUSES (resumable) rather than terminating.
+    assert rc._pause_evt.is_set()
+    assert not rc._cancel_evt.is_set()
     outcome = rc._build_outcome()
-    assert outcome.final_status == RunStatus.aborted
+    assert outcome.final_status == RunStatus.paused
     assert "t1" in outcome.failed_task_ids
 
 
@@ -1206,12 +1211,15 @@ async def test_skip_policy_escalates_to_failed_and_aborts(
 
     book = rc._tasks["t1"]
     assert book.state == _TaskState.blocked
-    assert rc._cancel_evt.is_set()
+    # Backend never terminates: a failed task PAUSES the run (resumable) instead
+    # of cancelling it.
+    assert rc._pause_evt.is_set()
+    assert not rc._cancel_evt.is_set()
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=100)
     assert any(
         e.type == "task_failed"
         and e.task_id == "t1"
-        and (e.payload or {}).get("effective_action") == "abort"
+        and (e.payload or {}).get("effective_action") == "pause"
         for e in events
     )
     assert any(
@@ -1951,7 +1959,7 @@ async def test_empty_snapshot_emits_snapshot_unavailable_event(fake_lookup) -> N
 
 
 @pytest.mark.asyncio
-async def test_run_loop_unhandled_exception_marks_failed_and_emits_event(
+async def test_run_loop_unhandled_exception_pauses_and_emits_event(
     fake_lookup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = _make_spec()
@@ -1970,9 +1978,106 @@ async def test_run_loop_unhandled_exception_marks_failed_and_emits_event(
 
     monkeypatch.setattr(rc, "tick", _boom_tick)
     outcome = await rc.run_loop(max_ticks=2)
-    assert outcome.final_status == RunStatus.failed
+    # Scenario 9: the backend never terminates — a scheduler exception PAUSES the
+    # run (resumable) with a confirmation hint, instead of marking it failed.
+    assert outcome.final_status == RunStatus.paused
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=100)
     assert any(e.type == "run_loop_exception" for e in events)
+    from app.scheduler.run_metadata import (
+        PAUSE_REASON_INTERNAL_ERROR,
+        read_pause_state,
+    )
+    refreshed = get_storage().run_get(run.id)
+    assert refreshed.status == RunStatus.paused
+    blob = read_pause_state(refreshed)
+    assert blob is not None
+    assert blob.get("reason") == PAUSE_REASON_INTERNAL_ERROR
+    assert blob.get("needs_confirmation") is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_resume_reconciles_from_clawteam_snapshot(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prepare_resume is the single re-derivation point after a pause.
+
+    From the fresh ClawTeam snapshot: completed stays completed; an in_progress
+    LOCAL task (its tmux executor was killed at pause) is reset to pending so it
+    re-dispatches; an in_progress EXTERNAL task is left (its outstanding receipt
+    ticket resolves it — never re-dispatched).
+    """
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(id="alice", kind=AgentKind.claude, repo="/tmp/main",
+                      is_leader=False, merge_strategy=MergeStrategy.manual),
+            FlowAgent(id="ext", kind=AgentKind.external,
+                      external=ExternalNodeConfig(channel=ExternalChannel.human),
+                      is_leader=False),
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                      is_leader=True, merge_strategy=MergeStrategy.manual),
+        ],
+        tasks=[
+            FlowTask(id="t_local", owner_agent_id="alice", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="t_ext", owner_agent_id="ext", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="y",
+                     description="", depends_on=["t_local"], is_leader_summary=True),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+
+    updates: list[dict[str, Any]] = []
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            updates.append({"task_id": task_id, **kwargs})
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return [
+            TaskSnapshot(task_id="t_local", owner_agent_id="alice",
+                         status="in_progress", locked_by_agent="alice",
+                         metadata={}, dispatched_at_epoch=0),
+            TaskSnapshot(task_id="t_ext", owner_agent_id="ext",
+                         status="in_progress", locked_by_agent=None,
+                         metadata={}, dispatched_at_epoch=0),
+        ]
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider,
+        compile_result=compile_result,
+    )
+    await rc.prepare_resume()
+
+    # Local in_progress → reset to pending (re-dispatches on first tick).
+    assert rc._tasks["t_local"].state == _TaskState.pending
+    assert any(
+        u["task_id"] == compile_result.flow_to_clawteam["t_local"]
+        and u.get("status") == "pending"
+        for u in updates
+    )
+    # External in_progress → left as-is; NOT reset (no task_update to pending).
+    assert rc._tasks["t_ext"].state == _TaskState.in_progress
+    assert not any(
+        u["task_id"] == compile_result.flow_to_clawteam["t_ext"]
+        and u.get("status") == "pending"
+        for u in updates
+    )
 
 
 @pytest.mark.asyncio
@@ -2301,7 +2406,7 @@ def test_worker_exit_report_emits_structured_exit_event(
 
 
 @pytest.mark.asyncio
-async def test_spawn_failure_immediately_fails_run_with_agent_error_event(fake_lookup) -> None:
+async def test_spawn_failure_pauses_run_with_agent_error_event(fake_lookup) -> None:
     spec = _make_spec()
     run = _persist_flow_and_run(spec)
 
@@ -2331,7 +2436,9 @@ async def test_spawn_failure_immediately_fails_run_with_agent_error_event(fake_l
         snapshot_provider=snap_provider,
     )
     outcome = await rc.run_loop(max_ticks=5)
-    assert outcome.final_status == RunStatus.failed
+    # A SessionStartupError is scenario 9 — the backend PAUSES (resumable) with a
+    # confirmation hint instead of terminating.
+    assert outcome.final_status == RunStatus.paused
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
     startup_failed = [e for e in events if e.type == "task_session_start_failed"]
     assert startup_failed, "missing task_session_start_failed event"

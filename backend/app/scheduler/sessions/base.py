@@ -253,6 +253,28 @@ class WorkerSession(abc.ABC):
         self._transition({SessionState.Absent}, SessionState.Spawning, reason="adopt_probe")
         self._transition_force(SessionState.Idle, reason=reason)
 
+    def seed_resume(self, worktree: WorktreeInfo, *, reason: str = "run_resume") -> None:
+        """Seed a freshly-created session to RESUME into an existing worktree.
+
+        Used by the run-resume path (继续执行 after a pause): a brand-new
+        controller starts every session Absent, but the agent's worktree already
+        exists on disk from the paused run. Record it + force the session to
+        Crashed so the controller's startup sequence takes the resume branch
+        (``spawn_resume`` → ``--no-workspace --repo <existing>``) instead of a
+        fresh spawn — a fresh spawn would rebuild the worktree and lose the
+        committed + in-flight work it holds.
+        """
+        self.worktree = worktree
+        if self._state == SessionState.Exited:
+            return
+        # Reach Crashed via legal edges (Absent → Spawning → Crashed), mirroring
+        # ``adopt_existing``'s synthetic Absent → Spawning → Idle, so the state
+        # machine invariants stay intact.
+        if self._state == SessionState.Absent:
+            self._transition_force(SessionState.Spawning, reason=f"{reason}_probe")
+        if self._state != SessionState.Crashed:
+            self._transition_force(SessionState.Crashed, reason=reason)
+
     async def resume(self) -> None:
         """Try to bring a Crashed session back to Idle without losing worktree."""
         async with self._lock:

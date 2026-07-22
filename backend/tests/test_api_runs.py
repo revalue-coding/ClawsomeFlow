@@ -967,7 +967,7 @@ def test_abort_active_scheduler_marks_aborted_without_inline_cleanup(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     flow = _make_flow(cleanup_team=True)
-    run = _make_run(flow_id=flow.id, status=RunStatus.complaint_processing)
+    run = _make_run(flow_id=flow.id, status=RunStatus.running)
     sched = engine_mod.get_scheduler()
     monkeypatch.setattr(sched, "cancel_run", lambda _rid: True)
     touched: dict[str, str] = {}
@@ -992,7 +992,8 @@ def test_abort_inactive_scheduler_triggers_inline_cleanup(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     flow = _make_flow(cleanup_team=True)
-    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_review)
+    # Terminating a PAUSED run (no live controller) runs inline cleanup.
+    run = _make_run(flow_id=flow.id, status=RunStatus.paused)
     sched = engine_mod.get_scheduler()
     monkeypatch.setattr(sched, "cancel_run", lambda _rid: False)
     touched: dict[str, str] = {}
@@ -1037,6 +1038,118 @@ def test_abort_with_pending_merges_marks_aborted_and_cleans_up(
     assert refreshed.status == RunStatus.aborted
     assert refreshed.pending_merges is None
     assert touched["run_id"] == run.id
+
+
+# ── Pause / continue / terminate ------------------------------------
+
+
+def test_terminate_rejected_in_review_phase(app_client: TestClient) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_review)
+    r = app_client.post(f"/api/runs/{run.id}/abort")
+    assert r.status_code == 409
+    assert r.json()["error"] == "RUN_NOT_RUNNING"
+
+
+def test_terminate_allowed_on_paused_run(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.paused)
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "cancel_run", lambda _rid: False)
+    from app.api import runs as runs_mod
+
+    async def fake_cleanup(*, run, storage, flow=None):
+        del storage, flow
+
+    monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_cleanup)
+    r = app_client.post(f"/api/runs/{run.id}/abort")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "aborted"
+
+
+def test_pause_rejected_when_no_live_controller(app_client: TestClient) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.running)
+    r = app_client.post(f"/api/runs/{run.id}/pause")
+    assert r.status_code == 409
+    assert r.json()["error"] == "RUN_NOT_RUNNING"
+
+
+def test_pause_rejected_in_review_phase(app_client: TestClient) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_review)
+    r = app_client.post(f"/api/runs/{run.id}/pause")
+    assert r.status_code == 409
+    assert r.json()["error"] == "RUN_NOT_PAUSABLE"
+
+
+def test_pause_signals_live_controller(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.running)
+    sched = engine_mod.get_scheduler()
+    signalled: dict[str, object] = {}
+
+    class _Ctl:
+        def pause(self, *, reason: str, detail: str = "") -> None:
+            signalled["reason"] = reason
+
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Ctl())
+    r = app_client.post(f"/api/runs/{run.id}/pause")
+    assert r.status_code == 200, r.text
+    assert signalled.get("reason") == "user"
+
+
+def test_continue_rejected_when_not_paused(app_client: TestClient) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.running)
+    r = app_client.post(f"/api/runs/{run.id}/continue")
+    assert r.status_code == 409
+    assert r.json()["error"] == "RUN_NOT_PAUSED"
+
+
+def test_continue_paused_calls_resume_run(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.paused)
+    sched = engine_mod.get_scheduler()
+    called: dict[str, str] = {}
+
+    def fake_resume(*, run, flow, storage=None):  # noqa: ANN001
+        del flow, storage
+        called["run_id"] = run.id
+        return object()
+
+    monkeypatch.setattr(sched, "resume_run", fake_resume)
+    r = app_client.post(f"/api/runs/{run.id}/continue")
+    assert r.status_code == 200, r.text
+    assert called.get("run_id") == run.id
+
+
+def test_paused_run_summary_exposes_pause_state(app_client: TestClient) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id,
+        status=RunStatus.paused,
+        inputs={
+            "_csflow_pause_state": {
+                "reason": "failure",
+                "detail": "timeout: step slow",
+                "needs_confirmation": False,
+            },
+        },
+    )
+    r = app_client.get(f"/api/runs/{run.id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "paused"
+    assert body["pause"]["reason"] == "failure"
+    assert body["pause"]["detail"] == "timeout: step slow"
+    assert body["pause"]["needsConfirmation"] is False
 
 
 def test_dismiss_pending_merge(

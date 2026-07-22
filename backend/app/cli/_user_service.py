@@ -514,6 +514,11 @@ def _unit_text(
         "RestartSec=3",
         "KillMode=mixed",
         "TimeoutStopSec=30",
+        # Bias the OOM killer AWAY from the orchestrator: ClawsomeFlow drives
+        # long-lived runs (e.g. waiting on external tasks), so under memory
+        # pressure the kernel should reap an agent subprocess, not the service
+        # that would otherwise pause/resume the run. Overridable via env.
+        f"OOMScoreAdjust={os.environ.get('CSFLOW_SERVICE_OOM_SCORE_ADJUST', '-800')}",
         *_resource_directives_from_env(),
         "",
         "[Install]",

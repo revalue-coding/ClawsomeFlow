@@ -255,6 +255,7 @@ export type RunStatus =
   | "running"
   | "awaiting_external"
   | "awaiting_user_checkpoint"
+  | "paused"
   | "awaiting_user_review"
   | "awaiting_user_complaint"
   | "complaint_processing"
@@ -348,6 +349,15 @@ export interface FlowSaveResult {
   warnings?: FlowSaveWarning[];
 }
 
+/** Why a paused run is parked (present only while status === "paused"). */
+export interface RunPauseState {
+  /** user | failure | internal_error | drain */
+  reason: string;
+  detail: string;
+  needsConfirmation: boolean;
+  at: string | null;
+}
+
 export interface RunSummary {
   id: string;
   flowId: string;
@@ -360,6 +370,8 @@ export interface RunSummary {
   inputs: Record<string, unknown>;
   /** True only for runs launched by a timed schedule (drives the "Scheduled" tag). */
   isScheduled: boolean;
+  /** Present only while status === "paused" — drives the pause banner. */
+  pause?: RunPauseState | null;
 }
 
 export interface PendingMerge {
@@ -1085,6 +1097,10 @@ export const api = {
   },
   abortRun: (id: string) =>
     request<RunSummary>("POST", `/api/runs/${id}/abort`),
+  pauseRun: (id: string) =>
+    request<RunSummary>("POST", `/api/runs/${id}/pause`),
+  continueRun: (id: string) =>
+    request<RunSummary>("POST", `/api/runs/${id}/continue`),
   clearRunHistory: () =>
     request<{ runsDeleted: number; eventsDeleted: number }>(
       "DELETE",

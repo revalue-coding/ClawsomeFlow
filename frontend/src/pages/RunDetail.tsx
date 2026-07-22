@@ -46,6 +46,16 @@ const TERMINAL = new Set([
   "aborted",
   "orphaned",
 ]);
+// States where the user may 暂停执行 (pause) or 终止执行流 (terminate). The
+// controls open only once breakpoint recovery is guaranteed (compile done →
+// running) and stay visible+enabled continuously until the merge-review phase —
+// deliberately NOT shown during pending/compiling. Kept in sync with the
+// backend `_PAUSE_ALLOWED` guard.
+const PAUSE_ALLOWED = new Set([
+  "running",
+  "awaiting_external",
+  "awaiting_user_checkpoint",
+]);
 const LEADER_REPLY_VISIBLE = new Set([
   "awaiting_user_review",
   "awaiting_user_complaint",
@@ -209,6 +219,8 @@ export function RunDetail() {
     "connecting" | "open" | "closed" | "error"
   >("connecting");
   const [aborting, setAborting] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [complaintText, setComplaintText] = useState("");
   const [complaintSubmitting, setComplaintSubmitting] = useState(false);
   const [complaintActionCommitted, setComplaintActionCommitted] = useState(false);
@@ -407,6 +419,37 @@ export function RunDetail() {
       void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
     } finally {
       setAborting(false);
+    }
+  }
+
+  async function onPause() {
+    if (!run) return;
+    setPausing(true);
+    try {
+      const r = await api.pauseRun(run.id);
+      setRun({ ...run, status: r.status, pause: r.pause });
+    } catch (e) {
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setPausing(false);
+    }
+  }
+
+  async function onContinue() {
+    if (!run) return;
+    // Scenario 9 (internal error): make the user acknowledge the run may be in
+    // an inconsistent state before re-running.
+    if (run.pause?.needsConfirmation && !(await confirm(t("runDetail.resumeConfirm")))) {
+      return;
+    }
+    setContinuing(true);
+    try {
+      const r = await api.continueRun(run.id);
+      setRun({ ...run, status: r.status, pause: r.pause ?? null });
+    } catch (e) {
+      void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    } finally {
+      setContinuing(false);
     }
   }
 
@@ -707,10 +750,6 @@ export function RunDetail() {
   const showComplaintPanel =
     run.status === "awaiting_user_complaint" ||
     (run.status === "complaint_processing" && Boolean(complaintNotice));
-  const abortLockedByComplaint =
-    complaintSubmitting
-    || complaintActionCommitted
-    || run.status === "complaint_processing";
   const boardHint = t("runDetail.boardHint").trim();
 
   return (
@@ -768,17 +807,57 @@ export function RunDetail() {
               ? t("runDetail.wsConnecting")
               : t("runDetail.wsOffline")}
           </span>
-          {!TERMINAL.has(run.status) && (
+          {PAUSE_ALLOWED.has(run.status) && (
+            <button
+              className="btn-outline"
+              onClick={onPause}
+              disabled={pausing}
+            >
+              {pausing ? t("runDetail.pausing") : t("runDetail.pause")}
+            </button>
+          )}
+          {run.status === "paused" && (
+            <button
+              className="btn-primary"
+              onClick={onContinue}
+              disabled={continuing}
+            >
+              {continuing ? t("runDetail.resuming") : t("runDetail.resume")}
+            </button>
+          )}
+          {(PAUSE_ALLOWED.has(run.status) || run.status === "paused") && (
             <button
               className="btn-danger"
               onClick={onAbort}
-              disabled={aborting || abortLockedByComplaint}
+              disabled={aborting}
             >
               {aborting ? t("runDetail.aborting") : t("runDetail.abort")}
             </button>
           )}
         </div>
       </div>
+
+      {/* Paused banner — why the run is parked + resume/terminate hint */}
+      {run.status === "paused" && (
+        <Card
+          className={
+            run.pause?.needsConfirmation ? "border-amber-300" : "border-sky-200"
+          }
+        >
+          <CardTitle>{t("runDetail.pausedTitle")}</CardTitle>
+          <div className="space-y-1 text-sm text-ink-600">
+            <p>{t(`runDetail.pauseReason.${run.pause?.reason || "user"}`)}</p>
+            {run.pause?.needsConfirmation && (
+              <p className="text-amber-700">{t("runDetail.pauseNeedsConfirm")}</p>
+            )}
+            {run.pause?.detail && (
+              <p className="font-mono text-xs text-ink-500 break-all">
+                {run.pause.detail}
+              </p>
+            )}
+          </div>
+        </Card>
+      )}
 
       {/* Pending merges */}
       {run.pendingMerges && run.pendingMerges.length > 0 && (
@@ -1245,7 +1324,7 @@ export function RunDetail() {
           </div>
         )}
         {boardTab === "list" ? (
-          <TaskDependencyBoard board={board} />
+          <TaskDependencyBoard board={board} paused={run.status === "paused"} />
         ) : (
           <RunTerminalBoard
             listTasks={terminalListTasks}
@@ -1348,7 +1427,7 @@ function BoardProgressChips({
     <div className="flex items-center gap-1.5 text-[11px] font-medium">
       <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2 py-0.5 text-sky-700">
         <span className="relative inline-flex h-1.5 w-1.5">
-          {running > 0 && (
+          {running > 0 && run.status !== "paused" && (
             <span className="absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-60 animate-ping" />
           )}
           <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-sky-500" />
@@ -1391,7 +1470,10 @@ function BoardProgressBar({
         style={{ width: `${donePct}%` }}
       />
       <div
-        className="h-full bg-sky-500 animate-pulse transition-[width] duration-700 ease-out"
+        className={
+          "h-full bg-sky-500 transition-[width] duration-700 ease-out"
+          + (run.status === "paused" ? "" : " animate-pulse")
+        }
         style={{ width: `${runningPct}%` }}
       />
     </div>
@@ -1599,8 +1681,10 @@ function clampBoardSplit(value: number): number {
 
 function TaskDependencyBoard({
   board,
+  paused = false,
 }: {
   board: TaskBoardModel;
+  paused?: boolean;
 }) {
   const { t } = useTranslation();
   const [hoverNodeId, setHoverNodeId] = useState<string | null>(null);
@@ -1759,18 +1843,24 @@ function TaskDependencyBoard({
                       <span
                         className={
                           n.state === "dispatched"
-                            ? "inline-flex items-center gap-1 rounded-full bg-[#38bdf8]/20 px-2 py-0.5 text-[10px] text-[#7dd3fc]"
+                            ? paused
+                              // Interrupted by pause + reset to pending — muted
+                              // amber "will re-run on continue", no live pulse.
+                              ? "inline-flex items-center gap-1 rounded-full bg-[#f5b942]/20 px-2 py-0.5 text-[10px] text-[#fcd34d]"
+                              : "inline-flex items-center gap-1 rounded-full bg-[#38bdf8]/20 px-2 py-0.5 text-[10px] text-[#7dd3fc]"
                             : "inline-flex items-center gap-1 rounded-full bg-[#10b981]/20 px-2 py-0.5 text-[10px] text-[#6ee7b7]"
                         }
                       >
-                        {n.state === "dispatched" && (
+                        {n.state === "dispatched" && !paused && (
                           <span className="relative inline-flex h-1.5 w-1.5">
                             <span className="absolute inline-flex h-full w-full rounded-full bg-[#38bdf8] opacity-60 animate-ping" />
                             <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[#38bdf8]" />
                           </span>
                         )}
                         {n.state === "dispatched"
-                          ? t("runDetail.boardNodeRunning")
+                          ? paused
+                            ? t("runDetail.boardNodePaused")
+                            : t("runDetail.boardNodeRunning")
                           : t("runDetail.boardNodeDone")}
                       </span>
                     </div>
@@ -1945,7 +2035,7 @@ function TaskDependencyBoard({
                     onMouseLeave={() => setHoverNodeId((cur) => (cur === n.id ? null : cur))}
                     style={{ cursor: "default" }}
                   >
-                    {n.state === "dispatched" && (
+                    {n.state === "dispatched" && !paused && (
                       <circle
                         cx={n.x}
                         cy={n.y}
