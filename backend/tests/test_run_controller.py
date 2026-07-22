@@ -2114,7 +2114,8 @@ def test_backend_failure_pauses_manual_but_terminates_unattended(fake_lookup) ->
     resume; pausing would strand a delegated caller forever)."""
     spec = _make_spec()
 
-    # Manual run → pause.
+    # Manual run → pause. (_backend_stop_after_failure only sets events, no DB
+    # write, so an in-memory copy suffices for the unattended variant.)
     manual = _persist_flow_and_run(spec)
     rc_manual = RunController(
         run=manual, spec=spec, flow_description="d",
@@ -2125,8 +2126,7 @@ def test_backend_failure_pauses_manual_but_terminates_unattended(fake_lookup) ->
     assert not rc_manual._cancel_evt.is_set()
 
     # Unattended run (e.g. delegated / scheduled / MCP) → terminate.
-    unattended = _persist_flow_and_run(spec)
-    unattended.inputs = {"_csflow_unattended": "true"}
+    unattended = manual.model_copy(update={"inputs": {"_csflow_unattended": "true"}})
     rc_unatt = RunController(
         run=unattended, spec=spec, flow_description="d",
         worktree_lookup=fake_lookup, snapshot_provider=_empty_snapshots,
