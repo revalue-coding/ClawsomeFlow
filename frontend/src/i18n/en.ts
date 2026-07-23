@@ -746,6 +746,7 @@ const en = {
     },
     pauseFailureSyntheticTimeout: "Task timed out{{detail}}",
     pauseFailureSyntheticFailed: "FAILED: {{taskId}}{{detail}}",
+    pauseExternalFailureHint: "Fix the problem, then click Resume to re-run this node",
     pauseReason: {
       user: "Paused at your request. Continue to resume from where it left off, or terminate to discard the run.",
       failure: "A step failed, so the run was paused. Continue to re-run the failed step, or terminate to discard the run.",
@@ -963,7 +964,6 @@ const en = {
       submitting: "Submitting…",
       waitingWebhook: "Dispatched to the external endpoint — waiting for its callback.",
       waitingRemote: "Delegated to the remote ClawsomeFlow — waiting for its leader report callback.",
-      failedReceipt: "The remote executor reported failure — the run has paused; fix the problem, then click Resume to re-run this node",
     },
     checkpoint: {
       title: "Manual checkpoint",

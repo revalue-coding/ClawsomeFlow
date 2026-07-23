@@ -809,6 +809,14 @@ export function RunDetail() {
     if (!taskId && !subject && !message && !detail) return null;
     return { taskId, subject: subject || taskId || "—", agentId, signal, detail, message };
   }, [run?.status, run?.pause, run?.specSnapshot, events]);
+  const pauseFailureIsExternal = useMemo(() => {
+    if (!pauseFailureReport?.agentId || !run?.specSnapshot?.agents) return false;
+    const agents = run.specSnapshot.agents as Array<{ id?: string; kind?: string }>;
+    const hit = agents.find(
+      (a) => String(a.id ?? "") === pauseFailureReport.agentId,
+    );
+    return hit?.kind === "external";
+  }, [pauseFailureReport, run?.specSnapshot]);
   const rerunTargetItem = useMemo(
     () =>
       rerunModalTaskId
@@ -933,6 +941,14 @@ export function RunDetail() {
           <CardTitle>{t("runDetail.pausedTitle")}</CardTitle>
           <div className="space-y-1 text-sm text-ink-600">
             <p>{t(`runDetail.pauseReason.${run.pause?.reason || "user"}`)}</p>
+            {run.pause?.reason === "failure" && pauseFailureIsExternal ? (
+              <p className="text-sm text-rose-700">
+                {t("runDetail.pauseExternalFailureHint")}
+                {pauseFailureReport?.detail
+                  ? `: ${pauseFailureReport.detail}`
+                  : null}
+              </p>
+            ) : null}
             {run.pause?.needsConfirmation && (
               <p className="text-amber-700">{t("runDetail.pauseNeedsConfirm")}</p>
             )}
@@ -3592,9 +3608,9 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
         completedNonces.add(`${tid}:${String(payload.nonce ?? "")}`);
       }
     } else if (e.type === "task_failed") {
-      // The tick detected & surfaced this node's failure → show the failed hint,
-      // keyed by the dispatch nonce so a later re-dispatch (fresh nonce) shows
-      // "waiting" again rather than a stale "failed".
+      // The tick detected & surfaced this node's failure — hide the card
+      // (recovery is via the pause banner). Key by dispatch nonce so a later
+      // re-dispatch (fresh nonce) shows the card again as "waiting".
       const n = String(payload.nonce ?? "");
       if (n) failedNonces.set(`${tid}:${n}`, String(payload.detail ?? "").trim());
     } else if (e.type === "task_completed") {
@@ -3645,7 +3661,9 @@ function ExternalTasksCard({
   const visibleItems = useMemo(
     () =>
       items.filter(
-        (it) => !dismissedKeys.has(`${it.taskId}:${it.nonce}`),
+        (it) =>
+          !it.failed &&
+          !dismissedKeys.has(`${it.taskId}:${it.nonce}`),
       ),
     [items, dismissedKeys],
   );
@@ -3798,19 +3816,12 @@ function ExternalTasksCard({
                   </div>
                 );
               })()}
-              {item.failed ? (
-                <div className="mt-2 text-xs text-rose-700">
-                  {t("runDetail.external.failedReceipt")}
-                  {item.failureSummary ? `: ${item.failureSummary}` : ""}
+              {!isHuman && !item.failed && (
+                <div className="mt-2 text-xs text-ink-600">
+                  {item.channel === "webhook"
+                    ? t("runDetail.external.waitingWebhook")
+                    : t("runDetail.external.waitingRemote")}
                 </div>
-              ) : (
-                !isHuman && (
-                  <div className="mt-2 text-xs text-ink-600">
-                    {item.channel === "webhook"
-                      ? t("runDetail.external.waitingWebhook")
-                      : t("runDetail.external.waitingRemote")}
-                  </div>
-                )
               )}
               {isHuman ? (
                 <div className="mt-3 space-y-2">

@@ -737,6 +737,7 @@ const zh = {
     },
     pauseFailureSyntheticTimeout: "任务超时{{detail}}",
     pauseFailureSyntheticFailed: "FAILED: {{taskId}}{{detail}}",
+    pauseExternalFailureHint: "修复问题后点击「继续执行」，该节点任务将会重新执行",
     pauseReason: {
       user: "已按你的请求暂停。点击“继续执行”从断点继续，或“终止执行流”丢弃本次执行。",
       failure: "某个步骤失败，因此执行流被暂停。点击“继续执行”重跑失败步骤，或“终止执行流”丢弃本次执行。",
@@ -951,7 +952,6 @@ const zh = {
       submitting: "提交中…",
       waitingWebhook: "已派发到外部端点，等待其回调完成。",
       waitingRemote: "已委托给远端 ClawsomeFlow，等待其 leader 报告回调。",
-      failedReceipt: "远端执行返回失败——执行流已暂停；修复问题后点击“继续执行”，该节点任务将会重新执行",
     },
     checkpoint: {
       title: "人工检查点",
