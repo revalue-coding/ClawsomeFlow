@@ -8,8 +8,8 @@ from rich.console import Console
 from app import config as cfg_mod
 from app.cli import app
 from app.cli._runtime import (
-    confirm_no_active_runs_or_exit,
     is_alive,
+    notify_active_runs_will_pause,
     read_pid,
     remove_pid,
     stop_process,
@@ -30,12 +30,13 @@ def stop(
     ),
     yes: bool = typer.Option(
         False, "--yes", "-y",
-        help="Skip the in-flight-run confirmation (use for scripts/automation).",
+        help="Suppress the in-flight-run (auto-pause) notice (scripts/automation).",
     ),
 ) -> None:
     """Stop the running backend (PID file at ``~/.clawsomeflow/csflow.pid``)."""
-    # Confirm before terminating in-flight runs (the pre-stop drain aborts them).
-    confirm_no_active_runs_or_exit(
+    # In-flight runs are PAUSED (resumably) by the pre-stop drain — never
+    # aborted — so no confirmation is needed; just tell the user.
+    notify_active_runs_will_pause(
         non_interactive=yes, action="stop the service", console=console,
     )
 

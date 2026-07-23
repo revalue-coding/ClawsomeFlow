@@ -48,6 +48,16 @@ must import the constants from here.
   run was parked, so the Run detail page can render a "why paused" banner (and
   the scenario-9 ``internal_error`` confirmation hint). Written by the pause
   finalize branch; cleared on ``继续执行`` (resume) and on 终止执行流 (terminate).
+* :data:`CHECKPOINT_STATE_KEY` — set alongside :data:`PAUSE_STATE_KEY` while a
+  run is parked, snapshotting the controller's in-memory human-checkpoint
+  approval state so a resumed controller does NOT re-open an already-approved
+  checkpoint (``_checkpoint_passed_tasks`` / ``_checkpoint_approved_summaries``
+  are otherwise process-local and would be lost across a pause/resume, making a
+  completed+approved upstream re-prompt the user). Value is a JSON object
+  ``{"passed": [task_id, ...], "summaries": {task_id: summary|null}}``. Written
+  by the pause finalize branch (only when there is approval state to save);
+  restored + cleared in ``prepare_resume`` (继续执行). Safe default = absent
+  (fresh controller starts with empty approval sets, so old runs load fine).
 
 NOTE: the string values are a persisted on-disk contract (existing user DBs
 contain them) — never rename the values, only the Python symbols.
@@ -67,6 +77,7 @@ UNATTENDED_KEY = "_csflow_unattended"
 EXTERNAL_CALLBACK_KEY = "_csflow_external_callback"
 EXTERNAL_CALLBACK_SENT_KEY = "_csflow_external_callback_sent_at"
 PAUSE_STATE_KEY = "_csflow_pause_state"
+CHECKPOINT_STATE_KEY = "_csflow_checkpoint_state"
 
 #: Allowed ``reason`` values in the :data:`PAUSE_STATE_KEY` blob.
 PAUSE_REASON_USER = "user"                # user pressed 暂停执行
@@ -175,7 +186,61 @@ def clear_pause_state(run: Any) -> None:
         run.inputs = merged
 
 
+def write_checkpoint_state(
+    run: Any,
+    *,
+    passed: Any,
+    summaries: Any,
+) -> None:
+    """Stamp the :data:`CHECKPOINT_STATE_KEY` snapshot onto ``run.inputs``.
+
+    ``passed`` is an iterable of task ids the user already approved past their
+    human checkpoint; ``summaries`` maps task id → approved summary (or None).
+    A no-op when there is nothing to snapshot, so a pause of a run that never
+    hit a checkpoint stays marker-free.
+    """
+    passed_ids = sorted({str(t) for t in (passed or []) if str(t or "").strip()})
+    summ = {
+        str(k): (None if v is None else str(v))
+        for k, v in dict(summaries or {}).items()
+        if str(k or "").strip()
+    }
+    if not passed_ids and not summ:
+        return
+    inputs = dict(getattr(run, "inputs", None) or {})
+    inputs[CHECKPOINT_STATE_KEY] = {"passed": passed_ids, "summaries": summ}
+    run.inputs = inputs
+
+
+def read_checkpoint_state(run: Any) -> tuple[set[str], dict[str, str | None]]:
+    """Return ``(passed_task_ids, approved_summaries)`` from the marker.
+
+    Safe default ``(set(), {})`` when the marker is absent or malformed.
+    """
+    raw = (getattr(run, "inputs", None) or {}).get(CHECKPOINT_STATE_KEY)
+    if not isinstance(raw, dict):
+        return set(), {}
+    passed = {str(t) for t in (raw.get("passed") or []) if str(t or "").strip()}
+    summaries_raw = raw.get("summaries")
+    summaries: dict[str, str | None] = {}
+    if isinstance(summaries_raw, dict):
+        for k, v in summaries_raw.items():
+            if str(k or "").strip():
+                summaries[str(k)] = None if v is None else str(v)
+    return passed, summaries
+
+
+def clear_checkpoint_state(run: Any) -> None:
+    """Drop the checkpoint-state marker (on resume / terminate). Idempotent."""
+    inputs = getattr(run, "inputs", None)
+    if isinstance(inputs, dict) and CHECKPOINT_STATE_KEY in inputs:
+        merged = dict(inputs)
+        merged.pop(CHECKPOINT_STATE_KEY, None)
+        run.inputs = merged
+
+
 __all__ = [
+    "CHECKPOINT_STATE_KEY",
     "DEV_PENDING_PR_AGENT_IDS_KEY",
     "FAILED_AUTO_MERGE_AGENT_IDS_KEY",
     "EXTERNAL_CALLBACK_KEY",
@@ -190,10 +255,13 @@ __all__ = [
     "PRESERVE_WORKTREE_AGENT_IDS_KEY",
     "REVERTED_MERGE_AGENT_IDS_KEY",
     "UNATTENDED_KEY",
+    "clear_checkpoint_state",
     "clear_pause_state",
     "coalesce_reverted_merge_markers",
+    "read_checkpoint_state",
     "read_failed_auto_merge_agent_ids",
     "read_pause_state",
     "run_is_unattended",
+    "write_checkpoint_state",
     "write_pause_state",
 ]

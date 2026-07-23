@@ -199,6 +199,29 @@ class TestEventLog:
         partial = s.event_list(run_id=run.id, since_id=events[1].id)
         assert len(partial) == 3
 
+    def test_event_task_ids_with_type(self) -> None:
+        s = get_storage()
+        flow = s.flow_create(_flow())
+        run = s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1,
+            team_name="csflow-evt-type", user="alice",
+        ))
+        s.event_append(RunEvent(run_id=run.id, type="task_completed", task_id="t1"))
+        s.event_append(RunEvent(run_id=run.id, type="task_completed", task_id="t1"))
+        s.event_append(RunEvent(run_id=run.id, type="task_completed", task_id="t2"))
+        s.event_append(RunEvent(run_id=run.id, type="task_dispatched", task_id="t3"))
+        # A run-scoped event with no task_id must not appear.
+        s.event_append(RunEvent(run_id=run.id, type="task_completed", task_id=None))
+        # A different run's completion must not leak in.
+        other = s.run_create(FlowRun(
+            flow_id=flow.id, flow_version=1, team_name="csflow-evt-other",
+            user="alice",
+        ))
+        s.event_append(RunEvent(run_id=other.id, type="task_completed", task_id="tX"))
+
+        got = s.event_task_ids_with_type(run_id=run.id, type="task_completed")
+        assert got == {"t1", "t2"}
+
     def test_history_cleanup_removes_old_terminal_data(self) -> None:
         s = get_storage()
         flow = s.flow_create(_flow())

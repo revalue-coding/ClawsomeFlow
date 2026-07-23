@@ -592,6 +592,23 @@ class SqliteStorage:
             stmt = stmt.order_by(RunEvent.id).limit(limit)
             return list(s.exec(stmt).all())
 
+    def event_task_ids_with_type(self, *, run_id: str, type: str) -> set[str]:
+        """Return the distinct non-null ``task_id`` set for events of ``type``.
+
+        Used by the resume path to learn which tasks already had their
+        ``task_completed`` announced, so it can re-emit only for completions
+        that were never observed by a live tick (e.g. an external task the
+        user completed while the run was paused). Indexed on ``type``.
+        """
+        with self._session() as s:
+            stmt = (
+                select(RunEvent.task_id)
+                .where(RunEvent.run_id == run_id)
+                .where(RunEvent.type == type)
+                .where(RunEvent.task_id.is_not(None))
+            )
+            return {tid for tid in s.exec(stmt).all() if tid}
+
     # ---- Chat history (single-agent direct chat) ----
 
     def chat_message_append(self, row: ChatMessageRow) -> ChatMessageRow:

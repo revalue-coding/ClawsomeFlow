@@ -315,6 +315,18 @@ export function RunDetail() {
     return () => clearInterval(tid);
   }, [id]);
 
+  // Keep the pause/continue buttons locked until the run status *actually*
+  // settles (item 1). `pausing` clears only once the run reaches "paused"
+  // (the resume control appears); `continuing` clears only once it leaves
+  // "paused" (recovery finished). Status is driven by the 5s poll + POST
+  // response, so this covers async pause/resume that the POST doesn't reflect
+  // yet. The terminate button reads the same two flags, so both lock together.
+  const runStatus = run?.status;
+  useEffect(() => {
+    if (pausing && runStatus === "paused") setPausing(false);
+    if (continuing && runStatus && runStatus !== "paused") setContinuing(false);
+  }, [runStatus, pausing, continuing]);
+
   // WebSocket live event stream.
   useEffect(() => {
     if (!id) return;
@@ -423,32 +435,38 @@ export function RunDetail() {
   }
 
   async function onPause() {
-    if (!run) return;
+    if (!run || pausing) return;
+    // Lock immediately and keep locked until the status actually settles on
+    // "paused" (a useEffect clears `pausing` then) — NOT when the POST returns.
+    // Both pause + terminate stay disabled meanwhile.
     setPausing(true);
     try {
       const r = await api.pauseRun(run.id);
       setRun({ ...run, status: r.status, pause: r.pause });
     } catch (e) {
       void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-    } finally {
+      // Only unlock on failure; on success the effect clears it once the
+      // status reaches "paused" so the button never flickers back mid-pause.
       setPausing(false);
     }
   }
 
   async function onContinue() {
-    if (!run) return;
+    if (!run || continuing) return;
     // Scenario 9 (internal error): make the user acknowledge the run may be in
     // an inconsistent state before re-running.
     if (run.pause?.needsConfirmation && !(await confirm(t("runDetail.resumeConfirm")))) {
       return;
     }
+    // Lock immediately and keep locked ("正在恢复") until the status leaves
+    // "paused" (a useEffect clears `continuing` then) — NOT when the POST
+    // returns. Both continue + terminate stay disabled meanwhile.
     setContinuing(true);
     try {
       const r = await api.continueRun(run.id);
       setRun({ ...run, status: r.status, pause: r.pause ?? null });
     } catch (e) {
       void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-    } finally {
       setContinuing(false);
     }
   }
@@ -829,7 +847,10 @@ export function RunDetail() {
             <button
               className="btn-danger"
               onClick={onAbort}
-              disabled={aborting}
+              // Terminate locks together with pause/continue: while a pause or
+              // resume is in flight the run state is transient, so terminating
+              // is disabled until it settles.
+              disabled={aborting || pausing || continuing}
             >
               {aborting ? t("runDetail.aborting") : t("runDetail.abort")}
             </button>
@@ -1017,7 +1038,7 @@ export function RunDetail() {
                   type="button"
                   className="btn-danger"
                   onClick={onAbort}
-                  disabled={aborting}
+                  disabled={aborting || pausing || continuing}
                 >
                   {aborting
                     ? t("runDetail.aborting")

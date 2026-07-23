@@ -108,13 +108,15 @@ def active_driving_run_count() -> int:
         return 0
 
 
-def confirm_no_active_runs_or_exit(*, non_interactive: bool, action: str, console) -> None:
-    """Interactively confirm before a stop/restart that would abort live runs.
+def notify_active_runs_will_pause(*, non_interactive: bool, action: str, console) -> None:
+    """Tell the user in-flight runs will be PAUSED (never aborted) on stop/restart.
 
-    Skipped entirely when ``non_interactive`` (``--yes`` / backend self-calls)
-    or when the service is not running (nothing in-flight to terminate). Only
-    prompts when the backend is up AND has ACTIVE_DRIVING runs. ``action`` is a
-    short verb phrase, e.g. ``"stop the service"`` / ``"restart the service"``.
+    The pre-stop drain (:meth:`FlowScheduler.drain_to_terminal`) parks every
+    live run resumably — it NEVER terminates one — so a stop/restart/upgrade
+    does not need the user's permission. This is purely informational: it does
+    NOT prompt and never blocks the operation. Skipped when ``non_interactive``
+    (``--yes`` / backend self-calls) or when the service is down / idle.
+    ``action`` is a short verb phrase, e.g. ``"stop the service"``.
     """
     if non_interactive:
         return
@@ -124,20 +126,17 @@ def confirm_no_active_runs_or_exit(*, non_interactive: bool, action: str, consol
     count = active_driving_run_count()
     if count <= 0:
         return
-    import typer
-
     console.print(
         f"[yellow]⚠ {count} run(s) are still executing.[/yellow] "
-        f"They will be gracefully aborted when you {action}."
+        f"They will be paused when you {action}, then resumed after it comes "
+        "back (scheduled / delegated runs resume automatically; resume the "
+        "rest with 继续执行 / Continue in the UI)."
     )
-    if not typer.confirm(f"Continue and {action}?", default=False):
-        console.print("[dim]Cancelled; service left running.[/dim]")
-        raise typer.Exit(code=0)
 
 
 __all__ = [
     "active_driving_run_count",
-    "confirm_no_active_runs_or_exit",
+    "notify_active_runs_will_pause",
     "is_alive",
     "pid_file",
     "read_pid",

@@ -6,10 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.scheduler.run_metadata import (
+    CHECKPOINT_STATE_KEY,
     REVERTED_MERGE_AGENT_IDS_KEY,
     UNATTENDED_KEY,
+    clear_checkpoint_state,
     coalesce_reverted_merge_markers,
+    read_checkpoint_state,
     run_is_unattended,
+    write_checkpoint_state,
 )
 
 
@@ -89,3 +93,36 @@ def test_coalesce_reverted_merge_markers_noop_when_absent() -> None:
     stale = _Run(id="run-1", inputs={"goal": "x"})
     coalesce_reverted_merge_markers(stale, _FakeStorage(_Run(id="run-1")))
     assert stale.inputs == {"goal": "x"}
+
+
+def test_checkpoint_state_roundtrip() -> None:
+    run = _Run(inputs={"goal": "x"})
+    write_checkpoint_state(
+        run, passed={"t1", "t2"}, summaries={"t1": "approved", "t2": None},
+    )
+    assert CHECKPOINT_STATE_KEY in run.inputs
+    assert run.inputs["goal"] == "x"  # existing inputs preserved
+    passed, summaries = read_checkpoint_state(run)
+    assert passed == {"t1", "t2"}
+    assert summaries == {"t1": "approved", "t2": None}
+    clear_checkpoint_state(run)
+    assert CHECKPOINT_STATE_KEY not in run.inputs
+    assert read_checkpoint_state(run) == (set(), {})
+
+
+def test_checkpoint_state_absent_safe_default() -> None:
+    # Old runs without the marker → empty, never raises (upgrade-safe default).
+    assert read_checkpoint_state(_Run()) == (set(), {})
+    assert read_checkpoint_state(_Run(inputs={"goal": "x"})) == (set(), {})
+
+
+def test_checkpoint_state_marker_key_is_internal_prefixed() -> None:
+    # Must ride under the _csflow_ prefix so _public_run_inputs strips it.
+    assert CHECKPOINT_STATE_KEY.startswith("_csflow_")
+
+
+def test_checkpoint_state_write_noop_when_empty() -> None:
+    # Nothing to persist → don't pollute inputs with an empty marker.
+    run = _Run(inputs={"goal": "x"})
+    write_checkpoint_state(run, passed=set(), summaries={})
+    assert CHECKPOINT_STATE_KEY not in run.inputs

@@ -28,6 +28,7 @@ from app.models import (
     FlowTask,
     MergeStrategy,
     OnFailure,
+    RunEvent,
     RunStatus,
 )
 from app.scheduler.prompts import WorkerReport
@@ -2140,6 +2141,111 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
     # External in_progress → left as-is; NOT reset.
     assert rc._tasks["t_ext"].state == _TaskState.in_progress
     assert not _reset_to_pending("t_ext")
+
+
+@pytest.mark.asyncio
+async def test_prepare_resume_reemits_task_completed_for_completion_during_pause(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completion that happened while the run was PAUSED (e.g. an external
+    human task finished via the todo card, which emits only
+    ``external_task_completed`` — never ``task_completed``) must heal the board
+    on resume. prepare_resume leaves such a task's book NON-completed so the
+    first ``_apply_snapshots`` detects the transition and emits ``task_completed``.
+    A completion that WAS already announced is pre-seeded completed so the tick
+    does not re-emit. Both suppress re-audit via ``_completed_audited``.
+    """
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(id="alice", kind=AgentKind.claude, repo="/tmp/main",
+                      is_leader=False, merge_strategy=MergeStrategy.manual),
+            FlowAgent(id="ext", kind=AgentKind.external,
+                      external=ExternalNodeConfig(channel=ExternalChannel.human),
+                      is_leader=False),
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                      is_leader=True, merge_strategy=MergeStrategy.manual),
+        ],
+        tasks=[
+            # Completed & announced BEFORE the pause (has a task_completed event).
+            FlowTask(id="t_local", owner_agent_id="alice", subject="x",
+                     description="", depends_on=[]),
+            # External task the user completed WHILE paused → only an
+            # external_task_completed event exists, never task_completed.
+            FlowTask(id="t_ext", owner_agent_id="ext", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="y",
+                     description="", depends_on=["t_local", "t_ext"],
+                     is_leader_summary=True),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    storage = get_storage()
+    # t_local's completion was announced before the pause.
+    storage.event_append(RunEvent(
+        run_id=run.id, type="task_completed", agent_id="alice", task_id="t_local",
+        payload={"old": "in_progress", "new": "completed"},
+    ))
+    # t_ext completed during the pause — ONLY external_task_completed exists.
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_completed", agent_id="ext",
+        task_id="t_ext", payload={},
+    ))
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    completed_snaps = [
+        TaskSnapshot(task_id="t_local", owner_agent_id="alice",
+                     status="completed", locked_by_agent=None,
+                     metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="t_ext", owner_agent_id="ext",
+                     status="completed", locked_by_agent=None,
+                     metadata={}, dispatched_at_epoch=None),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return completed_snaps
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider,
+        compile_result=compile_result,
+    )
+    await rc.prepare_resume()
+
+    # Announced completion → pre-seeded completed (first tick won't re-emit).
+    assert rc._tasks["t_local"].state == _TaskState.completed
+    # Completion during pause → left NON-completed so the tick emits it.
+    assert rc._tasks["t_ext"].state != _TaskState.completed
+    # Both suppress OpenClaw re-audit.
+    assert {"t_local", "t_ext"} <= rc._completed_audited
+
+    # The first snapshot application heals the board: task_completed for t_ext
+    # (pending→completed), none for t_local (already completed).
+    changed = rc._apply_snapshots(completed_snaps)
+    assert changed
+    assert rc._tasks["t_ext"].state == _TaskState.completed
+    completed_events = [
+        e for e in storage.event_list(run_id=run.id, limit=1000)
+        if e.type == "task_completed"
+    ]
+    tids = [e.task_id for e in completed_events]
+    assert tids.count("t_ext") == 1  # newly emitted on resume
+    assert tids.count("t_local") == 1  # NOT re-emitted (pre-seeded completed)
 
 
 def test_backend_failure_always_pauses_even_unattended(fake_lookup) -> None:

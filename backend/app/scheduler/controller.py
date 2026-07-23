@@ -103,8 +103,11 @@ from app.scheduler.run_metadata import (
     PAUSE_REASON_FAILURE,
     PAUSE_REASON_INTERNAL_ERROR,
     POST_COMPLAINT_STATUS_KEY,
+    clear_checkpoint_state,
     coalesce_reverted_merge_markers,
+    read_checkpoint_state,
     run_is_unattended,
+    write_checkpoint_state,
     write_pause_state,
 )
 from app.scheduler.naming import openclaw_session_id_for_run, team_name_for_run
@@ -554,6 +557,15 @@ class RunController:
         """
         from app.scheduler.run_metadata import clear_pause_state
         clear_pause_state(self.run)
+        # Restore human-checkpoint approvals captured at pause time BEFORE the
+        # first tick runs, so a completed+approved upstream is not re-opened as
+        # a fresh checkpoint (_maybe_open_eager_checkpoint skips passed tasks)
+        # and downstream still receives the user-approved summary bundle.
+        passed, summaries = read_checkpoint_state(self.run)
+        self._checkpoint_passed_tasks.update(passed)
+        for tid, summary in summaries.items():
+            self._checkpoint_approved_summaries.setdefault(tid, summary)
+        clear_checkpoint_state(self.run)
         # Snapshot the stale FAILED leader-inbox messages present right now so the
         # failure detector ignores them post-resume (they'd otherwise re-fail a
         # reset task — mailbox_peek is non-consuming). Best-effort.
@@ -590,6 +602,24 @@ class RunController:
             s.task_id for s in snaps or []
             if (s.status or "").strip().lower() == "completed"
         }
+        # Which completions were already announced (a ``task_completed`` event
+        # exists)? A completion that happened while the run was PAUSED — e.g. an
+        # external human task the user finished via the todo card — only emits
+        # ``external_task_completed``, never ``task_completed`` (no live tick
+        # observed the ClawTeam transition). If we pre-seed the book to
+        # completed for those, the first tick sees old==new==completed and never
+        # emits ``task_completed``, so the board node stays stuck on "执行中"
+        # until the run terminates. For UNannounced completions we deliberately
+        # LEAVE the book non-completed so the first ``_apply_snapshots`` detects
+        # the pending→completed transition and emits ``task_completed``, healing
+        # the board. The audit stays suppressed via ``_completed_audited`` either
+        # way, so finished OpenClaw work is never re-audited.
+        try:
+            announced_completed = self.storage.event_task_ids_with_type(
+                run_id=self.run.id, type="task_completed",
+            )
+        except Exception:  # pragma: no cover - defensive
+            announced_completed = set()
         reset_task_ids: list[str] = []
         for s in snaps or []:
             book = self._tasks.get(s.task_id)
@@ -597,8 +627,10 @@ class RunController:
                 continue
             status = (s.status or "").strip().lower()
             if status == "completed":
-                book.state = _TaskState.completed
                 self._completed_audited.add(s.task_id)
+                if s.task_id in announced_completed:
+                    book.state = _TaskState.completed
+                # else: leave book non-completed → first tick emits task_completed.
                 continue
             owner = (
                 self._agents.get(s.owner_agent_id)
@@ -4979,6 +5011,15 @@ class RunController:
                 detail=self._pause_detail,
                 needs_confirmation=self._pause_needs_confirmation,
                 at=datetime.now(timezone.utc).isoformat(),
+            )
+            # Snapshot the in-memory human-checkpoint approval state so the
+            # resumed controller does NOT re-prompt an already-approved
+            # checkpoint (these sets are otherwise process-local and lost on
+            # teardown). Restored + cleared in prepare_resume.
+            write_checkpoint_state(
+                self.run,
+                passed=self._checkpoint_passed_tasks,
+                summaries=self._checkpoint_approved_summaries,
             )
         ipt = FinalizeInput(
             run=self.run, flow=self.flow, agents=list(self._agents.values()),

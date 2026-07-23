@@ -19,7 +19,7 @@ from rich.table import Table
 from app import __version__
 from app import config as cfg_mod
 from app.cli import app
-from app.cli._runtime import confirm_no_active_runs_or_exit, wait_for_health
+from app.cli._runtime import notify_active_runs_will_pause, wait_for_health
 from app.cli._user_service import ServiceError, restart_and_enable, service_status_hint
 from app.cli.deps import (
     check_non_openclaw_agent_tools,
@@ -120,8 +120,9 @@ def start(
         console.print("[bold]🦞 ClawsomeFlow service start[/bold]\n")
     else:
         console.print("[bold]🦞 ClawsomeFlow first-time setup[/bold]\n")
-    # `start` restarts the running service; confirm before aborting in-flight runs.
-    confirm_no_active_runs_or_exit(
+    # `start` restarts the running service; in-flight runs are PAUSED resumably
+    # by the drain (never aborted), so just inform the user — no confirmation.
+    notify_active_runs_will_pause(
         non_interactive=yes, action="restart the service", console=console,
     )
 
