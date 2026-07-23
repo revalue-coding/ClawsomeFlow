@@ -963,6 +963,8 @@ const en = {
       submitting: "Submitting…",
       waitingWebhook: "Dispatched to the external endpoint — waiting for its callback.",
       waitingRemote: "Delegated to the remote ClawsomeFlow — waiting for its leader report callback.",
+      failedReceipt: "The remote executor reported failure — re-dispatch to try again",
+      redispatchNeedsResume: "The run is paused — click 继续执行 (Resume) first, then re-dispatch.",
     },
     checkpoint: {
       title: "Manual checkpoint",

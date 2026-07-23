@@ -521,7 +521,7 @@ def test_complete_success_sends_mailbox_and_marks_completed(
     assert len(fake.task_updates) == 1  # no second ClawTeam write
 
 
-def test_complete_failed_sends_failure_signal_not_completed(
+def test_complete_failed_writes_event_and_bypasses_inbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _fake_mcp(monkeypatch)
@@ -530,9 +530,18 @@ def test_complete_failed_sends_failure_signal_not_completed(
         storage=get_storage(), run=run, task_id="t1", nonce="n-1",
         ok=False, summary="parts missing", source="test",
     ))
-    # Legacy FAILED signal → failure detector applies on_failure next tick.
-    assert fake.mailbox_calls[0]["content"] == "FAILED: t1: parts missing"
-    assert fake.task_updates == []  # never marked completed on failure
+    # External failures are detected by NONCE from the external_task_completed
+    # event — NOT via a leader-inbox FAILED string. So on failure we send NOTHING
+    # to the inbox and never mark the task completed.
+    assert fake.mailbox_calls == []
+    assert fake.task_updates == []
+    comp = [
+        e for e in get_storage().event_list(run_id=run.id, limit=1000)
+        if e.type == "external_task_completed" and e.task_id == "t1"
+    ]
+    assert len(comp) == 1
+    assert comp[0].payload.get("ok") is False
+    assert comp[0].payload.get("nonce") == "n-1"
 
 
 def test_complete_rejects_stale_nonce_and_undispatched(

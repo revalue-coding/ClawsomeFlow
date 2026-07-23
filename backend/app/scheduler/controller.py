@@ -90,6 +90,7 @@ from app.scheduler.prompts import (
 from app.scheduler.failure import (
     MIN_TASK_TIMEOUT_SECONDS,
     FailureRecord,
+    FailureReason,
     TaskSnapshot,
     apply_on_failure,
     detect_failures,
@@ -457,6 +458,13 @@ class RunController:
         self._forced_failed = False
         self._failed_task_ids: set[str] = set()
         self._skipped_task_ids: set[str] = set()
+        # External failures are identified by their dispatch NONCE (from the
+        # ``external_task_completed(ok=false)`` event), not by an inbox string.
+        # This set records nonces already turned into a failure so the same
+        # receipt is never processed twice; a re-dispatch mints a fresh nonce so
+        # the old one stops matching the current dispatch anyway. Seeded on resume
+        # from ``task_failed`` event payloads (``_seed_handled_external_nonces``).
+        self._handled_external_failure_nonces: set[str] = set()
         self._terminal_snapshot_persisted = False
         self._task_outputs: dict[str, list[dict[str, Any]]] = {}
         self._worker_report_history: list[dict[str, Any]] = []
@@ -635,6 +643,10 @@ class RunController:
         """
         from app.scheduler.run_metadata import clear_pause_state
         clear_pause_state(self.run)
+        # External failures are nonce-identified; rebuild the handled-nonce set
+        # from durable task_failed events so a re-driven controller never
+        # re-processes a receipt it already surfaced before the pause.
+        self._seed_handled_external_nonces()
         # Restore human-checkpoint approvals captured at pause time BEFORE the
         # first tick runs, so a completed+approved upstream is not re-opened as
         # a fresh checkpoint (_maybe_open_eager_checkpoint skips passed tasks)
@@ -646,7 +658,12 @@ class RunController:
         clear_checkpoint_state(self.run)
         # Snapshot the stale FAILED leader-inbox messages present right now so the
         # failure detector ignores them post-resume (they'd otherwise re-fail a
-        # reset task — mailbox_peek is non-consuming). Best-effort.
+        # reset task — mailbox_peek is non-consuming). This is a LOCAL-WORKER-ONLY
+        # concern: an LLM-authored FAILED string has no identity and can't be
+        # consumed selectively (FIFO-window receive would also drop the
+        # ``task <id> done:`` reports downstream dispatch peeks live), so the
+        # string-set is the compromise. EXTERNAL nodes never appear here — they no
+        # longer send inbox FAILED and are detected by nonce identity instead. Best-effort.
         try:
             for msg in await self._fetch_leader_inbox():
                 if msg and str(msg).strip().upper().startswith("FAILED"):
@@ -714,18 +731,55 @@ class RunController:
                 self._agents.get(s.owner_agent_id)
                 or self._agents.get(book.task.owner_agent_id)
             )
-            # ONLY an in-flight EXTERNAL task is left untouched — it holds a live
-            # receipt ticket that will resolve it. A FAILED external task (blocked,
-            # ticket already consumed) falls through to the runnable-reset rule
-            # below and is re-dispatched (fresh ticket / notification) like any
-            # other node, so no kind of task can strand the resume.
+            # An in-flight EXTERNAL task normally holds a live receipt ticket
+            # that will resolve it — leave it untouched (never re-dispatch, which
+            # would mint a new nonce and invalidate the held ticket). BUT a
+            # FAILED receipt that arrived while the run was PAUSED had no live
+            # controller tick to observe its ``FAILED:`` inbox signal, so
+            # ``record_external_result`` left the ClawTeam task pinned to
+            # ``in_progress`` (it never task_updates on failure). Detect that
+            # orphaned failure from the event stream and treat it like any other
+            # failed node: surface it (task_failed → visible in history) and fall
+            # through to the runnable-reset below so 继续执行 re-dispatches it
+            # with a fresh ticket. This is symmetric with a SUCCESS receipt that
+            # lands while paused, which is reconciled to completed above.
             if (
                 owner is not None
                 and owner.kind == AgentKind.external
                 and status == "in_progress"
             ):
-                book.state = _TaskState.in_progress
-                continue
+                hit = self._external_failure_receipt(s.task_id)
+                if hit is None:
+                    book.state = _TaskState.in_progress
+                    continue
+                fail_nonce, fail_detail = hit
+                if fail_nonce in self._handled_external_failure_nonces:
+                    # Already surfaced (e.g. a prior resume) — leave it to the
+                    # runnable-reset below without re-emitting a duplicate failure.
+                    pass
+                else:
+                    self._handled_external_failure_nonces.add(fail_nonce)
+                    on_failure = getattr(getattr(owner, "on_failure", None), "value", "")
+                    self._emit_event(
+                        "task_failure_detected", agent_id=owner.id, task_id=s.task_id,
+                        payload={
+                            "reason": "leader_inbox_failed", "detail": fail_detail,
+                            "on_failure": on_failure, "effective_action": "pause",
+                            "context": "resume_orphaned_external_failure",
+                            "nonce": fail_nonce,
+                        },
+                    )
+                    self._emit_event(
+                        "task_failed", agent_id=owner.id, task_id=s.task_id,
+                        payload={
+                            "reason": "leader_inbox_failed", "detail": fail_detail,
+                            "effective_action": "pause", "reset_to_pending": True,
+                            "context": "resume_orphaned_external_failure",
+                            "nonce": fail_nonce,
+                        },
+                    )
+                # Fall through (no ``continue``): status is ``in_progress`` so the
+                # runnable-reset block below resets it to pending → re-dispatched.
             # Non-completed. Reset to pending if it is runnable now: ``in_progress``
             # (interrupted — always had its deps met) or a failure-``blocked`` task
             # whose deps are all completed. A task still gated on incomplete deps is
@@ -1575,6 +1629,11 @@ class RunController:
                 leader_inbox_messages=inbox,
                 agents=self._agents,
             )
+            # External-node failures are identified by NONCE from the durable
+            # completion event (never the inbox) — append them to the same
+            # handling loop so a live external failure resets+pauses like any
+            # other explicit failure.
+            failures = failures + self._detect_external_failures(snapshots)
             if failures:
                 activity = True
                 for rec in failures:
@@ -2888,6 +2947,98 @@ class RunController:
 
     # ── failure handling ─────────────────────────────────────────────
 
+    def _external_failure_receipt(self, task_id: str) -> tuple[str, str] | None:
+        """Return ``(nonce, summary)`` iff *task_id*'s LATEST external dispatch
+        received a FAILURE receipt, else ``None``.
+
+        An external node reports failure via ``record_external_result(ok=False)``,
+        which writes an ``external_task_completed`` event with ``ok=False`` for the
+        dispatch nonce (and deliberately does NOT touch the leader inbox or the
+        ClawTeam status). This event — matched to the CURRENT dispatch nonce — is
+        the SOLE failure signal for external nodes (a stale receipt from a prior
+        attempt has a different nonce and is ignored). Used by both the live-tick
+        detector (:meth:`_detect_external_failures`) and the resume reconcile
+        (:meth:`prepare_resume`). Fully defensive.
+        """
+        from app.services.external_tasks import (
+            find_completion_event, latest_dispatch_event,
+        )
+        try:
+            disp = latest_dispatch_event(
+                self.storage, run_id=self.run.id, task_id=task_id,
+            )
+            if disp is None:
+                return None
+            nonce = str((disp.payload or {}).get("nonce") or "")
+            if not nonce:
+                return None
+            comp = find_completion_event(
+                self.storage, run_id=self.run.id, task_id=task_id, nonce=nonce,
+            )
+            if comp is None:
+                return None
+            payload = comp.payload or {}
+            if payload.get("ok") is False:
+                summary = (
+                    str(payload.get("summary") or "").strip()
+                    or "external executor reported failure"
+                )
+                return nonce, summary
+            return None
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    def _detect_external_failures(
+        self, snapshots: list[TaskSnapshot],
+    ) -> list[FailureRecord]:
+        """Failure records for external tasks whose current dispatch got an
+        ``ok=false`` receipt and hasn't been handled yet (by nonce).
+
+        This is the LIVE-tick counterpart of the resume reconcile: external
+        failures are identified by nonce from the durable completion event, never
+        from the leader inbox. Only in-flight external tasks are considered; a
+        task already reset to pending by a prior handling is skipped.
+        """
+        out: list[FailureRecord] = []
+        for snap in snapshots:
+            if (snap.status or "").strip().lower() != "in_progress":
+                continue
+            owner = self._agents.get(snap.owner_agent_id)
+            if owner is None:
+                book = self._tasks.get(snap.task_id)
+                owner = self._agents.get(book.task.owner_agent_id) if book else None
+            if owner is None or owner.kind != AgentKind.external:
+                continue
+            hit = self._external_failure_receipt(snap.task_id)
+            if hit is None:
+                continue
+            nonce, summary = hit
+            if nonce in self._handled_external_failure_nonces:
+                continue
+            out.append(FailureRecord(
+                task_id=snap.task_id,
+                agent_id=owner.id,
+                reason=FailureReason.leader_inbox_failed,
+                detail=summary,
+                external_nonce=nonce,
+            ))
+        return out
+
+    def _seed_handled_external_nonces(self) -> None:
+        """Rebuild ``_handled_external_failure_nonces`` from durable ``task_failed``
+        events (each external failure tags its nonce). Called on resume so a
+        rebuilt controller never re-processes an already-handled external receipt.
+        """
+        try:
+            for ev in self.storage.event_list(run_id=self.run.id, limit=100000):
+                if ev.type != "task_failed":
+                    continue
+                nonce = str((ev.payload or {}).get("nonce") or "")
+                if nonce:
+                    self._handled_external_failure_nonces.add(nonce)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
     async def _handle_failure(self, rec: FailureRecord) -> None:
         book = self._tasks.get(rec.task_id)
         if book is None:
@@ -2923,12 +3074,18 @@ class RunController:
             book.dispatched_at = None
             self.dispatch_clock.reset(book.task.id)
             self._failed_task_ids.add(book.task.id)
+            # Record the external dispatch nonce so a rebuilt controller (resume)
+            # never re-processes this same receipt, and tag it on the event.
+            nonce_payload: dict[str, Any] = {}
+            if rec.external_nonce:
+                self._handled_external_failure_nonces.add(rec.external_nonce)
+                nonce_payload = {"nonce": rec.external_nonce}
             self._emit_event(
                 "task_failure_detected", agent_id=agent.id, task_id=book.task.id,
                 payload={
                     "reason": rec.reason.value, "detail": rec.detail,
                     "on_failure": agent.on_failure.value,
-                    "effective_action": "pause",
+                    "effective_action": "pause", **nonce_payload,
                 },
             )
             self._emit_event(
@@ -2936,6 +3093,7 @@ class RunController:
                 payload={
                     "reason": rec.reason.value, "detail": rec.detail,
                     "effective_action": "pause", "reset_to_pending": True,
+                    **nonce_payload,
                 },
             )
             self._pause_from_failure_record(

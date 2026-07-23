@@ -634,15 +634,15 @@ async def complete_external_task(
     else:
         if not summary_text:
             summary_text = "external executor reported failure without a reason"
-        if leader_id:
-            # Legacy failure signal — picked up by failure.detect_failures
-            # (leader_inbox_failed) and routed through on_failure policy.
-            await mcp.mailbox_send(
-                team_name=run.team_name,
-                from_agent=agent_id,
-                to=leader_id,
-                content=f"FAILED: {task_id}: {summary_text}",
-            )
+        # External failures are detected by NONCE identity, not the leader inbox:
+        # the ``external_task_completed(ok=false, nonce)`` event below is the sole
+        # signal (matched to the current dispatch nonce by
+        # RunController._external_failure_receipt). We deliberately do NOT
+        # send a ``FAILED:`` leader-inbox message — an LLM-authored inbox string has
+        # no identity, which is what forced the resume string-suppression + caused
+        # the "identical-text refailure suppressed" edge. Bypassing the inbox keeps
+        # the leader inbox for ``task <id> done:`` reports only (peeked live for
+        # downstream passthrough).
 
     from app.events import publish_run_event
 

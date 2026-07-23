@@ -2248,6 +2248,257 @@ async def test_prepare_resume_reemits_task_completed_for_completion_during_pause
     assert tids.count("t_local") == 1  # NOT re-emitted (pre-seeded completed)
 
 
+@pytest.mark.asyncio
+async def test_prepare_resume_reconciles_external_failure_during_pause(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FAILED external receipt that lands while the run is PAUSED (no live tick
+    observed the ``FAILED:`` inbox signal, so ClawTeam stays ``in_progress``) is
+    reconciled on resume: prepare_resume surfaces it (``task_failed`` event) and
+    resets it to ``pending`` so 继续执行 re-dispatches it. A genuinely-waiting
+    external ``in_progress`` task (no completion event for its latest nonce) is
+    left untouched — its outstanding ticket must NOT be invalidated.
+
+    Regression for run f2d8b01c57b6: a second remote node that failed after the
+    first failure paused the run was neither displayed nor re-dispatched.
+    """
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(id="ext_failed", kind=AgentKind.external,
+                      external=ExternalNodeConfig(channel=ExternalChannel.remote_csflow,
+                                                  base_url="http://x", flow_id="f",
+                                                  pair_token_ref="r"),
+                      is_leader=False),
+            FlowAgent(id="ext_waiting", kind=AgentKind.external,
+                      external=ExternalNodeConfig(channel=ExternalChannel.remote_csflow,
+                                                  base_url="http://y", flow_id="g",
+                                                  pair_token_ref="s"),
+                      is_leader=False),
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                      is_leader=True, merge_strategy=MergeStrategy.manual),
+        ],
+        tasks=[
+            FlowTask(id="t_failed", owner_agent_id="ext_failed", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="t_waiting", owner_agent_id="ext_waiting", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="y",
+                     description="", depends_on=["t_failed", "t_waiting"],
+                     is_leader_summary=True),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    storage = get_storage()
+    # t_failed: latest dispatch nonce N1 has a FAILURE receipt (ok=false).
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_dispatched", agent_id="ext_failed",
+        task_id="t_failed", payload={"nonce": "N1"},
+    ))
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_completed", agent_id="ext_failed",
+        task_id="t_failed", payload={"nonce": "N1", "ok": False, "summary": "boom"},
+    ))
+    # t_waiting: dispatched (nonce N2) but NO completion event → still waiting.
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_dispatched", agent_id="ext_waiting",
+        task_id="t_waiting", payload={"nonce": "N2"},
+    ))
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    snaps = [
+        TaskSnapshot(task_id="t_failed", owner_agent_id="ext_failed",
+                     status="in_progress", locked_by_agent=None,
+                     metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="t_waiting", owner_agent_id="ext_waiting",
+                     status="in_progress", locked_by_agent=None,
+                     metadata={}, dispatched_at_epoch=None),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return snaps
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider,
+        compile_result=compile_result,
+    )
+    await rc.prepare_resume()
+
+    # Orphaned failure → reset to pending (re-dispatchable) and surfaced.
+    assert rc._tasks["t_failed"].state == _TaskState.pending
+    # Genuinely-waiting external task → left in_progress, never re-dispatched.
+    assert rc._tasks["t_waiting"].state == _TaskState.in_progress
+
+    failed_events = [
+        e for e in storage.event_list(run_id=run.id, limit=1000)
+        if e.type == "task_failed"
+    ]
+    failed_tids = [e.task_id for e in failed_events]
+    assert failed_tids.count("t_failed") == 1  # surfaced on resume
+    assert "t_waiting" not in failed_tids
+    # The surfaced failure carries the receipt summary.
+    assert any(e.payload.get("detail") == "boom" for e in failed_events)
+    # Nonce identity tagged on the surfaced failure + recorded as handled.
+    assert any(e.payload.get("nonce") == "N1" for e in failed_events)
+    assert "N1" in rc._handled_external_failure_nonces
+
+
+def _external_only_spec() -> FlowSpec:
+    return FlowSpec(
+        agents=[
+            FlowAgent(id="ext", kind=AgentKind.external,
+                      external=ExternalNodeConfig(
+                          channel=ExternalChannel.remote_csflow,
+                          base_url="http://x", flow_id="f", pair_token_ref="r"),
+                      is_leader=False),
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                      is_leader=True, merge_strategy=MergeStrategy.manual),
+        ],
+        tasks=[
+            FlowTask(id="t_ext", owner_agent_id="ext", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="y",
+                     description="", depends_on=["t_ext"], is_leader_summary=True),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_external_failure_detected_via_nonce_not_inbox(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LIVE external failure is detected from the ``external_task_completed``
+    nonce event — NOT from any leader-inbox FAILED string. Handling it resets the
+    task to pending, tags ``task_failed`` with the nonce, records the nonce as
+    handled, and pauses. A second detection pass finds nothing (already handled).
+    """
+    spec = _external_only_spec()
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    storage = get_storage()
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_dispatched", agent_id="ext",
+        task_id="t_ext", payload={"nonce": "N1"},
+    ))
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_completed", agent_id="ext",
+        task_id="t_ext", payload={"nonce": "N1", "ok": False, "summary": "boom"},
+    ))
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d", worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots, compile_result=compile_result,
+    )
+    rc._tasks["t_ext"].state = _TaskState.in_progress
+
+    snaps = [TaskSnapshot(
+        task_id="t_ext", owner_agent_id="ext", status="in_progress",
+        locked_by_agent=None, metadata={}, dispatched_at_epoch=0,
+    )]
+    recs = rc._detect_external_failures(snaps)
+    assert len(recs) == 1
+    assert recs[0].external_nonce == "N1"
+    assert recs[0].reason.value == "leader_inbox_failed"
+
+    await rc._handle_failure(recs[0])
+    assert rc._tasks["t_ext"].state == _TaskState.pending
+    assert rc._pause_evt.is_set()
+    assert "N1" in rc._handled_external_failure_nonces
+    failed = [
+        e for e in storage.event_list(run_id=run.id, limit=1000)
+        if e.type == "task_failed" and e.task_id == "t_ext"
+    ]
+    assert len(failed) == 1
+    assert failed[0].payload.get("nonce") == "N1"
+
+    # Same nonce, still in_progress snapshot → NOT re-detected (handled).
+    assert rc._detect_external_failures(snaps) == []
+
+
+@pytest.mark.asyncio
+async def test_external_handled_nonce_seeded_from_events(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rebuilt controller seeds the handled-nonce set from prior ``task_failed``
+    events so it never re-processes a receipt it already surfaced."""
+    spec = _external_only_spec()
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    storage = get_storage()
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_dispatched", agent_id="ext",
+        task_id="t_ext", payload={"nonce": "N1"},
+    ))
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_completed", agent_id="ext",
+        task_id="t_ext", payload={"nonce": "N1", "ok": False, "summary": "boom"},
+    ))
+    storage.event_append(RunEvent(
+        run_id=run.id, type="task_failed", agent_id="ext", task_id="t_ext",
+        payload={"reason": "leader_inbox_failed", "nonce": "N1"},
+    ))
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d", worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots, compile_result=compile_result,
+    )
+    rc._seed_handled_external_nonces()
+    assert "N1" in rc._handled_external_failure_nonces
+    rc._tasks["t_ext"].state = _TaskState.in_progress
+    snaps = [TaskSnapshot(
+        task_id="t_ext", owner_agent_id="ext", status="in_progress",
+        locked_by_agent=None, metadata={}, dispatched_at_epoch=0,
+    )]
+    # Already handled (seeded) → not re-detected.
+    assert rc._detect_external_failures(snaps) == []
+
+
 def test_backend_failure_always_pauses_even_unattended(fake_lookup) -> None:
     """A detected node failure ALWAYS pauses (never terminates) — the user must
     fix + 继续执行. This holds even for unattended runs, which are then NOT

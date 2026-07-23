@@ -240,7 +240,10 @@ class RunDiffAgentView(_CamelModel):
     """One agent's merged-into-baseline summary for the post-run "Run diff" list.
 
     Only agents whose branch actually landed content on a baseline branch this
-    run appear (``merge_count > 0``); OpenClaw agents are excluded upstream.
+    run appear (``files_changed > 0``). OpenClaw agents ARE included — their
+    repo is resolved via :func:`_resolve_agent_repo_for_run` (their worktree
+    lives under ``~/.clawsomeflow/agents/{id}/workspace``, not on the Flow
+    spec). Only ``merge_strategy=skip`` (external) nodes are excluded upstream.
     """
 
     agent_id: str
@@ -1855,7 +1858,10 @@ async def get_run_diff(
     for agent in _run_diff_agents(run, storage):
         if agent.id in reverted:
             continue
-        repo = str(agent.repo or "").strip() or None
+        # OpenClaw agents carry no ``repo`` on the Flow spec — their merge lands
+        # in ``~/.clawsomeflow/agents/{id}/workspace``. Resolve via the shared
+        # helper (same as every other run endpoint) so their merges are found.
+        repo = _resolve_agent_repo_for_run(run=run, agent_id=agent.id, storage=storage)
         try:
             result = await cli.run_merged_agent_patch(
                 team=run.team_name, agent=agent.id, repo=repo, include_patch=False,
@@ -1921,7 +1927,7 @@ async def get_run_agent_diff(
             f"agent {agent_id!r} is not eligible for Run diff in this run",
             status_code=404,
         )
-    repo = str(agent.repo or "").strip() or None
+    repo = _resolve_agent_repo_for_run(run=run, agent_id=agent.id, storage=storage)
     cli = get_clawteam_cli()
     try:
         result = await cli.run_merged_agent_patch(
@@ -2006,7 +2012,7 @@ async def revert_run_agent_merge(
             target_branch=str(agent.target_branch or DEFAULT_TARGET_BRANCH),
             message="already reverted",
         )
-    repo = str(agent.repo or "").strip() or None
+    repo = _resolve_agent_repo_for_run(run=run, agent_id=agent.id, storage=storage)
     target = str(agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
     cli = get_clawteam_cli()
     try:

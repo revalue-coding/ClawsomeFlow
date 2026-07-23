@@ -207,8 +207,15 @@ def test_webui_complete_failed_reports_failure(
         json={"status": "failed", "summary": "cannot access lab"},
     )
     assert r.status_code == 200, r.text
-    assert fake.mailbox_calls[0]["content"] == "FAILED: t1: cannot access lab"
+    # External failures bypass the inbox — detected by nonce from the
+    # external_task_completed event, not a FAILED leader-inbox message.
+    assert fake.mailbox_calls == []
     assert fake.task_updates == []
+    comp = [
+        e for e in get_storage().event_list(run_id=run.id, limit=1000)
+        if e.type == "external_task_completed" and e.task_id == "t1"
+    ]
+    assert comp and comp[0].payload.get("ok") is False
 
 
 def test_webui_complete_requires_outstanding_dispatch(

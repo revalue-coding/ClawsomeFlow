@@ -951,6 +951,8 @@ const zh = {
       submitting: "提交中…",
       waitingWebhook: "已派发到外部端点，等待其回调完成。",
       waitingRemote: "已委托给远端 ClawsomeFlow，等待其 leader 报告回调。",
+      failedReceipt: "远端执行返回失败，可重新派发再试一次",
+      redispatchNeedsResume: "执行流已暂停，请先点击“继续执行”，再重新派发。",
     },
     checkpoint: {
       title: "人工检查点",

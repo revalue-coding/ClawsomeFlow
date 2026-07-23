@@ -52,8 +52,13 @@ class FailureRecord:
     agent_id: str
     reason: FailureReason
     detail: str = ""
-    #: Raw leader-inbox line when ``reason`` is ``leader_inbox_failed``.
+    #: Raw leader-inbox line when ``reason`` is ``leader_inbox_failed`` (local
+    #: workers only; external nodes never route through the inbox).
     inbox_message: str = ""
+    #: Dispatch nonce for an EXTERNAL-node failure (identity of the receipt that
+    #: triggered it). Empty for local failures. Recorded on the ``task_failed``
+    #: event so a rebuilt controller can skip an already-handled receipt.
+    external_nonce: str = ""
 
     def as_log(self) -> dict[str, Any]:
         return {
@@ -160,16 +165,19 @@ def detect_failures(
                 ))
                 continue
 
-    # Signal 3: leader inbox FAILED:<task_id>:<reason>. The worker/receipt
-    # protocol REQUIRES a node that cannot complete to send this (see
-    # scheduler/prompts.py — "MUST"). It is authoritative: a ``FAILED:<tid>`` is
-    # treated as a failure **even if the node is currently marked ``completed``**
+    # Signal 3: leader inbox FAILED:<task_id>:<reason> — LOCAL workers only.
+    # The worker protocol REQUIRES a local node that cannot complete to send this
+    # (see scheduler/prompts.py — "MUST"). It is authoritative: a ``FAILED:<tid>``
+    # is treated as a failure **even if the node is currently marked ``completed``**
     # in ClawTeam (an agent may finish the ClawTeam task yet report the WORK
     # failed). The controller then pauses the Flow + resets the node rather than
-    # advancing to downstream tasks. Stale FAILED messages from a pre-pause
-    # attempt are suppressed on resume by the controller
-    # (``_resume_suppressed_failed_msgs``), so a re-run that succeeds is not
-    # re-failed by an old message.
+    # advancing to downstream tasks. Stale FAILED messages from a pre-pause attempt
+    # are suppressed on resume by the controller (``_resume_suppressed_failed_msgs``),
+    # so a re-run that succeeds is not re-failed by an old message.
+    # EXTERNAL-owned tasks are SKIPPED here: they never route failures through the
+    # inbox — the controller detects them by nonce from the durable
+    # ``external_task_completed(ok=false)`` event (no ambiguous string, no
+    # suppression set needed).
     if leader_inbox_messages:
         already = {(r.task_id, r.reason) for r in out}
         for msg in leader_inbox_messages:
@@ -178,6 +186,13 @@ def detect_failures(
                 continue
             tid, reason = parsed
             owner = flow_tasks.get(tid).owner_agent_id if tid in flow_tasks else "?"
+            # EXTERNAL nodes never route failures through the inbox — they are
+            # detected by nonce identity from the ``external_task_completed``
+            # event (see RunController). Skip any external-owned FAILED line so a
+            # stray/legacy message can't double-fire an external task's failure.
+            owner_agent = (agents or {}).get(owner)
+            if owner_agent is not None and owner_agent.kind == AgentKind.external:
+                continue
             key = (tid, FailureReason.leader_inbox_failed)
             if key in already:
                 continue

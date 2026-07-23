@@ -1176,6 +1176,7 @@ export function RunDetail() {
           runId={run.id}
           teamName={run.teamName ?? ""}
           events={events}
+          paused={run.status === "paused"}
         />
       )}
 
@@ -3504,6 +3505,11 @@ type ExternalTaskItem = {
     fromAgent?: string;
     summary?: string;
   }> | null;
+  /** A failure receipt (ok=false) arrived for THIS dispatch nonce — the task is
+   * NOT done, it needs re-dispatch (or resume). The card stays visible. */
+  failed: boolean;
+  /** Reason text from the failure receipt, if any. */
+  failureSummary: string;
 };
 
 /** Outstanding external-node dispatches: latest dispatch per task, minus
@@ -3514,6 +3520,8 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
   const latest = new Map<string, ExternalTaskItem>();
   const completedNonces = new Set<string>();
   const completedTasks = new Set<string>();
+  /** nonce-key → failure summary. A failed receipt does NOT hide the card. */
+  const failedNonces = new Map<string, string>();
   for (const e of ordered) {
     const tid = typeof e.taskId === "string" ? e.taskId : "";
     if (!tid) continue;
@@ -3545,28 +3553,48 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
         upstreamOutputs: Array.isArray(upstreamRaw)
           ? (upstreamRaw as ExternalTaskItem["upstreamOutputs"])
           : null,
+        failed: false,
+        failureSummary: "",
       });
     } else if (e.type === "external_task_completed") {
-      completedNonces.add(`${tid}:${String(payload.nonce ?? "")}`);
+      // A SUCCESS receipt (ok !== false) completes the task → hide the card.
+      // A FAILURE receipt (ok === false) does NOT: the task is still outstanding
+      // (failed, awaiting re-dispatch / resume), so keep the card visible and
+      // mark it failed. Otherwise the backend keeps waiting while no card shows.
+      const key = `${tid}:${String(payload.nonce ?? "")}`;
+      if (payload.ok === false) {
+        failedNonces.set(key, String(payload.summary ?? "").trim());
+      } else {
+        completedNonces.add(key);
+      }
     } else if (e.type === "task_completed") {
       completedTasks.add(tid);
     }
   }
-  return [...latest.values()].filter(
-    (it) =>
-      !completedTasks.has(it.taskId)
-      && !completedNonces.has(`${it.taskId}:${it.nonce}`),
-  );
+  return [...latest.values()]
+    .filter(
+      (it) =>
+        !completedTasks.has(it.taskId)
+        && !completedNonces.has(`${it.taskId}:${it.nonce}`),
+    )
+    .map((it) => {
+      const failKey = `${it.taskId}:${it.nonce}`;
+      return failedNonces.has(failKey)
+        ? { ...it, failed: true, failureSummary: failedNonces.get(failKey) ?? "" }
+        : it;
+    });
 }
 
 function ExternalTasksCard({
   runId,
   teamName,
   events,
+  paused,
 }: {
   runId: string;
   teamName: string;
   events: RunWsEvent[];
+  paused: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const { alert, confirm } = useDialog();
@@ -3742,11 +3770,23 @@ function ExternalTasksCard({
                   </div>
                 );
               })()}
-              {!isHuman && (
-                <div className="mt-2 text-xs text-ink-600">
-                  {item.channel === "webhook"
-                    ? t("runDetail.external.waitingWebhook")
-                    : t("runDetail.external.waitingRemote")}
+              {item.failed ? (
+                <div className="mt-2 text-xs text-rose-700">
+                  {t("runDetail.external.failedReceipt")}
+                  {item.failureSummary ? `: ${item.failureSummary}` : ""}
+                </div>
+              ) : (
+                !isHuman && (
+                  <div className="mt-2 text-xs text-ink-600">
+                    {item.channel === "webhook"
+                      ? t("runDetail.external.waitingWebhook")
+                      : t("runDetail.external.waitingRemote")}
+                  </div>
+                )
+              )}
+              {paused && canRedispatch && (
+                <div className="mt-2 text-xs text-amber-700">
+                  {t("runDetail.external.redispatchNeedsResume")}
                 </div>
               )}
               {isHuman ? (
@@ -3813,7 +3853,12 @@ function ExternalTasksCard({
                     <button
                       type="button"
                       className="btn-primary"
-                      disabled={actionsBusy}
+                      // Paused runs have no live controller — re-dispatch would
+                      // 409. Require the user to 继续执行 first (pause/resume and
+                      // re-dispatch are kept as separate actions). The amber hint
+                      // above explains why the button is disabled.
+                      disabled={actionsBusy || paused}
+                      title={paused ? t("runDetail.external.redispatchNeedsResume") : undefined}
                       onClick={() => void redispatch(item.taskId)}
                     >
                       {redispatching === item.taskId

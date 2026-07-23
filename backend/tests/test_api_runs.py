@@ -2498,6 +2498,47 @@ def test_run_diff_lists_merged_agents_including_openclaw(
     assert "leader" in queried
 
 
+def test_run_diff_resolves_openclaw_repo_to_agent_workspace(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (run f2d8b01c57b6): OpenClaw agents carry NO ``repo`` on the
+    Flow spec — their merge lands in ``~/.clawsomeflow/agents/{id}/workspace``.
+    The Run-diff endpoints must resolve the repo via ``_resolve_agent_repo_for_run``
+    (like every other run endpoint), NOT read raw ``agent.repo`` (which is empty
+    → ``None`` → ``run_merged_agent_patch`` returns None → the agent is dropped
+    and the module renders "本次运行没有修改被并入项目"). Assert the OpenClaw
+    agent is queried with its workspace repo, and a normal agent with its spec repo.
+    """
+    from app import paths
+
+    flow = _make_openclaw_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.completed)
+
+    seen: dict[str, str | None] = {}
+
+    class _FakeCli:
+        async def run_merged_agent_patch(
+            self, *, team, agent, repo, include_patch=True, **kw,
+        ):
+            del team, include_patch, kw
+            seen[agent] = repo
+            return {
+                "repo_root": repo or "", "branch": f"clawteam/{run.team_name}/{agent}",
+                "merge_count": 1, "commit_count": 1, "files_changed": 1,
+                "insertions": 1, "deletions": 0, "patch": "", "patch_truncated": False,
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/run-diff")
+    assert r.status_code == 200, r.text
+    # OpenClaw agent resolved to its per-agent workspace, NOT None.
+    assert seen["ocw"] == str(paths.agent_dir("ocw") / "workspace")
+    # A normal agent still resolves to its spec repo.
+    assert seen["alice"] == "/tmp/r"
+
+
 def test_run_agent_diff_returns_patch(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

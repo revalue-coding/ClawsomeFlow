@@ -120,6 +120,31 @@ def test_leader_inbox_failed_fires_even_when_task_completed() -> None:
     assert failures[0].reason == F.FailureReason.leader_inbox_failed
 
 
+def test_leader_inbox_failed_skips_external_owner() -> None:
+    """External nodes never route failures through the inbox — they are detected
+    by nonce from the completion event. A stray/legacy external-owned FAILED line
+    must be IGNORED here so it can't double-fire (or fire without nonce identity)."""
+    from app.models import ExternalChannel, ExternalNodeConfig
+
+    ext_task = FlowTask(
+        id="t1", owner_agent_id="ext", subject="x", description="", depends_on=[],
+    )
+    ext_agent = FlowAgent(
+        id="ext", kind=AgentKind.external,
+        external=ExternalNodeConfig(channel=ExternalChannel.human),
+        is_leader=False,
+    )
+    failures = F.detect_failures(
+        team_name="csflow-x",
+        flow_tasks={"t1": ext_task},
+        snapshots=[_snap(task_id="t1", owner="ext")],
+        leader_agent_id="leader",
+        leader_inbox_messages=["FAILED: t1: stray external report"],
+        agents={"ext": ext_agent},
+    )
+    assert failures == []
+
+
 def test_leader_inbox_dedup_with_other_signals() -> None:
     snaps = [_snap(metadata={"csflow_failed": "boom"})]
     failures = F.detect_failures(
