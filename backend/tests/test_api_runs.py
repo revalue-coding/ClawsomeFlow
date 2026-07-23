@@ -1160,6 +1160,9 @@ def test_pause_signals_live_controller(
         def __init__(self) -> None:
             self.run = run
 
+        def is_pausing(self) -> bool:
+            return False
+
         def pause(self, *, reason: str, detail: str = "", **kw) -> None:
             del kw
             signalled["reason"] = reason
@@ -1174,6 +1177,35 @@ def test_pause_signals_live_controller(
     blob = (refreshed.inputs or {}).get("_csflow_pause_state")
     assert isinstance(blob, dict)
     assert blob.get("reason") == "user"
+
+
+def test_pause_discarded_when_already_pausing(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a pause is in flight (``is_pausing()`` True — e.g. a failure pause
+    already fired), a further pause request is DISCARDED: pause() is NOT called
+    again (so a higher-authority reason can't be clobbered by the user reason),
+    and the endpoint returns 200 with the current summary."""
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, status=RunStatus.running)
+    sched = engine_mod.get_scheduler()
+    calls: list[str] = []
+
+    class _Ctl:
+        def __init__(self) -> None:
+            self.run = run
+
+        def is_pausing(self) -> bool:
+            return True
+
+        def pause(self, *, reason: str, detail: str = "", **kw) -> None:
+            del kw
+            calls.append(reason)
+
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Ctl())
+    r = app_client.post(f"/api/runs/{run.id}/pause")
+    assert r.status_code == 200, r.text
+    assert calls == []  # discarded — pause() never re-invoked
 
 
 def test_continue_rejected_when_not_paused(app_client: TestClient) -> None:

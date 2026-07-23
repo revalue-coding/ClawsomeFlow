@@ -1549,6 +1549,14 @@ async def pause_run(
             "no live run to pause",
             status_code=409,
         )
+    # Idempotent: once a pause is in flight (triggered by ANY source — a user
+    # click, a detected failure, or a drain — the controller's ``_pause_evt`` is
+    # set), DISCARD any further pause request until it settles. Re-invoking would
+    # be redundant work and, worse, could clobber a higher-authority pause reason
+    # (e.g. a failure pause) with the user reason. The already-``paused`` case is
+    # already rejected above by the ``_PAUSE_ALLOWED`` check.
+    if controller.is_pausing():
+        return _to_summary(storage.run_get(run.id) or run)
     controller.pause(reason=PAUSE_REASON_USER, detail="user requested pause")
     # Eagerly persist the user reason BEFORE the cooperative finalize lands.
     # Otherwise a concurrent ``csflow`` restart drain can race onto the same

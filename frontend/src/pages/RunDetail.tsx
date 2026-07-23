@@ -291,28 +291,44 @@ export function RunDetail() {
     };
   }, [id]);
 
-  // Poll detail every 5s so status pill / pending_merges stay current.
+  // Poll detail every 0.5s so the status pill / paused freeze / pending_merges
+  // reflect backend state within ~0.5s. A detected failure always pauses the run,
+  // but run.status flips only in the backend teardown and is observed ONLY via
+  // this poll (WS carries events, not status) — a tight interval keeps the window
+  // between "failure detected" and "UI shows paused" short enough that a stray
+  // click is a non-issue (and a redundant pause is discarded server-side anyway).
+  // Self-scheduling (setTimeout, not setInterval) so a slow request never lets
+  // polls overlap/pile up at this cadence. Cheap: loopback + SQLite, single-user.
   useEffect(() => {
     if (!id) return;
-    const tid = setInterval(async () => {
+    let cancelled = false;
+    let handle: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
       try {
         const r = await api.getRun(id);
+        if (cancelled) return;
         setRun(r);
         if (!TERMINAL.has(r.status)) {
           try {
             const cp = await api.getRunCheckpoint(id);
-            setCheckpointSnapshot(cp ?? null);
+            if (!cancelled) setCheckpointSnapshot(cp ?? null);
           } catch {
-            setCheckpointSnapshot(null);
+            if (!cancelled) setCheckpointSnapshot(null);
           }
         } else {
           setCheckpointSnapshot(null);
         }
       } catch {
         /* ignore transient */
+      } finally {
+        if (!cancelled) handle = setTimeout(poll, 500);
       }
-    }, 5000);
-    return () => clearInterval(tid);
+    };
+    handle = setTimeout(poll, 500);
+    return () => {
+      cancelled = true;
+      if (handle) clearTimeout(handle);
+    };
   }, [id]);
 
   // Keep the pause/continue buttons locked until the run status *actually*
@@ -333,6 +349,14 @@ export function RunDetail() {
     const handle = openRunStream(id, {
       onEvent: (e) => {
         setEvents((prev) => mergeById(prev, e));
+        // `run_resumed` fires once at the START of every resume (before the first
+        // tick). Clear the "正在恢复" lock on it directly, because a resume can
+        // IMMEDIATELY re-pause on another already-failed node — the status stays
+        // "paused" the whole time, so the status-based clear (which waits for
+        // status !== "paused") would never fire and the spinner would stick. This
+        // signals "resume was processed" independent of the resulting status; the
+        // pause banner then re-renders with the next failure.
+        if (e.type === "run_resumed") setContinuing(false);
         if (
           e.type === "task_session_start_failed"
           && !alertedSessionStartFails.current.has(e.id)
