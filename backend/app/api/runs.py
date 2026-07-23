@@ -93,6 +93,7 @@ from app.scheduler.run_metadata import (
     REVERTED_MERGE_AGENT_IDS_KEY,
     UNATTENDED_KEY,
     read_pause_state,
+    write_pause_state,
 )
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
@@ -185,6 +186,11 @@ class RunPauseView(_CamelModel):
     reason: str = ""                 # user | failure | internal_error | drain
     detail: str = ""
     failure_inbox_message: str = ""  # raw/synthetic FAILED:… line when reason=failure
+    failure_task_id: str = ""
+    failure_task_subject: str = ""
+    failure_agent_id: str = ""
+    failure_signal: str = ""         # leader_inbox_failed | worker_reported | timeout
+    failure_detail: str = ""         # detail body (agent text / timeout stats)
     needs_confirmation: bool = False  # scenario 9: internal error → confirm before resume
     at: str | None = None
 
@@ -516,6 +522,11 @@ def _to_summary(r: FlowRun) -> RunSummary:
                 reason=str(blob.get("reason") or ""),
                 detail=str(blob.get("detail") or ""),
                 failure_inbox_message=str(blob.get("failure_inbox_message") or ""),
+                failure_task_id=str(blob.get("failure_task_id") or ""),
+                failure_task_subject=str(blob.get("failure_task_subject") or ""),
+                failure_agent_id=str(blob.get("failure_agent_id") or ""),
+                failure_signal=str(blob.get("failure_signal") or ""),
+                failure_detail=str(blob.get("failure_detail") or ""),
                 needs_confirmation=bool(blob.get("needs_confirmation")),
                 at=(str(blob["at"]) if blob.get("at") else None),
             )
@@ -619,6 +630,11 @@ def _to_detail(r: FlowRun, *, flow: Flow | None, cfg: Config) -> RunDetail:
                 reason=str(blob.get("reason") or ""),
                 detail=str(blob.get("detail") or ""),
                 failure_inbox_message=str(blob.get("failure_inbox_message") or ""),
+                failure_task_id=str(blob.get("failure_task_id") or ""),
+                failure_task_subject=str(blob.get("failure_task_subject") or ""),
+                failure_agent_id=str(blob.get("failure_agent_id") or ""),
+                failure_signal=str(blob.get("failure_signal") or ""),
+                failure_detail=str(blob.get("failure_detail") or ""),
                 needs_confirmation=bool(blob.get("needs_confirmation")),
                 at=(str(blob["at"]) if blob.get("at") else None),
             )
@@ -1531,6 +1547,24 @@ async def pause_run(
             status_code=409,
         )
     controller.pause(reason=PAUSE_REASON_USER, detail="user requested pause")
+    # Eagerly persist the user reason BEFORE the cooperative finalize lands.
+    # Otherwise a concurrent ``csflow`` restart drain can race onto the same
+    # controller (or write finalize first) and the banner falsely says the run
+    # was paused for "service restart / upgrade". ``write_pause_state`` refuses
+    # to downgrade this marker to ``drain``.
+    at = datetime.now(timezone.utc).isoformat()
+    write_pause_state(
+        run, reason=PAUSE_REASON_USER, detail="user requested pause", at=at,
+    )
+    ctl_run = getattr(controller, "run", None)
+    if ctl_run is not None:
+        write_pause_state(
+            ctl_run, reason=PAUSE_REASON_USER, detail="user requested pause", at=at,
+        )
+    try:
+        storage.run_update(run)
+    except Exception:  # pragma: no cover - best-effort stamp
+        logger.warning("pause_state_eager_persist_failed", run_id=run.id, exc_info=True)
     refreshed = storage.run_get(run.id) or run
     return _to_summary(refreshed)
 

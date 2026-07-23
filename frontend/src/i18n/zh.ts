@@ -726,6 +726,17 @@ const zh = {
     pausedTitle: "执行流已暂停",
     pauseNeedsConfirm: "因内部错误暂停——继续前请先确认。",
     pauseFailureInboxLabel: "节点失败报告（FAILED inbox）",
+    pauseFailureNodeLabel: "失败节点",
+    pauseFailureNodeValue: "{{subject}}",
+    pauseFailureNodeId: "任务 ID：{{taskId}}",
+    pauseFailureMessageLabel: "失败消息",
+    pauseFailureSignal: {
+      leader_inbox_failed: "节点回报 FAILED",
+      worker_reported: "节点标记失败",
+      timeout: "超时",
+    },
+    pauseFailureSyntheticTimeout: "任务超时{{detail}}",
+    pauseFailureSyntheticFailed: "FAILED: {{taskId}}{{detail}}",
     pauseReason: {
       user: "已按你的请求暂停。点击“继续执行”从断点继续，或“终止执行流”丢弃本次执行。",
       failure: "某个步骤失败，因此执行流被暂停而非终止。点击“继续执行”在原 worktree 中重跑失败步骤，或“终止执行流”丢弃本次执行。",

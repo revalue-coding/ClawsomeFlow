@@ -94,6 +94,8 @@ from app.scheduler.failure import (
     apply_on_failure,
     detect_failures,
     failed_inbox_message_for_pause,
+    format_pause_failure_detail,
+    resolve_ui_language,
 )
 from app.scheduler.finalize import (
     FinalizeInput,
@@ -106,7 +108,9 @@ from app.scheduler.run_metadata import (
     POST_COMPLAINT_STATUS_KEY,
     clear_checkpoint_state,
     coalesce_reverted_merge_markers,
+    pause_reason_outranks,
     read_checkpoint_state,
+    read_pause_state,
     run_is_unattended,
     write_checkpoint_state,
     write_pause_state,
@@ -428,6 +432,11 @@ class RunController:
         self._pause_reason = ""
         self._pause_detail = ""
         self._pause_failure_inbox_message = ""
+        self._pause_failure_task_id = ""
+        self._pause_failure_task_subject = ""
+        self._pause_failure_agent_id = ""
+        self._pause_failure_signal = ""
+        self._pause_failure_detail = ""
         self._pause_needs_confirmation = False
         # Stale leader-inbox ``FAILED:<tid>`` messages captured at RESUME time.
         # ``mailbox_peek`` is non-consuming, so a FAILED report from the attempt
@@ -485,29 +494,58 @@ class RunController:
         reason: str,
         detail: str = "",
         failure_inbox_message: str = "",
+        failure_task_id: str = "",
+        failure_task_subject: str = "",
+        failure_agent_id: str = "",
+        failure_signal: str = "",
+        failure_detail: str = "",
         needs_confirmation: bool = False,
     ) -> None:
         """Request a graceful, RESUMABLE stop (never terminal).
 
         Breaks the tick loop into the NON-destructive finalize path: worktrees +
         ClawTeam team are preserved and the run lands in ``RunStatus.paused`` so
-        ``继续执行`` can rebuild a controller and re-drive the DAG. The first
-        pause reason wins (idempotent). A concurrent :meth:`cancel` (terminate)
-        always takes precedence — the finalize path checks cancel first.
+        ``继续执行`` can rebuild a controller and re-drive the DAG.
+
+        Pause **reason** uses authority ranking (not pure first-wins):
+        ``failure`` / ``internal_error`` > ``user`` > ``drain``. A pre-stop
+        drain that races a user 暂停执行 must not clobber the human-facing
+        banner. A concurrent :meth:`cancel` (terminate) always takes precedence
+        — the finalize path checks cancel first.
         """
-        if not self._pause_evt.is_set():
+        if not self._pause_evt.is_set() or pause_reason_outranks(
+            reason, self._pause_reason,
+        ):
             self._pause_reason = reason
             self._pause_detail = detail
+            self._pause_needs_confirmation = needs_confirmation
             if failure_inbox_message.strip():
                 self._pause_failure_inbox_message = failure_inbox_message.strip()
-            self._pause_needs_confirmation = needs_confirmation
+            if failure_task_id.strip():
+                self._pause_failure_task_id = failure_task_id.strip()
+            if failure_task_subject.strip():
+                self._pause_failure_task_subject = failure_task_subject.strip()
+            if failure_agent_id.strip():
+                self._pause_failure_agent_id = failure_agent_id.strip()
+            if failure_signal.strip():
+                self._pause_failure_signal = failure_signal.strip()
+            if failure_detail.strip():
+                self._pause_failure_detail = failure_detail.strip()
         self._pause_evt.set()
 
     def is_pausing(self) -> bool:
         return self._pause_evt.is_set() and not self._cancel_evt.is_set()
 
     def _backend_stop_after_failure(
-        self, *, detail: str, failure_inbox_message: str = "",
+        self,
+        *,
+        detail: str = "",
+        failure_inbox_message: str = "",
+        failure_task_id: str = "",
+        failure_task_subject: str = "",
+        failure_agent_id: str = "",
+        failure_signal: str = "",
+        failure_detail: str = "",
     ) -> None:
         """A detected node failure ALWAYS pauses the Flow (never terminates).
 
@@ -522,6 +560,35 @@ class RunController:
             reason=_PAUSE_REASON_FAILURE,
             detail=detail,
             failure_inbox_message=failure_inbox_message,
+            failure_task_id=failure_task_id,
+            failure_task_subject=failure_task_subject,
+            failure_agent_id=failure_agent_id,
+            failure_signal=failure_signal,
+            failure_detail=failure_detail,
+        )
+
+    def _pause_from_failure_record(
+        self, rec: FailureRecord, *, task_subject: str = "",
+    ) -> None:
+        """Pause after a detected failure, stamping structured + i18n detail."""
+        lang = resolve_ui_language()
+        subject = (task_subject or "").strip()
+        inbox = failed_inbox_message_for_pause(rec, lang=lang)
+        detail = format_pause_failure_detail(
+            task_id=rec.task_id,
+            subject=subject,
+            signal=rec.reason.value,
+            detail=rec.detail,
+            lang=lang,
+        )
+        self._backend_stop_after_failure(
+            detail=detail,
+            failure_inbox_message=inbox,
+            failure_task_id=rec.task_id,
+            failure_task_subject=subject,
+            failure_agent_id=rec.agent_id,
+            failure_signal=rec.reason.value,
+            failure_detail=rec.detail,
         )
 
     def _backend_stop_after_internal_error(self, *, detail: str) -> None:
@@ -2871,9 +2938,8 @@ class RunController:
                     "effective_action": "pause", "reset_to_pending": True,
                 },
             )
-            self._backend_stop_after_failure(
-                detail=f"task {book.task.id} failed ({rec.reason.value}): {rec.detail}"[:1000],
-                failure_inbox_message=failed_inbox_message_for_pause(rec),
+            self._pause_from_failure_record(
+                rec, task_subject=str(getattr(book.task, "subject", "") or ""),
             )
             return
         decision = apply_on_failure(
@@ -2943,8 +3009,8 @@ class RunController:
                     ),
                 },
             )
-            self._backend_stop_after_failure(
-                detail=f"{rec.reason.value}: {rec.detail}"[:1000],
+            self._pause_from_failure_record(
+                rec, task_subject=str(getattr(book.task, "subject", "") or ""),
             )
         else:  # abort
             synced = await self._mark_clawteam_task_blocked(
@@ -2969,8 +3035,8 @@ class RunController:
                     ),
                 },
             )
-            self._backend_stop_after_failure(
-                detail=f"{rec.reason.value}: {rec.detail}"[:1000],
+            self._pause_from_failure_record(
+                rec, task_subject=str(getattr(book.task, "subject", "") or ""),
             )
 
     # ── session lifecycle ────────────────────────────────────────────
@@ -5015,6 +5081,45 @@ class RunController:
         coalesce_reverted_merge_markers(self.run, self.storage)
         pausing = self._pause_evt.is_set() and not self._cancel_evt.is_set()
         if pausing:
+            # Prefer a stronger reason already stamped on disk (the pause API
+            # eagerly persists ``user`` so a racing drain finalize cannot
+            # rewrite the banner to "service restart / upgrade").
+            try:
+                db_run = self.storage.run_get(self.run.id)
+            except Exception:  # pragma: no cover - defensive
+                db_run = None
+            def _adopt_pause_blob(blob: dict) -> None:
+                self._pause_reason = str(blob.get("reason") or "")
+                self._pause_detail = str(blob.get("detail") or self._pause_detail)
+                inbox = str(blob.get("failure_inbox_message") or "").strip()
+                if inbox:
+                    self._pause_failure_inbox_message = inbox
+                for attr, key in (
+                    ("_pause_failure_task_id", "failure_task_id"),
+                    ("_pause_failure_task_subject", "failure_task_subject"),
+                    ("_pause_failure_agent_id", "failure_agent_id"),
+                    ("_pause_failure_signal", "failure_signal"),
+                    ("_pause_failure_detail", "failure_detail"),
+                ):
+                    val = str(blob.get(key) or "").strip()
+                    if val:
+                        setattr(self, attr, val)
+                self._pause_needs_confirmation = bool(
+                    blob.get("needs_confirmation"),
+                )
+
+            db_blob = read_pause_state(db_run) if db_run is not None else None
+            if db_blob and pause_reason_outranks(
+                str(db_blob.get("reason") or ""), self._pause_reason,
+            ):
+                _adopt_pause_blob(db_blob)
+            # Also honour a stronger reason already on the in-memory inputs
+            # blob (same eager-API path when storage round-trip is skipped).
+            mem_blob = read_pause_state(self.run)
+            if mem_blob and pause_reason_outranks(
+                str(mem_blob.get("reason") or ""), self._pause_reason,
+            ):
+                _adopt_pause_blob(mem_blob)
             # Stamp WHY the run is parked so the UI can explain it; finalize's
             # paused branch preserves run.inputs and persists this.
             write_pause_state(
@@ -5022,6 +5127,11 @@ class RunController:
                 reason=self._pause_reason or _PAUSE_REASON_FAILURE,
                 detail=self._pause_detail,
                 failure_inbox_message=self._pause_failure_inbox_message,
+                failure_task_id=self._pause_failure_task_id,
+                failure_task_subject=self._pause_failure_task_subject,
+                failure_agent_id=self._pause_failure_agent_id,
+                failure_signal=self._pause_failure_signal,
+                failure_detail=self._pause_failure_detail,
                 needs_confirmation=self._pause_needs_confirmation,
                 at=datetime.now(timezone.utc).isoformat(),
             )

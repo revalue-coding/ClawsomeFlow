@@ -356,6 +356,12 @@ export interface RunPauseState {
   detail: string;
   /** Raw or synthetic ``FAILED:…`` agent report when reason === "failure". */
   failureInboxMessage?: string;
+  failureTaskId?: string;
+  failureTaskSubject?: string;
+  failureAgentId?: string;
+  /** leader_inbox_failed | worker_reported | timeout */
+  failureSignal?: string;
+  failureDetail?: string;
   needsConfirmation: boolean;
   at: string | null;
 }

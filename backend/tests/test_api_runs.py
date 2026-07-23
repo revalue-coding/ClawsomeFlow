@@ -1157,13 +1157,23 @@ def test_pause_signals_live_controller(
     signalled: dict[str, object] = {}
 
     class _Ctl:
-        def pause(self, *, reason: str, detail: str = "") -> None:
+        def __init__(self) -> None:
+            self.run = run
+
+        def pause(self, *, reason: str, detail: str = "", **kw) -> None:
+            del kw
             signalled["reason"] = reason
 
     monkeypatch.setattr(sched, "get_controller", lambda _rid: _Ctl())
     r = app_client.post(f"/api/runs/{run.id}/pause")
     assert r.status_code == 200, r.text
     assert signalled.get("reason") == "user"
+    # Eager persist: reason=user is on disk even before finalize flips status.
+    refreshed = get_storage().run_get(run.id)
+    assert refreshed is not None
+    blob = (refreshed.inputs or {}).get("_csflow_pause_state")
+    assert isinstance(blob, dict)
+    assert blob.get("reason") == "user"
 
 
 def test_continue_rejected_when_not_paused(app_client: TestClient) -> None:
@@ -1201,8 +1211,13 @@ def test_paused_run_summary_exposes_pause_state(app_client: TestClient) -> None:
         inputs={
             "_csflow_pause_state": {
                 "reason": "failure",
-                "detail": "timeout: step slow",
+                "detail": "Task \"slow step\" failed (timeout): step slow",
                 "failure_inbox_message": "FAILED: t1: env broken",
+                "failure_task_id": "t1",
+                "failure_task_subject": "slow step",
+                "failure_agent_id": "alice",
+                "failure_signal": "leader_inbox_failed",
+                "failure_detail": "env broken",
                 "needs_confirmation": False,
             },
         },
@@ -1212,8 +1227,10 @@ def test_paused_run_summary_exposes_pause_state(app_client: TestClient) -> None:
     body = r.json()
     assert body["status"] == "paused"
     assert body["pause"]["reason"] == "failure"
-    assert body["pause"]["detail"] == "timeout: step slow"
     assert body["pause"]["failureInboxMessage"] == "FAILED: t1: env broken"
+    assert body["pause"]["failureTaskId"] == "t1"
+    assert body["pause"]["failureTaskSubject"] == "slow step"
+    assert body["pause"]["failureSignal"] == "leader_inbox_failed"
     assert body["pause"]["needsConfirmation"] is False
 
 

@@ -7,13 +7,19 @@ from typing import Any
 
 from app.scheduler.run_metadata import (
     CHECKPOINT_STATE_KEY,
+    PAUSE_REASON_DRAIN,
+    PAUSE_REASON_FAILURE,
+    PAUSE_REASON_USER,
+    PAUSE_STATE_KEY,
     REVERTED_MERGE_AGENT_IDS_KEY,
     UNATTENDED_KEY,
     clear_checkpoint_state,
     coalesce_reverted_merge_markers,
+    pause_reason_outranks,
     read_checkpoint_state,
     run_is_unattended,
     write_checkpoint_state,
+    write_pause_state,
 )
 
 
@@ -126,3 +132,22 @@ def test_checkpoint_state_write_noop_when_empty() -> None:
     run = _Run(inputs={"goal": "x"})
     write_checkpoint_state(run, passed=set(), summaries={})
     assert CHECKPOINT_STATE_KEY not in run.inputs
+
+
+def test_pause_reason_outranks_drain_is_weakest() -> None:
+    assert pause_reason_outranks(PAUSE_REASON_USER, PAUSE_REASON_DRAIN)
+    assert pause_reason_outranks(PAUSE_REASON_FAILURE, PAUSE_REASON_DRAIN)
+    assert pause_reason_outranks(PAUSE_REASON_FAILURE, PAUSE_REASON_USER)
+    assert not pause_reason_outranks(PAUSE_REASON_DRAIN, PAUSE_REASON_USER)
+    assert not pause_reason_outranks(PAUSE_REASON_USER, PAUSE_REASON_FAILURE)
+
+
+def test_write_pause_state_refuses_to_downgrade_user_to_drain() -> None:
+    run = _Run(inputs={"goal": "x"})
+    write_pause_state(run, reason=PAUSE_REASON_USER, detail="user requested pause")
+    write_pause_state(
+        run, reason=PAUSE_REASON_DRAIN, detail="service stop / upgrade drain",
+    )
+    blob = run.inputs[PAUSE_STATE_KEY]
+    assert blob["reason"] == PAUSE_REASON_USER
+    assert blob["detail"] == "user requested pause"

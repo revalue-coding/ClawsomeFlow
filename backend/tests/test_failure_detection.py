@@ -189,4 +189,29 @@ def test_failed_inbox_message_for_pause() -> None:
         reason=F.FailureReason.worker_reported,
         detail="cannot finish",
     )
-    assert F.failed_inbox_message_for_pause(worker) == "FAILED: t2: cannot finish"
+    assert F.failed_inbox_message_for_pause(worker, lang="en") == (
+        "FAILED: t2: cannot finish"
+    )
+    timeout = F.FailureRecord(
+        task_id="t3", agent_id="carol",
+        reason=F.FailureReason.timeout,
+        detail="elapsed=100s > limit=50s",
+    )
+    assert "超时" in F.failed_inbox_message_for_pause(timeout, lang="zh")
+    assert "timed out" in F.failed_inbox_message_for_pause(timeout, lang="en")
+
+
+def test_format_pause_failure_detail_follows_ui_language() -> None:
+    zh = F.format_pause_failure_detail(
+        task_id="research", subject="调研草原目的地",
+        signal="leader_inbox_failed", detail="env broken", lang="zh",
+    )
+    assert "调研草原目的地" in zh
+    assert "节点回报 FAILED" in zh
+    assert "env broken" in zh
+    en = F.format_pause_failure_detail(
+        task_id="research", subject="Survey destinations",
+        signal="timeout", detail="elapsed=1", lang="en",
+    )
+    assert "Survey destinations" in en
+    assert "timeout" in en

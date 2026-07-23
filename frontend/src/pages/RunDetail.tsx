@@ -205,7 +205,7 @@ const EMPTY_TASK_BOARD: TaskBoardModel = {
 
 export function RunDetail() {
   const { id } = useParams();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { confirm, alert } = useDialog();
   const alertedSessionStartFails = useRef(new Set<number>());
   const [run, setRun] = useState<RunDetailT | null>(null);
@@ -749,23 +749,42 @@ export function RunDetail() {
     if (replayPlaying && replayIndex >= replayMaxIndex) setReplayPlaying(false);
   }, [replayPlaying, replayIndex, replayMaxIndex]);
   const mergeFailures = useMemo(() => extractMergeFailures(events), [events]);
-  const pauseFailureInboxMessage = useMemo(() => {
-    if (run?.status !== "paused" || run.pause?.reason !== "failure") return "";
-    const fromApi = (run.pause.failureInboxMessage ?? "").trim();
-    if (fromApi) return fromApi;
-    // Runs paused before ``failure_inbox_message`` was persisted — reconstruct
-    // from the latest failure event (same FAILED:… wording the agent sent).
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i];
-      if (e.type !== "task_failed" && e.type !== "task_failure_detected") continue;
-      const tid = (e.taskId ?? "").trim();
-      const payload = e.payload ?? {};
-      const detail = String(payload.detail ?? "").trim();
-      if (!tid) continue;
-      if (detail) return `FAILED: ${tid}: ${detail}`;
+  const pauseFailureReport = useMemo(() => {
+    if (run?.status !== "paused" || run.pause?.reason !== "failure") return null;
+    const pause = run.pause;
+    const tasks = Array.isArray(run.specSnapshot?.tasks) ? run.specSnapshot.tasks : [];
+    const subjectOf = (tid: string) => {
+      const hit = tasks.find((x) => String((x as { id?: string }).id ?? "") === tid) as
+        | { subject?: string }
+        | undefined;
+      return String(hit?.subject ?? "").trim();
+    };
+    let taskId = (pause.failureTaskId ?? "").trim();
+    let subject = (pause.failureTaskSubject ?? "").trim();
+    let agentId = (pause.failureAgentId ?? "").trim();
+    let signal = (pause.failureSignal ?? "").trim();
+    let detail = (pause.failureDetail ?? "").trim();
+    let message = (pause.failureInboxMessage ?? "").trim();
+    // Legacy runs: reconstruct from the latest failure event + Flow spec.
+    if (!taskId || !message) {
+      for (let i = events.length - 1; i >= 0; i--) {
+        const e = events[i];
+        if (e.type !== "task_failed" && e.type !== "task_failure_detected") continue;
+        const tid = (e.taskId ?? "").trim();
+        if (!tid) continue;
+        const payload = e.payload ?? {};
+        if (!taskId) taskId = tid;
+        if (!subject) subject = subjectOf(tid);
+        if (!agentId) agentId = (e.agentId ?? "").trim();
+        if (!signal) signal = String(payload.reason ?? "").trim();
+        if (!detail) detail = String(payload.detail ?? "").trim();
+        break;
+      }
     }
-    return "";
-  }, [run?.status, run?.pause, events]);
+    if (!subject && taskId) subject = subjectOf(taskId);
+    if (!taskId && !subject && !message && !detail) return null;
+    return { taskId, subject: subject || taskId || "—", agentId, signal, detail, message };
+  }, [run?.status, run?.pause, run?.specSnapshot, events]);
   const rerunTargetItem = useMemo(
     () =>
       rerunModalTaskId
@@ -893,17 +912,81 @@ export function RunDetail() {
             {run.pause?.needsConfirmation && (
               <p className="text-amber-700">{t("runDetail.pauseNeedsConfirm")}</p>
             )}
-            {run.pause?.reason === "failure" && pauseFailureInboxMessage ? (
-              <div className="mt-2 space-y-1">
+            {run.pause?.reason === "failure" && pauseFailureReport ? (
+              <div className="mt-2 space-y-2">
                 <div className="text-xs font-medium text-ink-700">
                   {t("runDetail.pauseFailureInboxLabel")}
                 </div>
-                <pre className="rounded-md border border-rose-200 bg-rose-50/50 px-3 py-2 text-xs text-ink-800 whitespace-pre-wrap break-words font-mono">
-                  {pauseFailureInboxMessage}
-                </pre>
+                <div className="rounded-md border border-rose-200 bg-rose-50/50 px-3 py-2 space-y-2">
+                  <div className="text-sm text-ink-900">
+                    <span className="text-xs font-medium text-ink-600">
+                      {t("runDetail.pauseFailureNodeLabel")}
+                      {": "}
+                    </span>
+                    <span className="font-medium">
+                      {t("runDetail.pauseFailureNodeValue", {
+                        subject: pauseFailureReport.subject,
+                      })}
+                    </span>
+                    {pauseFailureReport.taskId ? (
+                      <span className="ml-2 font-mono text-xs text-ink-500">
+                        {t("runDetail.pauseFailureNodeId", {
+                          taskId: pauseFailureReport.taskId,
+                        })}
+                      </span>
+                    ) : null}
+                    {pauseFailureReport.signal &&
+                    (pauseFailureReport.signal === "leader_inbox_failed" ||
+                      pauseFailureReport.signal === "worker_reported" ||
+                      pauseFailureReport.signal === "timeout") ? (
+                      <span className="ml-2 text-xs text-ink-500">
+                        (
+                        {t(
+                          `runDetail.pauseFailureSignal.${pauseFailureReport.signal}`,
+                        )}
+                        )
+                      </span>
+                    ) : null}
+                  </div>
+                  {(() => {
+                    const zh = i18n.language?.startsWith("zh");
+                    const detailSep = zh ? "：" : ": ";
+                    const failedSep = ": ";
+                    const msg =
+                      pauseFailureReport.message ||
+                      (pauseFailureReport.signal === "timeout"
+                        ? t("runDetail.pauseFailureSyntheticTimeout", {
+                            detail: pauseFailureReport.detail
+                              ? `${detailSep}${pauseFailureReport.detail}`
+                              : "",
+                          })
+                        : pauseFailureReport.taskId
+                          ? t("runDetail.pauseFailureSyntheticFailed", {
+                              taskId: pauseFailureReport.taskId,
+                              detail: pauseFailureReport.detail
+                                ? `${failedSep}${pauseFailureReport.detail}`
+                                : "",
+                            })
+                          : pauseFailureReport.detail);
+                    if (!msg) return null;
+                    return (
+                      <div className="space-y-1">
+                        <div className="text-xs font-medium text-ink-600">
+                          {t("runDetail.pauseFailureMessageLabel")}
+                        </div>
+                        <pre className="text-xs text-ink-800 whitespace-pre-wrap break-words font-mono">
+                          {msg}
+                        </pre>
+                      </div>
+                    );
+                  })()}
+                </div>
               </div>
             ) : null}
-            {run.pause?.detail && (
+            {/* Structured failure card already covers detail; keep raw detail
+                only for non-failure pauses (or failure without structured info). */}
+            {run.pause?.detail &&
+              !(run.pause?.reason === "failure" && pauseFailureReport) && (
               <p className="font-mono text-xs text-ink-500 break-all">
                 {run.pause.detail}
               </p>
@@ -2818,7 +2901,10 @@ function RunDiffCard({
             >
               <div className="min-w-0">
                 <div className="truncate font-medium text-ink-900">{a.agentId}</div>
-                <div className="truncate text-xs text-ink-500 font-mono">{a.branch}</div>
+                <div className="truncate text-xs text-ink-500 font-mono">
+                  {a.branch}
+                  {a.repoRoot ? ` → ${a.repoRoot}` : ""}
+                </div>
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 <span className="text-xs text-ink-500">
@@ -3358,7 +3444,7 @@ function RunAgentDiffBody({ runId, agentId }: { runId: string; agentId: string }
     <div className="space-y-3">
       <div className="text-xs text-ink-500 font-mono break-all">
         {data.branch}
-        {data.repoRoot ? ` @ ${data.repoRoot}` : ""}
+        {data.repoRoot ? ` → ${data.repoRoot}` : ""}
       </div>
       {!hasPatch ? (
         <div className="text-sm text-ink-500">{t("runDetail.runDiffPatchEmpty")}</div>

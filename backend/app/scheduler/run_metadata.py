@@ -44,8 +44,10 @@ must import the constants from here.
   cleared on exhausted failure so a later ``run_update`` / upgrade can retry).
 * :data:`PAUSE_STATE_KEY` — set while a run sits in ``RunStatus.paused``. Value
   is a JSON object ``{"reason": user|failure|internal_error|drain,
-  "detail": str, "failure_inbox_message": str (optional), "at": iso,
-  "needs_confirmation": bool}`` describing WHY the
+  "detail": str, "failure_inbox_message": str (optional),
+  "failure_task_id" / "failure_task_subject" / "failure_agent_id" /
+  "failure_signal" / "failure_detail" (optional, when reason=failure),
+  "at": iso, "needs_confirmation": bool}`` describing WHY the
   run was parked, so the Run detail page can render a "why paused" banner (and
   the scenario-9 ``internal_error`` confirmation hint). Written by the pause
   finalize branch; cleared on ``继续执行`` (resume) and on 终止执行流 (terminate).
@@ -85,6 +87,28 @@ PAUSE_REASON_USER = "user"                # user pressed 暂停执行
 PAUSE_REASON_FAILURE = "failure"          # backend detected a task failure
 PAUSE_REASON_INTERNAL_ERROR = "internal_error"  # scheduler exception (scenario 9)
 PAUSE_REASON_DRAIN = "drain"              # pre-stop / upgrade drain parked it
+
+
+def pause_reason_rank(reason: str) -> int:
+    """Authority rank for a pause reason (higher wins).
+
+    ``drain`` is weakest: a user / failure / internal_error pause that races a
+    pre-stop drain on the same controller must keep the human-facing reason
+    (otherwise a restart after 暂停执行 falsely shows "paused for upgrade").
+    """
+    r = str(reason or "").strip()
+    if r == PAUSE_REASON_DRAIN:
+        return 0
+    if r == PAUSE_REASON_USER:
+        return 2
+    if r in (PAUSE_REASON_FAILURE, PAUSE_REASON_INTERNAL_ERROR):
+        return 3
+    return 1
+
+
+def pause_reason_outranks(new: str, old: str) -> bool:
+    """True when *new* should replace an already-recorded *old* pause reason."""
+    return pause_reason_rank(new) > pause_reason_rank(old)
 
 
 def coalesce_reverted_merge_markers(run: Any, storage: Any) -> None:
@@ -154,6 +178,11 @@ def write_pause_state(
     reason: str,
     detail: str = "",
     failure_inbox_message: str = "",
+    failure_task_id: str = "",
+    failure_task_subject: str = "",
+    failure_agent_id: str = "",
+    failure_signal: str = "",
+    failure_detail: str = "",
     needs_confirmation: bool = False,
     at: str | None = None,
 ) -> None:
@@ -162,12 +191,37 @@ def write_pause_state(
     ``at`` should be an ISO-8601 string; callers pass one because the scheduler
     context forbids ``datetime.now`` in some paths — but it is optional and left
     absent when unavailable (UI falls back to ``run.finished_at``).
+
+    Never **downgrades** an already-stamped stronger reason to ``drain`` (or any
+    weaker reason): the pause API may eagerly persist ``user`` before finalize,
+    and a racing pre-stop drain must not clobber that banner text.
     """
     inputs = dict(getattr(run, "inputs", None) or {})
-    blob: dict[str, Any] = {"reason": str(reason), "detail": str(detail or "")}
+    existing = inputs.get(PAUSE_STATE_KEY)
+    new_reason = str(reason or "")
+    if isinstance(existing, dict):
+        old_reason = str(existing.get("reason") or "")
+        if old_reason and pause_reason_rank(old_reason) > pause_reason_rank(new_reason):
+            return
+    blob: dict[str, Any] = {"reason": new_reason, "detail": str(detail or "")}
     inbox = str(failure_inbox_message or "").strip()
     if inbox:
         blob["failure_inbox_message"] = inbox
+    tid = str(failure_task_id or "").strip()
+    if tid:
+        blob["failure_task_id"] = tid
+    subj = str(failure_task_subject or "").strip()
+    if subj:
+        blob["failure_task_subject"] = subj
+    aid = str(failure_agent_id or "").strip()
+    if aid:
+        blob["failure_agent_id"] = aid
+    sig = str(failure_signal or "").strip()
+    if sig:
+        blob["failure_signal"] = sig
+    fdetail = str(failure_detail or "").strip()
+    if fdetail:
+        blob["failure_detail"] = fdetail
     if needs_confirmation:
         blob["needs_confirmation"] = True
     if at:
@@ -263,6 +317,8 @@ __all__ = [
     "clear_checkpoint_state",
     "clear_pause_state",
     "coalesce_reverted_merge_markers",
+    "pause_reason_outranks",
+    "pause_reason_rank",
     "read_checkpoint_state",
     "read_failed_auto_merge_agent_ids",
     "read_pause_state",

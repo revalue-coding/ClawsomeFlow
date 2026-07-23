@@ -2275,6 +2275,38 @@ def test_backend_failure_always_pauses_even_unattended(fake_lookup) -> None:
     assert not rc_unatt._cancel_evt.is_set()
 
 
+def test_pause_reason_user_outranks_prior_drain(fake_lookup) -> None:
+    """If pre-stop drain races onto a controller first, a later user 暂停执行
+    must still win the banner reason (not stay stuck on 'service restart')."""
+    from app.scheduler.run_metadata import PAUSE_REASON_DRAIN, PAUSE_REASON_USER
+
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup, snapshot_provider=_empty_snapshots,
+    )
+    rc.pause(reason=PAUSE_REASON_DRAIN, detail="service stop / upgrade drain")
+    assert rc._pause_reason == PAUSE_REASON_DRAIN
+    rc.pause(reason=PAUSE_REASON_USER, detail="user requested pause")
+    assert rc._pause_reason == PAUSE_REASON_USER
+    assert rc._pause_detail == "user requested pause"
+
+
+def test_pause_reason_drain_does_not_clobber_user(fake_lookup) -> None:
+    from app.scheduler.run_metadata import PAUSE_REASON_DRAIN, PAUSE_REASON_USER
+
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup, snapshot_provider=_empty_snapshots,
+    )
+    rc.pause(reason=PAUSE_REASON_USER, detail="user requested pause")
+    rc.pause(reason=PAUSE_REASON_DRAIN, detail="service stop / upgrade drain")
+    assert rc._pause_reason == PAUSE_REASON_USER
+
+
 @pytest.mark.asyncio
 async def test_run_loop_finally_shuts_down_remaining_sessions(fake_lookup) -> None:
     spec = _make_spec()

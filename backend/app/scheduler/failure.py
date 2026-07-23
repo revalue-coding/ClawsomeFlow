@@ -218,24 +218,95 @@ def _parse_failed_inbox(msg: str) -> tuple[str, str] | None:
     return tid, reason
 
 
-def failed_inbox_message_for_pause(rec: FailureRecord) -> str:
-    """Build the agent FAILED inbox line shown on the Run detail pause banner.
+def resolve_ui_language() -> str:
+    """``zh`` / ``en`` from the WebUI language pill (``Config.ui_language``)."""
+    try:
+        from app.config import load_config
 
-    ``leader_inbox_failed`` keeps the raw leader-inbox message when available;
-    ``worker_reported`` synthesizes the canonical ``FAILED:<task>: …`` form from
-    the ``csflow_failed`` metadata (same protocol wording the dispatch prompt
-    teaches agents to send via inbox).
+        lang = (load_config().ui_language or "").strip().lower()
+        if lang in ("zh", "en"):
+            return lang
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return "en"
+
+
+_FAILURE_SIGNAL_LABEL = {
+    "zh": {
+        FailureReason.leader_inbox_failed.value: "节点回报 FAILED",
+        FailureReason.worker_reported.value: "节点标记失败",
+        FailureReason.timeout.value: "超时",
+    },
+    "en": {
+        FailureReason.leader_inbox_failed.value: "agent reported FAILED",
+        FailureReason.worker_reported.value: "agent marked failed",
+        FailureReason.timeout.value: "timeout",
+    },
+}
+
+
+def failed_inbox_message_for_pause(
+    rec: FailureRecord, *, lang: str | None = None,
+) -> str:
+    """Build the FAILED inbox line shown on the Run detail pause banner.
+
+    ``leader_inbox_failed`` keeps the **raw** leader-inbox message when available
+    (agent-authored — never rewritten). ``worker_reported`` / missing raw inbox
+    synthesizes the canonical ``FAILED:<task>: …`` form; the surrounding
+    template follows *lang* (WebUI pill), while the detail body stays as stored
+    on the failure record (usually agent text).
     """
+    resolved = "zh" if (lang or resolve_ui_language()) == "zh" else "en"
     if rec.reason == FailureReason.leader_inbox_failed:
         raw = (rec.inbox_message or "").strip()
         if raw:
             return raw
     if rec.reason in (FailureReason.leader_inbox_failed, FailureReason.worker_reported):
         detail = (rec.detail or "").strip()
+        if resolved == "zh":
+            if detail:
+                return f"FAILED: {rec.task_id}: {detail}"
+            return f"FAILED: {rec.task_id}"
         if detail:
             return f"FAILED: {rec.task_id}: {detail}"
         return f"FAILED: {rec.task_id}"
+    if rec.reason == FailureReason.timeout:
+        detail = (rec.detail or "").strip()
+        if resolved == "zh":
+            return (
+                f"任务 {rec.task_id} 超时"
+                + (f"：{detail}" if detail else "")
+            )
+        return (
+            f"task {rec.task_id} timed out"
+            + (f": {detail}" if detail else "")
+        )
     return ""
+
+
+def format_pause_failure_detail(
+    *,
+    task_id: str,
+    subject: str = "",
+    signal: str = "",
+    detail: str = "",
+    lang: str | None = None,
+) -> str:
+    """Human-facing pause ``detail`` string (backend-injected, UI-language aware)."""
+    resolved = "zh" if (lang or resolve_ui_language()) == "zh" else "en"
+    title = (subject or "").strip() or task_id
+    labels = _FAILURE_SIGNAL_LABEL.get(resolved) or _FAILURE_SIGNAL_LABEL["en"]
+    reason_label = labels.get(signal) or (signal or ("失败" if resolved == "zh" else "failed"))
+    body = (detail or "").strip()
+    if resolved == "zh":
+        text = f"任务「{title}」失败（{reason_label}）"
+        if body:
+            text = f"{text}：{body}"
+    else:
+        text = f'Task "{title}" failed ({reason_label})'
+        if body:
+            text = f"{text}: {body}"
+    return text[:1000]
 
 
 # ──────────────────────────────────────────────────────────────────────
