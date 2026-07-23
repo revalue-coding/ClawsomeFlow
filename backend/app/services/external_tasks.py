@@ -582,8 +582,34 @@ async def complete_external_task(
     signal so the existing failure detector applies the agent's ``on_failure``
     policy (retry re-dispatches with a fresh nonce). Idempotent per nonce.
     """
+    # Telemetry: stamp the MOMENT a receipt lands, so the logs can later confirm
+    # receipts arrive promptly + exactly when. structlog adds the wall-clock ``ts``
+    # to every line; we also carry the dispatch→receipt elapsed (parsed from the
+    # dispatch event ts) for at-a-glance latency, and log the stale/duplicate/
+    # no-dispatch branches so a receipt is NEVER silently swallowed.
+    received_at = datetime.now(timezone.utc)
     dispatch_ev = latest_dispatch_event(storage, run_id=run.id, task_id=task_id)
+    elapsed_since_dispatch: float | None = None
+    if dispatch_ev is not None and dispatch_ev.ts:
+        try:
+            dt = datetime.fromisoformat(str(dispatch_ev.ts))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            elapsed_since_dispatch = (received_at - dt).total_seconds()
+        except Exception:  # pragma: no cover - defensive ts parse
+            elapsed_since_dispatch = None
+    logger.info(
+        "external_receipt_received",
+        run_id=run.id, task_id=task_id, nonce=nonce, ok=ok, source=source,
+        received_at=received_at.isoformat(),
+        dispatched_at=str(dispatch_ev.ts) if dispatch_ev is not None else None,
+        elapsed_since_dispatch_sec=elapsed_since_dispatch,
+    )
     if dispatch_ev is None:
+        logger.warning(
+            "external_receipt_no_dispatch",
+            run_id=run.id, task_id=task_id, nonce=nonce, source=source,
+        )
         raise ExternalTaskError(
             "EXTERNAL_TASK_NOT_DISPATCHED",
             f"task {task_id!r} has no outstanding external dispatch",
@@ -592,6 +618,12 @@ async def complete_external_task(
     payload = dispatch_ev.payload or {}
     current_nonce = str(payload.get("nonce") or "")
     if not current_nonce or nonce != current_nonce:
+        logger.warning(
+            "external_receipt_stale",
+            run_id=run.id, task_id=task_id, source=source,
+            received_nonce=nonce, current_nonce=current_nonce,
+            elapsed_since_dispatch_sec=elapsed_since_dispatch,
+        )
         raise ExternalTaskError(
             "EXTERNAL_TICKET_STALE",
             "ticket does not match the latest dispatch attempt "
@@ -602,6 +634,10 @@ async def complete_external_task(
         storage, run_id=run.id, task_id=task_id, nonce=nonce,
     )
     if already is not None:
+        logger.info(
+            "external_receipt_duplicate",
+            run_id=run.id, task_id=task_id, nonce=nonce, source=source,
+        )
         return {"status": "already_recorded", "taskId": task_id}
 
     agent_id = dispatch_ev.agent_id or str(payload.get("agentId") or "")
@@ -658,6 +694,12 @@ async def complete_external_task(
             "summary": summary_text[:4000],
             "source": source,
         },
+    )
+    logger.info(
+        "external_receipt_recorded",
+        run_id=run.id, task_id=task_id, nonce=nonce, ok=ok, source=source,
+        elapsed_since_dispatch_sec=elapsed_since_dispatch,
+        handling_sec=(datetime.now(timezone.utc) - received_at).total_seconds(),
     )
     return {"status": "recorded", "taskId": task_id, "ok": ok}
 
@@ -855,6 +897,8 @@ def send_delegate_callback(prepared: dict[str, Any]) -> threading.Thread:
                     logger.info(
                         "delegate_callback_sent",
                         run_id=prepared["run_id"], attempt=attempt,
+                        ok=prepared["ok"], url=prepared["url"],
+                        run_status=prepared["run_status"],
                     )
                     return
                 detail = f"HTTP {resp.status_code}: {resp.text[:200]}"
