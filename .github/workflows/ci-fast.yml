@@ -32,6 +32,13 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Match docker/test/Dockerfile: throwaway git repos need commit identity on
+      # runners that ship without a global user.name/user.email.
+      - name: Configure git for tests
+        run: |
+          git config --global user.email "ci@clawsomeflow.local"
+          git config --global user.name "ClawsomeFlow CI"
+
       - name: Setup Node 22
         uses: actions/setup-node@v4
         with:

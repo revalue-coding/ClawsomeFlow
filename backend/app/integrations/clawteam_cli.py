@@ -51,6 +51,16 @@ BANNED_SKILLS: frozenset[str] = frozenset({"clawteam"})
 # Pairs with the 8h cross-process file lock in ``repo_merge_lock``.
 CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS = 12 * 3600
 
+# Fallback when the operator has no global ``user.*`` git config (common on CI and
+# fresh machines). ``git revert`` / merge commits need a committer identity even
+# when earlier commits used env-scoped author metadata only.
+_GIT_IDENTITY_ENV: dict[str, str] = {
+    "GIT_AUTHOR_NAME": "ClawsomeFlow",
+    "GIT_AUTHOR_EMAIL": "csflow@local",
+    "GIT_COMMITTER_NAME": "ClawsomeFlow",
+    "GIT_COMMITTER_EMAIL": "csflow@local",
+}
+
 # Ceiling for every *control-plane* CLI subprocess this module spawns
 # (``clawteam spawn/inject/list/...``, git branch prep, tmux window ops).
 # IMPORTANT: these commands NEVER execute agent tasks — tasks run
@@ -1030,7 +1040,7 @@ class ClawTeamCli:
         target = (target_branch or "").strip() or "main"
         result["target_branch"] = target
         branch = f"clawteam/{team}/{agent}"
-        env = self._env()
+        env = self._git_subprocess_env()
 
         async with self._locks.lock(
             f"clawteam_main_repo:{repo_root}",
@@ -1455,6 +1465,20 @@ class ClawTeamCli:
         env["CLAWTEAM_USER"] = get_request_user() or self._cfg.default_user
         if self._cfg.clawteam_data_dir:
             env["CLAWTEAM_DATA_DIR"] = self._cfg.clawteam_data_dir
+        return env
+
+    def _git_subprocess_env(self) -> dict[str, str]:
+        """Env for baseline-repo git writes (revert, merge, checkout, …).
+
+        Drops inherited ``GIT_DIR`` / ``GIT_WORK_TREE`` pollution and ensures a
+        committer identity when the host has no ``git config user.*`` (GitHub
+        Actions runners, unlike our Docker test image's system-level defaults).
+        """
+        env = self._env()
+        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES"):
+            env.pop(key, None)
+        for key, value in _GIT_IDENTITY_ENV.items():
+            env.setdefault(key, value)
         return env
 
 
