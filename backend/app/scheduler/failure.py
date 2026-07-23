@@ -52,6 +52,8 @@ class FailureRecord:
     agent_id: str
     reason: FailureReason
     detail: str = ""
+    #: Raw leader-inbox line when ``reason`` is ``leader_inbox_failed``.
+    inbox_message: str = ""
 
     def as_log(self) -> dict[str, Any]:
         return {
@@ -181,7 +183,9 @@ def detect_failures(
                 continue
             out.append(FailureRecord(
                 task_id=tid, agent_id=owner,
-                reason=FailureReason.leader_inbox_failed, detail=reason,
+                reason=FailureReason.leader_inbox_failed,
+                detail=reason,
+                inbox_message=msg.strip(),
             ))
             already.add(key)
 
@@ -212,6 +216,26 @@ def _parse_failed_inbox(msg: str) -> tuple[str, str] | None:
     tid = parts[1].strip()
     reason = parts[2].strip() if len(parts) >= 3 else ""
     return tid, reason
+
+
+def failed_inbox_message_for_pause(rec: FailureRecord) -> str:
+    """Build the agent FAILED inbox line shown on the Run detail pause banner.
+
+    ``leader_inbox_failed`` keeps the raw leader-inbox message when available;
+    ``worker_reported`` synthesizes the canonical ``FAILED:<task>: …`` form from
+    the ``csflow_failed`` metadata (same protocol wording the dispatch prompt
+    teaches agents to send via inbox).
+    """
+    if rec.reason == FailureReason.leader_inbox_failed:
+        raw = (rec.inbox_message or "").strip()
+        if raw:
+            return raw
+    if rec.reason in (FailureReason.leader_inbox_failed, FailureReason.worker_reported):
+        detail = (rec.detail or "").strip()
+        if detail:
+            return f"FAILED: {rec.task_id}: {detail}"
+        return f"FAILED: {rec.task_id}"
+    return ""
 
 
 # ──────────────────────────────────────────────────────────────────────

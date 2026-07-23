@@ -18,13 +18,16 @@ from app.scheduler.providers import (
 
 
 class _FakeMcp:
-    def __init__(self, *, tasks=None, inbox=None, fail=False) -> None:
+    def __init__(self, *, tasks=None, inbox=None, event_log=None, fail=False) -> None:
         self._tasks = tasks or []
         self._inbox = inbox or []
+        self._event_log = event_log or []
         self._fail = fail
         self.list_calls = 0
         self.recv_calls = 0
         self.peek_calls = 0
+        self.event_log_calls = 0
+        self.event_log_limit: int | None = None
 
     async def task_list(self, team_name: str):
         self.list_calls += 1
@@ -41,6 +44,11 @@ class _FakeMcp:
     async def mailbox_peek(self, team_name: str, agent_name: str):
         self.peek_calls += 1
         return list(self._inbox)
+
+    async def mailbox_event_log(self, team_name: str, agent_name: str, *, limit=200):
+        self.event_log_calls += 1
+        self.event_log_limit = limit
+        return list(self._event_log)
 
 
 def _cr() -> CompileResult:
@@ -156,6 +164,76 @@ async def test_inbox_returns_empty_on_failure() -> None:
     p = McpLeaderInboxProvider(team_name="t", leader_agent_id="leader", mcp=mcp)
     rows = await p()
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_inbox_peek_backfills_from_event_log() -> None:
+    """Reports the FIFO peek window dropped are recovered from the event log.
+
+    Regression for run 561a9fb188ab: shutdown_request lifecycle noise (one per
+    pause/finalize teardown) starved a recent ``task <id> done:`` report out of
+    peek's oldest-10 window, so the resumed checkpoint showed an empty summary.
+    """
+    # Peek only surfaces the (older) shutdown noise.
+    peek = [
+        {"from_agent": "csflow-scheduler", "to": "leader",
+         "content": "Shutdown requested. Reason: run_finalize",
+         "requestId": "s1"},
+    ]
+    # The recent report lives only in the newest-first event log.
+    log = [
+        {"from": "remote22", "to": "leader",
+         "content": "task assemble_itinerary done: 已生成最终版",
+         "requestId": "r1"},
+        {"from": "csflow-scheduler", "to": "leader",
+         "content": "Shutdown requested. Reason: run_finalize",
+         "requestId": "s1"},  # duplicate of the peek row → deduped
+    ]
+    mcp = _FakeMcp(inbox=peek, event_log=log)
+    p = McpLeaderInboxProvider(team_name="t", leader_agent_id="leader", mcp=mcp)
+    rows = await p()
+    assert mcp.peek_calls == 1
+    assert mcp.event_log_calls == 1
+    # Peek row kept first and verbatim; the report is appended; s1 deduped.
+    assert len(rows) == 2
+    assert rows[0]["requestId"] == "s1"
+    assert any(
+        "task assemble_itinerary done" in (r.get("content") or "") for r in rows
+    )
+    # Exactly one shutdown row survives (dedup by requestId).
+    assert sum(
+        1 for r in rows if "Shutdown requested" in (r.get("content") or "")
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_inbox_event_log_failure_falls_back_to_peek() -> None:
+    """A transient event-log failure never drops the peek rows."""
+
+    class _EventLogBoom(_FakeMcp):
+        async def mailbox_event_log(self, team_name, agent_name, *, limit=200):
+            raise RuntimeError("log unavailable")
+
+    mcp = _EventLogBoom(inbox=[{"from_agent": "x", "content": "y", "requestId": "p1"}])
+    p = McpLeaderInboxProvider(team_name="t", leader_agent_id="leader", mcp=mcp)
+    rows = await p()
+    assert len(rows) == 1
+    assert rows[0]["from_agent"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_inbox_receive_mode_skips_event_log() -> None:
+    """Non-peek (consuming) mode is unchanged: no event-log backfill."""
+    mcp = _FakeMcp(inbox=[{"from_agent": "x", "content": "y"}], event_log=[
+        {"from": "z", "to": "leader", "content": "task t done:", "requestId": "r"},
+    ])
+    p = McpLeaderInboxProvider(
+        team_name="t", leader_agent_id="leader", mcp=mcp, peek=False,
+    )
+    rows = await p()
+    assert mcp.recv_calls == 1
+    assert mcp.event_log_calls == 0
+    assert len(rows) == 1
 
 
 # ── DispatchClock -----------------------------------------------------

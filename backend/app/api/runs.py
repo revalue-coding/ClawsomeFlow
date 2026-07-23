@@ -184,6 +184,7 @@ class RunPauseView(_CamelModel):
 
     reason: str = ""                 # user | failure | internal_error | drain
     detail: str = ""
+    failure_inbox_message: str = ""  # raw/synthetic FAILED:… line when reason=failure
     needs_confirmation: bool = False  # scenario 9: internal error → confirm before resume
     at: str | None = None
 
@@ -514,6 +515,7 @@ def _to_summary(r: FlowRun) -> RunSummary:
             pause_view = RunPauseView(
                 reason=str(blob.get("reason") or ""),
                 detail=str(blob.get("detail") or ""),
+                failure_inbox_message=str(blob.get("failure_inbox_message") or ""),
                 needs_confirmation=bool(blob.get("needs_confirmation")),
                 at=(str(blob["at"]) if blob.get("at") else None),
             )
@@ -616,6 +618,7 @@ def _to_detail(r: FlowRun, *, flow: Flow | None, cfg: Config) -> RunDetail:
             pause_view = RunPauseView(
                 reason=str(blob.get("reason") or ""),
                 detail=str(blob.get("detail") or ""),
+                failure_inbox_message=str(blob.get("failure_inbox_message") or ""),
                 needs_confirmation=bool(blob.get("needs_confirmation")),
                 at=(str(blob["at"]) if blob.get("at") else None),
             )

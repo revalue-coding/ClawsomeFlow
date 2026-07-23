@@ -734,6 +734,7 @@ const en = {
     resumeConfirm: "This run was paused by an internal error, so its state may be inconsistent. Continue anyway? Completed work is kept and interrupted steps re-run in their existing worktree.",
     pausedTitle: "Run paused",
     pauseNeedsConfirm: "Paused by an internal error — review before continuing.",
+    pauseFailureInboxLabel: "Agent failure report (FAILED inbox)",
     pauseReason: {
       user: "Paused at your request. Continue to resume from where it left off, or terminate to discard the run.",
       failure: "A step failed, so the run was paused instead of terminated. Continue to re-run the failed step in its existing worktree, or terminate to discard the run.",

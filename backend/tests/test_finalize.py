@@ -1043,3 +1043,26 @@ async def test_perform_manual_merge_triggers_team_cleanup_when_enabled() -> None
     )
     assert ok is True
     assert cli.team_cleanup_calls == [run.team_name]
+
+
+def test_resolve_agent_repo_openclaw_uses_managed_workspace() -> None:
+    """OpenClaw agents have no Flow-spec ``repo``; diff/merge APIs must still
+    resolve the agent workspace git root."""
+    from app import paths
+
+    run, flow, spec = _make_run_and_spec(agents_kw=[
+        {"id": "ocA", "kind": AgentKind.openclaw,
+         "is_leader": False, "merge_strategy": MergeStrategy.agent_self,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+        {"id": "leader", "kind": AgentKind.claude, "repo": "/r",
+         "is_leader": True, "merge_strategy": MergeStrategy.manual,
+         "on_failure": OnFailure.retry, "max_retries": 2},
+    ])
+    storage = get_storage()
+    got = fin._resolve_agent_repo_for_run(
+        run=run, agent_id="ocA", storage=storage,
+    )
+    assert got == str(paths.agent_dir("ocA") / "workspace")
+    assert fin._resolve_agent_repo_for_run(
+        run=run, agent_id="leader", storage=storage,
+    ) == "/r"

@@ -93,6 +93,7 @@ from app.scheduler.failure import (
     TaskSnapshot,
     apply_on_failure,
     detect_failures,
+    failed_inbox_message_for_pause,
 )
 from app.scheduler.finalize import (
     FinalizeInput,
@@ -426,6 +427,7 @@ class RunController:
         self._pause_evt = asyncio.Event()
         self._pause_reason = ""
         self._pause_detail = ""
+        self._pause_failure_inbox_message = ""
         self._pause_needs_confirmation = False
         # Stale leader-inbox ``FAILED:<tid>`` messages captured at RESUME time.
         # ``mailbox_peek`` is non-consuming, so a FAILED report from the attempt
@@ -482,6 +484,7 @@ class RunController:
         *,
         reason: str,
         detail: str = "",
+        failure_inbox_message: str = "",
         needs_confirmation: bool = False,
     ) -> None:
         """Request a graceful, RESUMABLE stop (never terminal).
@@ -495,13 +498,17 @@ class RunController:
         if not self._pause_evt.is_set():
             self._pause_reason = reason
             self._pause_detail = detail
+            if failure_inbox_message.strip():
+                self._pause_failure_inbox_message = failure_inbox_message.strip()
             self._pause_needs_confirmation = needs_confirmation
         self._pause_evt.set()
 
     def is_pausing(self) -> bool:
         return self._pause_evt.is_set() and not self._cancel_evt.is_set()
 
-    def _backend_stop_after_failure(self, *, detail: str) -> None:
+    def _backend_stop_after_failure(
+        self, *, detail: str, failure_inbox_message: str = "",
+    ) -> None:
         """A detected node failure ALWAYS pauses the Flow (never terminates).
 
         The user must fix the problem and then 继续执行 — so this holds even for
@@ -511,7 +518,11 @@ class RunController:
         to pending so it re-runs on resume, and its downstream tasks are never
         dispatched (their dependency is no longer completed).
         """
-        self.pause(reason=_PAUSE_REASON_FAILURE, detail=detail)
+        self.pause(
+            reason=_PAUSE_REASON_FAILURE,
+            detail=detail,
+            failure_inbox_message=failure_inbox_message,
+        )
 
     def _backend_stop_after_internal_error(self, *, detail: str) -> None:
         """Scenario-9 stop (scheduler exception in the loop).
@@ -2862,6 +2873,7 @@ class RunController:
             )
             self._backend_stop_after_failure(
                 detail=f"task {book.task.id} failed ({rec.reason.value}): {rec.detail}"[:1000],
+                failure_inbox_message=failed_inbox_message_for_pause(rec),
             )
             return
         decision = apply_on_failure(
@@ -5009,6 +5021,7 @@ class RunController:
                 self.run,
                 reason=self._pause_reason or _PAUSE_REASON_FAILURE,
                 detail=self._pause_detail,
+                failure_inbox_message=self._pause_failure_inbox_message,
                 needs_confirmation=self._pause_needs_confirmation,
                 at=datetime.now(timezone.utc).isoformat(),
             )

@@ -102,6 +102,7 @@ def test_leader_inbox_failed() -> None:
     assert len(failures) == 1
     assert failures[0].reason == F.FailureReason.leader_inbox_failed
     assert "env broken" in failures[0].detail
+    assert failures[0].inbox_message == "FAILED: t1: env broken"
 
 
 def test_leader_inbox_failed_fires_even_when_task_completed() -> None:
@@ -173,3 +174,19 @@ def test_parse_failed_inbox_lenient() -> None:
     assert F._parse_failed_inbox("FAILED: t2") == ("t2", "")
     assert F._parse_failed_inbox("not it") is None
     assert F._parse_failed_inbox(None) is None  # type: ignore[arg-type]
+
+
+def test_failed_inbox_message_for_pause() -> None:
+    rec = F.FailureRecord(
+        task_id="t1", agent_id="alice",
+        reason=F.FailureReason.leader_inbox_failed,
+        detail="boom",
+        inbox_message="FAILED: t1: boom",
+    )
+    assert F.failed_inbox_message_for_pause(rec) == "FAILED: t1: boom"
+    worker = F.FailureRecord(
+        task_id="t2", agent_id="bob",
+        reason=F.FailureReason.worker_reported,
+        detail="cannot finish",
+    )
+    assert F.failed_inbox_message_for_pause(worker) == "FAILED: t2: cannot finish"

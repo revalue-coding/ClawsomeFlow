@@ -155,6 +155,25 @@ class McpLeaderInboxProvider:
         try:
             if self.peek:
                 rows = await self.mcp.mailbox_peek(self.team_name, self.leader_agent_id)
+                # ``inbox peek`` only returns the OLDEST fetch window (ClawTeam
+                # caps it at 10, FIFO). One ``shutdown_request`` lands in the
+                # leader's inbox on every pause / finalize teardown, so after a
+                # few pause/resume cycles that lifecycle noise can starve a
+                # recent ``task <id> done:`` report out of the peek window —
+                # which is exactly why an eager checkpoint opened after resume
+                # showed an empty summary. Merge in the newest-first team event
+                # log (also non-consuming) so recent reports always surface.
+                try:
+                    log_rows = await self.mcp.mailbox_event_log(
+                        self.team_name, self.leader_agent_id, limit=200,
+                    )
+                except Exception as exc:  # backfill is best-effort
+                    logger.warning(
+                        "leader_inbox_event_log_failed",
+                        team=self.team_name, leader=self.leader_agent_id, error=str(exc),
+                    )
+                    log_rows = []
+                rows = self._merge_rows(list(rows), log_rows)
             else:
                 rows = await self.mcp.mailbox_receive(
                     self.team_name, self.leader_agent_id, limit=self.limit,
@@ -166,6 +185,39 @@ class McpLeaderInboxProvider:
             )
             return []
         return list(rows)
+
+    @staticmethod
+    def _row_key(row: dict[str, Any]) -> tuple[Any, ...]:
+        rid = row.get("requestId") or row.get("request_id") or row.get("id")
+        if rid:
+            return ("rid", str(rid))
+        return (
+            "tuple",
+            str(row.get("from") or row.get("from_agent") or ""),
+            str(row.get("to") or ""),
+            str(row.get("content") or row.get("message") or ""),
+            str(row.get("timestamp") or row.get("ts") or ""),
+        )
+
+    @classmethod
+    def _merge_rows(
+        cls, peek_rows: list[dict[str, Any]], log_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Union of peek rows and event-log rows, deduped, peek order first.
+
+        Peek rows are kept verbatim and first (never lose a peek row); any
+        event-log row not already present is appended so recent reports the
+        peek window dropped still reach the report scan.
+        """
+        merged = list(peek_rows)
+        seen = {cls._row_key(r) for r in peek_rows}
+        for r in log_rows:
+            key = cls._row_key(r)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(r)
+        return merged
 
 
 __all__ = [

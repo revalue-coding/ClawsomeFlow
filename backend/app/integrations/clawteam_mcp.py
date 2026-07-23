@@ -343,6 +343,39 @@ class ClawTeamMcpClient:
             consume=False,
         )
 
+    async def mailbox_event_log(
+        self, team_name: str, agent_name: str, *, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Newest-first, non-consuming message history addressed to *agent_name*.
+
+        ``inbox peek`` only returns the OLDEST ``fetch`` window (ClawTeam caps
+        this at 10, FIFO by filename), so lifecycle noise — one
+        ``shutdown_request`` lands in the leader's inbox on every pause /
+        finalize teardown — can push a genuinely recent ``task <id> done:``
+        report out of the peek window after a few pause/resume cycles. The
+        team event log is newest-first and covers the full history, so we use
+        it to backfill the leader's report scan. The event log is team-wide;
+        we filter client-side to rows whose ``to`` equals *agent_name* so the
+        result mirrors "the agent's inbox" (never-consuming, like peek).
+        """
+        argv = [
+            "clawteam", "--json", "inbox", "log", team_name,
+            "--limit", str(int(limit)),
+        ]
+        exit_code, stdout, stderr = await _run_cli(argv, env=self._env())
+        if exit_code != 0:
+            self._log.warning(
+                "mailbox_event_log_failed",
+                team=team_name,
+                agent=agent_name,
+                exit_code=exit_code,
+                stderr=(stderr or "")[:1000],
+            )
+            return []
+        rows = _extract_mailbox_rows(_try_parse_json(stdout))
+        wanted = str(agent_name)
+        return [r for r in rows if str(r.get("to") or "") == wanted]
+
     async def _mailbox_rows_via_cli(
         self,
         *,

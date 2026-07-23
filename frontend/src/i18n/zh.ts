@@ -725,6 +725,7 @@ const zh = {
     resumeConfirm: "该执行流因内部错误被暂停，状态可能不一致。仍要继续吗？已完成的工作会保留，被中断的步骤会在原 worktree 中重新执行。",
     pausedTitle: "执行流已暂停",
     pauseNeedsConfirm: "因内部错误暂停——继续前请先确认。",
+    pauseFailureInboxLabel: "节点失败报告（FAILED inbox）",
     pauseReason: {
       user: "已按你的请求暂停。点击“继续执行”从断点继续，或“终止执行流”丢弃本次执行。",
       failure: "某个步骤失败，因此执行流被暂停而非终止。点击“继续执行”在原 worktree 中重跑失败步骤，或“终止执行流”丢弃本次执行。",

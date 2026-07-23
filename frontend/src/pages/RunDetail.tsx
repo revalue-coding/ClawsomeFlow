@@ -749,6 +749,23 @@ export function RunDetail() {
     if (replayPlaying && replayIndex >= replayMaxIndex) setReplayPlaying(false);
   }, [replayPlaying, replayIndex, replayMaxIndex]);
   const mergeFailures = useMemo(() => extractMergeFailures(events), [events]);
+  const pauseFailureInboxMessage = useMemo(() => {
+    if (run?.status !== "paused" || run.pause?.reason !== "failure") return "";
+    const fromApi = (run.pause.failureInboxMessage ?? "").trim();
+    if (fromApi) return fromApi;
+    // Runs paused before ``failure_inbox_message`` was persisted — reconstruct
+    // from the latest failure event (same FAILED:… wording the agent sent).
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.type !== "task_failed" && e.type !== "task_failure_detected") continue;
+      const tid = (e.taskId ?? "").trim();
+      const payload = e.payload ?? {};
+      const detail = String(payload.detail ?? "").trim();
+      if (!tid) continue;
+      if (detail) return `FAILED: ${tid}: ${detail}`;
+    }
+    return "";
+  }, [run?.status, run?.pause, events]);
   const rerunTargetItem = useMemo(
     () =>
       rerunModalTaskId
@@ -769,6 +786,9 @@ export function RunDetail() {
     run.status === "awaiting_user_complaint" ||
     (run.status === "complaint_processing" && Boolean(complaintNotice));
   const boardHint = t("runDetail.boardHint").trim();
+  const runPaused = run.status === "paused";
+  const pausedUiLock =
+    "pointer-events-none select-none opacity-45 grayscale-[35%] transition-opacity";
 
   return (
     <div className="space-y-5">
@@ -785,11 +805,13 @@ export function RunDetail() {
           </h1>
           <div className="flex items-center gap-3 text-sm text-ink-500">
             <StatusPill status={run.status} />
-            <span>
+            <span className={runPaused ? pausedUiLock : undefined}>
               {t("runDetail.flowLabel")}{" "}
               <SilentLink
                 to={`/flows/${run.flowId}`}
                 className="text-brand-600 hover:underline"
+                tabIndex={runPaused ? -1 : undefined}
+                aria-disabled={runPaused}
               >
                 {flowName || run.flowId}
               </SilentLink>
@@ -871,6 +893,16 @@ export function RunDetail() {
             {run.pause?.needsConfirmation && (
               <p className="text-amber-700">{t("runDetail.pauseNeedsConfirm")}</p>
             )}
+            {run.pause?.reason === "failure" && pauseFailureInboxMessage ? (
+              <div className="mt-2 space-y-1">
+                <div className="text-xs font-medium text-ink-700">
+                  {t("runDetail.pauseFailureInboxLabel")}
+                </div>
+                <pre className="rounded-md border border-rose-200 bg-rose-50/50 px-3 py-2 text-xs text-ink-800 whitespace-pre-wrap break-words font-mono">
+                  {pauseFailureInboxMessage}
+                </pre>
+              </div>
+            ) : null}
             {run.pause?.detail && (
               <p className="font-mono text-xs text-ink-500 break-all">
                 {run.pause.detail}
@@ -880,6 +912,7 @@ export function RunDetail() {
         </Card>
       )}
 
+      <div className={runPaused ? pausedUiLock : undefined}>
       {/* Pending merges */}
       {run.pendingMerges && run.pendingMerges.length > 0 && (
         <Card className="border-amber-200">
@@ -1366,6 +1399,7 @@ export function RunDetail() {
         </CardTitle>
         <EventTable events={events} />
       </Card>
+      </div>
 
       <Modal
         open={!!rerunModalTaskId}

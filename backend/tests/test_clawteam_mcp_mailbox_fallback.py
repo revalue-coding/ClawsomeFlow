@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from app.integrations import clawteam_mcp as mcp_mod
 from app.integrations.clawteam_mcp import ClawTeamMcpClient, _extract_mailbox_rows
 
 
@@ -65,3 +68,47 @@ async def test_mailbox_receive_reads_via_cli_with_limit(monkeypatch: pytest.Monk
         "consume": True,
         "limit": 3,
     }
+
+
+@pytest.mark.asyncio
+async def test_mailbox_event_log_filters_to_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = ClawTeamMcpClient(acting_user="alice")
+    captured: dict[str, object] = {}
+
+    async def fake_run_cli(argv, *, env):
+        captured["argv"] = argv
+        payload = [
+            {"from": "csflow-scheduler", "to": "leader",
+             "content": "Shutdown requested. Reason: run_finalize", "requestId": "s1"},
+            {"from": "remote22", "to": "leader",
+             "content": "task assemble_itinerary done: ok", "requestId": "r1"},
+            {"from": "leader", "to": "worker",
+             "content": "dispatch to worker", "requestId": "d1"},
+        ]
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(mcp_mod, "_run_cli", fake_run_cli)
+
+    rows = await client.mailbox_event_log("team-x", "leader", limit=200)
+    # Only messages addressed to the leader survive (dispatch to worker dropped).
+    assert [r["requestId"] for r in rows] == ["s1", "r1"]
+    assert captured["argv"] == [
+        "clawteam", "--json", "inbox", "log", "team-x", "--limit", "200",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mailbox_event_log_returns_empty_on_cli_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = ClawTeamMcpClient(acting_user="alice")
+
+    async def fake_run_cli(argv, *, env):
+        return 1, "", "boom"
+
+    monkeypatch.setattr(mcp_mod, "_run_cli", fake_run_cli)
+
+    rows = await client.mailbox_event_log("team-x", "leader")
+    assert rows == []

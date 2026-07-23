@@ -354,6 +354,8 @@ export interface RunPauseState {
   /** user | failure | internal_error | drain */
   reason: string;
   detail: string;
+  /** Raw or synthetic ``FAILED:…`` agent report when reason === "failure". */
+  failureInboxMessage?: string;
   needsConfirmation: boolean;
   at: string | null;
 }

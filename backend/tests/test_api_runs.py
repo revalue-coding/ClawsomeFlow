@@ -1202,6 +1202,7 @@ def test_paused_run_summary_exposes_pause_state(app_client: TestClient) -> None:
             "_csflow_pause_state": {
                 "reason": "failure",
                 "detail": "timeout: step slow",
+                "failure_inbox_message": "FAILED: t1: env broken",
                 "needs_confirmation": False,
             },
         },
@@ -1212,6 +1213,7 @@ def test_paused_run_summary_exposes_pause_state(app_client: TestClient) -> None:
     assert body["status"] == "paused"
     assert body["pause"]["reason"] == "failure"
     assert body["pause"]["detail"] == "timeout: step slow"
+    assert body["pause"]["failureInboxMessage"] == "FAILED: t1: env broken"
     assert body["pause"]["needsConfirmation"] is False
 
 
@@ -1608,6 +1610,80 @@ def test_checkpoint_item_diff_auto_merge_uses_merge_history(
     assert "+merged-line" in body["patch"]
     assert captured["merged_agent"] == "alice"
     assert captured["include_patch"] is True
+
+
+def test_checkpoint_item_diff_openclaw_passes_agent_workspace_repo(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenClaw checkpoint items self-merge into ``agents/{id}/workspace``; the
+    diff endpoint must pass that repo into merge-history reconstruction."""
+    from app import paths
+
+    storage = get_storage()
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(
+                id="xuezhe", kind=AgentKind.openclaw, is_leader=False,
+                merge_strategy=MergeStrategy.agent_self,
+                on_failure=OnFailure.retry, max_retries=2,
+            ),
+            FlowAgent(
+                id="leader", kind=AgentKind.claude, repo="/tmp/r", is_leader=True,
+                merge_strategy=MergeStrategy.manual,
+                on_failure=OnFailure.retry, max_retries=2,
+            ),
+        ],
+        tasks=[
+            FlowTask(id="t1", owner_agent_id="xuezhe", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="y",
+                     description="", depends_on=["t1"], is_leader_summary=True),
+        ],
+    )
+    flow = Flow(
+        name="oc-checkpoint",
+        description="",
+        owner_user="alice",
+    ).with_spec(spec)
+    flow = storage.flow_create(flow)
+    run = _make_run(flow_id=flow.id, status=RunStatus.awaiting_user_checkpoint)
+
+    class _Controller:
+        def checkpoint_snapshot(self):
+            return {"downstream_task_id": "ts", "items": [{
+                "task_id": "t1",
+                "owner_agent_id": "xuezhe",
+                "decision": "pending",
+            }]}
+
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "get_controller", lambda _rid: _Controller())
+
+    expected_repo = str(paths.agent_dir("xuezhe") / "workspace")
+    captured: dict[str, Any] = {}
+
+    class _FakeCli:
+        async def workspace_agent_patch(self, *, team, agent, repo, **kw):
+            captured["wt_repo"] = repo
+            return None
+
+        async def run_merged_agent_patch(self, *, team, agent, repo, include_patch=True, **kw):
+            captured["merged_repo"] = repo
+            return {
+                "repo_root": expected_repo,
+                "branch": f"clawteam/{team}/xuezhe",
+                "patch": "diff --git a/f b/f\n+line\n",
+                "patch_truncated": False,
+            }
+
+    from app.api import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "get_clawteam_cli", lambda: _FakeCli())
+
+    r = app_client.get(f"/api/runs/{run.id}/checkpoint/items/t1/diff")
+    assert r.status_code == 200, r.text
+    assert captured["wt_repo"] == expected_repo
+    assert captured["merged_repo"] == expected_repo
+    assert "+line" in r.json()["patch"]
 
 
 def test_merge_calls_perform_manual_merge(

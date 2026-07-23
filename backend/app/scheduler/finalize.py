@@ -877,6 +877,12 @@ def _resolve_agent_repo_for_run(
             continue
         repo = str(agent.repo or "").strip()
         if not repo:
+            # OpenClaw agents never carry ``repo`` on the Flow spec; worktrees
+            # live under ``~/.clawsomeflow/agents/{id}/workspace`` (same as spawn).
+            if agent.kind == AgentKind.openclaw:
+                from app import paths
+
+                return str(paths.agent_dir(agent.id) / "workspace")
             return None
         return str(Path(repo).expanduser())
     return None

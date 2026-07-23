@@ -44,7 +44,8 @@ must import the constants from here.
   cleared on exhausted failure so a later ``run_update`` / upgrade can retry).
 * :data:`PAUSE_STATE_KEY` — set while a run sits in ``RunStatus.paused``. Value
   is a JSON object ``{"reason": user|failure|internal_error|drain,
-  "detail": str, "at": iso, "needs_confirmation": bool}`` describing WHY the
+  "detail": str, "failure_inbox_message": str (optional), "at": iso,
+  "needs_confirmation": bool}`` describing WHY the
   run was parked, so the Run detail page can render a "why paused" banner (and
   the scenario-9 ``internal_error`` confirmation hint). Written by the pause
   finalize branch; cleared on ``继续执行`` (resume) and on 终止执行流 (terminate).
@@ -152,6 +153,7 @@ def write_pause_state(
     *,
     reason: str,
     detail: str = "",
+    failure_inbox_message: str = "",
     needs_confirmation: bool = False,
     at: str | None = None,
 ) -> None:
@@ -163,6 +165,9 @@ def write_pause_state(
     """
     inputs = dict(getattr(run, "inputs", None) or {})
     blob: dict[str, Any] = {"reason": str(reason), "detail": str(detail or "")}
+    inbox = str(failure_inbox_message or "").strip()
+    if inbox:
+        blob["failure_inbox_message"] = inbox
     if needs_confirmation:
         blob["needs_confirmation"] = True
     if at:
