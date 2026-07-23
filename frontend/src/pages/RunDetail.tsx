@@ -3548,28 +3548,27 @@ type ExternalTaskItem = {
     fromAgent?: string;
     summary?: string;
   }> | null;
-  /** A failure receipt (ok=false) arrived for THIS dispatch nonce — the task is
-   * NOT done, it needs re-dispatch (or resume). The card stays visible. */
-  failed: boolean;
-  /** Reason text from the failure receipt, if any. */
-  failureSummary: string;
 };
 
 /** Outstanding external-node dispatches: latest dispatch per task, minus
- *  those already completed (matching completion nonce) or whose ClawTeam
- *  task already went completed. */
+ *  completed / failed dispatches. Failed dispatches are keyed by
+ *  ``taskId:nonce`` and NEVER re-shown; a re-dispatch mints a fresh nonce so
+ *  the new card cannot collide with a suppressed failure. */
 function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
   const ordered = [...events].sort((a, b) => a.id - b.id);
   const latest = new Map<string, ExternalTaskItem>();
   const completedNonces = new Set<string>();
   const completedTasks = new Set<string>();
-  /** nonce-key → failure summary. A failed receipt does NOT hide the card. */
-  const failedNonces = new Map<string, string>();
+  /** Dispatch keys permanently hidden from the external todo card. */
+  const suppressedDispatchKeys = new Set<string>();
+  /** Fallback when ``task_failed`` has no nonce — cleared on re-dispatch. */
+  const suppressedTaskIds = new Set<string>();
   for (const e of ordered) {
     const tid = typeof e.taskId === "string" ? e.taskId : "";
     if (!tid) continue;
     const payload = (e.payload ?? {}) as Record<string, unknown>;
     if (e.type === "external_task_dispatched") {
+      suppressedTaskIds.delete(tid);
       const runtimeRaw = payload.runtimeInputs ?? payload.runtime_inputs;
       const upstreamRaw = payload.upstreamOutputs ?? payload.upstream_outputs;
       latest.set(tid, {
@@ -3596,39 +3595,36 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
         upstreamOutputs: Array.isArray(upstreamRaw)
           ? (upstreamRaw as ExternalTaskItem["upstreamOutputs"])
           : null,
-        failed: false,
-        failureSummary: "",
       });
     } else if (e.type === "external_task_completed") {
-      // Only a SUCCESS receipt (ok !== false) hides the card. An ok=false receipt
-      // does NOT hide it and does NOT (by itself) mark it failed — a raw HTTP
-      // receipt is not a surfaced failure. The card shows "waiting" until the
-      // scheduler TICK detects the failure and emits ``task_failed`` (below).
+      const nonce = String(payload.nonce ?? "");
       if (payload.ok !== false) {
-        completedNonces.add(`${tid}:${String(payload.nonce ?? "")}`);
+        completedNonces.add(`${tid}:${nonce}`);
+      } else if (nonce) {
+        // Failure receipt — hide this dispatch immediately (no failure copy on
+        // the card; the pause banner owns recovery UX once the tick surfaces).
+        suppressedDispatchKeys.add(`${tid}:${nonce}`);
       }
-    } else if (e.type === "task_failed") {
-      // The tick detected & surfaced this node's failure — hide the card
-      // (recovery is via the pause banner). Key by dispatch nonce so a later
-      // re-dispatch (fresh nonce) shows the card again as "waiting".
+    } else if (
+      e.type === "task_failed" || e.type === "task_failure_detected"
+    ) {
       const n = String(payload.nonce ?? "");
-      if (n) failedNonces.set(`${tid}:${n}`, String(payload.detail ?? "").trim());
+      if (n) {
+        suppressedDispatchKeys.add(`${tid}:${n}`);
+      } else {
+        suppressedTaskIds.add(tid);
+      }
     } else if (e.type === "task_completed") {
       completedTasks.add(tid);
     }
   }
-  return [...latest.values()]
-    .filter(
-      (it) =>
-        !completedTasks.has(it.taskId)
-        && !completedNonces.has(`${it.taskId}:${it.nonce}`),
-    )
-    .map((it) => {
-      const failKey = `${it.taskId}:${it.nonce}`;
-      return failedNonces.has(failKey)
-        ? { ...it, failed: true, failureSummary: failedNonces.get(failKey) ?? "" }
-        : it;
-    });
+  return [...latest.values()].filter(
+    (it) =>
+      !completedTasks.has(it.taskId)
+      && !completedNonces.has(`${it.taskId}:${it.nonce}`)
+      && !suppressedDispatchKeys.has(`${it.taskId}:${it.nonce}`)
+      && !suppressedTaskIds.has(it.taskId),
+  );
 }
 
 function ExternalTasksCard({
@@ -3661,9 +3657,7 @@ function ExternalTasksCard({
   const visibleItems = useMemo(
     () =>
       items.filter(
-        (it) =>
-          !it.failed &&
-          !dismissedKeys.has(`${it.taskId}:${it.nonce}`),
+        (it) => !dismissedKeys.has(`${it.taskId}:${it.nonce}`),
       ),
     [items, dismissedKeys],
   );
@@ -3816,7 +3810,7 @@ function ExternalTasksCard({
                   </div>
                 );
               })()}
-              {!isHuman && !item.failed && (
+              {!isHuman && (
                 <div className="mt-2 text-xs text-ink-600">
                   {item.channel === "webhook"
                     ? t("runDetail.external.waitingWebhook")
@@ -3884,10 +3878,8 @@ function ExternalTasksCard({
                     {t("runDetail.external.submitFailed")}
                   </button>
                   {/* Re-dispatch is for a genuinely-WAITING task (e.g. a missed
-                      receipt) — NOT for a failed node, whose recovery is the
-                      failure banner's 继续执行 (which re-runs it). So hide the
-                      button once the tick has surfaced the failure. */}
-                  {canRedispatch && !item.failed && (
+                      receipt) — NOT for a failed dispatch (suppressed by nonce). */}
+                  {canRedispatch && (
                     <button
                       type="button"
                       className="btn-primary"
