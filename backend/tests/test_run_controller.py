@@ -2511,6 +2511,57 @@ async def test_external_handled_nonce_seeded_from_events(
 
 
 @pytest.mark.asyncio
+async def test_external_failure_detected_when_clawteam_status_pending(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (run 581ede31bc2f): a user 暂停 can cancel a dispatch AFTER its
+    outbound (the remote runs + returns ok=false) but BEFORE the ClawTeam
+    in_progress marking, leaving the failed task ``pending``. Detection must key
+    off the receipt nonce, NOT require status=="in_progress" — otherwise the
+    failure is missed on resume and the task is silently re-dispatched."""
+    spec = _external_only_spec()
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    storage = get_storage()
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_dispatched", agent_id="ext",
+        task_id="t_ext", payload={"nonce": "N1"},
+    ))
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_completed", agent_id="ext",
+        task_id="t_ext", payload={"nonce": "N1", "ok": False, "summary": "boom"},
+    ))
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d", worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots, compile_result=compile_result,
+    )
+    # ClawTeam status is PENDING (dispatch cancelled before in_progress marking).
+    snaps = [TaskSnapshot(
+        task_id="t_ext", owner_agent_id="ext", status="pending",
+        locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+    )]
+    recs = rc._detect_external_failures(snaps)
+    assert [r.task_id for r in recs] == ["t_ext"]
+    assert recs[0].external_nonce == "N1"
+
+
+@pytest.mark.asyncio
 async def test_tick_handles_one_failure_at_a_time_and_pauses(
     fake_lookup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

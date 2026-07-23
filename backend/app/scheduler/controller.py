@@ -2973,14 +2973,24 @@ class RunController:
         """Failure records for external tasks whose current dispatch got an
         ``ok=false`` receipt and hasn't been handled yet (by nonce).
 
-        This is the LIVE-tick counterpart of the resume reconcile: external
-        failures are identified by nonce from the durable completion event, never
-        from the leader inbox. Only in-flight external tasks are considered; a
-        task already reset to pending by a prior handling is skipped.
+        External failures are identified by nonce from the durable completion
+        event, never from the leader inbox. Every NON-completed external task is
+        considered (``pending`` as well as ``in_progress`` — a pause can cancel a
+        dispatch after its outbound but before the in_progress marking, leaving a
+        genuinely-failed task ``pending``). An already-handled receipt is skipped
+        via the nonce set.
         """
         out: list[FailureRecord] = []
         for snap in snapshots:
-            if (snap.status or "").strip().lower() != "in_progress":
+            # Consider any NON-completed external task, NOT only ``in_progress``.
+            # A user 暂停 can cancel a dispatch mid-flight AFTER the outbound has
+            # been sent (the remote runs and returns a receipt) but BEFORE the
+            # ClawTeam ``in_progress`` marking — leaving the task ``pending`` even
+            # though its latest dispatch really failed. Keying off the receipt +
+            # nonce (via ``_external_failure_receipt`` + the handled-nonce set),
+            # not the ClawTeam status, catches that case; otherwise the failure is
+            # missed and the task is silently re-dispatched instead of surfaced.
+            if (snap.status or "").strip().lower() == "completed":
                 continue
             owner = self._agents.get(snap.owner_agent_id)
             if owner is None:
