@@ -995,7 +995,11 @@ export function RunDetail() {
         </Card>
       )}
 
-      <div className={runPaused ? pausedUiLock : undefined}>
+      <div
+        className={
+          runPaused ? `space-y-5 ${pausedUiLock}` : "space-y-5"
+        }
+      >
       {/* Pending merges */}
       {run.pendingMerges && run.pendingMerges.length > 0 && (
         <Card className="border-amber-200">
@@ -1176,7 +1180,6 @@ export function RunDetail() {
           runId={run.id}
           teamName={run.teamName ?? ""}
           events={events}
-          paused={run.status === "paused"}
         />
       )}
 
@@ -3557,16 +3560,19 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
         failureSummary: "",
       });
     } else if (e.type === "external_task_completed") {
-      // A SUCCESS receipt (ok !== false) completes the task → hide the card.
-      // A FAILURE receipt (ok === false) does NOT: the task is still outstanding
-      // (failed, awaiting re-dispatch / resume), so keep the card visible and
-      // mark it failed. Otherwise the backend keeps waiting while no card shows.
-      const key = `${tid}:${String(payload.nonce ?? "")}`;
-      if (payload.ok === false) {
-        failedNonces.set(key, String(payload.summary ?? "").trim());
-      } else {
-        completedNonces.add(key);
+      // Only a SUCCESS receipt (ok !== false) hides the card. An ok=false receipt
+      // does NOT hide it and does NOT (by itself) mark it failed — a raw HTTP
+      // receipt is not a surfaced failure. The card shows "waiting" until the
+      // scheduler TICK detects the failure and emits ``task_failed`` (below).
+      if (payload.ok !== false) {
+        completedNonces.add(`${tid}:${String(payload.nonce ?? "")}`);
       }
+    } else if (e.type === "task_failed") {
+      // The tick detected & surfaced this node's failure → show the failed hint,
+      // keyed by the dispatch nonce so a later re-dispatch (fresh nonce) shows
+      // "waiting" again rather than a stale "failed".
+      const n = String(payload.nonce ?? "");
+      if (n) failedNonces.set(`${tid}:${n}`, String(payload.detail ?? "").trim());
     } else if (e.type === "task_completed") {
       completedTasks.add(tid);
     }
@@ -3589,12 +3595,10 @@ function ExternalTasksCard({
   runId,
   teamName,
   events,
-  paused,
 }: {
   runId: string;
   teamName: string;
   events: RunWsEvent[];
-  paused: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const { alert, confirm } = useDialog();
@@ -3784,11 +3788,6 @@ function ExternalTasksCard({
                   </div>
                 )
               )}
-              {paused && canRedispatch && (
-                <div className="mt-2 text-xs text-amber-700">
-                  {t("runDetail.external.redispatchNeedsResume")}
-                </div>
-              )}
               {isHuman ? (
                 <div className="mt-3 space-y-2">
                   <textarea
@@ -3849,16 +3848,15 @@ function ExternalTasksCard({
                   >
                     {t("runDetail.external.submitFailed")}
                   </button>
-                  {canRedispatch && (
+                  {/* Re-dispatch is for a genuinely-WAITING task (e.g. a missed
+                      receipt) — NOT for a failed node, whose recovery is the
+                      failure banner's 继续执行 (which re-runs it). So hide the
+                      button once the tick has surfaced the failure. */}
+                  {canRedispatch && !item.failed && (
                     <button
                       type="button"
                       className="btn-primary"
-                      // Paused runs have no live controller — re-dispatch would
-                      // 409. Require the user to 继续执行 first (pause/resume and
-                      // re-dispatch are kept as separate actions). The amber hint
-                      // above explains why the button is disabled.
-                      disabled={actionsBusy || paused}
-                      title={paused ? t("runDetail.external.redispatchNeedsResume") : undefined}
+                      disabled={actionsBusy}
                       onClick={() => void redispatch(item.taskId)}
                     >
                       {redispatching === item.taskId

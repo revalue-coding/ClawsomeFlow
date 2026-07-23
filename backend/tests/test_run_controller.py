@@ -2252,15 +2252,16 @@ async def test_prepare_resume_reemits_task_completed_for_completion_during_pause
 async def test_prepare_resume_reconciles_external_failure_during_pause(
     fake_lookup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A FAILED external receipt that lands while the run is PAUSED (no live tick
-    observed the ``FAILED:`` inbox signal, so ClawTeam stays ``in_progress``) is
-    reconciled on resume: prepare_resume surfaces it (``task_failed`` event) and
-    resets it to ``pending`` so 继续执行 re-dispatches it. A genuinely-waiting
-    external ``in_progress`` task (no completion event for its latest nonce) is
-    left untouched — its outstanding ticket must NOT be invalidated.
+    """A FAILED external receipt that lands while the run is PAUSED is NOT handled
+    by prepare_resume itself — prepare_resume leaves the external task in_progress
+    (both a failed one and a genuinely-waiting one). The failure is surfaced +
+    paused by the FIRST resume tick's ``_detect_external_failures`` → uniform with
+    a live failure, so the run always pauses on a failure (never silently
+    re-dispatches). A genuinely-waiting external task (no ok=false receipt) is left
+    in_progress and NOT surfaced.
 
-    Regression for run f2d8b01c57b6: a second remote node that failed after the
-    first failure paused the run was neither displayed nor re-dispatched.
+    Regression for runs f2d8b01c57b6 / 15b681cd0221: a remote node that failed
+    while paused must be surfaced + PAUSE on 继续执行, one at a time.
     """
     spec = FlowSpec(
         agents=[
@@ -2340,22 +2341,32 @@ async def test_prepare_resume_reconciles_external_failure_during_pause(
     )
     await rc.prepare_resume()
 
-    # Orphaned failure → reset to pending (re-dispatchable) and surfaced.
-    assert rc._tasks["t_failed"].state == _TaskState.pending
-    # Genuinely-waiting external task → left in_progress, never re-dispatched.
+    # prepare_resume itself does NOT surface/reset external failures — both the
+    # failed and the waiting external tasks are left in_progress.
+    assert rc._tasks["t_failed"].state == _TaskState.in_progress
     assert rc._tasks["t_waiting"].state == _TaskState.in_progress
+    assert not [
+        e for e in storage.event_list(run_id=run.id, limit=1000)
+        if e.type == "task_failed"
+    ]
 
+    # The first resume tick's detector surfaces ONLY the failed one (nonce match).
+    recs = rc._detect_external_failures(snaps)
+    assert [r.task_id for r in recs] == ["t_failed"]
+    assert recs[0].external_nonce == "N1"
+
+    await rc._handle_failure(recs[0])
+    # Surfaced + reset to pending + PAUSED; the waiting one is untouched.
+    assert rc._tasks["t_failed"].state == _TaskState.pending
+    assert rc._tasks["t_waiting"].state == _TaskState.in_progress
+    assert rc._pause_evt.is_set()
     failed_events = [
         e for e in storage.event_list(run_id=run.id, limit=1000)
         if e.type == "task_failed"
     ]
-    failed_tids = [e.task_id for e in failed_events]
-    assert failed_tids.count("t_failed") == 1  # surfaced on resume
-    assert "t_waiting" not in failed_tids
-    # The surfaced failure carries the receipt summary.
-    assert any(e.payload.get("detail") == "boom" for e in failed_events)
-    # Nonce identity tagged on the surfaced failure + recorded as handled.
-    assert any(e.payload.get("nonce") == "N1" for e in failed_events)
+    assert [e.task_id for e in failed_events] == ["t_failed"]
+    assert failed_events[0].payload.get("detail") == "boom"
+    assert failed_events[0].payload.get("nonce") == "N1"
     assert "N1" in rc._handled_external_failure_nonces
 
 
@@ -2497,6 +2508,100 @@ async def test_external_handled_nonce_seeded_from_events(
     )]
     # Already handled (seeded) → not re-detected.
     assert rc._detect_external_failures(snaps) == []
+
+
+@pytest.mark.asyncio
+async def test_tick_handles_one_failure_at_a_time_and_pauses(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When two external tasks have failed, a single tick surfaces ONLY the first
+    (resets it + pauses) and STOPS — the second is left in_progress for the next
+    tick after 继续执行. Failures are never handled two-at-once."""
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(id="ext1", kind=AgentKind.external,
+                      external=ExternalNodeConfig(
+                          channel=ExternalChannel.remote_csflow,
+                          base_url="http://a", flow_id="f1", pair_token_ref="r1"),
+                      is_leader=False),
+            FlowAgent(id="ext2", kind=AgentKind.external,
+                      external=ExternalNodeConfig(
+                          channel=ExternalChannel.remote_csflow,
+                          base_url="http://b", flow_id="f2", pair_token_ref="r2"),
+                      is_leader=False),
+            FlowAgent(id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                      is_leader=True, merge_strategy=MergeStrategy.manual),
+        ],
+        tasks=[
+            FlowTask(id="t1", owner_agent_id="ext1", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="t2", owner_agent_id="ext2", subject="x",
+                     description="", depends_on=[]),
+            FlowTask(id="ts", owner_agent_id="leader", subject="y",
+                     description="", depends_on=["t1", "t2"], is_leader_summary=True),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    storage = get_storage()
+    for tid, ag, n in (("t1", "ext1", "A1"), ("t2", "ext2", "B1")):
+        storage.event_append(RunEvent(
+            run_id=run.id, type="external_task_dispatched", agent_id=ag,
+            task_id=tid, payload={"nonce": n},
+        ))
+        storage.event_append(RunEvent(
+            run_id=run.id, type="external_task_completed", agent_id=ag,
+            task_id=tid, payload={"nonce": n, "ok": False, "summary": f"boom-{tid}"},
+        ))
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    # dispatched_at_epoch=None → the timeout signal is skipped, isolating the
+    # external nonce-failure path (a real recent dispatch wouldn't time out).
+    snaps = [
+        TaskSnapshot(task_id="t1", owner_agent_id="ext1", status="in_progress",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="t2", owner_agent_id="ext2", status="in_progress",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return snaps
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d", worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider, compile_result=compile_result,
+    )
+    rc._tasks["t1"].state = _TaskState.in_progress
+    rc._tasks["t2"].state = _TaskState.in_progress
+
+    await rc._tick_inner()
+
+    # Exactly ONE failure surfaced this tick; the run paused.
+    failed = [
+        e for e in storage.event_list(run_id=run.id, limit=1000)
+        if e.type == "task_failed"
+    ]
+    assert [e.task_id for e in failed] == ["t1"]
+    assert rc._pause_evt.is_set()
+    # t1 reset to pending; t2 left in_progress (surfaced only on the NEXT tick).
+    assert rc._tasks["t1"].state == _TaskState.pending
+    assert rc._tasks["t2"].state == _TaskState.in_progress
+    assert "A1" in rc._handled_external_failure_nonces
+    assert "B1" not in rc._handled_external_failure_nonces
 
 
 def test_backend_failure_always_pauses_even_unattended(fake_lookup) -> None:

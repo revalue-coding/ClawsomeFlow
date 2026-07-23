@@ -731,55 +731,25 @@ class RunController:
                 self._agents.get(s.owner_agent_id)
                 or self._agents.get(book.task.owner_agent_id)
             )
-            # An in-flight EXTERNAL task normally holds a live receipt ticket
-            # that will resolve it — leave it untouched (never re-dispatch, which
-            # would mint a new nonce and invalidate the held ticket). BUT a
-            # FAILED receipt that arrived while the run was PAUSED had no live
-            # controller tick to observe its ``FAILED:`` inbox signal, so
-            # ``record_external_result`` left the ClawTeam task pinned to
-            # ``in_progress`` (it never task_updates on failure). Detect that
-            # orphaned failure from the event stream and treat it like any other
-            # failed node: surface it (task_failed → visible in history) and fall
-            # through to the runnable-reset below so 继续执行 re-dispatches it
-            # with a fresh ticket. This is symmetric with a SUCCESS receipt that
-            # lands while paused, which is reconciled to completed above.
+            # An in-flight EXTERNAL task is LEFT in_progress — never reset it here.
+            # It is resolved by the normal tick, uniformly with a live failure:
+            #   * a genuinely-waiting task (outstanding ticket, no ok=false receipt)
+            #     stays in_progress until its receipt arrives — never re-dispatched
+            #     (that would mint a new nonce and invalidate the held ticket);
+            #   * a task whose receipt FAILED while the run was paused is detected
+            #     by ``_detect_external_failures`` on the first resume tick (nonce
+            #     match) → ``_handle_failure`` surfaces the failure banner, resets
+            #     it to pending, and PAUSES. So a failure that landed during a pause
+            #     is surfaced + paused on resume (one at a time), NOT silently
+            #     re-dispatched. Do the detection in the tick (not here) so live and
+            #     resume share one code path and the run always pauses on a failure.
             if (
                 owner is not None
                 and owner.kind == AgentKind.external
                 and status == "in_progress"
             ):
-                hit = self._external_failure_receipt(s.task_id)
-                if hit is None:
-                    book.state = _TaskState.in_progress
-                    continue
-                fail_nonce, fail_detail = hit
-                if fail_nonce in self._handled_external_failure_nonces:
-                    # Already surfaced (e.g. a prior resume) — leave it to the
-                    # runnable-reset below without re-emitting a duplicate failure.
-                    pass
-                else:
-                    self._handled_external_failure_nonces.add(fail_nonce)
-                    on_failure = getattr(getattr(owner, "on_failure", None), "value", "")
-                    self._emit_event(
-                        "task_failure_detected", agent_id=owner.id, task_id=s.task_id,
-                        payload={
-                            "reason": "leader_inbox_failed", "detail": fail_detail,
-                            "on_failure": on_failure, "effective_action": "pause",
-                            "context": "resume_orphaned_external_failure",
-                            "nonce": fail_nonce,
-                        },
-                    )
-                    self._emit_event(
-                        "task_failed", agent_id=owner.id, task_id=s.task_id,
-                        payload={
-                            "reason": "leader_inbox_failed", "detail": fail_detail,
-                            "effective_action": "pause", "reset_to_pending": True,
-                            "context": "resume_orphaned_external_failure",
-                            "nonce": fail_nonce,
-                        },
-                    )
-                # Fall through (no ``continue``): status is ``in_progress`` so the
-                # runnable-reset block below resets it to pending → re-dispatched.
+                book.state = _TaskState.in_progress
+                continue
             # Non-completed. Reset to pending if it is runnable now: ``in_progress``
             # (interrupted — always had its deps met) or a failure-``blocked`` task
             # whose deps are all completed. A task still gated on incomplete deps is
@@ -1636,8 +1606,17 @@ class RunController:
             failures = failures + self._detect_external_failures(snapshots)
             if failures:
                 activity = True
+                # Handle failures ONE AT A TIME. An explicit failure resets its
+                # node to pending, surfaces the failure banner, and PAUSES — the
+                # moment that happens we STOP so a single 继续执行 never surfaces
+                # (or silently re-dispatches) more than one failure at once, which
+                # confuses the user. Any other still-failed sibling is surfaced on
+                # the NEXT tick after the user resumes. Non-pausing decisions
+                # (timeout→retry) don't set the pause event, so they continue.
                 for rec in failures:
                     await self._handle_failure(rec)
+                    if self._pause_evt.is_set():
+                        break
 
             # 2.5. Fallback recovery: detect runtime-level socket closure in
             # live pane output and proactively requeue the task for redispatch.
