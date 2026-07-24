@@ -283,10 +283,22 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, object]:
-        """Liveness probe + on-disk bootstrap snapshot."""
+        """Liveness probe + on-disk bootstrap snapshot.
+
+        ``draining`` is True while the pre-stop drain is parking live runs
+        (``csflow stop`` / upgrade / restart). The WebUI uses it to freeze
+        interactions before the process actually exits.
+        """
+        draining = False
+        try:
+            from app.scheduler.engine import get_scheduler
+            draining = bool(get_scheduler().is_draining())
+        except Exception:  # pragma: no cover - defensive
+            draining = False
         return {
             "status": "ok",
             "version": __version__,
+            "draining": draining,
             "bootstrap": bootstrap.bootstrap_summary().as_dict(),
         }
 
@@ -299,7 +311,12 @@ def create_app() -> FastAPI:
     # init), so dev/tests are unaffected. Added before routers are exercised;
     # middleware wraps the whole app regardless of registration order.
     from app.api._api_guard import ApiTokenGuardMiddleware
+    from app.api._drain_guard import ServiceDrainGuardMiddleware
+    # Starlette applies middleware in reverse add-order (last added = outermost).
+    # Drain guard is outer so a shutting-down service rejects writes before
+    # token/host checks do extra work.
     app.add_middleware(ApiTokenGuardMiddleware)
+    app.add_middleware(ServiceDrainGuardMiddleware)
 
     # Phase 1: flows CRUD; future phases register more routers here.
     from app.api import register_routers

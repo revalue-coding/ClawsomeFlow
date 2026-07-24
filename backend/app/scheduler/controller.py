@@ -520,6 +520,11 @@ class RunController:
         drain that races a user 暂停执行 must not clobber the human-facing
         banner. A concurrent :meth:`cancel` (terminate) always takes precedence
         — the finalize path checks cancel first.
+
+        **Contract:** finish every in-flight prep step first (ClawTeam sync,
+        ``RunEvent`` emission, eager ``write_pause_state`` when applicable), then
+        call this method last — ``_pause_evt.set()`` breaks the tick loop and
+        must not run while prep is still incomplete.
         """
         if not self._pause_evt.is_set() or pause_reason_outranks(
             reason, self._pause_reason,
@@ -578,7 +583,11 @@ class RunController:
     def _pause_from_failure_record(
         self, rec: FailureRecord, *, task_subject: str = "",
     ) -> None:
-        """Pause after a detected failure, stamping structured + i18n detail."""
+        """Pause after a detected failure, stamping structured + i18n detail.
+
+        Call only after ClawTeam reset + ``task_failed`` events for this
+        failure — :meth:`pause` is the last step.
+        """
         lang = resolve_ui_language()
         subject = (task_subject or "").strip()
         inbox = failed_inbox_message_for_pause(rec, lang=lang)
@@ -1484,9 +1493,15 @@ class RunController:
                         await self._wait_stop_or_timeout(self._poll_sec)
                 except SessionStartupError as exc:
                     loop_exc = exc
-                    # Scenario 9 (scheduler-side startup failure). Attended runs
-                    # PARK (paused, confirm-before-resume). Unattended runs go
-                    # terminal instead — no human to resume, caller needs a result.
+                    self._emit_event(
+                        "run_loop_exception",
+                        payload={
+                            "error": (
+                                f"session startup failed "
+                                f"({exc.agent_id}/{exc.phase}): {exc.detail}"
+                            )[:1000],
+                        },
+                    )
                     self._backend_stop_after_internal_error(
                         detail=f"session startup failed ({exc.agent_id}/{exc.phase}): {exc.detail}"[:1000],
                     )
@@ -1498,14 +1513,14 @@ class RunController:
                     )
                 except Exception as exc:
                     loop_exc = exc
-                    self._backend_stop_after_internal_error(
-                        detail=f"scheduler exception: {exc}"[:1000],
-                    )
-                    logger.exception("run_loop_unhandled_exception", error=str(exc))
                     self._emit_event(
                         "run_loop_exception",
                         payload={"error": str(exc)[:1000]},
                     )
+                    self._backend_stop_after_internal_error(
+                        detail=f"scheduler exception: {exc}"[:1000],
+                    )
+                    logger.exception("run_loop_unhandled_exception", error=str(exc))
                 finally:
                     # Always try to stop live sessions first so abnormal exits do
                     # not leak orphaned agent processes. On a pause this releases
@@ -3047,9 +3062,8 @@ class RunController:
         if explicit:
             # Do NOT retry and do NOT advance to downstream tasks. Reset the node
             # to pending (re-dispatchable on 继续执行 — and this also blocks its
-            # downstream, whose dependency is no longer completed) and PAUSE
-            # immediately so the user can fix the problem. The pause is
-            # reason=failure → never auto-resumed, even for unattended runs.
+            # downstream, whose dependency is no longer completed), emit failure
+            # events, then PAUSE last (reason=failure → never auto-resumed).
             synced = await self._reset_clawteam_task(
                 book.task.id, locked_by=rec.agent_id or agent.id,
             )

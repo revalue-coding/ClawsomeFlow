@@ -151,6 +151,22 @@ def test_health_returns_ok(client: TestClient) -> None:
     assert body["status"] == "ok"
     assert body["version"] == __version__
     assert "bootstrap" in body
+    # Idle service is never draining (WebUI freeze gate keys off this flag).
+    assert body.get("draining") is False
+
+
+def test_health_reports_draining(client: TestClient) -> None:
+    from app.scheduler.engine import get_scheduler
+
+    sched = get_scheduler()
+    assert sched.is_draining() is False
+    sched._draining = True
+    try:
+        body = client.get("/health").json()
+        assert body["draining"] is True
+        assert body["status"] == "ok"
+    finally:
+        sched._draining = False
 
 
 def test_health_bootstrap_summary_fields(client: TestClient) -> None:

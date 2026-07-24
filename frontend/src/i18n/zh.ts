@@ -136,6 +136,13 @@ const zh = {
     updateFailed: "无法确认升级是否完成——可能仍在后台进行，也可能已失败。请刷新页面确认；若仍未升级，请手动执行以下升级命令：",
     updateFailedCommand: "csflow upgrade",
     updateReload: "立即刷新",
+    serviceFreezeDrainingTitle: "服务正在关停",
+    serviceFreezeDrainingBody:
+      "后台正在安全暂停执行中的任务流（升级 / 重启 / 停止）。请稍候，不要在此期间操作。",
+    serviceFreezeOfflineTitle: "服务暂时不可用",
+    serviceFreezeOfflineBody:
+      "后台服务已停止或尚未就绪。恢复后界面会自动解锁；若刚完成升级，页面可能自动刷新。",
+    serviceFreezeHint: "已锁定界面，避免与关停 / 启动流程冲突。",
   },
   flowNotify: {
     button: "通知",

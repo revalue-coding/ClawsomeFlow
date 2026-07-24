@@ -136,6 +136,13 @@ const en = {
       "Couldn't confirm the upgrade finished — it may still be completing in the background, or it may have failed. Reload to check; if it didn't apply, run the upgrade command manually:",
     updateFailedCommand: "csflow upgrade",
     updateReload: "Reload now",
+    serviceFreezeDrainingTitle: "Service shutting down",
+    serviceFreezeDrainingBody:
+      "The backend is safely parking in-flight runs (upgrade / restart / stop). Please wait — do not interact with the UI.",
+    serviceFreezeOfflineTitle: "Service temporarily unavailable",
+    serviceFreezeOfflineBody:
+      "The backend has stopped or is not ready yet. The UI unlocks automatically when it returns; after an upgrade this page may reload.",
+    serviceFreezeHint: "The interface is locked to avoid conflicting with stop / start.",
   },
   flowNotify: {
     button: "Notifications",

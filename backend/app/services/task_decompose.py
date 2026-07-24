@@ -272,11 +272,12 @@ Flow goal into a scheduler-ready DAG of tasks for the user to review.
 
 {goal}
 
-## Owner sources — every task owner is ONE of these two kinds
+## Owner sources — every task owner is ONE of these kinds
 
-ClawsomeFlow assigns each task to either a **persistent agent** (a managed agent
-that already exists on one of the user's persistent platforms) or a **temporary
-agent** (an ad-hoc agent you define inline just for this Flow).
+ClawsomeFlow assigns each task to a **persistent agent** (a managed agent that
+already exists on one of the user's persistent platforms), a **temporary agent**
+(an ad-hoc agent you define inline just for this Flow), or — for steps a person
+must do — a **human external execution node** (section 3).
 
 ### 1) Persistent agents you may assign as task owners
 
@@ -301,13 +302,37 @@ For every temporary agent you define, its `agents[]` entry must set:
 - `isTemporary`: true
 - `id`: a fresh unique id not used by any persistent agent
 
-### Git workspace for every non-OpenClaw owner
+### Git workspace for every non-OpenClaw agent
 
-Any agent with `kind` != `openclaw` (persistent Hermes or temporary) must set:
+Any agent with `kind` != `openclaw` (persistent Hermes or temporary — but NOT an
+`external` node, see section 3) must set:
 - `repo`: `{temp_agent_workdir}` by default unless the goal clearly requires another path
 - `targetBranch`: `main`
 
-OpenClaw agents must NOT set `repo` or `targetBranch`.
+OpenClaw agents and external nodes must NOT set `repo` or `targetBranch`.
+
+### 3) Human external execution node (a person does this step)
+
+Some steps are best done by a **person**, not an AI agent — e.g. a manual
+approval / sign-off, a real-world action, a subjective judgement, or supplying
+something only a human has. For such a step — and ONLY when a human is genuinely
+the right executor — make the task owner a **human external node**:
+
+- `kind`: `external`
+- `external`: `{{"channel": "human"}}` (you MAY add `"assignee": "<who/hint>"`, a
+  free-form display hint shown on the person's todo card)
+- `isTemporary`: false, `isLeader`: false
+- Do NOT set `repo`, `targetBranch`, `profile`, or `command` — a human node owns
+  no worktree.
+
+The human node's task appears as a todo card in the WebUI and the person submits
+the result there. Use it sparingly — only when a human clearly fits; otherwise
+prefer an agent owner.
+
+**Never assign the other two external channels** (`webhook` / `remote_csflow`):
+those require endpoint URLs, pairing secrets, and remote Flow ids you do NOT have,
+which the user must wire up manually afterward. The ONLY `external.channel` you
+may emit is `"human"`.
 
 ## Existing agents in editor (already drafted by the user; treat as hints)
 
@@ -322,7 +347,8 @@ OpenClaw agents must NOT set `repo` or `targetBranch`.
 Produce one JSON object with two arrays:
 
 - `agents`: each item has `id`, `kind`, optional `repo`, optional `targetBranch`,
-  `isTemporary`, `isLeader`.
+  `isTemporary`, `isLeader`. A human external node instead sets `kind: "external"`
+  + `external: {{"channel": "human"}}` (see section 3) and omits `repo`/`targetBranch`.
 - `tasks`: each item has `id`, `ownerAgentId`, `subject` (<=80 chars),
   `description` (1-3 sentences), `dependsOn` (array of task ids), `isLeaderSummary`
   (boolean), optional `timeoutSeconds` (default 1800).
@@ -331,20 +357,28 @@ Invariants (the server rejects violations):
 1. Exactly one task has `isLeaderSummary: true`, owned by `{leader_agent_id}`.
 2. The leader owns no other (non-summary) task.
 3. Task ids and agent ids are unique; `dependsOn` references resolve; the DAG is acyclic.
-4. Owner kinds limited to `openclaw`, `hermes`, or a temporary-agent platform
-   advertised in section 1 (`claude`, `codex`, `cursor`, `gemini`, `kimi`,
-   `qwen`, `opencode`, `qoder`, `codebuddy`). Only assign temporary platforms
-   listed there as available on this host.
+4. Owner kinds limited to `openclaw`, `hermes`, a temporary-agent platform
+   advertised as available on this host (`claude`, `codex`, `cursor`, `gemini`,
+   `kimi`, `qwen`, `opencode`, `qoder`, `codebuddy`), or `external` with
+   `external.channel = "human"` (section 3). Only assign temporary platforms
+   listed as available on this host; NEVER emit an `external.channel` of
+   `webhook` or `remote_csflow`.
 5. Every agent in `agents` is referenced by at least one task.
 6. All task `subject` and `description` text is in {result_language}.
 
 ## Owner assignment policy (in priority order)
 
+First decide, per task, whether the step genuinely needs a **person** (manual
+approval, real-world action, subjective sign-off, or input only a human can
+supply). If so, make its owner a **human external node** (section 3). Otherwise
+pick an agent owner:
+
 a. Reuse a *persistent agent* from section 1 **only when it genuinely fits** the
    task (set `isTemporary: false`). Never force an ill-suited persistent agent
    onto a task just to reuse one.
-b. If no persistent agent fits, you MUST define a *temporary agent* per section 2
-   (set `isTemporary: true`, `kind` != `openclaw`; follow section 3 for repo/branch).
+b. If no persistent agent fits (and the step does not need a person), you MUST
+   define a *temporary agent* per section 2 (set `isTemporary: true`, `kind` !=
+   `openclaw`; follow the "Git workspace" rule above for repo/branch).
    Do NOT leave a worker task's `ownerAgentId` empty.
 c. Only if NO temporary platform is available above and no persistent agent fits,
    set `ownerAgentId` to an empty string `""` for the user to pick manually
@@ -407,8 +441,8 @@ user already has". Apply the Owner assignment policy literally and strictly:
 
 - Reuse a persistent agent from section 1 ONLY when it is a genuine fit for the
   task. Do NOT force an unrelated/ill-suited persistent agent onto a task.
-- Whenever no persistent agent is a clean fit, you MUST define a NEW temporary
-  agent for that task (section 2 + section 3).
+- Whenever no persistent agent is a clean fit (and the step does not need a
+  person), you MUST define a NEW temporary agent for that task (section 2).
 - It is WRONG to return a DAG where every task is owned by a pre-existing
   persistent agent unless each of those agents is genuinely the best fit.\
 """

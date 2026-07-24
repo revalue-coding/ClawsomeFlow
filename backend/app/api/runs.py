@@ -1557,12 +1557,10 @@ async def pause_run(
     # already rejected above by the ``_PAUSE_ALLOWED`` check.
     if controller.is_pausing():
         return _to_summary(storage.run_get(run.id) or run)
-    controller.pause(reason=PAUSE_REASON_USER, detail="user requested pause")
-    # Eagerly persist the user reason BEFORE the cooperative finalize lands.
-    # Otherwise a concurrent ``csflow`` restart drain can race onto the same
-    # controller (or write finalize first) and the banner falsely says the run
-    # was paused for "service restart / upgrade". ``write_pause_state`` refuses
-    # to downgrade this marker to ``drain``.
+    # Eagerly persist the user reason BEFORE signalling pause (``_pause_evt``).
+    # ``write_pause_state`` must land first so a racing drain finalize cannot
+    # clobber the banner; only then call :meth:`RunController.pause` as the
+    # last step — it breaks the tick loop.
     at = datetime.now(timezone.utc).isoformat()
     write_pause_state(
         run, reason=PAUSE_REASON_USER, detail="user requested pause", at=at,
@@ -1576,6 +1574,7 @@ async def pause_run(
         storage.run_update(run)
     except Exception:  # pragma: no cover - best-effort stamp
         logger.warning("pause_state_eager_persist_failed", run_id=run.id, exc_info=True)
+    controller.pause(reason=PAUSE_REASON_USER, detail="user requested pause")
     refreshed = storage.run_get(run.id) or run
     return _to_summary(refreshed)
 

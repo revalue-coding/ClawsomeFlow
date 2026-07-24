@@ -20,6 +20,7 @@ import {
   getUpgradeModalOpen,
   setUpgradeModalOpen,
 } from "@/components/UpdateNotice";
+import { ServiceFreezeOverlay } from "@/components/ServiceFreezeOverlay";
 import { Modal, MODAL_ROOT_ID } from "@/components/ui";
 import { DialogProvider } from "@/components/dialog";
 import { SilentLink } from "@/components/SilentLink";
@@ -167,6 +168,9 @@ export function AppShell() {
             it never blocks when empty; each Modal's overlay re-enables events. */}
         <div id={MODAL_ROOT_ID} className="pointer-events-none absolute inset-0 z-40" />
       </main>
+      {/* Freeze UI during pre-stop drain / service-down gap (CLI stop/start
+          included). Sits under UpgradeModal (z-100) when that path is active. */}
+      <ServiceFreezeOverlay />
       {update?.updateAvailable && (
         <UpgradeModal
           status={update}

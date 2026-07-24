@@ -6089,13 +6089,37 @@ function proposalToRows(
   const registeredOpenclawIds = new Set(openclawOptions.map((agent) => agent.id));
   const byId = new Map<
     string,
-    { kind: OwnerKind; repo: string; targetBranch: string; isTemporary: boolean }
+    {
+      kind: OwnerKind;
+      repo: string;
+      targetBranch: string;
+      isTemporary: boolean;
+      externalChannel: ExternalChannelDraft;
+      externalAssignee: string;
+    }
   >();
   for (const a of proposal.agents) {
     const aid = String(a.id ?? "").trim();
     if (!aid) continue;
     const kind: OwnerKind = toOwnerKind(a.kind);
     if (kind === "openclaw" && !registeredOpenclawIds.has(aid)) {
+      continue;
+    }
+    // External execution nodes: the AI decomposer only ever proposes the "human"
+    // channel (webhook / remote_csflow need endpoints + secrets it lacks). Ignore
+    // any other channel defensively so a bad proposal can't smuggle one in.
+    if (kind === "external") {
+      const ext = (a.external ?? {}) as Record<string, unknown>;
+      const channel = String(ext.channel ?? "").trim();
+      if (channel !== "human") continue;
+      byId.set(aid, {
+        kind: "external",
+        repo: "",
+        targetBranch: "",
+        isTemporary: false,
+        externalChannel: "human",
+        externalAssignee: String(ext.assignee ?? "").trim(),
+      });
       continue;
     }
     const repo = String(a.repo ?? "");
@@ -6116,11 +6140,25 @@ function proposalToRows(
         : kind === "hermes"
         ? !hermesOptions.some((h) => h.id === aid)
         : true;
-    byId.set(aid, { kind, repo, targetBranch, isTemporary });
+    byId.set(aid, {
+      kind,
+      repo,
+      targetBranch,
+      isTemporary,
+      externalChannel: "",
+      externalAssignee: "",
+    });
   }
   for (const a of openclawOptions) {
     if (!byId.has(a.id)) {
-      byId.set(a.id, { kind: "openclaw", repo: "", targetBranch: "", isTemporary: false });
+      byId.set(a.id, {
+        kind: "openclaw",
+        repo: "",
+        targetBranch: "",
+        isTemporary: false,
+        externalChannel: "",
+        externalAssignee: "",
+      });
     }
   }
 
@@ -6139,6 +6177,8 @@ function proposalToRows(
         isTemporary:
           ctxKind !== "openclaw"
           && !hermesOptions.some((h) => h.id === normalizedLeaderId),
+        externalChannel: "",
+        externalAssignee: "",
       });
     }
   }
@@ -6154,12 +6194,16 @@ function proposalToRows(
           repo: "",
           targetBranch: "",
           isTemporary: true,
+          externalChannel: "" as ExternalChannelDraft,
+          externalAssignee: "",
         }
       : {
           kind: "claude" as OwnerKind,
           repo: "",
           targetBranch: "",
           isTemporary: true,
+          externalChannel: "" as ExternalChannelDraft,
+          externalAssignee: "",
         };
     const dependsOn = Array.isArray(tk.dependsOn ?? tk.depends_on)
       ? ((tk.dependsOn ?? tk.depends_on) as unknown[]).map(String)
@@ -6185,8 +6229,9 @@ function proposalToRows(
         ? meta.targetBranch
         : "",
       ownerIsTemporary: meta.kind !== "openclaw" && meta.isTemporary,
-      // The AI decomposer never proposes external execution nodes.
-      externalChannel: "" as ExternalChannelDraft,
+      // The AI decomposer may propose a "human" external node; the other two
+      // channels (webhook / remote_csflow) it never proposes (no endpoints/secrets).
+      externalChannel: meta.externalChannel,
       externalEndpointUrl: "",
       externalBaseUrl: "",
       externalFlowId: "",
@@ -6196,7 +6241,7 @@ function proposalToRows(
       externalRemoteFlowName: "",
       externalRemoteFlowDescription: "",
       externalInputs: "",
-      externalAssignee: "",
+      externalAssignee: meta.externalAssignee,
       dependsOn,
       isLeaderSummary: !!(tk.isLeaderSummary ?? tk.is_leader_summary),
       timeoutSeconds: Number(

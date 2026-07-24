@@ -112,6 +112,10 @@ class FlowScheduler:
         # a user-triggered cancel still aborts.
         self._draining = False
 
+    def is_draining(self) -> bool:
+        """True while :meth:`drain_to_terminal` is in progress (pre-stop)."""
+        return self._draining
+
     # ── lifecycle ───────────────────────────────────────────────────
 
     def start_run(

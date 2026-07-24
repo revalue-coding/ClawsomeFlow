@@ -189,7 +189,7 @@ def test_prompt_lists_persistent_agents_and_platforms() -> None:
     assert "Persistent agents you may assign" in body
     assert "id=writer" in body and "kind=openclaw" in body
     assert "id=sage" in body and "kind=hermes" in body
-    assert "Git workspace for every non-OpenClaw owner" in body
+    assert "Git workspace for every non-OpenClaw agent" in body
     assert "targetBranch" in body
     # Available temporary platforms (probed) listed.
     assert "Temporary-agent platforms available" in body
@@ -197,6 +197,21 @@ def test_prompt_lists_persistent_agents_and_platforms() -> None:
     # Temporary fallback + default workdir + never-openclaw rule.
     assert "~/csflow-ai-decompose" in body
     assert "NEVER be a temporary agent" in body
+
+
+def test_prompt_offers_human_external_node_only() -> None:
+    """The decomposer may assign a human external node, but never webhook /
+    remote_csflow (those need endpoints/secrets/remote ids it does not have)."""
+    body = _compose_body(kind=AgentKind.openclaw, platforms=["claude"])
+    # Human external node section is advertised with the correct output format.
+    assert "Human external execution node" in body
+    assert '{"channel": "human"}' in body
+    assert "`kind`: `external`" in body
+    # The AI is told to decide, per task, when a person is genuinely required.
+    assert "genuinely needs a **person**" in body
+    # The other two channels must be explicitly forbidden.
+    assert "Never assign the other two external channels" in body
+    assert "webhook" in body and "remote_csflow" in body
 
 
 def test_openclaw_delivery_uses_curl_callback() -> None:
