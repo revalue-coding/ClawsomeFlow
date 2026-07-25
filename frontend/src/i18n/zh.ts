@@ -595,6 +595,9 @@ const zh = {
     columnFinished: "完成时间",
     columnUser: "用户",
     scheduledTag: "定时",
+    delegatedTag: "远程委派执行",
+    delegatedTagTitle:
+      "由远程 ClawsomeFlow 委派执行（配对凭据：{{pairToken}}，来源执行流：{{sourceRun}}）。以无人值守方式运行，会跳过需要人参与的环节。",
     filterStatus: "按状态过滤",
     filterStatusAll: "全部",
     schedule: {
@@ -730,6 +733,20 @@ const zh = {
     resume: "继续执行",
     resuming: "正在恢复…",
     resumeConfirm: "该执行流因内部错误被暂停，状态可能不一致。仍要继续吗？已完成的工作会保留，被中断的步骤会在原 worktree 中重新执行。",
+    delegatedTitle: "远程委派执行",
+    delegatedIntro:
+      "这条执行流不是你启动的——是远程的 ClawsomeFlow 把它当作自己流程中的一个子任务，委派给本实例执行的。因为本机没有人在等它，它以无人值守方式运行，会跳过所有需要人参与的环节：",
+    delegatedSkipCheckpoint:
+      "人工检查点被忽略：勾选了「完成后需人工检查」的节点，做完会直接交给下一个节点，不会停下来等你确认。",
+    delegatedSkipReview:
+      "没有合并审查：每个节点在任务内就把自己的改动合并进目标分支，不会有任何合并停下来等你批准。",
+    delegatedSkipComplaint:
+      "没有投诉阶段：leader 汇总完成后直接进入终态，事后无法再要求返工。",
+    delegatedStillPauses:
+      "但失败不会被跳过：某个节点报告自己做不完时，执行流依然会暂停并等你处理，绝不会自动恢复。结果由发起方主动轮询我们获取，我们不会向外推送任何内容。",
+    delegatedPairToken: "配对凭据",
+    delegatedSourceRun: "来源执行流",
+    delegatedSourceTask: "来源任务",
     pausedTitle: "执行流已暂停",
     pauseNeedsConfirm: "因内部错误暂停——继续前请先确认。",
     pauseFailureInboxLabel: "节点失败报告",

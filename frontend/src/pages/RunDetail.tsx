@@ -954,6 +954,43 @@ export function RunDetail() {
         </div>
       </div>
 
+      {/* Remote-delegation notice — a delegated run is always unattended, so
+          spell out which human phases it skips (the user did not trigger it and
+          would otherwise wonder why review / complaint / checkpoints never
+          appeared). Ids shown belong to the ORIGIN instance, so they are plain
+          text, not links. */}
+      {run.delegateOrigin && (
+        <Card className="border-indigo-200">
+          <CardTitle>{t("runDetail.delegatedTitle")}</CardTitle>
+          <div className="space-y-2 text-sm text-ink-600">
+            <p>{t("runDetail.delegatedIntro")}</p>
+            <ul className="list-disc space-y-1 pl-5">
+              <li>{t("runDetail.delegatedSkipCheckpoint")}</li>
+              <li>{t("runDetail.delegatedSkipReview")}</li>
+              <li>{t("runDetail.delegatedSkipComplaint")}</li>
+            </ul>
+            <p>{t("runDetail.delegatedStillPauses")}</p>
+            <div className="pt-1 text-xs text-ink-500">
+              <div>
+                {t("runDetail.delegatedPairToken")}:{" "}
+                <span className="font-mono">{run.delegateOrigin.pairTokenName || "—"}</span>
+              </div>
+              <div>
+                {t("runDetail.delegatedSourceRun")}:{" "}
+                <span className="font-mono">{run.delegateOrigin.sourceRunId || "—"}</span>
+                {run.delegateOrigin.sourceTaskId && (
+                  <>
+                    {" · "}
+                    {t("runDetail.delegatedSourceTask")}:{" "}
+                    <span className="font-mono">{run.delegateOrigin.sourceTaskId}</span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* Paused banner — why the run is parked + resume/terminate hint */}
       {run.status === "paused" && (
         <Card

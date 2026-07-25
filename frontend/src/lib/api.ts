@@ -366,6 +366,13 @@ export interface RunPauseState {
   at: string | null;
 }
 
+/** Who delegated this run to us. Ids belong to the ORIGIN instance — never link them. */
+export interface RunDelegateOrigin {
+  pairTokenName: string;
+  sourceRunId: string;
+  sourceTaskId: string;
+}
+
 export interface RunSummary {
   id: string;
   flowId: string;
@@ -380,6 +387,12 @@ export interface RunSummary {
   isScheduled: boolean;
   /** Present only while status === "paused" — drives the pause banner. */
   pause?: RunPauseState | null;
+  /**
+   * Present only for a run a remote ClawsomeFlow delegated to us. Drives the
+   * "remote delegated" tag and the skipped-phases notice (delegated runs are
+   * always unattended).
+   */
+  delegateOrigin?: RunDelegateOrigin | null;
 }
 
 export interface PendingMerge {

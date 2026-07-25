@@ -81,6 +81,7 @@ contain them) — never rename the values, only the Python symbols.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 POST_COMPLAINT_STATUS_KEY = "_csflow_post_complaint_final_status"
@@ -249,6 +250,26 @@ def write_pause_state(
     run.inputs = inputs
 
 
+def read_delegate_origin(run: Any) -> dict[str, Any] | None:
+    """Return the delegation record stamped by ``POST /api/external/delegate``.
+
+    ``None`` when this run was not delegated by a remote ClawsomeFlow. The blob
+    is written as a JSON *string* (see :data:`DELEGATE_ORIGIN_KEY`), but a dict
+    is accepted too so a hand-edited / future-shape marker still loads. A
+    malformed value degrades to ``None`` rather than raising — the marker also
+    gates ``GET /api/external/delegated-runs/{id}``, and a run that cannot prove
+    its origin must simply look undelegated.
+    """
+    raw = (getattr(run, "inputs", None) or {}).get(DELEGATE_ORIGIN_KEY)
+    if not raw:
+        return None
+    try:
+        info = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except Exception:
+        return None
+    return info if isinstance(info, dict) else None
+
+
 def read_pause_state(run: Any) -> dict[str, Any] | None:
     """Return the pause-state blob, or ``None`` when the run is not paused."""
     raw = (getattr(run, "inputs", None) or {}).get(PAUSE_STATE_KEY)
@@ -391,6 +412,7 @@ __all__ = [
     "pause_reason_outranks",
     "pause_reason_rank",
     "read_checkpoint_state",
+    "read_delegate_origin",
     "read_failed_auto_merge_agent_ids",
     "read_failure_guidance",
     "read_pause_state",

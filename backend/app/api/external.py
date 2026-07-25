@@ -52,6 +52,7 @@ from app.scheduler.run_metadata import (
     DELEGATE_ORIGIN_KEY,
     EXTERNAL_CALLBACK_KEY,
     UNATTENDED_KEY,
+    read_delegate_origin,
 )
 from app.services.external_tasks import (
     DELEGATE_SUCCESS_STATUSES,
@@ -306,7 +307,7 @@ async def delegated_run_status(
 
     storage = get_storage()
     run = storage.run_get(run_id)
-    origin = _delegate_origin(run) if run is not None else None
+    origin = read_delegate_origin(run) if run is not None else None
     if run is None or origin is None:
         # Also covers "delegated by a different pairing credential" — do not
         # distinguish, or this becomes a run-id probe.
@@ -334,18 +335,6 @@ async def delegated_run_status(
             storage.event_list(run_id=run.id, since_id=None, limit=500),
         ) or "",
     )
-
-
-def _delegate_origin(run: FlowRun) -> dict[str, Any] | None:
-    """The delegation record stamped by :func:`delegate_flow`, if any."""
-    raw = (run.inputs or {}).get(DELEGATE_ORIGIN_KEY)
-    if not raw:
-        return None
-    try:
-        info = json.loads(raw) if isinstance(raw, str) else dict(raw)
-    except Exception:
-        return None
-    return info if isinstance(info, dict) else None
 
 
 __all__ = ["router"]

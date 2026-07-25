@@ -93,6 +93,7 @@ from app.scheduler.run_metadata import (
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
     REVERTED_MERGE_AGENT_IDS_KEY,
     UNATTENDED_KEY,
+    read_delegate_origin,
     read_pause_state,
     write_failure_guidance,
     write_pause_state,
@@ -197,6 +198,19 @@ class RunPauseView(_CamelModel):
     at: str | None = None
 
 
+class RunDelegateOriginView(_CamelModel):
+    """Who delegated this run to us (``POST /api/external/delegate``).
+
+    Present only for runs a *remote* ClawsomeFlow asked this instance to execute.
+    ``source_run_id`` / ``source_task_id`` belong to the ORIGIN instance, so they
+    are diagnostic text only — never link them to a local run.
+    """
+
+    pair_token_name: str = ""
+    source_run_id: str = ""
+    source_task_id: str = ""
+
+
 class RunSummary(_CamelModel):
     id: str
     flow_id: str
@@ -212,6 +226,11 @@ class RunSummary(_CamelModel):
     is_scheduled: bool = False
     #: Present only while ``status == "paused"`` — why the run was parked.
     pause: RunPauseView | None = None
+    #: Present only for a run delegated by a remote ClawsomeFlow. Drives the
+    #: "remote delegated" tag in the run list and the skipped-phases notice on
+    #: the Run detail page. A delegated run is always unattended, so the WebUI
+    #: can explain the skipped human phases from this field alone.
+    delegate_origin: RunDelegateOriginView | None = None
 
 
 class PendingMergeView(_CamelModel):
@@ -529,6 +548,23 @@ def _public_run_inputs(inputs: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _to_delegate_origin_view(r: FlowRun) -> RunDelegateOriginView | None:
+    """Expose the delegation record (if any) to the WebUI.
+
+    Only the pairing credential *name* is surfaced — never its secret, which
+    lives in ``Config.external_remote_targets`` on the origin side and is not
+    part of the marker at all.
+    """
+    origin = read_delegate_origin(r)
+    if origin is None:
+        return None
+    return RunDelegateOriginView(
+        pair_token_name=str(origin.get("pairTokenName") or ""),
+        source_run_id=str(origin.get("sourceRunId") or ""),
+        source_task_id=str(origin.get("sourceTaskId") or ""),
+    )
+
+
 def _to_summary(r: FlowRun) -> RunSummary:
     pause_view: RunPauseView | None = None
     if r.status == RunStatus.paused:
@@ -556,6 +592,7 @@ def _to_summary(r: FlowRun) -> RunSummary:
         inputs=_public_run_inputs(r.inputs),
         is_scheduled=bool(r.is_scheduled),
         pause=pause_view,
+        delegate_origin=_to_delegate_origin_view(r),
     )
 
 
@@ -664,6 +701,7 @@ def _to_detail(r: FlowRun, *, flow: Flow | None, cfg: Config) -> RunDetail:
         inputs=_public_run_inputs(r.inputs),
         is_scheduled=bool(r.is_scheduled),
         pause=pause_view,
+        delegate_origin=_to_delegate_origin_view(r),
         pending_merges=pending,
         clawteam_board_url=_board_url(r.team_name, cfg),
         spec_snapshot=spec_snapshot,

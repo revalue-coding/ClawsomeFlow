@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -2868,6 +2869,62 @@ def test_run_summary_exposes_is_scheduled(app_client: TestClient) -> None:
     rows = {row["teamName"]: row for row in app_client.get("/api/runs").json()["items"]}
     assert rows["csflow-sched"]["isScheduled"] is True
     assert rows["csflow-manual"]["isScheduled"] is False
+
+
+def test_run_summary_exposes_delegate_origin(app_client: TestClient) -> None:
+    """A remotely delegated run is identifiable in list + detail.
+
+    Drives the "远程委派执行" tag and the Run-detail skipped-phases notice. The
+    marker itself is a ``_csflow_*`` key, so it must NOT leak into the public
+    "Execution Parameters" inputs — only into the dedicated field.
+    """
+    flow = _make_flow()
+    origin = {
+        "pairTokenName": "remote-flow-abc",
+        "sourceRunId": "run-upstream1",
+        "sourceTaskId": "task-up",
+    }
+    delegated = _make_run(
+        flow_id=flow.id, status=RunStatus.completed, team_name="csflow-delegated",
+        inputs={
+            "topic": "real input",
+            "_csflow_unattended": "true",
+            "_csflow_delegate_origin": json.dumps(origin),
+        },
+    )
+    _make_run(flow_id=flow.id, status=RunStatus.completed, team_name="csflow-local")
+
+    rows = {row["teamName"]: row for row in app_client.get("/api/runs").json()["items"]}
+    assert rows["csflow-delegated"]["delegateOrigin"] == {
+        "pairTokenName": "remote-flow-abc",
+        "sourceRunId": "run-upstream1",
+        "sourceTaskId": "task-up",
+    }
+    assert rows["csflow-local"]["delegateOrigin"] is None
+
+    body = app_client.get(f"/api/runs/{delegated.id}").json()
+    assert body["delegateOrigin"]["pairTokenName"] == "remote-flow-abc"
+    # The raw marker stays out of user-facing Execution Parameters.
+    assert body["inputs"] == {"topic": "real input"}
+
+
+def test_run_summary_delegate_origin_tolerates_malformed_marker(
+    app_client: TestClient,
+) -> None:
+    """A corrupt marker degrades to "not delegated" instead of erroring the list.
+
+    Historical/hand-edited data must never break the run list, so the reader
+    returns None rather than raising (same contract as the delegated-run status
+    endpoint, which then simply 404s).
+    """
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id, status=RunStatus.completed,
+        inputs={"_csflow_delegate_origin": "not-json{"},
+    )
+    r = app_client.get(f"/api/runs/{run.id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["delegateOrigin"] is None
 
 
 def test_webhook_marker_key_hidden_from_run_inputs(app_client: TestClient) -> None:

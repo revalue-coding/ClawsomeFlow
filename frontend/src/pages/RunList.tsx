@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { SilentLink } from "@/components/SilentLink";
 import { useTranslation } from "react-i18next";
 
-import { ApiError, RunSummary, api } from "@/lib/api";
+import { ApiError, RunDelegateOrigin, RunSummary, api } from "@/lib/api";
 import { Card, EmptyState, ErrorBox, Loading, StatusPill } from "@/components/ui";
 import { RunIcon } from "@/components/icons";
 import { useDialog } from "@/components/dialog";
@@ -71,6 +71,22 @@ function ScheduledTag() {
   return (
     <span className="shrink-0 rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:border-sky-500/50 dark:bg-sky-500/10 dark:text-sky-300">
       {t("runList.scheduledTag")}
+    </span>
+  );
+}
+
+/** Small badge marking a run a remote ClawsomeFlow delegated to this instance. */
+function DelegatedTag({ origin }: { origin: RunDelegateOrigin }) {
+  const { t } = useTranslation();
+  return (
+    <span
+      className="shrink-0 rounded-full border border-indigo-300 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-500/50 dark:bg-indigo-500/10 dark:text-indigo-300"
+      title={t("runList.delegatedTagTitle", {
+        pairToken: origin.pairTokenName || "—",
+        sourceRun: origin.sourceRunId || "—",
+      })}
+    >
+      {t("runList.delegatedTag")}
     </span>
   );
 }
@@ -263,6 +279,7 @@ export function RunList() {
                           {flowNameById[r.flowId] || r.flowId}
                         </div>
                         {r.isScheduled && <ScheduledTag />}
+                        {r.delegateOrigin && <DelegatedTag origin={r.delegateOrigin} />}
                       </div>
                       <StatusPill status={r.status} />
                     </div>
@@ -320,6 +337,7 @@ export function RunList() {
                             {flowNameById[r.flowId] || r.flowId}
                           </SilentLink>
                           {r.isScheduled && <ScheduledTag />}
+                          {r.delegateOrigin && <DelegatedTag origin={r.delegateOrigin} />}
                         </div>
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-ink-700">{r.teamName}</td>
