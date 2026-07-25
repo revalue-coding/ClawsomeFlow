@@ -656,6 +656,8 @@ class PendingMerge(_ApiBase):
     agent_id: str
     branch: str
     target_branch: str = DEFAULT_TARGET_BRANCH
+    #: Main repository directory merges land in (not the branch name).
+    repo_root: str = ""
     diff_summary: dict[str, Any] = Field(default_factory=dict)
     leader_suggestion: str = ""
 

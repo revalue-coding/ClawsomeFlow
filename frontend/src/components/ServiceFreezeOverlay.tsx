@@ -109,7 +109,9 @@ export function ServiceFreezeOverlay() {
             ? t("shell.serviceFreezeDrainingBody")
             : t("shell.serviceFreezeOfflineBody")}
         </p>
-        <p className="mt-3 text-xs text-ink-500">{t("shell.serviceFreezeHint")}</p>
+        {reason === "draining" ? (
+          <p className="mt-3 text-xs text-ink-500">{t("shell.serviceFreezeHint")}</p>
+        ) : null}
       </div>
     </div>
   );

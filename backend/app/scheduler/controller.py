@@ -1705,6 +1705,18 @@ class RunController:
             if not self._stop_requested():
                 polled = await self._poll_external_tasks(snapshots)
                 activity = activity or polled
+                # Poll may record ``external_task_completed(ok=false)`` in this
+                # same tick — step 2 already ran failure detection BEFORE poll,
+                # so surface those receipts now instead of waiting another tick
+                # (and another poll interval) for ``task_failure_detected``.
+                if polled and not self._pause_evt.is_set():
+                    post_poll = self._detect_external_failures(snapshots)
+                    if post_poll:
+                        activity = True
+                        for rec in post_poll:
+                            await self._handle_failure(rec)
+                            if self._pause_evt.is_set():
+                                break
 
         # 3. Manual checkpoint refresh/clear. While a checkpoint is open,
         #    local-agent dispatch stays paused (worktree/session safety —
@@ -1952,6 +1964,33 @@ class RunController:
                 out.append(book)
         return out
 
+    def _leader_summary_book(self) -> _TaskBook | None:
+        if not self._leader_summary_task_id:
+            return None
+        return self._tasks.get(self._leader_summary_task_id)
+
+    def _pending_completed_checkpoint_upstreams(self) -> list[_TaskBook]:
+        """Non-summary tasks that finished but still need manual approval.
+
+        The leader summary is allowed to run with an empty ``depends_on`` once
+        every non-summary task has completed; those implicit edges must still
+        honour ``requires_human_checkpoint``.
+        """
+        out: list[_TaskBook] = []
+        for up_book in self._tasks.values():
+            up_task = up_book.task
+            if up_task.is_leader_summary:
+                continue
+            if not self._task_requires_manual_checkpoint(up_task):
+                continue
+            if up_task.id in self._checkpoint_passed_tasks:
+                continue
+            if up_book.state != _TaskState.completed:
+                continue
+            out.append(up_book)
+        out.sort(key=lambda b: b.task.id)
+        return out
+
     async def _maybe_open_eager_checkpoint(self) -> bool:
         """Open a checkpoint for a completed upstream that still needs review.
 
@@ -1975,6 +2014,10 @@ class RunController:
                 b for b in self._tasks.values()
                 if up_task.id in (b.task.depends_on or [])
             ]
+            if not dependents:
+                sum_book = self._leader_summary_book()
+                if sum_book is not None:
+                    dependents = [sum_book]
             if not dependents:
                 continue
             non_summary = [
@@ -2307,6 +2350,12 @@ class RunController:
                 if checkpoint_target is None and dep_book.state == _TaskState.completed:
                     checkpoint_target = (book, dep_book)
                 break
+            if book.task.is_leader_summary:
+                pending = self._pending_completed_checkpoint_upstreams()
+                if pending:
+                    blocked_by_checkpoint = True
+                    if checkpoint_target is None:
+                        checkpoint_target = (book, pending[0])
             if not blocked_by_checkpoint:
                 dispatchable.append(book)
 

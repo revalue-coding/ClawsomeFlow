@@ -218,6 +218,7 @@ class PendingMergeView(_CamelModel):
     agent_id: str
     branch: str
     target_branch: str = DEFAULT_TARGET_BRANCH
+    repo_root: str = ""
     diff_summary: dict[str, Any] = Field(default_factory=dict)
     leader_suggestion: str = ""
 

@@ -367,9 +367,15 @@ async def finalize_run(
             diff = _compose_diff_summary(diff=raw_diff, dirty=dirty)
             branch = wt.branch_name if wt else f"clawteam/{ipt.run.team_name}/{a.id}"
             target_branch = (a.target_branch or DEFAULT_TARGET_BRANCH).strip() or DEFAULT_TARGET_BRANCH
+            repo_root = ""
+            if wt is not None and wt.repo_root:
+                repo_root = str(wt.repo_root).strip()
+            elif a.repo:
+                repo_root = str(a.repo).strip()
             pending.append(PendingMerge(
                 agent_id=a.id, branch=branch,
                 target_branch=target_branch,
+                repo_root=repo_root,
                 diff_summary=diff,
                 leader_suggestion="",  # filled later from leader's deliverable (Phase 7+)
             ))

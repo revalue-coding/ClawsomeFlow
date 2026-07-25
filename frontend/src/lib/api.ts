@@ -386,6 +386,8 @@ export interface PendingMerge {
   agentId: string;
   branch: string;
   targetBranch?: string;
+  /** Main repo directory merges apply to (not the target branch name). */
+  repoRoot?: string;
   diffSummary: Record<string, unknown>;
   leaderSuggestion: string;
 }

@@ -25,7 +25,7 @@ running instance can simulate every case just by varying the URL in the Flow:
     /hook?mode=manual            stay "running" until you click on the web page
     /hook?nopoll=1               accept WITHOUT a poll url — exercises the
                                  fallback where we poll this same endpoint
-    /hook?ack=500                reject the dispatch itself (retry next tick)
+    /hook?ack=500                reject the dispatch itself (Run pauses; Continue to retry)
 
 Inspect what happened at ``http://<this-host>:18899/`` (HTML, auto-refresh) or
 ``GET /log`` (JSON). Everything is also appended to --log-file as JSONL.

@@ -198,6 +198,16 @@ type TerminalListTask = {
 
 const BOARD_PANEL_HEIGHT = "h-[480px]";
 
+/** Legacy backend placeholder when an external failure had no summary. */
+const EXTERNAL_FAILURE_EMPTY_DETAIL =
+  "external executor reported failure without a reason";
+
+function sanitizePauseFailureDetail(raw: string | undefined | null): string {
+  const s = String(raw ?? "").trim();
+  if (!s || s === EXTERNAL_FAILURE_EMPTY_DETAIL) return "";
+  return s;
+}
+
 const EMPTY_TASK_BOARD: TaskBoardModel = {
   visibleNodes: [],
   listNodes: [],
@@ -799,7 +809,7 @@ export function RunDetail() {
     let subject = (pause.failureTaskSubject ?? "").trim();
     let agentId = (pause.failureAgentId ?? "").trim();
     let signal = (pause.failureSignal ?? "").trim();
-    let detail = (pause.failureDetail ?? "").trim();
+    let detail = sanitizePauseFailureDetail(pause.failureDetail ?? "");
     let message = (pause.failureInboxMessage ?? "").trim();
     // Legacy runs: reconstruct from the latest failure event + Flow spec.
     if (!taskId || !message) {
@@ -813,11 +823,12 @@ export function RunDetail() {
         if (!subject) subject = subjectOf(tid);
         if (!agentId) agentId = (e.agentId ?? "").trim();
         if (!signal) signal = String(payload.reason ?? "").trim();
-        if (!detail) detail = String(payload.detail ?? "").trim();
+        if (!detail) detail = sanitizePauseFailureDetail(String(payload.detail ?? ""));
         break;
       }
     }
     if (!subject && taskId) subject = subjectOf(taskId);
+    detail = sanitizePauseFailureDetail(detail);
     if (!taskId && !subject && !message && !detail) return null;
     return { taskId, subject: subject || taskId || "—", agentId, signal, detail, message };
   }, [run?.status, run?.pause, run?.specSnapshot, events]);
@@ -952,14 +963,10 @@ export function RunDetail() {
         >
           <CardTitle>{t("runDetail.pausedTitle")}</CardTitle>
           <div className="space-y-1 text-sm text-ink-600">
-            <p>{t(`runDetail.pauseReason.${run.pause?.reason || "user"}`)}</p>
-            {run.pause?.reason === "failure" && pauseFailureIsExternal ? (
-              <p className="text-sm text-rose-700">
-                {t("runDetail.pauseExternalFailureHint")}
-                {pauseFailureReport?.detail
-                  ? `: ${pauseFailureReport.detail}`
-                  : null}
-              </p>
+            {!(
+              run.pause?.reason === "failure" && pauseFailureReport
+            ) ? (
+              <p>{t(`runDetail.pauseReason.${run.pause?.reason || "user"}`)}</p>
             ) : null}
             {run.pause?.needsConfirmation && (
               <p className="text-amber-700">{t("runDetail.pauseNeedsConfirm")}</p>
@@ -1005,30 +1012,31 @@ export function RunDetail() {
                     const zh = i18n.language?.startsWith("zh");
                     const detailSep = zh ? "：" : ": ";
                     const failedSep = ": ";
+                    const detailText = sanitizePauseFailureDetail(
+                      pauseFailureReport.detail,
+                    );
                     const msg =
                       pauseFailureReport.message ||
                       (pauseFailureReport.signal === "timeout"
                         ? t("runDetail.pauseFailureSyntheticTimeout", {
-                            detail: pauseFailureReport.detail
-                              ? `${detailSep}${pauseFailureReport.detail}`
+                            detail: detailText
+                              ? `${detailSep}${detailText}`
                               : "",
                           })
                         : pauseFailureReport.signal === "dispatch_failed"
-                        // Not an agent-authored FAILED line — the hand-off never
-                        // reached the node, so don't dress it up as one.
                         ? t("runDetail.pauseFailureSyntheticDispatchFailed", {
-                            detail: pauseFailureReport.detail
-                              ? `${detailSep}${pauseFailureReport.detail}`
+                            detail: detailText
+                              ? `${detailSep}${detailText}`
                               : "",
                           })
                         : pauseFailureReport.taskId
                           ? t("runDetail.pauseFailureSyntheticFailed", {
                               taskId: pauseFailureReport.taskId,
-                              detail: pauseFailureReport.detail
-                                ? `${failedSep}${pauseFailureReport.detail}`
+                              detail: detailText
+                                ? `${failedSep}${detailText}`
                                 : "",
                             })
-                          : pauseFailureReport.detail);
+                          : detailText);
                     if (!msg) return null;
                     return (
                       <div className="space-y-1">
@@ -1097,6 +1105,15 @@ export function RunDetail() {
                 key={p.agentId}
                 runId={run.id}
                 pending={p}
+                mergeRepoPath={
+                  (p.repoRoot ?? "").trim()
+                  || (
+                    (run.specSnapshot?.agents as Array<{ id?: string; repo?: string }> | undefined)
+                      ?.find((a) => String(a.id ?? "") === p.agentId)
+                      ?.repo
+                    ?? ""
+                  ).trim()
+                }
                 onMerge={() => onMerge(p.agentId)}
                 onDismiss={() => onDismiss(p.agentId)}
               />
@@ -2647,16 +2664,20 @@ function firstNonEmptyString(...values: unknown[]): string | null {
 function PendingMergeCard({
   runId,
   pending,
+  mergeRepoPath,
   onMerge,
   onDismiss,
 }: {
   runId: string;
   pending: PendingMerge;
+  /** Directory merges land in (``repo_root`` from finalize, not ``targetBranch``). */
+  mergeRepoPath: string;
   onMerge: () => void;
   onDismiss: () => void;
 }) {
   const { t } = useTranslation();
   const targetBranch = pending.targetBranch?.trim() || DEFAULT_TARGET_BRANCH;
+  const mergeInto = mergeRepoPath.trim();
   const diff = pending.diffSummary as {
     files_changed?: number | string[];
     insertions?: number;
@@ -2697,7 +2718,7 @@ function PendingMergeCard({
           </span>
         </div>
         <div className="text-xs text-ink-500 mt-1">
-          {t("runDetail.mergeTarget")}: {targetBranch}
+          {t("runDetail.mergeTarget")}: {mergeInto || "—"}
         </div>
         <div className="text-xs text-ink-500 mt-1">
           {fileCount != null

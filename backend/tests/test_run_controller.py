@@ -2538,6 +2538,78 @@ async def test_live_external_failure_detected_via_nonce_not_inbox(
 
 
 @pytest.mark.asyncio
+async def test_external_poll_failure_surfaces_in_same_tick(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure recorded during poll must emit task_failure_detected this tick."""
+    from app.services import external_tasks as ext_svc
+
+    spec = _external_only_spec()
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    storage = get_storage()
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_dispatched", agent_id="ext",
+        task_id="t_ext", payload={"nonce": "N1"},
+    ))
+    storage.event_append(RunEvent(
+        run_id=run.id, type="external_task_accepted", agent_id="ext",
+        task_id="t_ext",
+        payload={"nonce": "N1", "poll": {"url": "http://x", "auth": "task_token"}},
+    ))
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    async def fake_poll(**kwargs):
+        del kwargs
+        await ext_svc.complete_external_task(
+            storage=storage, run=run, task_id="t_ext", nonce="N1",
+            ok=False, summary="", source="test",
+        )
+        return "recorded", ext_svc.EXTERNAL_SCHEDULER_POLL_INTERVAL_SEC
+
+    monkeypatch.setattr(ext_svc, "poll_external_task", fake_poll)
+
+    snaps = [
+        TaskSnapshot(
+            task_id="t_ext", owner_agent_id="ext", status="in_progress",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=0,
+        ),
+        TaskSnapshot(
+            task_id="ts", owner_agent_id="leader", status="blocked",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snaps)
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d", worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider, compile_result=compile_result,
+    )
+
+    await rc.tick()
+    assert rc._pause_evt.is_set()
+    events = storage.event_list(run_id=run.id, limit=200)
+    assert any(e.type == "task_failure_detected" for e in events)
+    assert any(e.type == "task_failed" and e.task_id == "t_ext" for e in events)
+
+
+@pytest.mark.asyncio
 async def test_refused_external_dispatch_fails_the_task_and_pauses(
     fake_lookup,
 ) -> None:
@@ -2653,7 +2725,7 @@ async def test_tick_polls_waiting_external_nodes_and_respects_the_interval(
 
     async def fake_poll(*, storage, run, agent, task_id, http_allowed):
         calls.append({"task_id": task_id, "http_allowed": http_allowed})
-        return "waiting", 30.0
+        return "waiting", 1.0
 
     monkeypatch.setattr(
         "app.services.external_tasks.poll_external_task", fake_poll,
@@ -2678,7 +2750,7 @@ async def test_tick_polls_waiting_external_nodes_and_respects_the_interval(
     assert await rc._poll_external_tasks(snaps) is False
     assert calls == [{"task_id": "t_ext", "http_allowed": True}]
 
-    # Immediately after, the 30s interval blocks another request but the
+    # Immediately after, the scheduler interval blocks another HTTP poll but the
     # already-answered case is still applied (http_allowed=False).
     await rc._poll_external_tasks(snaps)
     assert calls[-1] == {"task_id": "t_ext", "http_allowed": False}
@@ -5641,6 +5713,82 @@ async def test_waiting_webhook_external_redispatch_invalidates_prior_nonce(
     assert recorded["status"] == "recorded"
     assert len(fake.task_updates) == 1
     assert "fresh result" in fake.mailbox_calls[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_opens_for_remote_external_when_summary_has_empty_depends_on(
+    fake_lookup,
+) -> None:
+    """Leader summary may leave depends_on empty; it still waits for every
+    non-summary task — checkpoint-required upstreams must gate it."""
+    spec = FlowSpec(
+        agents=[
+            FlowAgent(
+                id="wh",
+                kind=AgentKind.external,
+                external=ExternalNodeConfig(
+                    channel=ExternalChannel.webhook,
+                    endpoint_url="https://partner.example/hook",
+                ),
+            ),
+            FlowAgent(
+                id="leader", kind=AgentKind.claude, repo="/tmp/main",
+                is_leader=True, merge_strategy=MergeStrategy.manual,
+            ),
+        ],
+        tasks=[
+            FlowTask(
+                id="t_ext",
+                owner_agent_id="wh",
+                subject="仅测试",
+                description="remote step",
+                requires_human_checkpoint=True,
+            ),
+            FlowTask(
+                id="ts",
+                owner_agent_id="leader",
+                subject="summary",
+                description="wrap",
+                depends_on=[],
+                is_leader_summary=True,
+            ),
+        ],
+    )
+    run = _persist_flow_and_run(spec)
+    sessions: dict[str, _RecordingSession] = {}
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        s = _RecordingSession(agent=agent, team_name=run.team_name, run_id=run.id)
+        sessions[agent.id] = s
+        return s
+
+    snapshots = [
+        TaskSnapshot(
+            task_id="t_ext", owner_agent_id="wh", status="completed",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="ts", owner_agent_id="leader", status="pending",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=factory,
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=lambda: [],
+    )
+    await rc.tick()
+    assert run.status == RunStatus.awaiting_user_checkpoint
+    cp = rc.checkpoint_snapshot()
+    assert cp is not None
+    assert cp["items"][0]["task_id"] == "t_ext"
+    assert sessions.get("leader") is None or sessions["leader"].dispatched == []
 
 
 @pytest.mark.asyncio

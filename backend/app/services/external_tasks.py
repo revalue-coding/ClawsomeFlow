@@ -45,10 +45,9 @@ ways, both driven by us: the dispatch response carries it, or we poll for it.
 
     # B2. Long-running: accept it, we will ask you later.
     202 {"status": "accepted",
-         "poll": {"url": "https://you/jobs/123",   # optional
-                  "intervalSeconds": 30}}          # optional hint
+         "poll": {"url": "https://you/jobs/123"}}   # url optional
 
-    # …then, on our schedule (outbound GET, one every intervalSeconds):
+    # …then, on our schedule (outbound GET — interval is ours, not yours):
     GET <poll.url, else the dispatch endpoint + ?runId=&taskId=>
     Authorization: Bearer <taskToken>
     → 200 {"status": "running"}                       # keep waiting
@@ -145,12 +144,10 @@ _TICKET_CONTEXT = "csflow-external"
 EXTERNAL_SCHEMA_VERSION = 2
 _EVENT_SCAN_LIMIT = 5000
 _OUTBOUND_TIMEOUT_SEC = 15.0
-#: Result polling (outbound GET). The partner may propose an interval; we clamp
-#: it so a hostile/typo'd value can neither hammer them nor stall a Flow.
+#: Result polling (outbound GET). Interval is fixed by the scheduler — partners
+#: only tell us WHERE to poll (``poll.url``), not how often.
 _POLL_TIMEOUT_SEC = 10.0
-_POLL_DEFAULT_INTERVAL_SEC = 15.0
-_POLL_MIN_INTERVAL_SEC = 5.0
-_POLL_MAX_INTERVAL_SEC = 600.0
+EXTERNAL_SCHEDULER_POLL_INTERVAL_SEC = 1.0
 #: Backoff applied when a poll itself fails (network error / non-2xx). Poll
 #: failures are TRANSIENT — never a task failure; the task's own
 #: ``timeout_seconds`` is what eventually ends a truly stuck node.
@@ -395,16 +392,6 @@ def classify_result_status(body: Any) -> tuple[str, str]:
     return "waiting", summary
 
 
-def _clamp_poll_interval(value: Any) -> float:
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return _POLL_DEFAULT_INTERVAL_SEC
-    if seconds <= 0:
-        return _POLL_DEFAULT_INTERVAL_SEC
-    return max(_POLL_MIN_INTERVAL_SEC, min(_POLL_MAX_INTERVAL_SEC, seconds))
-
-
 def _poll_spec_from_reply(body: Any) -> dict[str, Any]:
     """Poll instructions from a webhook partner's "accepted" response.
 
@@ -414,10 +401,8 @@ def _poll_spec_from_reply(body: Any) -> dict[str, Any]:
     """
     poll = body.get("poll") if isinstance(body, dict) else None
     url = ""
-    interval: Any = None
     if isinstance(poll, dict):
         url = str(poll.get("url") or poll.get("statusUrl") or "").strip()
-        interval = poll.get("intervalSeconds") or poll.get("interval")
     elif isinstance(poll, str):
         url = poll.strip()
     if not url and isinstance(body, dict):
@@ -426,7 +411,6 @@ def _poll_spec_from_reply(body: Any) -> dict[str, Any]:
     return {
         "auth": "task_token",
         "url": url,
-        "intervalSeconds": _clamp_poll_interval(interval),
     }
 
 
@@ -448,7 +432,6 @@ def _reply_contract(endpoint_url: str) -> dict[str, Any]:
             "poll": {
                 "url": "https://your-system/jobs/123  (optional — omit to be "
                        "polled on this same endpoint)",
-                "intervalSeconds": 30,
             },
         },
         "poll": {
@@ -600,7 +583,6 @@ def _delegate_poll_spec(ext: Any, remote_run_id: str | None) -> dict[str, Any]:
         "auth": "pair_token",
         "pairTokenRef": (getattr(ext, "pair_token_ref", "") or "").strip(),
         "url": f"{base}/api/external/delegated-runs/{rid}" if (rid and base) else "",
-        "intervalSeconds": _POLL_DEFAULT_INTERVAL_SEC,
     }
 
 
@@ -791,7 +773,7 @@ async def poll_external_task(
     if find_completion_event(
         storage, run_id=run.id, task_id=task_id, nonce=nonce,
     ) is not None:
-        return "waiting", _POLL_DEFAULT_INTERVAL_SEC  # already recorded
+        return "waiting", EXTERNAL_SCHEDULER_POLL_INTERVAL_SEC  # already recorded
     accepted = latest_accepted_event(
         storage, run_id=run.id, task_id=task_id, nonce=nonce,
     )
@@ -805,12 +787,12 @@ async def poll_external_task(
             ok=bool(result.get("ok")), summary=str(result.get("summary") or ""),
             source="external_dispatch_reply",
         )
-        return "recorded", _POLL_DEFAULT_INTERVAL_SEC
+        return "recorded", EXTERNAL_SCHEDULER_POLL_INTERVAL_SEC
 
     spec = payload.get("poll")
     if not isinstance(spec, dict):
         return "unavailable", _POLL_ERROR_INTERVAL_SEC
-    interval = _clamp_poll_interval(spec.get("intervalSeconds"))
+    interval = EXTERNAL_SCHEDULER_POLL_INTERVAL_SEC
     if not http_allowed:
         return "waiting", interval
 
@@ -1096,7 +1078,7 @@ async def complete_external_task(
         )
     else:
         if not summary_text:
-            summary_text = "external executor reported failure without a reason"
+            summary_text = ""
         # External failures are detected by NONCE identity, not the leader inbox:
         # the ``external_task_completed(ok=false, nonce)`` event below is the sole
         # signal (matched to the current dispatch nonce by

@@ -749,7 +749,7 @@ def test_webhook_accepted_then_polled_to_success(
         first, interval = await ext_svc.poll_external_task(
             storage=storage, run=run, agent=agent, task_id="t1",
         )
-        assert (first, interval) == ("waiting", 30.0)
+        assert (first, interval) == ("waiting", ext_svc.EXTERNAL_SCHEDULER_POLL_INTERVAL_SEC)
         second, _ = await ext_svc.poll_external_task(
             storage=storage, run=run, agent=agent, task_id="t1",
         )
@@ -790,7 +790,7 @@ def test_poll_falls_back_to_the_dispatch_endpoint(
             storage=storage, run=run, agent=agent, task_id="t1",
         )
         assert outcome == "recorded"
-        assert interval == 15.0  # default cadence when the partner suggests none
+        assert interval == ext_svc.EXTERNAL_SCHEDULER_POLL_INTERVAL_SEC
 
     asyncio.run(scenario())
     assert gets[0]["url"] == "https://partner.example/hook"
@@ -974,7 +974,6 @@ def test_dispatch_remote_csflow_forwards_configured_inputs(
         "auth": "pair_token",
         "pairTokenRef": "peer",
         "url": "http://remote:17017/api/external/delegated-runs/run-remote-1",
-        "intervalSeconds": 15.0,
     }
 
 
