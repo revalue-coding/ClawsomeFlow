@@ -214,6 +214,15 @@ def test_prompt_offers_human_external_node_only() -> None:
     assert "webhook" in body and "remote_csflow" in body
 
 
+def test_prompt_requires_output_summary_requirement_per_task() -> None:
+    """The leader must fill outputSummaryRequirement on every decomposed task."""
+    body = _compose_body(kind=AgentKind.openclaw, platforms=["claude"])
+    assert "outputSummaryRequirement" in body
+    assert "REQUIRED for EVERY task" in body
+    # Enforced as a stated invariant, not just mentioned in the schema.
+    assert "non-empty, task-specific `outputSummaryRequirement`" in body
+
+
 def test_openclaw_delivery_uses_curl_callback() -> None:
     body = _compose_body(kind=AgentKind.openclaw)
     # OpenClaw stdout is not read → it must curl the result back.

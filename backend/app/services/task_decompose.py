@@ -350,8 +350,21 @@ Produce one JSON object with two arrays:
   `isTemporary`, `isLeader`. A human external node instead sets `kind: "external"`
   + `external: {{"channel": "human"}}` (see section 3) and omits `repo`/`targetBranch`.
 - `tasks`: each item has `id`, `ownerAgentId`, `subject` (<=80 chars),
-  `description` (1-3 sentences), `dependsOn` (array of task ids), `isLeaderSummary`
-  (boolean), optional `timeoutSeconds` (default 1800).
+  `description` (1-3 sentences), `outputSummaryRequirement` (REQUIRED — see below),
+  `dependsOn` (array of task ids), `isLeaderSummary` (boolean), optional
+  `timeoutSeconds` (default 1800).
+
+### `outputSummaryRequirement` — REQUIRED for EVERY task
+
+Fill `outputSummaryRequirement` on every task: a concrete, verifiable statement
+of what that task's owner must include in its final output summary. This summary
+is passed to downstream dependent tasks and shown to the user, so it must be
+specific to the task — list the exact artifacts / file paths / row counts /
+metrics / decisions / anomalies the owner has to report. For a worker task, focus
+on what its downstream tasks need to consume; for the `isLeaderSummary` task,
+state how the leader should report the overall result back to the user. Never
+leave it empty or write a generic filler like "report the result". Write it in
+{result_language}.
 
 Invariants (the server rejects violations):
 1. Exactly one task has `isLeaderSummary: true`, owned by `{leader_agent_id}`.
@@ -364,7 +377,9 @@ Invariants (the server rejects violations):
    listed as available on this host; NEVER emit an `external.channel` of
    `webhook` or `remote_csflow`.
 5. Every agent in `agents` is referenced by at least one task.
-6. All task `subject` and `description` text is in {result_language}.
+6. All task `subject`, `description`, and `outputSummaryRequirement` text is in
+   {result_language}.
+7. Every task has a non-empty, task-specific `outputSummaryRequirement`.
 
 ## Owner assignment policy (in priority order)
 
