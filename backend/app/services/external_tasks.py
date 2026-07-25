@@ -55,8 +55,8 @@ ways, both driven by us: the dispatch response carries it, or we poll for it.
     → 200 {"status": "failed",  "summary": "<reason>"} # blocked/failed
 
 Answer the dispatch POST within ``_OUTBOUND_TIMEOUT_SEC`` or use B2. A non-2xx
-dispatch response = dispatch failure: the task stays pending and is retried
-next tick with a FRESH token. Status vocabulary is matched tolerantly
+dispatch response = dispatch failure: the run PAUSES, and the user's 继续执行
+re-dispatches with a FRESH token. Status vocabulary is matched tolerantly
 (``succeeded``/``done``/``error``/``pending``… all understood).
 
 **C. Remote ClawsomeFlow delegate** — origin → peer::
@@ -456,8 +456,9 @@ async def dispatch_external_task(
 ) -> None:
     """Mint the task token, persist the dispatch event, hand the task out.
 
-    Raising here fails the dispatch — the controller leaves the task pending
-    and retries next tick (with a FRESH nonce, invalidating this token).
+    Raising here fails the dispatch — the controller resets the task to pending
+    and PAUSES the run; the user's 继续执行 re-dispatches with a FRESH nonce
+    (invalidating this token).
 
     The executor's answer decides how the result comes back: a terminal status
     in the response completes the task, anything else means "we will poll you".

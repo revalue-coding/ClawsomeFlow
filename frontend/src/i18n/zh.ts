@@ -491,7 +491,7 @@ const zh = {
       externalRemoteConfigured: "已配置：{{flowId}}｜参数字段：{{fields}}",
       externalRemoteNoParams: "（无参数字段）",
       externalHumanHint: "由人工完成该子任务后在 Run 详情页返回结果。派发时会把任务说明（含任务描述、上游输入、输出要求）推送到该 Flow 配置的通知渠道（Flow 列表 →「通知」按钮），提醒执行人处理。",
-      externalWebhookHint: "派发时向该端点 POST 任务包（含 taskToken 与 reply 说明）。做完了就在这次响应里返回 {\"status\":\"success\",\"summary\":...}；耗时较长则返回 {\"status\":\"accepted\"}（可带 poll.url），之后由 ClawsomeFlow 定时 GET 查询状态。summary 会作为本节点产出给下游。ClawsomeFlow 只发出请求，不需要对方能访问到本机，跨机也无需任何配置。",
+      externalWebhookHint: "派发时向该端点 POST 任务包。summary 会作为本节点产出给下游。",
       externalRemoteHint: "委托给远端某条 Flow 执行，其最终报告作为本节点产出。",
       externalRemoteHintWithParams:
         "委托给远端某条 Flow 执行，其最终报告作为本节点产出。该远端 Flow 声明了参数字段：上游任务会智能填入字段值；你也可以自行填写确定的参数值（将覆盖上游回报）。",

@@ -289,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
         accepted: dict[str, Any] = {
             "status": "accepted",
             "recordId": record["id"],
-            "poll": {"intervalSeconds": 5},
+            "poll": {},
         }
         if poll_url:
             accepted["poll"]["url"] = poll_url

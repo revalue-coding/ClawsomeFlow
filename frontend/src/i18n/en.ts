@@ -497,7 +497,7 @@ const en = {
       externalRemoteConfigured: "Configured: {{flowId}} | param fields: {{fields}}",
       externalRemoteNoParams: "(no param fields)",
       externalHumanHint: "A person completes this subtask and returns the result on the Run page. On dispatch, the task sheet (description, upstream inputs, output requirement) is pushed to the Flow's notify channels (Flow list → \"Notify\" button) to alert the assignee.",
-      externalWebhookHint: "On dispatch we POST a task package to this endpoint (it carries a taskToken and a self-describing reply contract). Already done? Answer that request with {\"status\":\"success\",\"summary\":...}. Long-running? Answer {\"status\":\"accepted\"} (optionally with poll.url) and ClawsomeFlow will GET your status on a schedule. The summary becomes this node’s output. ClawsomeFlow only makes outbound calls — it never needs to be reachable from your side, so cross-machine needs no setup.",
+      externalWebhookHint: "On dispatch we POST a task package to this endpoint. The summary becomes this node’s output.",
       externalRemoteHint: "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output.",
       externalRemoteHintWithParams:
         "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output. The remote Flow declares param fields: upstream tasks will fill them intelligently; you may also enter known values yourself (they override upstream reports).",
