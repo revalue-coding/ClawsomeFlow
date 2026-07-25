@@ -742,20 +742,8 @@ const en = {
     resume: "Continue",
     resuming: "Resuming…",
     resumeConfirm: "This run was paused by an internal error, so its state may be inconsistent. Continue anyway? Completed work is kept and interrupted steps re-run in their existing worktree.",
-    delegatedTitle: "Remote delegated run",
-    delegatedIntro:
-      "This run was not started by you — a remote ClawsomeFlow delegated it to this instance as a subtask of its own flow. Because nobody here is waiting on it, it runs unattended and skips every phase that needs a person:",
-    delegatedSkipCheckpoint:
-      "Human checkpoints are ignored: a task with 「requires human checkpoint」 enabled completes and hands off to the next task without stopping.",
-    delegatedSkipReview:
-      "No merge review: every task merges its own changes into the target branch as its final step, so no merge waits for your approval.",
-    delegatedSkipComplaint:
-      "No complaint phase: the run goes straight to a terminal status once the leader summary completes, so you cannot ask for a rework afterwards.",
-    delegatedStillPauses:
-      "Failures are NOT skipped: if a node reports it could not finish, the run still pauses and waits for you — it is never auto-resumed. The result is returned by the origin polling us; we never push anything back.",
-    delegatedPairToken: "Pairing credential",
-    delegatedSourceRun: "Origin run",
-    delegatedSourceTask: "origin task",
+    delegatedNotice:
+      "This run was delegated by a remote ClawsomeFlow and automatically skips human checkpoints, merge review, and the complaint phase. Pairing credential: {{pairToken}}; origin run: {{sourceRun}}; origin task: {{sourceTask}}.",
     pausedTitle: "Run paused",
     pauseNeedsConfirm: "Paused by an internal error — review before continuing.",
     pauseFailureInboxLabel: "Node failure report",
