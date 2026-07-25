@@ -41,6 +41,7 @@ import { Card, CardTitle, ErrorBox, Loading, Modal, StatusPill } from "@/compone
 import { useDialog } from "@/components/dialog";
 import { ChatIcon } from "@/components/icons";
 import { cn } from "@/lib/cn";
+import { layoutDagLayered } from "@/lib/dagLayeredLayout";
 import { useTheme } from "@/lib/theme";
 import {
   DEFAULT_TARGET_BRANCH,
@@ -4359,13 +4360,13 @@ function MultiSelect({
 // ──────────────────────────────────────────────────────────────────────
 
 /**
- * Compact SVG visualization of the task DAG: each task is a dot positioned
- * by its longest-path depth (column) within its non-summary cohort; edges
- * follow ``dependsOn`` arrows. Summary task pins to its own rightmost
- * column. Hovering a dot reveals the subject in a floating tooltip.
+ * Compact SVG visualization of the task DAG: layered (Sugiyama-lite)
+ * columns by longest-path depth, barycenter row order, content-centered
+ * in the viewBox. Summary pins to the rightmost column. Hovering a dot
+ * reveals the full subject in a floating tooltip.
  *
  * Pure-DOM SVG keeps the bundle lean (no D3 / Cytoscape). Layout is
- * deterministic and recomputed on every render.
+ * deterministic and shared with the Run task board via ``layoutDagLayered``.
  */
 /** SVG node/edge colors for the dependency graph. SVG attributes can't read
  *  Tailwind utility classes, so we switch the literal palette by theme. The
@@ -4474,18 +4475,14 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
   const layout = useMemo(() => computeGraphLayout(tasks), [tasks]);
   if (layout.nodes.length === 0) return null;
 
-  const { nodes, edges, width, height } = layout;
+  const { nodes, edges, width, height, baseRadius } = layout;
   const hovered = nodes.find((n) => n.id === hover);
-  const nodeDensityScale = Math.max(
-    0.78,
-    Math.min(1.24, 1.24 - Math.max(0, nodes.length - 4) * 0.028),
-  );
+  // Radius tracks layered gaps but stays hard-capped — sparse graphs must
+  // not balloon dots just to fill the card.
   const nodeRadius = (node: Pick<GraphNode, "isSummary" | "degree">, isHover = false) => {
-    const rawBase = node.isSummary ? 14.2 : 9.6 + Math.min(4.4, node.degree * 0.64);
-    const scaled = node.isSummary
-      ? Math.max(11.2, rawBase * (nodeDensityScale + 0.08))
-      : Math.max(7.0, rawBase * nodeDensityScale);
-    return isHover ? scaled + 1.8 : scaled;
+    const worker = Math.min(baseRadius + Math.min(1.6, node.degree * 0.35), 11);
+    const scaled = node.isSummary ? Math.min(worker + 2.2, 13) : worker;
+    return isHover ? scaled + 1.4 : scaled;
   };
   const hoveredLeft = hovered
     ? `${Math.max(2, Math.min(98, (hovered.x / Math.max(1, width)) * 100))}%`
@@ -4799,209 +4796,50 @@ interface GraphEdge {
 }
 
 /**
- * Network-style layout: a lightweight Fruchterman–Reingold force simulation
- * with a soft horizontal bias toward each node's topological depth. The
- * result keeps the "upstream-left, downstream-right" reading order of a
- * traditional DAG drawing while letting nodes spread organically along the
- * vertical axis — so even chain-shaped DAGs read as a network rather than
- * a rigid column ladder.
- *
- * Determinism: a small string-hash PRNG seeds the initial scatter so the
- * layout is stable across renders (no jitter while the user is editing).
- *
- * Complexity: O(iters · n²). With ITER=180 and n≤30 (typical Flow size)
- * this stays well under 5 ms in practice; we don't memoise inside the
- * function — ``DependencyGraph`` already wraps it in ``useMemo``.
+ * Layered DAG layout (Sugiyama-lite) via ``layoutDagLayered`` — shared with
+ * the Run task board so editor preview and live board stay visually aligned.
+ * ``DependencyGraph`` already wraps this in ``useMemo``.
  */
 function computeGraphLayout(tasks: TaskRow[]): {
   nodes: GraphNode[];
   edges: GraphEdge[];
   width: number;
   height: number;
+  baseRadius: number;
 } {
   const usableTasks = tasks.filter((r) => r.id.trim());
   if (usableTasks.length === 0) {
-    return { nodes: [], edges: [], width: 0, height: 0 };
+    return { nodes: [], edges: [], width: 0, height: 0, baseRadius: 8 };
   }
   const byId = new Map<string, TaskRow>();
   for (const r of usableTasks) byId.set(r.id, r);
 
-  // ── Depth (longest path from a root) ────────────────────────────────
-  const depth = new Map<string, number>();
-  const visiting = new Set<string>();
-  function depthOf(id: string): number {
-    if (depth.has(id)) return depth.get(id)!;
-    if (visiting.has(id)) return 0; // cycle guard
-    visiting.add(id);
-    const r = byId.get(id);
-    const deps = (r?.dependsOn ?? []).filter((d) => byId.has(d));
-    const d = deps.length === 0 ? 0 : 1 + Math.max(...deps.map(depthOf));
-    visiting.delete(id);
-    depth.set(id, d);
-    return d;
-  }
-  for (const r of usableTasks) depthOf(r.id);
-
-  let maxWorkerDepth = 0;
-  for (const r of usableTasks) {
-    if (!r.isLeaderSummary) {
-      maxWorkerDepth = Math.max(maxWorkerDepth, depth.get(r.id)!);
-    }
-  }
-  // Summary anchors one step further than every worker.
-  const totalDepth = maxWorkerDepth + 1;
-
-  // ── Canvas sizing (align with RunDetail dependency board strategy) ---
-  const n = usableTasks.length;
-  const BOARD_CANVAS_MIN_WIDTH = 320;
-  const BOARD_CANVAS_MIN_HEIGHT = 340;
-  const BOARD_PAD_X = 56;
-  const BOARD_PAD_Y = 42;
-  const width = Math.max(
-    BOARD_CANVAS_MIN_WIDTH,
-    260 + n * 84 + Math.max(0, totalDepth - 1) * 22,
-  );
-  const height = Math.max(
-    BOARD_CANVAS_MIN_HEIGHT,
-    210 + Math.ceil(n / 2) * 72,
-  );
-  const innerWidth = width - BOARD_PAD_X * 2;
-  const innerHeight = height - BOARD_PAD_Y * 2;
-
-  // ── Edges + degree --------------------------------------------------
-  const edgeList: [string, string][] = [];
   const degree = new Map<string, number>();
   for (const r of usableTasks) degree.set(r.id, 0);
   for (const r of usableTasks) {
     for (const dep of r.dependsOn) {
       if (!byId.has(dep)) continue;
-      edgeList.push([dep, r.id]);
       degree.set(dep, (degree.get(dep) ?? 0) + 1);
       degree.set(r.id, (degree.get(r.id) ?? 0) + 1);
     }
   }
 
-  // ── Deterministic init via string-hash PRNG -------------------------
-  function rng(seed: string) {
-    let h = 2166136261;
-    for (let i = 0; i < seed.length; i += 1) {
-      h ^= seed.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    return () => {
-      h = Math.imul(h ^ (h >>> 15), 2246822507);
-      h = Math.imul(h ^ (h >>> 13), 3266489909);
-      h ^= h >>> 16;
-      return ((h >>> 0) % 10000) / 10000;
-    };
-  }
-
-  interface FNode {
-    id: string;
-    x: number;
-    y: number;
-    fx: number;
-    fy: number;
-    targetX: number;
-  }
-  const nodes: FNode[] = usableTasks.map((r) => {
-    const d = r.isLeaderSummary ? totalDepth : depth.get(r.id)!;
-    const rand = rng(r.id);
-    const targetX = totalDepth > 0
-      ? BOARD_PAD_X + (d / totalDepth) * innerWidth
-      : BOARD_PAD_X + innerWidth / 2;
-    return {
+  const laid = layoutDagLayered(
+    usableTasks.map((r) => ({
       id: r.id,
-      x: targetX + (rand() - 0.5) * 26,
-      y: BOARD_PAD_Y + rand() * innerHeight,
-      fx: 0,
-      fy: 0,
-      targetX,
-    };
-  });
-  const nodeById = new Map(nodes.map((n2) => [n2.id, n2] as const));
-
-  // ── Force simulation -------------------------------------------------
-  const ITERS = 140;
-  const k = Math.sqrt((width * height) / Math.max(1, n)) * 0.6;
-  for (let iter = 0; iter < ITERS; iter += 1) {
-    for (const a of nodes) {
-      a.fx = 0;
-      a.fy = 0;
-    }
-    // Repulsion (all pairs)
-    for (let i = 0; i < nodes.length; i += 1) {
-      for (let j = i + 1; j < nodes.length; j += 1) {
-        const a = nodes[i];
-        const b = nodes[j];
-        let dx = a.x - b.x;
-        let dy = a.y - b.y;
-        let d2 = dx * dx + dy * dy;
-        if (d2 < 0.5) {
-          // Same-position guard: nudge apart deterministically.
-          dx = (i - j) * 0.7;
-          dy = (j - i) * 0.7;
-          d2 = dx * dx + dy * dy;
-        }
-        const d = Math.sqrt(d2);
-        const force = (k * k) / d;
-        a.fx += (dx / d) * force;
-        a.fy += (dy / d) * force;
-        b.fx -= (dx / d) * force;
-        b.fy -= (dy / d) * force;
-      }
-    }
-    // Attraction along edges
-    for (const [fromId, toId] of edgeList) {
-      const a = nodeById.get(fromId)!;
-      const b = nodeById.get(toId)!;
-      const dx = a.x - b.x;
-      const dy = a.y - b.y;
-      const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const force = (d * d) / k;
-      const ax = (dx / d) * force;
-      const ay = (dy / d) * force;
-      a.fx -= ax;
-      a.fy -= ay;
-      b.fx += ax;
-      b.fy += ay;
-    }
-    // Horizontal bias toward target column (same strategy as run board).
-    for (const a of nodes) {
-      a.fx += (a.targetX - a.x) * 0.22;
-    }
-    const temperature = (1 - iter / ITERS) * 13 + 1;
-    for (const a of nodes) {
-      const fmag = Math.sqrt(a.fx * a.fx + a.fy * a.fy) || 1;
-      const step = Math.min(fmag, temperature);
-      a.x += (a.fx / fmag) * step;
-      a.y += (a.fy / fmag) * step;
-      a.x = Math.max(BOARD_PAD_X - 6, Math.min(width - BOARD_PAD_X + 6, a.x));
-      a.y = Math.max(BOARD_PAD_Y - 6, Math.min(height - BOARD_PAD_Y + 6, a.y));
-    }
-  }
-
-  // Tight-crop to content, identical spirit to RunDetail's board.
-  const minX = Math.min(...nodes.map((nn) => nn.x));
-  const maxX = Math.max(...nodes.map((nn) => nn.x));
-  const minY = Math.min(...nodes.map((nn) => nn.y));
-  const maxY = Math.max(...nodes.map((nn) => nn.y));
-  const offsetX = BOARD_PAD_X - minX;
-  const offsetY = BOARD_PAD_Y - minY;
-  const tightWidth = Math.max(
-    BOARD_CANVAS_MIN_WIDTH,
-    (maxX - minX) + BOARD_PAD_X * 2,
-  );
-  const tightHeight = Math.max(
-    BOARD_CANVAS_MIN_HEIGHT,
-    (maxY - minY) + BOARD_PAD_Y * 2,
+      dependsOn: r.dependsOn,
+      isSummary: r.isLeaderSummary,
+    })),
+    {
+      minWidth: 320,
+      minHeight: 280,
+      padX: 56,
+      padY: 48,
+    },
   );
 
-  // ── Materialise public node + edge lists -----------------------------
-  // A "root" task has no upstream dependencies. Highlighting them makes
-  // it obvious to the user where the Flow's execution actually starts.
   const outNodes: GraphNode[] = usableTasks.map((r) => {
-    const fn = nodeById.get(r.id)!;
+    const pos = laid.positions.get(r.id)!;
     const deps = r.dependsOn.filter((d) => byId.has(d));
     return {
       id: r.id,
@@ -5010,8 +4848,8 @@ function computeGraphLayout(tasks: TaskRow[]): {
       requiresHumanCheckpoint: !r.isLeaderSummary && !!r.requiresHumanCheckpoint,
       isRoot: !r.isLeaderSummary && deps.length === 0,
       isExternal: isExternalKind(r.ownerKind),
-      x: fn.x + offsetX,
-      y: fn.y + offsetY,
+      x: pos.x,
+      y: pos.y,
       degree: degree.get(r.id) ?? 0,
     };
   });
@@ -5037,8 +4875,9 @@ function computeGraphLayout(tasks: TaskRow[]): {
   return {
     nodes: outNodes,
     edges: outEdges,
-    width: tightWidth,
-    height: tightHeight,
+    width: laid.width,
+    height: laid.height,
+    baseRadius: laid.suggestedNodeRadius,
   };
 }
 

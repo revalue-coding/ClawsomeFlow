@@ -33,6 +33,7 @@ import {
   StatusPill,
 } from "@/components/ui";
 import { useDialog } from "@/components/dialog";
+import { layoutDagLayered } from "@/lib/dagLayeredLayout";
 import { pickExternalTaskSheet } from "@/lib/externalTaskSheet";
 import { DEFAULT_TARGET_BRANCH, getDevMode } from "@/lib/flowRuntime";
 import { useSessionBackedState } from "@/lib/sessionState";
@@ -73,11 +74,6 @@ const RUN_DIFF_VISIBLE = new Set([
 ]);
 const POST_RUN_MODULES_VISIBLE = RUN_DIFF_VISIBLE;
 
-const TASK_CANVAS_MIN_WIDTH = 280;
-const TASK_CANVAS_MIN_HEIGHT = 300;
-const TASK_PAD_X = 44;
-const TASK_PAD_Y = 32;
-const TASK_NODE_RADIUS = 8;
 const EVENT_PAGE_SIZE = 10;
 
 function normalizeRunInputs(inputs: Record<string, unknown> | null | undefined): Array<[string, string]> {
@@ -142,6 +138,8 @@ type TaskBoardModel = {
   nodeById: Map<string, TaskBoardNode>;
   width: number;
   height: number;
+  /** Layered-layout base radius; hard-capped so sparse boards stay calm. */
+  baseRadius: number;
 };
 
 type MergeFailureKind = "conflict" | "environment_error" | "unknown";
@@ -201,6 +199,7 @@ const EMPTY_TASK_BOARD: TaskBoardModel = {
   nodeById: new Map(),
   width: 720,
   height: 320,
+  baseRadius: 8,
 };
 
 export function RunDetail() {
@@ -1935,8 +1934,12 @@ function TaskDependencyBoard({
       if (e.to === hoverNodeId) hoverLinked.add(e.from);
     }
   }
-  const nodeRadius = (n: TaskBoardNode): number =>
-    n.isLeaderSummary ? TASK_NODE_RADIUS + 2 : n.state === "dispatched" ? TASK_NODE_RADIUS + 1 : TASK_NODE_RADIUS;
+  const nodeRadius = (n: TaskBoardNode): number => {
+    const base = board.baseRadius;
+    if (n.isLeaderSummary) return Math.min(base + 2.2, 13);
+    if (n.state === "dispatched") return Math.min(base + 1, 11.5);
+    return Math.min(base, 11);
+  };
   // Literal colors (not theme tokens): the board canvas is a fixed dark
   // surface, so theme-inverting `emerald-*`/`amber-*` tokens would lose
   // contrast in dark mode.
@@ -4067,6 +4070,7 @@ function buildTaskBoard(
       nodeById: new Map(),
       width: 720,
       height: 320,
+      baseRadius: 8,
     };
   }
 
@@ -4158,54 +4162,27 @@ function buildTaskBoard(
       nodeById: new Map(),
       width: 720,
       height: 320,
+      baseRadius: 8,
     };
   }
 
   const visibleById = new Map(visibleNodesRaw.map((n) => [n.task.id, n]));
-  const maxLevel = Math.max(0, ...visibleNodesRaw.map((n) => n.level));
-  const n = visibleNodesRaw.length;
-  const width = Math.max(TASK_CANVAS_MIN_WIDTH, 260 + n * 84);
-  const height = Math.max(TASK_CANVAS_MIN_HEIGHT, 210 + Math.ceil(n / 2) * 72);
-  const innerWidth = width - TASK_PAD_X * 2;
-  const innerHeight = height - TASK_PAD_Y * 2;
 
-  type ForceNode = {
-    id: string;
-    x: number;
-    y: number;
-    fx: number;
-    fy: number;
-    targetX: number;
-  };
-  const seedRand = (seed: string) => {
-    let h = 2166136261;
-    for (let i = 0; i < seed.length; i += 1) {
-      h ^= seed.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    return () => {
-      h = Math.imul(h ^ (h >>> 15), 2246822507);
-      h = Math.imul(h ^ (h >>> 13), 3266489909);
-      h ^= h >>> 16;
-      return ((h >>> 0) % 10000) / 10000;
-    };
-  };
-
-  const fNodes: ForceNode[] = visibleNodesRaw.map((row) => {
-    const rand = seedRand(row.task.id);
-    const targetX = maxLevel > 0
-      ? TASK_PAD_X + (row.level / maxLevel) * innerWidth
-      : TASK_PAD_X + innerWidth / 2;
-    return {
+  // Layered layout shared with the Flow editor dependency graph. Only
+  // non-pending nodes participate — pending tasks stay off the canvas.
+  const laid = layoutDagLayered(
+    visibleNodesRaw.map((row) => ({
       id: row.task.id,
-      x: targetX + (rand() - 0.5) * 26,
-      y: TASK_PAD_Y + rand() * innerHeight,
-      fx: 0,
-      fy: 0,
-      targetX,
-    };
-  });
-  const fById = new Map(fNodes.map((n2) => [n2.id, n2] as const));
+      dependsOn: (row.task.dependsOn ?? []).filter((d) => visibleById.has(d)),
+      isSummary: Boolean(row.task.isLeaderSummary),
+    })),
+    {
+      minWidth: 280,
+      minHeight: 260,
+      padX: 48,
+      padY: 44,
+    },
+  );
 
   const edgeSpecs: Array<{
     from: string;
@@ -4225,73 +4202,8 @@ function buildTaskBoard(
     }
   }
 
-  const ITERS = 140;
-  const k = Math.sqrt((width * height) / Math.max(1, n)) * 0.6;
-  for (let iter = 0; iter < ITERS; iter += 1) {
-    for (const p of fNodes) {
-      p.fx = 0;
-      p.fy = 0;
-    }
-    for (let i = 0; i < fNodes.length; i += 1) {
-      for (let j = i + 1; j < fNodes.length; j += 1) {
-        const a = fNodes[i];
-        const b = fNodes[j];
-        let dx = a.x - b.x;
-        let dy = a.y - b.y;
-        let d2 = dx * dx + dy * dy;
-        if (d2 < 0.5) {
-          dx = (i - j) * 0.7;
-          dy = (j - i) * 0.7;
-          d2 = dx * dx + dy * dy;
-        }
-        const d = Math.sqrt(d2);
-        const force = (k * k) / d;
-        a.fx += (dx / d) * force;
-        a.fy += (dy / d) * force;
-        b.fx -= (dx / d) * force;
-        b.fy -= (dy / d) * force;
-      }
-    }
-    for (const e of edgeSpecs) {
-      const a = fById.get(e.from);
-      const b = fById.get(e.to);
-      if (!a || !b) continue;
-      const dx = a.x - b.x;
-      const dy = a.y - b.y;
-      const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const force = (d * d) / k;
-      const ax = (dx / d) * force;
-      const ay = (dy / d) * force;
-      a.fx -= ax;
-      a.fy -= ay;
-      b.fx += ax;
-      b.fy += ay;
-    }
-    for (const p of fNodes) {
-      p.fx += (p.targetX - p.x) * 0.22;
-    }
-    const t = (1 - iter / ITERS) * 13 + 1;
-    for (const p of fNodes) {
-      const fmag = Math.sqrt(p.fx * p.fx + p.fy * p.fy) || 1;
-      const step = Math.min(fmag, t);
-      p.x += (p.fx / fmag) * step;
-      p.y += (p.fy / fmag) * step;
-      p.x = Math.max(TASK_PAD_X - 6, Math.min(width - TASK_PAD_X + 6, p.x));
-      p.y = Math.max(TASK_PAD_Y - 6, Math.min(height - TASK_PAD_Y + 6, p.y));
-    }
-  }
-
-  const minX = Math.min(...fNodes.map((p) => p.x));
-  const maxX = Math.max(...fNodes.map((p) => p.x));
-  const minY = Math.min(...fNodes.map((p) => p.y));
-  const maxY = Math.max(...fNodes.map((p) => p.y));
-  const offsetX = TASK_PAD_X - minX;
-  const offsetY = TASK_PAD_Y - minY;
-  const tightWidth = Math.max(TASK_CANVAS_MIN_WIDTH, (maxX - minX) + TASK_PAD_X * 2);
-  const tightHeight = Math.max(TASK_CANVAS_MIN_HEIGHT, (maxY - minY) + TASK_PAD_Y * 2);
-
   const visibleNodes: TaskBoardNode[] = visibleNodesRaw.map((row) => {
-    const p = fById.get(row.task.id)!;
+    const p = laid.positions.get(row.task.id)!;
     const hasCheckpoint = Boolean(
       (row.task as { requiresHumanCheckpoint?: unknown; requires_human_checkpoint?: unknown })
         .requiresHumanCheckpoint
@@ -4318,8 +4230,8 @@ function buildTaskBoard(
       durationMinutes,
       order: row.order,
       level: row.level,
-      x: p.x + offsetX,
-      y: p.y + offsetY,
+      x: p.x,
+      y: p.y,
       isExternal: externalAgentIds.has(row.task.ownerAgentId),
     };
   });
@@ -4339,7 +4251,15 @@ function buildTaskBoard(
     return a.id.localeCompare(b.id);
   });
 
-  return { visibleNodes, listNodes, edges, nodeById, width: tightWidth, height: tightHeight };
+  return {
+    visibleNodes,
+    listNodes,
+    edges,
+    nodeById,
+    width: laid.width,
+    height: laid.height,
+    baseRadius: laid.suggestedNodeRadius,
+  };
 }
 
 /** Latest inbox hand-off summary per upstream task id.
