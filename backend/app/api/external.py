@@ -1,17 +1,24 @@
 """External execution collaboration surface (``/api/external/*``).
 
-The ONLY inbound face a remote executor ever talks to. Two endpoints:
+The ONLY inbound face a remote executor ever talks to:
 
-* ``POST /api/external/tasks/{run_id}/{task_id}/complete`` — submit the
-  result of an external-node task. Auth = the one-time signed ticket embedded
-  in the outbound dispatch package (``Authorization: Bearer <ticket>`` or the
-  ``token`` body field). Idempotent per dispatch attempt.
 * ``POST /api/external/delegate`` — accept a Flow delegation from a remote
   ClawsomeFlow. Auth = a pairing credential from
   ``Config.external_pair_tokens`` (generated via ``csflow external
-  pair-token``). Triggers the referenced local Flow **unattended** and stamps
-  the callback info into ``run.inputs`` so the storage ``run_update`` hook
-  fires the result back when the run turns terminal.
+  pair-token``). Triggers the referenced local Flow **unattended**.
+* ``GET /api/external/delegated-runs/{run_id}`` — how the delegating origin
+  learns the result: it polls us. Same pairing credential, and only for a run
+  that credential itself delegated. This is what lets an origin behind NAT
+  delegate at all — we never need to reach it.
+* ``POST /api/external/tasks/{run_id}/{task_id}/complete`` — **legacy** (v1)
+  result push for an external-node task, kept for integrations already wired
+  against it. Auth = the one-time signed task token from the dispatch package.
+  Nothing in the v2 protocol depends on it: a webhook executor answers the
+  dispatch request or gets polled (see ``services/external_tasks``).
+
+A pre-v2 origin that still sends ``callbackUrl``/``callbackToken`` to
+``/delegate`` is served exactly as before (the storage ``run_update`` hook
+pushes the report when the delegated run turns terminal).
 
 Network rule (enforced by :class:`app.api._api_guard.ApiTokenGuardMiddleware`):
 this prefix is the ONLY surface remote source IPs may reach (peer-symmetric
@@ -41,8 +48,13 @@ from app.models import (
     FlowSpec,
     RunStatus,
 )
-from app.scheduler.run_metadata import EXTERNAL_CALLBACK_KEY, UNATTENDED_KEY
+from app.scheduler.run_metadata import (
+    DELEGATE_ORIGIN_KEY,
+    EXTERNAL_CALLBACK_KEY,
+    UNATTENDED_KEY,
+)
 from app.services.external_tasks import (
+    DELEGATE_SUCCESS_STATUSES,
     ExternalTaskError,
     complete_external_task,
     verify_ticket,
@@ -137,8 +149,11 @@ class DelegatePayload(_CamelModel):
     flow_id: str
     inputs: dict[str, Any] | None = None
     runtime_prompt: str | None = None
-    callback_url: str
-    callback_token: str
+    # v1 origins pushed their address here so we could POST the result back.
+    # v2 origins poll ``GET /delegated-runs/{id}`` instead and send neither —
+    # optional purely so an un-upgraded origin keeps working.
+    callback_url: str | None = None
+    callback_token: str | None = None
     source_run_id: str | None = None
     source_task_id: str | None = None
 
@@ -181,10 +196,13 @@ async def delegate_flow(
     """Run a local Flow on behalf of a remote ClawsomeFlow instance.
 
     The run executes **unattended** (no review / complaint / checkpoint
-    phases — same contract as MCP-triggered runs) and, on reaching a terminal
-    status, POSTs the leader work report to *callback_url* with
-    *callback_token* (the storage ``run_update`` hook + a daemon thread; see
-    ``services/external_tasks.prepare_delegate_callback``).
+    phases — same contract as MCP-triggered runs). The origin learns the result
+    by polling :func:`delegated_run_status`; we record which pairing credential
+    delegated the run so only that origin can read it.
+
+    Legacy: when the origin supplied *callback_url* + *callback_token* we also
+    push the leader work report on terminal (storage ``run_update`` hook + a
+    daemon thread; see ``services/external_tasks.prepare_delegate_callback``).
     """
     pair_name = _check_pair_token(authorization)
 
@@ -210,12 +228,19 @@ async def delegate_flow(
     run_id = _new_id("run")
     run_inputs: dict[str, Any] = dict(payload.inputs or {})
     run_inputs[UNATTENDED_KEY] = "true"
-    run_inputs[EXTERNAL_CALLBACK_KEY] = json.dumps({
-        "url": payload.callback_url,
-        "token": payload.callback_token,
+    # Ownership record for the polling endpoint (and plain observability).
+    run_inputs[DELEGATE_ORIGIN_KEY] = json.dumps({
+        "pairTokenName": pair_name,
         "sourceRunId": payload.source_run_id,
         "sourceTaskId": payload.source_task_id,
     })
+    if payload.callback_url and payload.callback_token:
+        run_inputs[EXTERNAL_CALLBACK_KEY] = json.dumps({
+            "url": payload.callback_url,
+            "token": payload.callback_token,
+            "sourceRunId": payload.source_run_id,
+            "sourceTaskId": payload.source_task_id,
+        })
     run = FlowRun(
         id=run_id,
         flow_id=flow.id,
@@ -252,6 +277,75 @@ async def delegate_flow(
         status=saved.status.value if hasattr(saved.status, "value") else str(saved.status),
         team_name=saved.team_name,
     )
+
+
+class DelegatedRunStatusResponse(_CamelModel):
+    run_id: str
+    #: Protocol vocabulary shared with webhook polling: ``running`` until the
+    #: run is terminal, then ``success`` / ``failed``.
+    status: str
+    run_status: str
+    summary: str = ""
+
+
+@router.get(
+    "/delegated-runs/{run_id}",
+    response_model=DelegatedRunStatusResponse,
+)
+async def delegated_run_status(
+    run_id: Annotated[str, Path()],
+    authorization: Annotated[str | None, Header()] = None,
+) -> DelegatedRunStatusResponse:
+    """Report a delegated run's progress to the origin that delegated it.
+
+    The origin polls this instead of us pushing a callback, so delegation works
+    regardless of whether the origin is addressable. Scoped by the pairing
+    credential: a credential may only read runs it delegated itself.
+    """
+    pair_name = _check_pair_token(authorization)
+
+    storage = get_storage()
+    run = storage.run_get(run_id)
+    origin = _delegate_origin(run) if run is not None else None
+    if run is None or origin is None:
+        # Also covers "delegated by a different pairing credential" — do not
+        # distinguish, or this becomes a run-id probe.
+        raise ApiError(
+            "NOT_FOUND", f"delegated run {run_id!r} not found", status_code=404,
+        )
+    if str(origin.get("pairTokenName") or "") != pair_name:
+        raise ApiError(
+            "NOT_FOUND", f"delegated run {run_id!r} not found", status_code=404,
+        )
+
+    run_status = run.status.value if hasattr(run.status, "value") else str(run.status)
+    if run.status not in TERMINAL_RUN_STATUSES:
+        return DelegatedRunStatusResponse(
+            run_id=run.id, status="running", run_status=run_status,
+        )
+    from app.services.run_report import extract_leader_report
+
+    ok = run.status in DELEGATE_SUCCESS_STATUSES
+    return DelegatedRunStatusResponse(
+        run_id=run.id,
+        status="success" if ok else "failed",
+        run_status=run_status,
+        summary=extract_leader_report(
+            storage.event_list(run_id=run.id, since_id=None, limit=500),
+        ) or "",
+    )
+
+
+def _delegate_origin(run: FlowRun) -> dict[str, Any] | None:
+    """The delegation record stamped by :func:`delegate_flow`, if any."""
+    raw = (run.inputs or {}).get(DELEGATE_ORIGIN_KEY)
+    if not raw:
+        return None
+    try:
+        info = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except Exception:
+        return None
+    return info if isinstance(info, dict) else None
 
 
 __all__ = ["router"]

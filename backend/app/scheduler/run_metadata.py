@@ -34,9 +34,15 @@ must import the constants from here.
   by ``services/run_schedules.py``); behavioural decisions consult the union of
   the two via :func:`run_is_unattended`, so a run's execution *mode*
   (normal / easy / dev) is untouched — an unattended dev run still runs as dev.
-* :data:`EXTERNAL_CALLBACK_KEY` — set by ``POST /api/external/delegate`` on a
-  run this instance executes on behalf of a remote ClawsomeFlow. Value is a
-  JSON string ``{"url": ..., "token": ...}``; when the run reaches a terminal
+* :data:`DELEGATE_ORIGIN_KEY` — set by ``POST /api/external/delegate`` on every
+  run this instance executes on behalf of a remote ClawsomeFlow. Value is a JSON
+  string ``{"pairTokenName": ..., "sourceRunId": ..., "sourceTaskId": ...}``. It
+  is what authorises ``GET /api/external/delegated-runs/{id}``: the origin polls
+  us for the result (protocol v2 is outbound-only in both directions), and a
+  pairing credential may only read the runs it delegated itself.
+* :data:`EXTERNAL_CALLBACK_KEY` — **legacy** push companion to the above, set
+  only when a pre-v2 origin supplied ``callbackUrl``/``callbackToken``. Value is
+  a JSON string ``{"url": ..., "token": ...}``; when the run reaches a terminal
   status the storage ``run_update`` hook POSTs the leader report back to that
   URL (see ``app.services.external_tasks.prepare_delegate_callback``).
 * :data:`EXTERNAL_CALLBACK_SENT_KEY` — ISO timestamp in-flight/success dedupe
@@ -51,6 +57,13 @@ must import the constants from here.
   run was parked, so the Run detail page can render a "why paused" banner (and
   the scenario-9 ``internal_error`` confirmation hint). Written by the pause
   finalize branch; cleared on ``继续执行`` (resume) and on 终止执行流 (terminate).
+* :data:`FAILURE_GUIDANCE_KEY` — **single-slot staging area** for the extra
+  guidance a user types on the failure pause banner ("明确失败原因后可以在此处添加
+  对 agent 的额外指导"). Value is a JSON object ``{"task_id": str, "text": str,
+  "at": iso}``. Written by ``POST /api/runs/{id}/continue`` (failure pauses
+  only), read back by the resumed controller and injected into THAT task's next
+  dispatch prompt, then dropped the moment the re-dispatch succeeds — so it is
+  never reused by a later dispatch. A second guidance simply overwrites the slot.
 * :data:`CHECKPOINT_STATE_KEY` — set alongside :data:`PAUSE_STATE_KEY` while a
   run is parked, snapshotting the controller's in-memory human-checkpoint
   approval state so a resumed controller does NOT re-open an already-approved
@@ -77,10 +90,16 @@ REVERTED_MERGE_AGENT_IDS_KEY = "_csflow_reverted_merge_agent_ids"
 DEV_PENDING_PR_AGENT_IDS_KEY = "_csflow_dev_pending_pr_agent_ids"
 FAILED_AUTO_MERGE_AGENT_IDS_KEY = "_csflow_failed_auto_merge_agent_ids"
 UNATTENDED_KEY = "_csflow_unattended"
+DELEGATE_ORIGIN_KEY = "_csflow_delegate_origin"
 EXTERNAL_CALLBACK_KEY = "_csflow_external_callback"
 EXTERNAL_CALLBACK_SENT_KEY = "_csflow_external_callback_sent_at"
 PAUSE_STATE_KEY = "_csflow_pause_state"
 CHECKPOINT_STATE_KEY = "_csflow_checkpoint_state"
+FAILURE_GUIDANCE_KEY = "_csflow_failure_guidance"
+
+#: Hard cap on the staged guidance text (prompt hygiene; the box is meant for a
+#: short instruction, not a document).
+FAILURE_GUIDANCE_MAX_CHARS = 4000
 
 #: Allowed ``reason`` values in the :data:`PAUSE_STATE_KEY` blob.
 PAUSE_REASON_USER = "user"                # user pressed 暂停执行
@@ -245,6 +264,54 @@ def clear_pause_state(run: Any) -> None:
         run.inputs = merged
 
 
+def write_failure_guidance(
+    run: Any, *, task_id: str, text: str, at: str | None = None,
+) -> bool:
+    """Stage the user's extra guidance for the failed task's next dispatch.
+
+    Single-slot on purpose: a new guidance replaces whatever was staged before,
+    and the slot is dropped by :func:`clear_failure_guidance` as soon as the
+    target task is re-dispatched, so guidance never leaks into a later dispatch.
+    Returns False (and writes nothing) when either the task id or the text is
+    empty.
+    """
+    tid = str(task_id or "").strip()
+    body = str(text or "").strip()
+    if not tid or not body:
+        return False
+    inputs = dict(getattr(run, "inputs", None) or {})
+    blob: dict[str, Any] = {
+        "task_id": tid,
+        "text": body[:FAILURE_GUIDANCE_MAX_CHARS],
+    }
+    if at:
+        blob["at"] = str(at)
+    inputs[FAILURE_GUIDANCE_KEY] = blob
+    run.inputs = inputs
+    return True
+
+
+def read_failure_guidance(run: Any) -> tuple[str, str] | None:
+    """Return the staged ``(task_id, text)``, or None when nothing is staged."""
+    raw = (getattr(run, "inputs", None) or {}).get(FAILURE_GUIDANCE_KEY)
+    if not isinstance(raw, dict):
+        return None
+    tid = str(raw.get("task_id") or "").strip()
+    text = str(raw.get("text") or "").strip()
+    if not tid or not text:
+        return None
+    return tid, text[:FAILURE_GUIDANCE_MAX_CHARS]
+
+
+def clear_failure_guidance(run: Any) -> None:
+    """Empty the guidance staging area (after re-dispatch). Idempotent."""
+    inputs = getattr(run, "inputs", None)
+    if isinstance(inputs, dict) and FAILURE_GUIDANCE_KEY in inputs:
+        merged = dict(inputs)
+        merged.pop(FAILURE_GUIDANCE_KEY, None)
+        run.inputs = merged
+
+
 def write_checkpoint_state(
     run: Any,
     *,
@@ -302,8 +369,11 @@ __all__ = [
     "CHECKPOINT_STATE_KEY",
     "DEV_PENDING_PR_AGENT_IDS_KEY",
     "FAILED_AUTO_MERGE_AGENT_IDS_KEY",
+    "DELEGATE_ORIGIN_KEY",
     "EXTERNAL_CALLBACK_KEY",
     "EXTERNAL_CALLBACK_SENT_KEY",
+    "FAILURE_GUIDANCE_KEY",
+    "FAILURE_GUIDANCE_MAX_CHARS",
     "PAUSE_STATE_KEY",
     "PAUSE_REASON_USER",
     "PAUSE_REASON_FAILURE",
@@ -315,14 +385,17 @@ __all__ = [
     "REVERTED_MERGE_AGENT_IDS_KEY",
     "UNATTENDED_KEY",
     "clear_checkpoint_state",
+    "clear_failure_guidance",
     "clear_pause_state",
     "coalesce_reverted_merge_markers",
     "pause_reason_outranks",
     "pause_reason_rank",
     "read_checkpoint_state",
     "read_failed_auto_merge_agent_ids",
+    "read_failure_guidance",
     "read_pause_state",
     "run_is_unattended",
     "write_checkpoint_state",
+    "write_failure_guidance",
     "write_pause_state",
 ]

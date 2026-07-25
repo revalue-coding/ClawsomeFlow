@@ -12,8 +12,9 @@ adds zero upgrade-parity surface):
 * ``list``                     — show inbound + outbound credential names.
 * ``expose on|off``            — opt-out lockdown for ``/api/external/*``
   (default is ON / open; ``off`` re-locks to loopback; restart to apply).
-* ``callback-url [<url>]``     — show/set the base URL remote executors use
-  to call back into this instance.
+* ``callback-url [<url>]``     — show/set this instance's public base URL, used
+  for links in notifications (NOT by the external protocol, which is
+  outbound-only and never hands an executor an address of ours).
 """
 
 from __future__ import annotations
@@ -119,7 +120,10 @@ def list_credentials() -> None:
         f"Expose /api/external to non-loopback callers: "
         f"{'ON' if cfg.external_api_expose else 'off'}"
     )
-    typer.echo(f"Callback base URL: {cfg.external_callback_base_url or '(unset)'}")
+    typer.echo(
+        "Public base URL (notification links only): "
+        + (cfg.external_callback_base_url or "(unset — loopback default)")
+    )
 
 
 @app.command()
@@ -156,11 +160,21 @@ def expose(
 def callback_url(
     url: str = typer.Argument(
         None,
-        help="Base URL remote executors should call back to "
-        "(e.g. http://my-host:17017). Omit to show the current value.",
+        help="Public base URL of this instance, e.g. http://my-host:17017. "
+        "Omit to show the current value.",
     ),
 ) -> None:
-    """Show or set the callback base URL embedded in outbound dispatches."""
+    """Show or set this instance's public base URL.
+
+    NOT needed for external execution nodes: the protocol is outbound-only —
+    ClawsomeFlow answers-or-polls its executors and never asks to be reached, so
+    webhook and remote-ClawsomeFlow nodes work across machines with no setup.
+
+    What still uses it: the ``runUrl`` link in a human-task chat notification,
+    and serving a pre-v2 remote instance that pushes delegated-run results back.
+    Unset means ``http://127.0.0.1:{csflow_port}``. The value is taken literally
+    — ClawsomeFlow never probes the network to guess its own address.
+    """
     cfg = cfg_mod.load_config()
     if url is None:
         typer.echo(cfg.external_callback_base_url or "(unset)")

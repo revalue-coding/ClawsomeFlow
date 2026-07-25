@@ -86,6 +86,7 @@ from app.scheduler.naming import team_name_for_run
 from app.scheduler.run_metadata import (
     DEV_PENDING_PR_AGENT_IDS_KEY,
     FAILED_AUTO_MERGE_AGENT_IDS_KEY,
+    PAUSE_REASON_FAILURE,
     PAUSE_REASON_USER,
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
@@ -93,6 +94,7 @@ from app.scheduler.run_metadata import (
     REVERTED_MERGE_AGENT_IDS_KEY,
     UNATTENDED_KEY,
     read_pause_state,
+    write_failure_guidance,
     write_pause_state,
 )
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
@@ -483,6 +485,16 @@ class ComplaintPayload(_CamelModel):
 
 class CheckpointRerunPayload(_CamelModel):
     feedback: str = Field(..., description="Guidance for upstream task rerun")
+
+
+class ContinuePayload(_CamelModel):
+    guidance: str = Field(
+        "",
+        description=(
+            "Optional extra guidance for the failed node's re-dispatch "
+            "(failure pauses only; consumed by that one dispatch)"
+        ),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1579,11 +1591,56 @@ async def pause_run(
     return _to_summary(refreshed)
 
 
+def _agent_is_external(flow: Flow, agent_id: str) -> bool:
+    """Whether *agent_id* is an external execution node in *flow*'s spec."""
+    return any(
+        a.id == agent_id and a.kind == AgentKind.external
+        for a in _agents_from_flow_spec(flow)
+    )
+
+
+def _stage_failure_guidance(
+    run: FlowRun, *, guidance: str, flow: Flow, storage: StorageBackend,
+) -> bool:
+    """Stage 继续执行 guidance for the failed node's re-dispatch.
+
+    Only a ``failure`` pause with a known task id carries a re-dispatch to inject
+    into, and only a LOCAL agent gets a prompt (an external node's task sheet has
+    no place for it), so anything else is silently dropped. Returns whether the
+    staging area was written.
+    """
+    blob = read_pause_state(run) or {}
+    if str(blob.get("reason") or "") != PAUSE_REASON_FAILURE:
+        return False
+    task_id = str(blob.get("failure_task_id") or "").strip()
+    if not task_id:
+        return False
+    failed_agent_id = str(blob.get("failure_agent_id") or "").strip()
+    if failed_agent_id and _agent_is_external(flow, failed_agent_id):
+        return False
+    if not write_failure_guidance(
+        run,
+        task_id=task_id,
+        text=guidance,
+        at=datetime.now(timezone.utc).isoformat(),
+    ):
+        return False
+    try:
+        storage.run_update(run)
+    except Exception:  # pragma: no cover - best-effort stamp
+        logger.warning(
+            "failure_guidance_persist_failed", run_id=run.id, exc_info=True,
+        )
+        return False
+    return True
+
+
 @router.post("/runs/{run_id}/continue", response_model=RunSummary)
 async def continue_run(
     run_id: Annotated[str, Path()],
     user: UserDep,
     storage: StorageDep,
+    payload: Annotated[ContinuePayload | None, Body()] = None,
 ) -> RunSummary:
     """继续执行 — resume a paused run from where it left off.
 
@@ -1592,6 +1649,12 @@ async def continue_run(
     stay completed, interrupted / failed tasks re-run in their existing worktree,
     and an external task's outstanding receipt is honoured (already-arrived →
     progresses; still-waiting → keeps waiting, never re-dispatched).
+
+    Optional ``guidance`` (failure pauses only) is staged for the failed node's
+    re-dispatch: it is injected into that one dispatch prompt and then dropped,
+    so it never influences a later dispatch. Ignored for a non-failure pause, an
+    external-node failure (its channel carries no prompt) or a failure with no
+    known task id.
     """
     run = storage.run_get(run_id)
     if run is None:
@@ -1606,6 +1669,9 @@ async def continue_run(
     flow = storage.flow_get(run.flow_id)
     if flow is None:
         raise ApiError("NOT_FOUND", f"flow {run.flow_id!r} not found", status_code=404)
+    guidance = (payload.guidance if payload else "").strip()
+    if guidance:
+        _stage_failure_guidance(run, guidance=guidance, flow=flow, storage=storage)
     sched = get_scheduler()
     sched.resume_run(run=run, flow=flow, storage=storage)
     refreshed = storage.run_get(run.id) or run

@@ -2144,6 +2144,86 @@ async def test_prepare_resume_reconciles_from_clawteam_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_resume_injects_staged_failure_guidance_once(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guidance a user types on the failure pause banner reaches the failed
+    node's re-dispatch prompt — and ONLY that one dispatch. The staging area is a
+    single slot emptied on a successful dispatch, so a later dispatch of the same
+    task never reuses the text."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    run.inputs = {
+        **(run.inputs or {}),
+        "_csflow_pause_state": {"reason": "failure", "failure_task_id": "t1"},
+        "_csflow_failure_guidance": {"task_id": "t1", "text": "Use the v2 auth flow."},
+    }
+    get_storage().run_update(run)
+
+    class _FakeMcp:
+        async def task_update(self, team_name, task_id, **kwargs):
+            return {"id": task_id, "status": kwargs.get("status")}
+
+    async def _fake_get_mcp_client(*, user: str):
+        del user
+        return _FakeMcp()
+
+    monkeypatch.setattr(
+        "app.integrations.clawteam_mcp.get_mcp_client", _fake_get_mcp_client,
+    )
+
+    snapshots: list[TaskSnapshot] = [
+        TaskSnapshot(task_id="t1", owner_agent_id="alice", status="in_progress",
+                     locked_by_agent="alice", metadata={}, dispatched_at_epoch=0),
+        TaskSnapshot(task_id="ts", owner_agent_id="leader", status="blocked",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    sessions: dict[str, _RecordingSession] = {}
+
+    def factory(agent: FlowAgent) -> WorkerSession:
+        s = _RecordingSession(agent=agent, team_name=run.team_name, run_id=run.id)
+        sessions[agent.id] = s
+        return s
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=factory,
+        snapshot_provider=snap_provider,
+        compile_result=compile_result,
+    )
+    await rc.prepare_resume()
+    assert rc._pending_failure_guidance == ("t1", "Use the v2 auth flow.")
+
+    # First tick re-dispatches the reset task WITH the guidance.
+    snapshots[0] = TaskSnapshot(
+        task_id="t1", owner_agent_id="alice", status="pending",
+        locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+    )
+    await rc.tick()
+    first = sessions["alice"].dispatched[-1]
+    assert first[0] == "t1"
+    assert "Use the v2 auth flow." in first[1]
+    assert "Additional Guidance From The User" in first[1]
+
+    # Staging area emptied in memory AND on disk — one-shot, never reused.
+    assert rc._pending_failure_guidance is None
+    assert "_csflow_failure_guidance" not in (get_storage().run_get(run.id).inputs or {})
+
+    # A later dispatch of the SAME task carries no guidance.
+    rc._tasks["t1"].state = _TaskState.pending
+    rc._tasks["t1"].dispatched_at = None
+    sessions["alice"].mark_idle(reason="test")
+    await rc._dispatch_one(rc._tasks["t1"])
+    assert "Use the v2 auth flow." not in sessions["alice"].dispatched[-1][1]
+
+
+@pytest.mark.asyncio
 async def test_prepare_resume_reemits_task_completed_for_completion_during_pause(
     fake_lookup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2455,6 +2535,64 @@ async def test_live_external_failure_detected_via_nonce_not_inbox(
 
     # Same nonce, still in_progress snapshot → NOT re-detected (handled).
     assert rc._detect_external_failures(snaps) == []
+
+
+@pytest.mark.asyncio
+async def test_tick_polls_waiting_external_nodes_and_respects_the_interval(
+    fake_lookup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tick is what pulls external results in — and it rate-limits itself.
+
+    Protocol v2 has no inbound path for webhook / remote_csflow results, so the
+    tick must poll every dispatched-but-unfinished external task. HTTP is only
+    issued once the executor's suggested interval has elapsed; a human node is
+    never polled (a person answers on the Run page).
+    """
+    spec = _external_only_spec()
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+    calls: list[dict[str, Any]] = []
+
+    async def fake_poll(*, storage, run, agent, task_id, http_allowed):
+        calls.append({"task_id": task_id, "http_allowed": http_allowed})
+        return "waiting", 30.0
+
+    monkeypatch.setattr(
+        "app.services.external_tasks.poll_external_task", fake_poll,
+    )
+    rc = RunController(
+        run=run, spec=spec, flow_description="d", worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots, compile_result=compile_result,
+    )
+    snaps = [
+        TaskSnapshot(
+            task_id="t_ext", owner_agent_id="ext", status="in_progress",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=0,
+        ),
+        TaskSnapshot(
+            task_id="ts", owner_agent_id="leader", status="pending",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=0,
+        ),
+    ]
+    assert await rc._poll_external_tasks(snaps) is False
+    assert calls == [{"task_id": "t_ext", "http_allowed": True}]
+
+    # Immediately after, the 30s interval blocks another request but the
+    # already-answered case is still applied (http_allowed=False).
+    await rc._poll_external_tasks(snaps)
+    assert calls[-1] == {"task_id": "t_ext", "http_allowed": False}
+
+    # A completed task is left alone.
+    calls.clear()
+    snaps[0] = TaskSnapshot(
+        task_id="t_ext", owner_agent_id="ext", status="completed",
+        locked_by_agent=None, metadata={}, dispatched_at_epoch=0,
+    )
+    assert await rc._poll_external_tasks(snaps) is False
+    assert calls == []
 
 
 @pytest.mark.asyncio

@@ -310,6 +310,42 @@ def test_worker_leader_summary_omits_inbox_send() -> None:
     assert "clawteam inbox send" not in msg
 
 
+# ── user guidance staged on the failure pause banner --------------------
+
+
+def test_worker_dispatch_omits_user_guidance_by_default() -> None:
+    msg = prompts.build_worker_dispatch(_ctx())
+    assert "Additional Guidance From The User" not in msg
+
+
+def test_worker_dispatch_injects_user_guidance_after_the_task_block() -> None:
+    msg = prompts.build_worker_dispatch(
+        _ctx(user_guidance="The API moved to v2 — use the new auth flow."),
+    )
+    assert "## Additional Guidance From The User (this attempt only)" in msg
+    assert "The API moved to v2 — use the new auth flow." in msg
+    # Amends the task, so it must land after it and before the checklist.
+    assert (
+        msg.index("## Task #t1")
+        < msg.index("## Additional Guidance From The User")
+        < msg.index("## Completion Checklist")
+    )
+
+
+def test_leader_dispatch_injects_user_guidance() -> None:
+    msg = prompts.build_leader_dispatch(_ctx(
+        agent=_agent(id="leader", leader=True),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+        user_guidance="Skip the perf section this time.",
+    ))
+    assert "Skip the perf section this time." in msg
+
+
+def test_whitespace_only_user_guidance_renders_nothing() -> None:
+    msg = prompts.build_worker_dispatch(_ctx(user_guidance="   \n  "))
+    assert "Additional Guidance From The User" not in msg
+
+
 # ── leader dispatch -----------------------------------------------------
 
 

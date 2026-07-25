@@ -491,7 +491,7 @@ const zh = {
       externalRemoteConfigured: "已配置：{{flowId}}｜参数字段：{{fields}}",
       externalRemoteNoParams: "（无参数字段）",
       externalHumanHint: "由人工完成该子任务后在 Run 详情页返回结果。派发时会把任务说明（含任务描述、上游输入、输出要求）推送到该 Flow 配置的通知渠道（Flow 列表 →「通知」按钮），提醒执行人处理。",
-      externalWebhookHint: "派发时向该端点 POST 任务包；完成后按包内 callback 说明回传 {\"status\",\"summary\"}。summary 会作为本节点产出给下游",
+      externalWebhookHint: "派发时向该端点 POST 任务包（含 taskToken 与 reply 说明）。做完了就在这次响应里返回 {\"status\":\"success\",\"summary\":...}；耗时较长则返回 {\"status\":\"accepted\"}（可带 poll.url），之后由 ClawsomeFlow 定时 GET 查询状态。summary 会作为本节点产出给下游。ClawsomeFlow 只发出请求，不需要对方能访问到本机，跨机也无需任何配置。",
       externalRemoteHint: "委托给远端某条 Flow 执行，其最终报告作为本节点产出。",
       externalRemoteHintWithParams:
         "委托给远端某条 Flow 执行，其最终报告作为本节点产出。该远端 Flow 声明了参数字段：上游任务会智能填入字段值；你也可以自行填写确定的参数值（将覆盖上游回报）。",
@@ -745,6 +745,10 @@ const zh = {
     pauseFailureSyntheticTimeout: "任务超时{{detail}}",
     pauseFailureSyntheticFailed: "FAILED: {{taskId}}{{detail}}",
     pauseExternalFailureHint: "修复问题后点击「继续执行」，该节点任务将会重新执行",
+    pauseFailureGuidanceLabel: "补充指导（可选）",
+    pauseFailureGuidanceHint:
+      "明确失败原因后，可以在此处添加对 agent 的额外指导。",
+    pauseFailureGuidancePlaceholder: "例如：接口已换成 v2，请改用新的鉴权方式重试。",
     pauseReason: {
       user: "已按你的请求暂停。点击“继续执行”从断点继续，或“终止执行流”丢弃本次执行。",
       failure: "某个步骤失败，因此执行流被暂停。点击“继续执行”重跑失败步骤，或“终止执行流”丢弃本次执行。",
@@ -957,8 +961,8 @@ const zh = {
       redispatchConfirmOk: "确认重新派发",
       redispatching: "重新派发中…",
       submitting: "提交中…",
-      waitingWebhook: "已派发到外部端点，等待其回调完成。",
-      waitingRemote: "已委托给远端 ClawsomeFlow，等待其 leader 报告回调。",
+      waitingWebhook: "已派发到外部端点，正在轮询其执行结果。",
+      waitingRemote: "已委托给远端 ClawsomeFlow，正在轮询其 leader 报告。",
     },
     checkpoint: {
       title: "人工检查点",

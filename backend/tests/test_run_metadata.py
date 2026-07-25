@@ -7,6 +7,8 @@ from typing import Any
 
 from app.scheduler.run_metadata import (
     CHECKPOINT_STATE_KEY,
+    FAILURE_GUIDANCE_KEY,
+    FAILURE_GUIDANCE_MAX_CHARS,
     PAUSE_REASON_DRAIN,
     PAUSE_REASON_FAILURE,
     PAUSE_REASON_USER,
@@ -14,11 +16,14 @@ from app.scheduler.run_metadata import (
     REVERTED_MERGE_AGENT_IDS_KEY,
     UNATTENDED_KEY,
     clear_checkpoint_state,
+    clear_failure_guidance,
     coalesce_reverted_merge_markers,
     pause_reason_outranks,
     read_checkpoint_state,
+    read_failure_guidance,
     run_is_unattended,
     write_checkpoint_state,
+    write_failure_guidance,
     write_pause_state,
 )
 
@@ -132,6 +137,51 @@ def test_checkpoint_state_write_noop_when_empty() -> None:
     run = _Run(inputs={"goal": "x"})
     write_checkpoint_state(run, passed=set(), summaries={})
     assert CHECKPOINT_STATE_KEY not in run.inputs
+
+
+def test_failure_guidance_roundtrip_and_clear() -> None:
+    run = _Run(inputs={"goal": "x"})
+    assert write_failure_guidance(run, task_id="t1", text="  use the v2 API  ") is True
+    assert run.inputs["goal"] == "x"  # existing inputs preserved
+    assert read_failure_guidance(run) == ("t1", "use the v2 API")
+    clear_failure_guidance(run)
+    assert FAILURE_GUIDANCE_KEY not in run.inputs
+    assert read_failure_guidance(run) is None
+    clear_failure_guidance(run)  # idempotent
+
+
+def test_failure_guidance_is_single_slot() -> None:
+    # A second guidance replaces the first — the staging area never accumulates.
+    run = _Run()
+    write_failure_guidance(run, task_id="t1", text="first")
+    write_failure_guidance(run, task_id="t2", text="second")
+    assert read_failure_guidance(run) == ("t2", "second")
+
+
+def test_failure_guidance_needs_task_and_text() -> None:
+    run = _Run()
+    assert write_failure_guidance(run, task_id="", text="hi") is False
+    assert write_failure_guidance(run, task_id="t1", text="   ") is False
+    assert run.inputs == {}
+
+
+def test_failure_guidance_text_is_capped() -> None:
+    run = _Run()
+    write_failure_guidance(run, task_id="t1", text="x" * (FAILURE_GUIDANCE_MAX_CHARS + 50))
+    staged = read_failure_guidance(run)
+    assert staged is not None
+    assert len(staged[1]) == FAILURE_GUIDANCE_MAX_CHARS
+
+
+def test_failure_guidance_absent_safe_default() -> None:
+    # Old runs without the marker → None, never raises (upgrade-safe default).
+    assert read_failure_guidance(_Run()) is None
+    assert read_failure_guidance(_Run(inputs={FAILURE_GUIDANCE_KEY: "junk"})) is None
+
+
+def test_failure_guidance_marker_key_is_internal_prefixed() -> None:
+    # Must ride under the _csflow_ prefix so _public_run_inputs strips it.
+    assert FAILURE_GUIDANCE_KEY.startswith("_csflow_")
 
 
 def test_pause_reason_outranks_drain_is_weakest() -> None:

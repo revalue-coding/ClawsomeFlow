@@ -1107,8 +1107,14 @@ export const api = {
     request<RunSummary>("POST", `/api/runs/${id}/abort`),
   pauseRun: (id: string) =>
     request<RunSummary>("POST", `/api/runs/${id}/pause`),
-  continueRun: (id: string) =>
-    request<RunSummary>("POST", `/api/runs/${id}/continue`),
+  // `guidance` is the optional extra instruction the user typed on the failure
+  // pause card; the backend stages it for the failed node's re-dispatch only.
+  continueRun: (id: string, guidance?: string) =>
+    request<RunSummary>(
+      "POST",
+      `/api/runs/${id}/continue`,
+      guidance ? { guidance } : undefined,
+    ),
   clearRunHistory: () =>
     request<{ runsDeleted: number; eventsDeleted: number }>(
       "DELETE",

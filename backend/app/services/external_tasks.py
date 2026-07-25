@@ -14,69 +14,90 @@ regular worker does itself:
    unblocks the dependents and the controller mirrors the state next tick.
 
 ────────────────────────────────────────────────────────────────────────
-Stable wire protocol (``schemaVersion: 1``) — treat as a public contract.
+Stable wire protocol (``schemaVersion: 2``) — treat as a public contract.
 Add optional fields freely; never rename/remove required keys without a
 new schemaVersion. Integrators should ignore unknown fields.
+
+**ClawsomeFlow is an OUTBOUND-ONLY client.** Like any ordinary consumer of a
+remote service, it never asks the executor to reach back into it — so an
+integrator needs no address, port, tunnel or firewall hole on our side, and we
+need no configuration about ourselves. A result arrives one of exactly two
+ways, both driven by us: the dispatch response carries it, or we poll for it.
+(v1's reverse-push ``callbackUrl`` is gone; see "Legacy receipt" at the end.)
 ────────────────────────────────────────────────────────────────────────
 
 **A. Webhook dispatch** — ClawsomeFlow → your endpoint (POST JSON)::
 
     {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "event": "external_task_dispatch",
       "runId", "taskId", "agentId", "channel": "webhook",
       "subject", "description", "outputRequirement",
       "upstreamOutputs": [{"taskId","subject","fromAgent","summary"}],
-      "callbackUrl", "callbackToken",
-      "callback": {
-        "method": "POST", "url": <callbackUrl>,
-        "auth": "Authorization: Bearer <callbackToken>",
-        "bodyExample": {"status": "success|failed", "summary": "..."}
-      }
+      "taskToken": "<one-time token identifying THIS attempt>",
+      "reply": { ...self-describing contract, see B... }
     }
 
-**B. Webhook / external receipt** — your system → ClawsomeFlow::
+**B. How you return the result** — two shapes, your choice per task::
 
-    POST /api/external/tasks/{runId}/{taskId}/complete
-    Authorization: Bearer <callbackToken>
-    {"status": "success"|"failed", "summary": "<text>"}
+    # B1. Finished already (fast work): answer the dispatch POST itself.
+    200 {"status": "success"|"failed", "summary": "<text>"}
+
+    # B2. Long-running: accept it, we will ask you later.
+    202 {"status": "accepted",
+         "poll": {"url": "https://you/jobs/123",   # optional
+                  "intervalSeconds": 30}}          # optional hint
+
+    # …then, on our schedule (outbound GET, one every intervalSeconds):
+    GET <poll.url, else the dispatch endpoint + ?runId=&taskId=>
+    Authorization: Bearer <taskToken>
+    → 200 {"status": "running"}                       # keep waiting
+    → 200 {"status": "success", "summary": "<text>"}   # done
+    → 200 {"status": "failed",  "summary": "<reason>"} # blocked/failed
+
+Answer the dispatch POST within ``_OUTBOUND_TIMEOUT_SEC`` or use B2. A non-2xx
+dispatch response = dispatch failure: the task stays pending and is retried
+next tick with a FRESH token. Status vocabulary is matched tolerantly
+(``succeeded``/``done``/``error``/``pending``… all understood).
 
 **C. Remote ClawsomeFlow delegate** — origin → peer::
 
     POST {peer}/api/external/delegate
     Authorization: Bearer <pair-secret>
-    {
-      "flowId", "runtimePrompt"?, "inputs"?,
-      "callbackUrl", "callbackToken",
-      "sourceRunId"?, "sourceTaskId"?
-    }
+    {"flowId", "runtimePrompt"?, "inputs"?, "sourceRunId"?, "sourceTaskId"?}
     → 202 {"id": <remoteRunId>, "status", "teamName"}
 
-**D. Delegate callback** — peer → origin (on remote run terminal)::
+**D. Delegated run result** — origin polls peer (same B2 rhythm)::
 
-    POST <callbackUrl>   # usually origin's /api/external/tasks/.../complete
-    Authorization: Bearer <callbackToken>
-    {"status": "success"|"failed", "summary": "<leader report>"}
+    GET {peer}/api/external/delegated-runs/{remoteRunId}
+    Authorization: Bearer <pair-secret>
+    → {"status": "running"|"success"|"failed", "summary": "<leader report>"}
 
-**Ticket scheme** (one-time signed receipt credential, stateless verify):
+So delegation also works with the origin behind NAT — nothing has to reach it.
 
-    ticket = "{nonce}.{HMAC-SHA256(internal_token_secret,
-                                   'csflow-external:{run_id}:{task_id}:{nonce}')}"
+**Token scheme** (one-time, signed, stateless verify):
+
+    taskToken = "{nonce}.{HMAC-SHA256(internal_token_secret,
+                                      'csflow-external:{run_id}:{task_id}:{nonce}')}"
 
 The currently-valid nonce is whatever the latest ``external_task_dispatched``
 RunEvent for that (run, task) carries — a retry re-dispatches with a fresh
-nonce, invalidating older tickets. The ticket only authorises submitting THIS
-task's result; it is deliberately independent from the global ``api_token``.
+token, invalidating older ones. It identifies one attempt of one task and is
+deliberately independent from the global ``api_token``.
 
-**Delegate callback** (this instance ran a Flow on behalf of a remote one):
-``POST /api/external/delegate`` stamps ``run.inputs[EXTERNAL_CALLBACK_KEY]``;
-when the run turns terminal the storage ``run_update`` hook (same single choke
-point as run_notify — do not scatter) calls :func:`prepare_delegate_callback`
-inside the commit and fires :func:`send_delegate_callback` on a daemon thread.
+**Legacy receipt (deprecated, still honoured)**: ``POST /api/external/tasks/
+{runId}/{taskId}/complete`` with ``Authorization: Bearer <taskToken>`` and the
+B1 body. v1 integrations that push their result keep working when they can
+reach this instance; nothing in v2 depends on it, and the WebUI human channel
+uses its own same-origin endpoint. Likewise a v1 origin that still sends
+``callbackUrl``/``callbackToken`` to ``/api/external/delegate`` is served by
+:func:`prepare_delegate_callback` (storage ``run_update`` hook + daemon
+thread) exactly as before.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import secrets
@@ -111,19 +132,36 @@ logger = get_logger("external_tasks")
 EXTERNAL_TASK_DISPATCHED_EVENT = "external_task_dispatched"
 EXTERNAL_TASK_COMPLETED_EVENT = "external_task_completed"
 EXTERNAL_DELEGATE_ACCEPTED_EVENT = "external_delegate_accepted"
+#: Written right AFTER a successful outbound, carrying what the executor
+#: answered: either the finished result (dispatch-response mode) or how to poll
+#: it. Keyed by the dispatch nonce, so it is re-derivable after a restart —
+#: which is what makes polling survive pause/resume with no extra state.
+EXTERNAL_TASK_ACCEPTED_EVENT = "external_task_accepted"
 
 _TICKET_CONTEXT = "csflow-external"
 #: Public wire-protocol version stamped on every outbound external package.
 #: Bump only when making a breaking change; keep additive changes on the same
 #: version (unknown fields must be ignored by receivers).
-EXTERNAL_SCHEMA_VERSION = 1
+EXTERNAL_SCHEMA_VERSION = 2
 _EVENT_SCAN_LIMIT = 5000
 _OUTBOUND_TIMEOUT_SEC = 15.0
+#: Result polling (outbound GET). The partner may propose an interval; we clamp
+#: it so a hostile/typo'd value can neither hammer them nor stall a Flow.
+_POLL_TIMEOUT_SEC = 10.0
+_POLL_DEFAULT_INTERVAL_SEC = 15.0
+_POLL_MIN_INTERVAL_SEC = 5.0
+_POLL_MAX_INTERVAL_SEC = 600.0
+#: Backoff applied when a poll itself fails (network error / non-2xx). Poll
+#: failures are TRANSIENT — never a task failure; the task's own
+#: ``timeout_seconds`` is what eventually ends a truly stuck node.
+_POLL_ERROR_INTERVAL_SEC = 60.0
 _CALLBACK_ATTEMPTS = 3
 _CALLBACK_RETRY_DELAY_SEC = 5.0
 
 #: Run terminal statuses that map to a "success" delegate callback.
-_DELEGATE_SUCCESS_STATUSES = frozenset({
+#: Terminal statuses reported to a delegating origin as ``success``. Shared with
+#: ``api/external.delegated_run_status`` so push (legacy) and poll agree.
+DELEGATE_SUCCESS_STATUSES = frozenset({
     RunStatus.completed,
     RunStatus.completed_with_conflicts,
 })
@@ -202,6 +240,24 @@ def latest_dispatch_event(
     return None
 
 
+def latest_accepted_event(
+    storage: StorageBackend, *, run_id: str, task_id: str, nonce: str,
+) -> RunEvent | None:
+    """The ``external_task_accepted`` event of THIS dispatch attempt, if any.
+
+    Carries the executor's answer to the dispatch POST (finished result, or how
+    to poll). A stale attempt's event has a different nonce and is ignored.
+    """
+    for ev in reversed(_scan_events(storage, run_id)):
+        if (
+            ev.type == EXTERNAL_TASK_ACCEPTED_EVENT
+            and ev.task_id == task_id
+            and (ev.payload or {}).get("nonce") == nonce
+        ):
+            return ev
+    return None
+
+
 def find_completion_event(
     storage: StorageBackend, *, run_id: str, task_id: str, nonce: str,
 ) -> RunEvent | None:
@@ -221,31 +277,65 @@ def find_completion_event(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def resolve_external_callback_base_url(config: Config | None = None) -> str:
-    """Absolute base URL peers use to call back into THIS instance.
-
-    Prefer ``Config.external_callback_base_url`` when it is a reachable
-    non-poisoned value. SSH-tunnel Host pollution historically wrote
-    ``http://127.0.0.1:<forwarded-port>`` (not the real listen port) into
-    config — that makes same-host peers get Connection refused. Fall back
-    to ``http://127.0.0.1:{csflow_port}`` when unset or when the configured
-    URL is loopback on a port other than ``csflow_port``.
-    """
+def _split_host_port(url: str) -> tuple[str, int] | None:
+    """``(host, port)`` of an absolute http(s) URL, or None when unusable."""
     from urllib.parse import urlsplit
 
+    try:
+        parts = urlsplit((url or "").strip())
+        host = (parts.hostname or "").strip().lower()
+        if not host:
+            return None
+        return host, int(parts.port or (443 if parts.scheme == "https" else 80))
+    except Exception:
+        return None
+
+
+def _host_is_loopback(host: str) -> bool:
+    """True for a host only reachable from this machine (or an empty host)."""
+    import ipaddress
+
+    candidate = (host or "").strip().lower()
+    if candidate in ("", "localhost", "localhost.localdomain"):
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False  # a real hostname — assume it names some other machine
+
+
+def resolve_external_callback_base_url(config: Config | None = None) -> str:
+    """Absolute base URL for LINKS to this instance (not part of the protocol).
+
+    The v2 external protocol is outbound-only, so no executor is ever told an
+    address of ours. What remains are two uses where a URL pointing at this
+    instance is genuinely needed: the ``runUrl`` in a chat notification a human
+    clicks, and rewriting the callback URL a *pre-v2 origin* sent us for a
+    delegated run.
+
+    Deliberately NOT derived from the network: the operator declares the
+    address (``csflow external callback-url`` / ``Config.external_callback_base_url``)
+    and we take it literally; unset means ``http://127.0.0.1:{csflow_port}``.
+    ClawsomeFlow does not probe routes or guess which of its addresses is
+    reachable — a wrong guess is a silent failure, while a wrong setting is
+    something the operator can see and fix (a VPN default route, for one, makes
+    any such guess actively wrong).
+
+    The single exception is a *poisoned* value: SSH-tunnel Host pollution
+    historically wrote ``http://127.0.0.1:<forwarded-port>`` (not the real
+    listen port) into config, which makes even same-host peers get Connection
+    refused. Such a value is discarded in favour of the loopback default.
+    """
     cfg = config or load_config()
     port = int(getattr(cfg, "csflow_port", 17017) or 17017)
     fallback = f"http://127.0.0.1:{port}"
     configured = (getattr(cfg, "external_callback_base_url", None) or "").strip().rstrip("/")
     if not configured:
         return fallback
-    try:
-        parts = urlsplit(configured)
-        host = (parts.hostname or "").lower()
-        cfg_port = parts.port or (443 if parts.scheme == "https" else 80)
-        if host in ("127.0.0.1", "localhost", "::1") and int(cfg_port) != port:
-            return fallback
-    except Exception:
+    parsed = _split_host_port(configured)
+    if parsed is None:
+        return fallback
+    if _host_is_loopback(parsed[0]) and parsed[1] != port:
         return fallback
     return configured
 
@@ -272,10 +362,103 @@ def sanitize_external_callback_base_url(config: Config | None = None) -> Config:
     return cfg
 
 
-def _callback_url(run_id: str, task_id: str, *, config: Config | None = None) -> str:
-    path = f"/api/external/tasks/{run_id}/{task_id}/complete"
-    base = resolve_external_callback_base_url(config)
-    return f"{base.rstrip('/')}{path}"
+# ── Result vocabulary (tolerant in, strict out) ───────────────────────
+# An integrator should not have to read our source to guess the exact word for
+# "done". Anything unrecognised counts as "still working" — never a failure,
+# so a partner's odd status string can only cost time, never a false failure.
+_STATUS_SUCCESS = frozenset({
+    "success", "succeeded", "successful", "ok", "completed", "complete", "done",
+    "finished",
+})
+_STATUS_FAILED = frozenset({
+    "failed", "failure", "fail", "error", "errored", "rejected", "cancelled",
+    "canceled", "aborted",
+})
+
+
+def classify_result_status(body: Any) -> tuple[str, str]:
+    """``(outcome, summary)`` where outcome is ``success`` / ``failed`` / ``waiting``.
+
+    Applied to BOTH the dispatch response and every poll response, so the two
+    modes share one vocabulary.
+    """
+    if not isinstance(body, dict):
+        return "waiting", ""
+    raw = str(body.get("status") or body.get("state") or "").strip().lower()
+    summary = str(
+        body.get("summary") or body.get("result") or body.get("detail") or "",
+    ).strip()
+    if raw in _STATUS_SUCCESS:
+        return "success", summary
+    if raw in _STATUS_FAILED:
+        return "failed", summary
+    return "waiting", summary
+
+
+def _clamp_poll_interval(value: Any) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return _POLL_DEFAULT_INTERVAL_SEC
+    if seconds <= 0:
+        return _POLL_DEFAULT_INTERVAL_SEC
+    return max(_POLL_MIN_INTERVAL_SEC, min(_POLL_MAX_INTERVAL_SEC, seconds))
+
+
+def _poll_spec_from_reply(body: Any) -> dict[str, Any]:
+    """Poll instructions from a webhook partner's "accepted" response.
+
+    An empty ``url`` means "poll the dispatch endpoint itself" — so a partner
+    can implement a single route (POST to accept, GET to report) and send back
+    no poll block at all.
+    """
+    poll = body.get("poll") if isinstance(body, dict) else None
+    url = ""
+    interval: Any = None
+    if isinstance(poll, dict):
+        url = str(poll.get("url") or poll.get("statusUrl") or "").strip()
+        interval = poll.get("intervalSeconds") or poll.get("interval")
+    elif isinstance(poll, str):
+        url = poll.strip()
+    if not url and isinstance(body, dict):
+        # Common alternative spellings for the same idea.
+        url = str(body.get("pollUrl") or body.get("statusUrl") or "").strip()
+    return {
+        "auth": "task_token",
+        "url": url,
+        "intervalSeconds": _clamp_poll_interval(interval),
+    }
+
+
+def _reply_contract(endpoint_url: str) -> dict[str, Any]:
+    """The self-describing "how to answer" block embedded in every dispatch."""
+    return {
+        "howToRespond": (
+            "Either answer THIS request with a terminal result, or accept the "
+            "task and let ClawsomeFlow poll you. ClawsomeFlow only makes "
+            "outbound calls — it never needs to be reachable from your side."
+        ),
+        "terminalBodyExample": {
+            "status": "success | failed",
+            "summary": "<completion summary — links/refs to deliverables; "
+                       "on failure: the blocking reason>",
+        },
+        "acceptedBodyExample": {
+            "status": "accepted",
+            "poll": {
+                "url": "https://your-system/jobs/123  (optional — omit to be "
+                       "polled on this same endpoint)",
+                "intervalSeconds": 30,
+            },
+        },
+        "poll": {
+            "method": "GET",
+            "url": endpoint_url or "<this endpoint>",
+            "query": {"runId": "<runId>", "taskId": "<taskId>"},
+            "auth": "Authorization: Bearer <taskToken>",
+            "waitingBodyExample": {"status": "running"},
+        },
+    }
 
 
 async def dispatch_external_task(
@@ -288,10 +471,15 @@ async def dispatch_external_task(
     message: str,
     package: dict[str, Any],
 ) -> None:
-    """Issue the receipt ticket, persist the dispatch event, notify the channel.
+    """Mint the task token, persist the dispatch event, hand the task out.
 
     Raising here fails the dispatch — the controller leaves the task pending
-    and retries next tick (with a FRESH nonce, invalidating this ticket).
+    and retries next tick (with a FRESH nonce, invalidating this token).
+
+    The executor's answer decides how the result comes back: a terminal status
+    in the response completes the task, anything else means "we will poll you".
+    Either way the answer is persisted as an ``external_task_accepted`` event so
+    the tick (and a restarted process) knows what to do next.
     """
     ext = agent.external
     if ext is None:  # defensive — the model validator guarantees this
@@ -299,7 +487,6 @@ async def dispatch_external_task(
     cfg = load_config()
     nonce = secrets.token_urlsafe(16)
     ticket = mint_ticket(run_id, task_id, nonce, config=cfg)
-    callback_url = _callback_url(run_id, task_id, config=cfg)
 
     # UI-only bilingual sheets (Run detail card). Never send to webhook/peer.
     package_wire = dict(package)
@@ -313,21 +500,10 @@ async def dispatch_external_task(
         "taskId": task_id,
         "agentId": agent.id,
         "channel": ext.channel.value,
-        "callbackUrl": callback_url,
-        "callbackToken": ticket,
-        # Self-describing completion contract so an integrated system needs no
-        # out-of-band documentation: POST this body back when the work is done.
-        # (callbackUrl/callbackToken above are kept as flat convenience fields.)
-        "callback": {
-            "method": "POST",
-            "url": callback_url,
-            "auth": "Authorization: Bearer <callbackToken>  (or body field 'token')",
-            "bodyExample": {
-                "status": "success | failed",
-                "summary": "<completion summary — links/refs to deliverables; "
-                           "on failure: the blocking reason>",
-            },
-        },
+        # Identifies THIS attempt of THIS task. The executor echoes it back as
+        # the poll credential; it is not a URL and not our address.
+        "taskToken": ticket,
+        "reply": _reply_contract(str(ext.endpoint_url or "")),
         **package_wire,
     }
     # Webhook partners run on a different host — remind them not to chase
@@ -368,12 +544,23 @@ async def dispatch_external_task(
         )
 
     if ext.channel == ExternalChannel.human:
+        # A person answers on the Run detail card (same-origin endpoint), so
+        # there is no outbound reply to interpret and nothing to poll.
         _notify_flow_channels_async(
             storage, run_id=run_id, package=outbound_package, message=message,
         )
         return
     if ext.channel == ExternalChannel.webhook:
-        await _post_outbound(str(ext.endpoint_url), outbound_package)
+        reply = await _post_outbound(str(ext.endpoint_url), outbound_package)
+        _record_acceptance(
+            storage,
+            run_id=run_id,
+            agent_id=agent.id,
+            task_id=task_id,
+            nonce=nonce,
+            reply=reply,
+            poll_spec=_poll_spec_from_reply(reply),
+        )
         return
     if ext.channel == ExternalChannel.remote_csflow:
         remote_run_id = await _post_delegate(
@@ -387,11 +574,80 @@ async def dispatch_external_task(
             task_id=task_id,
             payload={"remoteRunId": remote_run_id, "baseUrl": ext.base_url},
         )
+        _record_acceptance(
+            storage,
+            run_id=run_id,
+            agent_id=agent.id,
+            task_id=task_id,
+            nonce=nonce,
+            reply=None,
+            poll_spec=_delegate_poll_spec(ext, remote_run_id),
+        )
         return
     raise RuntimeError(f"unsupported external channel: {ext.channel!r}")
 
 
-async def _post_outbound(url: str, body: dict[str, Any]) -> None:
+def _delegate_poll_spec(ext: Any, remote_run_id: str | None) -> dict[str, Any]:
+    """Where to ask the peer about a delegated run (empty url = un-pollable).
+
+    A peer that returns no run id is pre-v2: it cannot be polled and (since we
+    send no callback) cannot report back either. We still record the attempt so
+    the poll step can say WHY the node is stuck instead of silently waiting.
+    """
+    rid = (remote_run_id or "").strip()
+    base = str(getattr(ext, "base_url", "") or "").rstrip("/")
+    return {
+        "auth": "pair_token",
+        "pairTokenRef": (getattr(ext, "pair_token_ref", "") or "").strip(),
+        "url": f"{base}/api/external/delegated-runs/{rid}" if (rid and base) else "",
+        "intervalSeconds": _POLL_DEFAULT_INTERVAL_SEC,
+    }
+
+
+def _record_acceptance(
+    storage: StorageBackend,
+    *,
+    run_id: str,
+    agent_id: str,
+    task_id: str,
+    nonce: str,
+    reply: Any,
+    poll_spec: dict[str, Any],
+) -> None:
+    """Persist what the executor answered: finished result, or how to poll.
+
+    Written AFTER the outbound (we cannot know the answer before) and keyed by
+    nonce, so the tick applies it exactly once and a restarted process
+    re-derives it from the event stream instead of in-memory state.
+    """
+    from app.events import publish_run_event
+
+    payload: dict[str, Any] = {"nonce": nonce}
+    outcome, summary = classify_result_status(reply)
+    if outcome in ("success", "failed"):
+        # The dispatch response already carried the result. Applying it is left
+        # to the tick's poll step so completion always flows through ONE path
+        # (and never races the controller's post-dispatch in_progress marking).
+        payload["result"] = {"ok": outcome == "success", "summary": summary}
+    else:
+        payload["poll"] = poll_spec
+    publish_run_event(
+        storage,
+        run_id=run_id,
+        event_type=EXTERNAL_TASK_ACCEPTED_EVENT,
+        agent_id=agent_id,
+        task_id=task_id,
+        payload=payload,
+    )
+
+
+async def _post_outbound(url: str, body: dict[str, Any]) -> dict[str, Any]:
+    """POST the task package; return the parsed response body (``{}`` if none).
+
+    A non-2xx response is a dispatch failure (raise → task stays pending,
+    retried next tick with a fresh token). The BODY is the protocol: it either
+    carries the finished result or tells us how to poll.
+    """
     import httpx
 
     async with httpx.AsyncClient(timeout=_OUTBOUND_TIMEOUT_SEC) as client:
@@ -400,6 +656,20 @@ async def _post_outbound(url: str, body: dict[str, Any]) -> None:
         raise RuntimeError(
             f"external endpoint returned HTTP {resp.status_code}: {resp.text[:300]}"
         )
+    return _json_body(resp)
+
+
+def _json_body(resp: Any) -> dict[str, Any]:
+    """Parsed JSON object from a response, or ``{}`` for anything else.
+
+    An empty / non-JSON / non-object body is legitimate ("accepted, ask me
+    later"), so it must never raise.
+    """
+    try:
+        parsed = resp.json()
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 async def _post_delegate(
@@ -423,11 +693,11 @@ async def _post_delegate(
     # Slim origin brief only — never the full external task sheet (that used
     # to nest into every peer task description and blow up webhook text).
     runtime_prompt = build_delegate_runtime_prompt(outbound_package)
+    # No callback fields: the origin polls the peer for the delegated run's
+    # result, so the origin needs no inbound reachability of its own.
     body = {
         "flowId": ext.flow_id,
         "runtimePrompt": runtime_prompt or None,
-        "callbackUrl": outbound_package["callbackUrl"],
-        "callbackToken": outbound_package["callbackToken"],
         "sourceRunId": outbound_package["runId"],
         "sourceTaskId": outbound_package["taskId"],
     }
@@ -454,6 +724,163 @@ async def _post_delegate(
         return str(resp.json().get("id") or "") or None
     except Exception:
         return None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Result polling (the outbound-only half of the v2 protocol)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _poll_request(
+    *,
+    agent: FlowAgent,
+    spec: dict[str, Any],
+    run_id: str,
+    task_id: str,
+    nonce: str,
+    config: Config,
+) -> tuple[str, dict[str, str], dict[str, str]] | None:
+    """``(url, params, headers)`` for one poll, or None when un-pollable."""
+    ext = agent.external
+    url = str(spec.get("url") or "").strip()
+    params: dict[str, str] = {}
+    headers: dict[str, str] = {}
+    if str(spec.get("auth") or "") == "pair_token":
+        ref = str(spec.get("pairTokenRef") or "").strip()
+        secret = (getattr(config, "external_remote_targets", None) or {}).get(ref)
+        if not url or not secret:
+            return None
+        headers["Authorization"] = f"Bearer {secret}"
+        return url, params, headers
+    # Webhook: fall back to the dispatch endpoint itself, identifying the task
+    # by query params so a partner can serve POST + GET on one route.
+    if not url:
+        url = str((ext.endpoint_url if ext else "") or "").strip()
+        if not url:
+            return None
+        params = {"runId": run_id, "taskId": task_id}
+    headers["Authorization"] = f"Bearer {mint_ticket(run_id, task_id, nonce, config=config)}"
+    return url, params, headers
+
+
+async def poll_external_task(
+    *,
+    storage: StorageBackend,
+    run: FlowRun,
+    agent: FlowAgent,
+    task_id: str,
+    http_allowed: bool = True,
+) -> tuple[str, float]:
+    """Ask a waiting executor whether it is done. Returns ``(outcome, interval)``.
+
+    Outcome is ``recorded`` (result applied — the tick will mirror the ClawTeam
+    flip next round), ``waiting``, or ``unavailable`` (nothing to poll: the
+    executor never told us how, e.g. a pre-v2 peer). ``interval`` is how long to
+    wait before the next poll.
+
+    Called from the scheduler tick, so it inherits pause's hard-cancel for free.
+    A poll error is transient: back off, never fail the task — a genuinely stuck
+    node is ended by its own ``timeout_seconds``.
+    """
+    disp = latest_dispatch_event(storage, run_id=run.id, task_id=task_id)
+    if disp is None:
+        return "unavailable", _POLL_ERROR_INTERVAL_SEC
+    nonce = str((disp.payload or {}).get("nonce") or "")
+    if not nonce:
+        return "unavailable", _POLL_ERROR_INTERVAL_SEC
+    if find_completion_event(
+        storage, run_id=run.id, task_id=task_id, nonce=nonce,
+    ) is not None:
+        return "waiting", _POLL_DEFAULT_INTERVAL_SEC  # already recorded
+    accepted = latest_accepted_event(
+        storage, run_id=run.id, task_id=task_id, nonce=nonce,
+    )
+    payload = (accepted.payload or {}) if accepted is not None else {}
+
+    # The dispatch response already carried the result — apply it now.
+    result = payload.get("result")
+    if isinstance(result, dict):
+        await _apply_polled_result(
+            storage=storage, run=run, task_id=task_id, nonce=nonce,
+            ok=bool(result.get("ok")), summary=str(result.get("summary") or ""),
+            source="external_dispatch_reply",
+        )
+        return "recorded", _POLL_DEFAULT_INTERVAL_SEC
+
+    spec = payload.get("poll")
+    if not isinstance(spec, dict):
+        return "unavailable", _POLL_ERROR_INTERVAL_SEC
+    interval = _clamp_poll_interval(spec.get("intervalSeconds"))
+    if not http_allowed:
+        return "waiting", interval
+
+    target = _poll_request(
+        agent=agent, spec=spec, run_id=run.id, task_id=task_id,
+        nonce=nonce, config=load_config(),
+    )
+    if target is None:
+        logger.warning(
+            "external_poll_unavailable",
+            run_id=run.id, task_id=task_id, nonce=nonce,
+            detail="executor did not provide a pollable status URL",
+        )
+        return "unavailable", _POLL_ERROR_INTERVAL_SEC
+    url, params, headers = target
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=_POLL_TIMEOUT_SEC) as client:
+            resp = await client.get(url, params=params or None, headers=headers)
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        body = _json_body(resp)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "external_poll_failed",
+            run_id=run.id, task_id=task_id, nonce=nonce, url=url, error=str(exc),
+        )
+        return "waiting", _POLL_ERROR_INTERVAL_SEC
+
+    outcome, summary = classify_result_status(body)
+    if outcome == "waiting":
+        return "waiting", interval
+    await _apply_polled_result(
+        storage=storage, run=run, task_id=task_id, nonce=nonce,
+        ok=(outcome == "success"), summary=summary, source="external_poll",
+    )
+    return "recorded", interval
+
+
+async def _apply_polled_result(
+    *,
+    storage: StorageBackend,
+    run: FlowRun,
+    task_id: str,
+    nonce: str,
+    ok: bool,
+    summary: str,
+    source: str,
+) -> None:
+    """Funnel a polled result through the ONE completion choke point.
+
+    Same call the legacy receipt endpoint makes, so dependency unblocking,
+    upstream-output matching, nonce idempotency and the external-failure
+    detector all behave identically no matter how the result arrived.
+    """
+    try:
+        await complete_external_task(
+            storage=storage, run=run, task_id=task_id, nonce=nonce,
+            ok=ok, summary=summary, source=source,
+        )
+    except ExternalTaskError as exc:
+        # Stale/duplicate/no-dispatch — the nonce guard already logged it.
+        logger.info(
+            "external_poll_result_rejected",
+            run_id=run.id, task_id=task_id, nonce=nonce, code=exc.code,
+        )
 
 
 #: Cap the task-briefing block in the human-dispatch notification. Same order
@@ -743,7 +1170,7 @@ def prepare_delegate_callback(run: FlowRun) -> dict[str, Any] | None:
             "url": url,
             "token": token,
             "run_id": run.id,
-            "ok": run.status in _DELEGATE_SUCCESS_STATUSES,
+            "ok": run.status in DELEGATE_SUCCESS_STATUSES,
             "run_status": status,
         }
     except Exception as exc:  # pragma: no cover — defensive
@@ -922,14 +1349,18 @@ def send_delegate_callback(prepared: dict[str, Any]) -> threading.Thread:
 
 __all__ = [
     "EXTERNAL_DELEGATE_ACCEPTED_EVENT",
+    "EXTERNAL_TASK_ACCEPTED_EVENT",
     "EXTERNAL_TASK_COMPLETED_EVENT",
     "EXTERNAL_TASK_DISPATCHED_EVENT",
     "ExternalTaskError",
+    "classify_result_status",
     "complete_external_task",
     "dispatch_external_task",
     "find_completion_event",
+    "latest_accepted_event",
     "latest_dispatch_event",
     "mint_ticket",
+    "poll_external_task",
     "prepare_delegate_callback",
     "resolve_external_callback_base_url",
     "retry_poisoned_delegate_callbacks",

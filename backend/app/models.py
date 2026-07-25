@@ -345,16 +345,20 @@ class ExternalNodeConfig(_ApiBase):
     * ``human`` — the task shows up as a todo card in the local WebUI; a person
       submits the result there (same-origin, no ticket needed). ``assignee``
       is a free-form display hint only.
-    * ``webhook`` — the scheduler POSTs the task package to ``endpoint_url``
-      (outbound) together with a one-time signed callback ticket; the external
-      system later calls ``POST /api/external/tasks/.../complete``.
+    * ``webhook`` — the scheduler POSTs the task package (``schemaVersion: 2``)
+      to ``endpoint_url`` with a one-time ``taskToken``. The executor returns the
+      result in that response or accepts the task and exposes a status URL the
+      scheduler polls (outbound-only; legacy push to
+      ``POST /api/external/tasks/.../complete`` is still honoured).
     * ``remote_csflow`` — the scheduler POSTs a delegation request to
-      ``{base_url}/api/external/delegate`` on the remote ClawsomeFlow, which
-      runs ``flow_id`` unattended and calls back with the leader report.
-      ``pair_token_ref`` names an entry in the local
-      ``Config.external_remote_targets`` table (outbound secrets registered via
-      ``csflow external add-remote``; the secret itself never lives in the
-      Flow spec). The peer’s inbound table is ``external_pair_tokens``.
+      ``{base_url}/api/external/delegate`` on the remote instance, which runs
+      ``flow_id`` unattended; the origin learns the leader report by polling
+      ``GET {base_url}/api/external/delegated-runs/{runId}`` with the pair
+      secret (nothing needs to reach the origin). ``pair_token_ref`` names an
+      entry in the local ``Config.external_remote_targets`` table (outbound
+      secrets registered via ``csflow external add-remote``; the secret itself
+      never lives in the Flow spec). The peer’s inbound table is
+      ``external_pair_tokens``.
     """
 
     channel: ExternalChannel

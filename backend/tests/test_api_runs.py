@@ -1235,6 +1235,82 @@ def test_continue_paused_calls_resume_run(
     assert called.get("run_id") == run.id
 
 
+def _failure_pause_inputs(**overrides: object) -> dict[str, object]:
+    blob: dict[str, object] = {
+        "reason": "failure",
+        "detail": 'Task "step one" failed (agent reported FAILED)',
+        "failure_inbox_message": "FAILED: t1: env broken",
+        "failure_task_id": "t1",
+        "failure_task_subject": "step one",
+        "failure_agent_id": "alice",
+        "failure_signal": "leader_inbox_failed",
+    }
+    blob.update(overrides)
+    return {"_csflow_pause_state": blob}
+
+
+def test_continue_stages_guidance_for_the_failed_task(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id, status=RunStatus.paused, inputs=_failure_pause_inputs(),
+    )
+    sched = engine_mod.get_scheduler()
+    resumed: list[str] = []
+    monkeypatch.setattr(
+        sched,
+        "resume_run",
+        lambda *, run, flow, storage=None: resumed.append(run.id),
+    )
+    r = app_client.post(
+        f"/api/runs/{run.id}/continue", json={"guidance": "  use the v2 API  "},
+    )
+    assert r.status_code == 200, r.text
+    assert resumed == [run.id]
+    staged = get_storage().run_get(run.id).inputs["_csflow_failure_guidance"]
+    assert staged["task_id"] == "t1"
+    assert staged["text"] == "use the v2 API"
+    # Internal marker stays out of the public inputs view.
+    assert "_csflow_failure_guidance" not in r.json().get("inputs", {})
+
+
+def test_continue_ignores_guidance_for_a_non_failure_pause(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id,
+        status=RunStatus.paused,
+        inputs={"_csflow_pause_state": {"reason": "user", "detail": "paused"}},
+    )
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "resume_run", lambda **kw: None)
+    r = app_client.post(
+        f"/api/runs/{run.id}/continue", json={"guidance": "try harder"},
+    )
+    assert r.status_code == 200, r.text
+    assert "_csflow_failure_guidance" not in (get_storage().run_get(run.id).inputs or {})
+
+
+def test_continue_ignores_guidance_when_failure_task_is_unknown(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(
+        flow_id=flow.id,
+        status=RunStatus.paused,
+        inputs=_failure_pause_inputs(failure_task_id=""),
+    )
+    sched = engine_mod.get_scheduler()
+    monkeypatch.setattr(sched, "resume_run", lambda **kw: None)
+    r = app_client.post(
+        f"/api/runs/{run.id}/continue", json={"guidance": "try harder"},
+    )
+    assert r.status_code == 200, r.text
+    assert "_csflow_failure_guidance" not in (get_storage().run_get(run.id).inputs or {})
+
+
 def test_paused_run_summary_exposes_pause_state(app_client: TestClient) -> None:
     flow = _make_flow()
     run = _make_run(

@@ -490,6 +490,54 @@ def _fake_mcp(monkeypatch: pytest.MonkeyPatch) -> _FakeMcp:
     return fake
 
 
+def _stub_httpx_get(
+    monkeypatch: pytest.MonkeyPatch, replies: list[Any],
+) -> list[dict[str, Any]]:
+    """Serve *replies* to successive polls; returns the captured GET calls.
+
+    A reply may be a dict (JSON body), an int (HTTP status) or an exception
+    instance (transport error).
+    """
+    import httpx
+
+    calls: list[dict[str, Any]] = []
+    queue = list(replies)
+
+    class _Resp:
+        def __init__(self, body: Any) -> None:
+            self.status_code = body if isinstance(body, int) else 200
+            self._body = body if isinstance(body, dict) else {}
+            self.text = ""
+
+        def json(self) -> dict[str, Any]:
+            return self._body
+
+    class _Client:
+        def __init__(self, **kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+        async def get(
+            self, url: str, *, params: Any = None, headers: Any = None,
+        ) -> _Resp:
+            calls.append({"url": url, "params": params, "headers": headers or {}})
+            reply = queue.pop(0) if queue else {"status": "running"}
+            if isinstance(reply, BaseException):
+                raise reply
+            return _Resp(reply)
+
+        async def post(self, url: str, **kw: Any) -> _Resp:  # pragma: no cover
+            raise AssertionError("unexpected POST in a poll test")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    return calls
+
+
 def test_complete_success_sends_mailbox_and_marks_completed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -586,29 +634,36 @@ def _mk_run_for_dispatch() -> FlowRun:
     ))
 
 
-def test_dispatch_webhook_outbound_includes_callback_contract(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The webhook outbound package must be self-describing: split briefing
-    fields + an explicit completion-callback contract."""
-    run = _mk_run_for_dispatch()
-    agent = FlowAgent(
+def _webhook_agent(endpoint: str = "https://partner.example/tasks") -> FlowAgent:
+    return FlowAgent(
         id="ext-node", kind=AgentKind.external,
         external=ExternalNodeConfig(
-            channel=ExternalChannel.webhook,
-            endpoint_url="https://partner.example/tasks",
+            channel=ExternalChannel.webhook, endpoint_url=endpoint,
         ),
     )
+
+
+def test_dispatch_webhook_outbound_is_outbound_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The webhook package is self-describing AND contains no address of ours.
+
+    A partner consuming an ordinary remote service never supplies its own
+    address; neither do we. The package tells the executor how to ANSWER us
+    (or be polled) — never how to reach us.
+    """
+    run = _mk_run_for_dispatch()
     captured: dict[str, Any] = {}
 
-    async def fake_post(url: str, body: dict[str, Any]) -> None:
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
         captured["url"] = url
         captured["body"] = body
+        return {}
 
     monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
     asyncio.run(ext_svc.dispatch_external_task(
         storage=get_storage(), run_id=run.id, team_name=run.team_name,
-        agent=agent, task_id="t1", message="sheet",
+        agent=_webhook_agent(), task_id="t1", message="sheet",
         package={
             "subject": "s", "description": "briefing",
             "outputRequirement": "a verdict", "clawteamTaskId": "CT-1",
@@ -617,16 +672,233 @@ def test_dispatch_webhook_outbound_includes_callback_contract(
     body = captured["body"]
     assert captured["url"] == "https://partner.example/tasks"
     assert body["event"] == "external_task_dispatch"
-    assert body["schemaVersion"] == 1
+    assert body["schemaVersion"] == 2
     assert body["description"] == "briefing"
     assert body["outputRequirement"] == "a verdict"
-    # Self-describing completion contract (flat convenience fields kept too).
-    assert body["callback"]["method"] == "POST"
-    assert body["callback"]["url"] == body["callbackUrl"]
-    assert body["callback"]["bodyExample"]["status"] == "success | failed"
-    assert body["callbackToken"].count(".") == 1
+    # One-time token identifying this attempt — a credential, not a URL.
+    assert body["taskToken"].count(".") == 1
+    # Self-describing reply contract: answer now, or get polled.
+    assert body["reply"]["terminalBodyExample"]["status"] == "success | failed"
+    assert body["reply"]["acceptedBodyExample"]["status"] == "accepted"
+    assert body["reply"]["poll"]["method"] == "GET"
+    # Nothing that points back at this instance.
+    assert "callbackUrl" not in body and "callbackToken" not in body
+    assert "127.0.0.1" not in json.dumps(body)
     from app.scheduler.prompts import WEBHOOK_REMOTE_NOTES
     assert body["notes"] == WEBHOOK_REMOTE_NOTES
+
+
+def test_webhook_sync_reply_completes_the_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fast executor answers the dispatch request itself — no polling at all."""
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = _webhook_agent()
+
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "success", "summary": "done inline"}
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+
+    async def scenario() -> None:
+        await ext_svc.dispatch_external_task(
+            storage=storage, run_id=run.id, team_name=run.team_name,
+            agent=agent, task_id="t1", message="sheet",
+            package={"clawteamTaskId": "CT-77", "leaderAgentId": "leader"},
+        )
+        # The result rides on the accepted event; the tick applies it, so no
+        # HTTP is needed (http_allowed=False proves it).
+        outcome, _ = await ext_svc.poll_external_task(
+            storage=storage, run=run, agent=agent, task_id="t1",
+            http_allowed=False,
+        )
+        assert outcome == "recorded"
+
+    asyncio.run(scenario())
+    assert fake.mailbox_calls[0]["content"] == "task t1 done: done inline"
+    assert fake.task_updates[0]["status"] == "completed"
+
+
+def test_webhook_accepted_then_polled_to_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The long-running path: accept, get polled, report when finished."""
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = _webhook_agent()
+
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "accepted",
+            "poll": {"url": "https://partner.example/jobs/9", "intervalSeconds": 30},
+        }
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+    replies = [{"status": "running"}, {"status": "done", "summary": "partner finished"}]
+    gets = _stub_httpx_get(monkeypatch, replies)
+
+    async def scenario() -> None:
+        await ext_svc.dispatch_external_task(
+            storage=storage, run_id=run.id, team_name=run.team_name,
+            agent=agent, task_id="t1", message="sheet",
+            package={"clawteamTaskId": "CT-77", "leaderAgentId": "leader"},
+        )
+        first, interval = await ext_svc.poll_external_task(
+            storage=storage, run=run, agent=agent, task_id="t1",
+        )
+        assert (first, interval) == ("waiting", 30.0)
+        second, _ = await ext_svc.poll_external_task(
+            storage=storage, run=run, agent=agent, task_id="t1",
+        )
+        assert second == "recorded"
+
+    asyncio.run(scenario())
+    assert gets[0]["url"] == "https://partner.example/jobs/9"
+    # The task token round-trips as the poll credential.
+    assert gets[0]["headers"]["Authorization"].startswith("Bearer ")
+    assert fake.mailbox_calls[0]["content"] == "task t1 done: partner finished"
+
+
+def test_poll_falls_back_to_the_dispatch_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No poll url? Poll the dispatch endpoint with ?runId&taskId.
+
+    Lets a partner serve the whole protocol on ONE route.
+    """
+    _fake_mcp(monkeypatch)
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = _webhook_agent("https://partner.example/hook")
+
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "accepted"}  # no poll block at all
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+    gets = _stub_httpx_get(monkeypatch, [{"status": "success", "summary": "ok"}])
+
+    async def scenario() -> None:
+        await ext_svc.dispatch_external_task(
+            storage=storage, run_id=run.id, team_name=run.team_name,
+            agent=agent, task_id="t1", message="sheet",
+            package={"clawteamTaskId": "CT-77", "leaderAgentId": "leader"},
+        )
+        outcome, interval = await ext_svc.poll_external_task(
+            storage=storage, run=run, agent=agent, task_id="t1",
+        )
+        assert outcome == "recorded"
+        assert interval == 15.0  # default cadence when the partner suggests none
+
+    asyncio.run(scenario())
+    assert gets[0]["url"] == "https://partner.example/hook"
+    assert gets[0]["params"] == {"runId": run.id, "taskId": "t1"}
+
+
+def test_polled_failure_writes_the_nonce_event_without_touching_the_inbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A polled failure is the same nonce-identified signal a receipt was."""
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = _webhook_agent()
+
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "accepted", "poll": {"url": "https://partner.example/j/1"}}
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+    _stub_httpx_get(monkeypatch, [{"status": "error", "summary": "no access"}])
+
+    async def scenario() -> None:
+        await ext_svc.dispatch_external_task(
+            storage=storage, run_id=run.id, team_name=run.team_name,
+            agent=agent, task_id="t1", message="sheet",
+            package={"clawteamTaskId": "CT-77", "leaderAgentId": "leader"},
+        )
+        outcome, _ = await ext_svc.poll_external_task(
+            storage=storage, run=run, agent=agent, task_id="t1",
+        )
+        assert outcome == "recorded"
+
+    asyncio.run(scenario())
+    assert fake.mailbox_calls == []  # failures bypass the leader inbox
+    assert fake.task_updates == []  # ClawTeam status left in_progress
+    completed = [
+        ev for ev in get_storage().event_list(run_id=run.id, limit=100)
+        if ev.type == ext_svc.EXTERNAL_TASK_COMPLETED_EVENT
+    ]
+    assert completed[-1].payload["ok"] is False
+    assert completed[-1].payload["summary"] == "no access"
+
+
+def test_poll_errors_are_transient_and_never_fail_the_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partner's flaky status endpoint must not turn into a task failure."""
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = _webhook_agent()
+
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "accepted", "poll": {"url": "https://partner.example/j/1"}}
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+    _stub_httpx_get(monkeypatch, [RuntimeError("connection reset")])
+
+    async def scenario() -> None:
+        await ext_svc.dispatch_external_task(
+            storage=storage, run_id=run.id, team_name=run.team_name,
+            agent=agent, task_id="t1", message="sheet",
+            package={"clawteamTaskId": "CT-77", "leaderAgentId": "leader"},
+        )
+        outcome, interval = await ext_svc.poll_external_task(
+            storage=storage, run=run, agent=agent, task_id="t1",
+        )
+        assert outcome == "waiting"
+        assert interval == 60.0  # backoff
+
+    asyncio.run(scenario())
+    assert not [
+        ev for ev in get_storage().event_list(run_id=run.id, limit=100)
+        if ev.type == ext_svc.EXTERNAL_TASK_COMPLETED_EVENT
+    ]
+
+
+def test_poll_state_is_re_derived_from_events_not_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Everything polling needs is durable, so a restart resumes polling.
+
+    Also: a superseded attempt's acceptance is invisible — a re-dispatch mints a
+    fresh nonce, and only the current one is matched.
+    """
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = _webhook_agent()
+
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "accepted", "poll": {"url": "https://partner.example/j/1"}}
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+    asyncio.run(ext_svc.dispatch_external_task(
+        storage=storage, run_id=run.id, team_name=run.team_name,
+        agent=agent, task_id="t1", message="sheet",
+        package={"clawteamTaskId": "CT-77", "leaderAgentId": "leader"},
+    ))
+    nonce = ext_svc.latest_dispatch_event(
+        storage, run_id=run.id, task_id="t1",
+    ).payload["nonce"]
+    accepted = ext_svc.latest_accepted_event(
+        storage, run_id=run.id, task_id="t1", nonce=nonce,
+    )
+    assert accepted is not None
+    assert accepted.payload["poll"]["url"] == "https://partner.example/j/1"
+    assert ext_svc.latest_accepted_event(
+        storage, run_id=run.id, task_id="t1", nonce="some-older-attempt",
+    ) is None
 
 
 def test_dispatch_remote_csflow_forwards_configured_inputs(
@@ -688,6 +960,22 @@ def test_dispatch_remote_csflow_forwards_configured_inputs(
     # Slim brief from package fields — not the full external task sheet.
     assert body["runtimePrompt"] == "s"
     assert body["inputs"] == {"需求描述": "抓取周报", "目标目录": "/data"}
+    # The origin never tells the peer how to reach it: it polls the peer instead.
+    assert "callbackUrl" not in body and "callbackToken" not in body
+    # The peer's run id is recorded as the poll target for the tick.
+    nonce = ext_svc.latest_dispatch_event(
+        get_storage(), run_id=run.id, task_id="t1",
+    ).payload["nonce"]
+    accepted = ext_svc.latest_accepted_event(
+        get_storage(), run_id=run.id, task_id="t1", nonce=nonce,
+    )
+    assert accepted is not None
+    assert accepted.payload["poll"] == {
+        "auth": "pair_token",
+        "pairTokenRef": "peer",
+        "url": "http://remote:17017/api/external/delegated-runs/run-remote-1",
+        "intervalSeconds": 15.0,
+    }
 
 
 def test_build_external_dispatch_notification_payload() -> None:
@@ -736,6 +1024,59 @@ def test_resolve_external_callback_base_url_rewrites_poisoned_loopback(
     cfg = Config(csflow_port=17017, external_callback_base_url="http://127.0.0.1:10208")
     save_config(cfg)
     assert resolve_external_callback_base_url() == "http://127.0.0.1:17017"
+
+
+def test_callback_base_url_is_never_derived_from_the_network() -> None:
+    """The peer's address must not influence the callback base in any way.
+
+    A host with a VPN default route (or any policy routing) would make a
+    route-probing heuristic produce an address no peer can reach, so resolution
+    is config-only: whatever the operator declared, else loopback.
+    """
+    from app.config import Config, save_config
+    from app.services import external_tasks as ext_svc
+
+    save_config(Config(csflow_port=17017))
+    assert ext_svc.resolve_external_callback_base_url() == "http://127.0.0.1:17017"
+    # Guards against reintroducing a probe: resolution takes no peer argument.
+    assert not hasattr(ext_svc, "derive_callback_base_url")
+    with pytest.raises(TypeError):
+        ext_svc.resolve_external_callback_base_url(peer_url="http://10.0.0.9:8080")
+
+
+def test_configured_callback_base_url_is_taken_literally() -> None:
+    from app.config import Config, save_config
+    from app.services import external_tasks as ext_svc
+
+    # An operator override is authoritative — it may be an address (public
+    # host / reverse proxy) this machine cannot see itself.
+    save_config(Config(
+        csflow_port=17017, external_callback_base_url="https://csflow.example.com",
+    ))
+    assert (
+        ext_svc.resolve_external_callback_base_url() == "https://csflow.example.com"
+    )
+    # A loopback override on our own listen port is a legitimate same-host
+    # setup, so it is honoured too.
+    save_config(Config(
+        csflow_port=17017, external_callback_base_url="http://127.0.0.1:17017",
+    ))
+    assert ext_svc.resolve_external_callback_base_url() == "http://127.0.0.1:17017"
+
+
+def test_no_external_node_setting_can_reintroduce_inbound_dependence() -> None:
+    """Guards the design: nothing about our own address may gate an external node.
+
+    The whole point of protocol v2 is that a webhook / remote-ClawsomeFlow node
+    works with zero knowledge of how (or whether) this instance can be reached.
+    So the callback-base helpers that used to shape a dispatch must stay gone
+    from that path, and the surviving one is link-building only.
+    """
+    from app.services import external_tasks as ext_svc
+
+    assert not hasattr(ext_svc, "describe_callback_base_url")
+    assert not hasattr(ext_svc, "derive_callback_base_url")
+    assert not hasattr(ext_svc, "_callback_url")
 
 
 def test_prepare_rewrites_poisoned_callback_url(

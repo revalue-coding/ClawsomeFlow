@@ -497,7 +497,7 @@ const en = {
       externalRemoteConfigured: "Configured: {{flowId}} | param fields: {{fields}}",
       externalRemoteNoParams: "(no param fields)",
       externalHumanHint: "A person completes this subtask and returns the result on the Run page. On dispatch, the task sheet (description, upstream inputs, output requirement) is pushed to the Flow's notify channels (Flow list → \"Notify\" button) to alert the assignee.",
-      externalWebhookHint: "On dispatch we POST a task package to this endpoint; when done, follow the package’s callback and return {\"status\",\"summary\"}. The summary becomes this node’s output.",
+      externalWebhookHint: "On dispatch we POST a task package to this endpoint (it carries a taskToken and a self-describing reply contract). Already done? Answer that request with {\"status\":\"success\",\"summary\":...}. Long-running? Answer {\"status\":\"accepted\"} (optionally with poll.url) and ClawsomeFlow will GET your status on a schedule. The summary becomes this node’s output. ClawsomeFlow only makes outbound calls — it never needs to be reachable from your side, so cross-machine needs no setup.",
       externalRemoteHint: "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output.",
       externalRemoteHintWithParams:
         "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output. The remote Flow declares param fields: upstream tasks will fill them intelligently; you may also enter known values yourself (they override upstream reports).",
@@ -754,6 +754,11 @@ const en = {
     pauseFailureSyntheticTimeout: "Task timed out{{detail}}",
     pauseFailureSyntheticFailed: "FAILED: {{taskId}}{{detail}}",
     pauseExternalFailureHint: "Fix the problem, then click Resume to re-run this node",
+    pauseFailureGuidanceLabel: "Additional guidance (optional)",
+    pauseFailureGuidanceHint:
+      "Once you know why it failed, you can add extra guidance for the agent here.",
+    pauseFailureGuidancePlaceholder:
+      "For example: the API moved to v2 — retry with the new auth flow.",
     pauseReason: {
       user: "Paused at your request. Continue to resume from where it left off, or terminate to discard the run.",
       failure: "A step failed, so the run was paused. Continue to re-run the failed step, or terminate to discard the run.",
@@ -969,8 +974,8 @@ const en = {
       redispatchConfirmOk: "Confirm re-dispatch",
       redispatching: "Re-dispatching…",
       submitting: "Submitting…",
-      waitingWebhook: "Dispatched to the external endpoint — waiting for its callback.",
-      waitingRemote: "Delegated to the remote ClawsomeFlow — waiting for its leader report callback.",
+      waitingWebhook: "Dispatched to the external endpoint — polling it for the result.",
+      waitingRemote: "Delegated to the remote ClawsomeFlow — polling it for the leader report.",
     },
     checkpoint: {
       title: "Manual checkpoint",

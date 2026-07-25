@@ -108,9 +108,11 @@ from app.scheduler.run_metadata import (
     PAUSE_REASON_INTERNAL_ERROR,
     POST_COMPLAINT_STATUS_KEY,
     clear_checkpoint_state,
+    clear_failure_guidance,
     coalesce_reverted_merge_markers,
     pause_reason_outranks,
     read_checkpoint_state,
+    read_failure_guidance,
     read_pause_state,
     run_is_unattended,
     write_checkpoint_state,
@@ -447,6 +449,11 @@ class RunController:
         # messages (a genuinely NEW failure after resume produces a fresh report
         # / falls back to the timeout signal), so the re-run proceeds cleanly.
         self._resume_suppressed_failed_msgs: set[str] = set()
+        # ``(task_id, guidance_text)`` the user staged on the failure pause banner
+        # for the next dispatch of that task (loaded from the durable staging area
+        # in ``prepare_resume``). Emptied — here and on disk — the moment that
+        # dispatch succeeds, so guidance is never reused by a later dispatch.
+        self._pending_failure_guidance: tuple[str, str] | None = None
         self._poll_sec = _POLL_MIN_SEC
 
         self._session_factory = session_factory or self._default_session_factory
@@ -465,6 +472,11 @@ class RunController:
         # the old one stops matching the current dispatch anyway. Seeded on resume
         # from ``task_failed`` event payloads (``_seed_handled_external_nonces``).
         self._handled_external_failure_nonces: set[str] = set()
+        # Next epoch second at which each waiting external task may be polled
+        # again (webhook / remote_csflow). Purely a rate limiter: everything
+        # needed to poll is re-derivable from the event stream, so a rebuilt
+        # controller just polls one round early.
+        self._external_poll_due: dict[str, float] = {}
         self._terminal_snapshot_persisted = False
         self._task_outputs: dict[str, list[dict[str, Any]]] = {}
         self._worker_report_history: list[dict[str, Any]] = []
@@ -665,6 +677,11 @@ class RunController:
         for tid, summary in summaries.items():
             self._checkpoint_approved_summaries.setdefault(tid, summary)
         clear_checkpoint_state(self.run)
+        # Pick up the guidance the user typed on the failure pause banner. The
+        # staging area is left on disk until the target task is actually
+        # re-dispatched (``_dispatch_one``), so a restart before that dispatch
+        # still delivers it exactly once.
+        self._pending_failure_guidance = read_failure_guidance(self.run)
         # Snapshot the stale FAILED leader-inbox messages present right now so the
         # failure detector ignores them post-resume (they'd otherwise re-fail a
         # reset task — mailbox_peek is non-consuming). This is a LOCAL-WORKER-ONLY
@@ -1002,6 +1019,9 @@ class RunController:
             # Leave book in_progress — operator can retry; prior nonce is
             # only invalidated once the new dispatch event persists.
             raise
+        # Poll the new attempt on the next tick rather than waiting out the
+        # previous attempt's interval.
+        self._external_poll_due.pop(tid, None)
         self._emit_event(
             "external_task_redispatched",
             agent_id=agent.id,
@@ -1493,15 +1513,8 @@ class RunController:
                         await self._wait_stop_or_timeout(self._poll_sec)
                 except SessionStartupError as exc:
                     loop_exc = exc
-                    self._emit_event(
-                        "run_loop_exception",
-                        payload={
-                            "error": (
-                                f"session startup failed "
-                                f"({exc.agent_id}/{exc.phase}): {exc.detail}"
-                            )[:1000],
-                        },
-                    )
+                    # task_session_start_failed was already emitted in tick(); do not
+                    # duplicate as run_loop_exception (that event is for unhandled errors).
                     self._backend_stop_after_internal_error(
                         detail=f"session startup failed ({exc.agent_id}/{exc.phase}): {exc.detail}"[:1000],
                     )
@@ -1637,6 +1650,14 @@ class RunController:
             # live pane output and proactively requeue the task for redispatch.
             recovered = await self._runtime_socket_error_recovery_tick()
             activity = activity or recovered
+
+            # 2.6. Ask waiting external executors whether they are done. This is
+            # how EVERY webhook / remote_csflow result arrives — we call them,
+            # they never call us — so no external node needs this instance to be
+            # reachable. Runs inside the tick, hence cancelled by pause for free.
+            if not self._stop_requested():
+                polled = await self._poll_external_tasks(snapshots)
+                activity = activity or polled
 
         # 3. Manual checkpoint refresh/clear. While a checkpoint is open,
         #    local-agent dispatch stays paused (worktree/session safety —
@@ -2278,6 +2299,10 @@ class RunController:
             book.dispatched_at = outcome.dispatched_at
             book.last_dispatch_message = message
             self.dispatch_clock.mark(book.task.id, outcome.dispatched_at)
+            # The message is out — the user's failure guidance has been delivered,
+            # so empty the staging area (a failed dispatch keeps it staged for the
+            # next attempt).
+            self._consume_staged_guidance(book.task.id)
             self._emit_event(
                 "task_dispatched",
                 agent_id=agent.id, task_id=book.task.id,
@@ -2945,7 +2970,7 @@ class RunController:
         """Return ``(nonce, summary)`` iff *task_id*'s LATEST external dispatch
         received a FAILURE receipt, else ``None``.
 
-        An external node reports failure via ``record_external_result(ok=False)``,
+        An external node reports failure via ``complete_external_task(ok=False)``,
         which writes an ``external_task_completed`` event with ``ok=False`` for the
         dispatch nonce (and deliberately does NOT touch the leader inbox or the
         ClawTeam status). This event — matched to the CURRENT dispatch nonce — is
@@ -2981,6 +3006,63 @@ class RunController:
             return None
         except Exception:  # pragma: no cover - defensive
             return None
+
+    async def _poll_external_tasks(self, snapshots: list[TaskSnapshot]) -> bool:
+        """Poll every dispatched-but-unfinished webhook / remote_csflow task.
+
+        The executor answered the dispatch either with the finished result or
+        with "ask me later"; both are persisted per nonce, so this step is the
+        single place a v2 result is applied — recording it through
+        :func:`complete_external_task` exactly like the legacy receipt did.
+
+        Human nodes are skipped (a person answers on the Run page). HTTP is only
+        issued when the task's poll interval has elapsed; the cheap in-memory
+        due-map is rebuilt naturally after a restart.
+        """
+        from app.models import ExternalChannel
+        from app.services.external_tasks import poll_external_task
+
+        activity = False
+        now = time.time()
+        for snap in snapshots:
+            if (snap.status or "").strip().lower() == "completed":
+                continue
+            book = self._tasks.get(snap.task_id)
+            if book is None:
+                continue
+            agent = self._agents.get(book.task.owner_agent_id)
+            if (
+                agent is None
+                or agent.kind != AgentKind.external
+                or agent.external is None
+                or agent.external.channel not in (
+                    ExternalChannel.webhook, ExternalChannel.remote_csflow,
+                )
+            ):
+                continue
+            due = self._external_poll_due.get(snap.task_id)
+            http_allowed = due is None or now >= due
+            try:
+                outcome, interval = await poll_external_task(
+                    storage=self.storage,
+                    run=self.run,
+                    agent=agent,
+                    task_id=snap.task_id,
+                    http_allowed=http_allowed,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "external_poll_tick_failed",
+                    run_id=self.run.id, task_id=snap.task_id, error=str(exc),
+                )
+                continue
+            if http_allowed:
+                self._external_poll_due[snap.task_id] = time.time() + interval
+            if outcome == "recorded":
+                activity = True
+        return activity
 
     def _detect_external_failures(
         self, snapshots: list[TaskSnapshot],
@@ -4921,6 +5003,39 @@ class RunController:
             self_merge=self_merge,
             merge_reference=merge_reference_enabled(mode=mode),
             remote_param_targets=self._downstream_remote_param_targets(task.id),
+            user_guidance=self._staged_guidance_for(task.id),
+        )
+
+    def _staged_guidance_for(self, task_id: str) -> str:
+        """The user's staged failure guidance, but only for its own task."""
+        staged = self._pending_failure_guidance
+        if staged is None or staged[0] != task_id:
+            return ""
+        return staged[1]
+
+    def _consume_staged_guidance(self, task_id: str) -> None:
+        """Empty the guidance staging area after *task_id* was re-dispatched.
+
+        One-shot by design: the text described one specific failure, so it must
+        not survive into any later dispatch. Clears the in-memory copy AND the
+        durable ``run.inputs`` slot in the same step.
+        """
+        staged = self._pending_failure_guidance
+        if staged is None or staged[0] != task_id:
+            return
+        self._pending_failure_guidance = None
+        clear_failure_guidance(self.run)
+        try:
+            self.storage.run_update(self.run)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "failure_guidance_clear_persist_failed",
+                run_id=self.run.id, task_id=task_id, error=str(exc),
+            )
+        self._emit_event(
+            "task_failure_guidance_applied",
+            task_id=task_id,
+            payload={"guidance_length": len(staged[1])},
         )
 
     def _downstream_remote_param_targets(

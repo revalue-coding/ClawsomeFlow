@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as _json
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,11 @@ from app.models import (
     RunStatus,
 )
 from app.scheduler import engine as engine_mod
-from app.scheduler.run_metadata import EXTERNAL_CALLBACK_KEY, UNATTENDED_KEY
+from app.scheduler.run_metadata import (
+    DELEGATE_ORIGIN_KEY,
+    EXTERNAL_CALLBACK_KEY,
+    UNATTENDED_KEY,
+)
 from app.services.external_tasks import (
     EXTERNAL_TASK_DISPATCHED_EVENT,
     mint_ticket,
@@ -295,7 +300,6 @@ def test_delegate_triggers_unattended_run_with_callback_marker(
     assert row is not None
     # Unattended contract + callback marker stamped in run.inputs.
     assert row.inputs[UNATTENDED_KEY] == "true"
-    import json as _json
     marker = _json.loads(row.inputs[EXTERNAL_CALLBACK_KEY])
     assert marker["url"].endswith("/complete")
     assert marker["token"] == "tok-123"
@@ -393,17 +397,68 @@ def test_main_api_still_loopback_only_when_external_open() -> None:
         ))
 
 
+def test_webhook_dispatch_reveals_no_address_of_ours(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with a public base URL configured, the package carries no callback.
+
+    A remote executor is a service we consume; it is never handed our address,
+    which is why a cross-machine webhook node needs no setup at all.
+    """
+    import asyncio
+
+    from app.models import ExternalNodeConfig
+    from app.services import external_tasks as ext_svc
+
+    _fake_mcp(monkeypatch)
+    storage = get_storage()
+    flow = _mk_flow()
+    run = storage.run_create(FlowRun(
+        flow_id=flow.id, flow_version=1, team_name="csflow-wh-remote",
+        status=RunStatus.running, inputs={}, user="alice",
+    ))
+    captured: dict[str, Any] = {}
+
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        captured["body"] = body
+        return {"status": "accepted"}
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+    save_config(load_config().model_copy(
+        update={
+            "csflow_port": 17017,
+            "external_callback_base_url": "http://192.168.1.20:17017",
+        },
+    ))
+    asyncio.run(ext_svc.dispatch_external_task(
+        storage=storage, run_id=run.id, team_name=run.team_name,
+        agent=FlowAgent(
+            id="ext-node", kind=AgentKind.external,
+            external=ExternalNodeConfig(
+                channel=ExternalChannel.webhook,
+                endpoint_url="http://192.168.1.30:8080/partner/hook",
+            ),
+        ),
+        task_id="t1", message="sheet",
+        package={"subject": "s", "description": "d", "clawteamTaskId": "CT-wh"},
+    ))
+    body = _json.dumps(captured["body"])
+    assert "192.168.1.20" not in body
+    assert "callbackUrl" not in captured["body"]
+    assert captured["body"]["taskToken"]
+
+
 # ── Loopback "remote" round-trips (local URL mimics the peer) ────────────
 
 
-def test_webhook_local_endpoint_dispatch_then_complete(
+def test_webhook_legacy_push_receipt_still_accepted(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Webhook channel: dispatch POSTs to a local URL, partner completes via ticket.
+    """v1 integrations that PUSH their result keep working (deprecated path).
 
-    The "remote" partner is simulated by the same process: ``_post_outbound``
-    is stubbed to capture the package, then we hit the receipt endpoint just
-    like an integrated system would.
+    Nothing in v2 depends on it — the package no longer advertises it — but a
+    partner already wired against the receipt endpoint must not break, and the
+    task token it was given is still the credential.
     """
     import asyncio
 
@@ -427,15 +482,12 @@ def test_webhook_local_endpoint_dispatch_then_complete(
     )
     captured: dict[str, Any] = {}
 
-    async def fake_post(url: str, body: dict[str, Any]) -> None:
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
         captured["url"] = url
         captured["body"] = body
+        return {"status": "accepted"}
 
     monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
-    cfg = load_config()
-    save_config(cfg.model_copy(
-        update={"external_callback_base_url": "http://127.0.0.1:17017"},
-    ))
 
     asyncio.run(ext_svc.dispatch_external_task(
         storage=storage, run_id=run.id, team_name=run.team_name,
@@ -448,34 +500,30 @@ def test_webhook_local_endpoint_dispatch_then_complete(
     ))
     assert captured["url"] == "http://127.0.0.1:17017/partner/hook"
     body = captured["body"]
-    assert body["schemaVersion"] == 1
+    assert body["schemaVersion"] == 2
     assert body["event"] == "external_task_dispatch"
-    assert body["callbackUrl"].startswith("http://127.0.0.1:17017/api/external/tasks/")
-    assert body["callbackUrl"].endswith("/complete")
-    ticket = body["callbackToken"]
 
-    # Partner system (local) submits the result with the one-time ticket.
     r = app_client.post(
-        body["callbackUrl"].replace("http://127.0.0.1:17017", ""),
+        f"/api/external/tasks/{run.id}/t1/complete",
         json={"status": "success", "summary": "partner finished"},
-        headers={"Authorization": f"Bearer {ticket}"},
+        headers={"Authorization": f"Bearer {body['taskToken']}"},
     )
     assert r.status_code == 200, r.text
     assert fake.mailbox_calls[0]["content"] == "task t1 done: partner finished"
     assert fake.task_updates[0]["task_id"] == "CT-wh"
 
 
-def test_remote_csflow_loopback_delegate_then_callback_complete(
+def test_remote_csflow_loopback_delegate_then_polled_to_completion(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Remote ClawsomeFlow channel: same local instance plays origin + peer.
 
-    Origin dispatches ``remote_csflow`` with ``base_url`` pointing at itself;
-    the peer ``/delegate`` accepts via pair-token; a terminal callback then
-    completes the origin task through the absolute callback URL.
+    Origin dispatches ``remote_csflow`` with ``base_url`` pointing at itself and
+    tells the peer NOTHING about how to reach it; when the peer's run finishes,
+    the origin's own poll of ``GET /delegated-runs/{id}`` brings the leader
+    report home. This is what makes delegation work from behind NAT.
     """
     import asyncio
-    import json as _json
 
     import httpx
 
@@ -489,7 +537,6 @@ def test_remote_csflow_loopback_delegate_then_callback_complete(
     save_config(cfg.model_copy(update={
         "external_pair_tokens": {"peer-local": "pair-secret"},
         "external_remote_targets": {"peer-local": "pair-secret"},
-        "external_callback_base_url": "http://127.0.0.1:17017",
     }))
 
     storage = get_storage()
@@ -519,19 +566,23 @@ def test_remote_csflow_loopback_delegate_then_callback_complete(
         status=RunStatus.running, inputs={}, user="alice",
     ))
 
-    # Route both async (delegate outbound) and sync (delegate callback)
-    # httpx calls to the same FastAPI app — local URL stands in for "remote".
+    # Route the origin's outbound httpx calls (delegate POST + status GET) to
+    # the same FastAPI app — a local URL stands in for "remote".
     from urllib.parse import urlparse
 
-    def _loopback_response(url: str, *, json: dict[str, Any] | None = None,
-                           headers: dict[str, str] | None = None) -> httpx.Response:
+    def _loopback(method: str, url: str, *, json: dict[str, Any] | None = None,
+                  params: Any = None,
+                  headers: dict[str, str] | None = None) -> httpx.Response:
         parsed = urlparse(url)
-        r = app_client.post(parsed.path, json=json or {}, headers=headers or {})
+        if method == "POST":
+            r = app_client.post(parsed.path, json=json or {}, headers=headers or {})
+        else:
+            r = app_client.get(parsed.path, params=params, headers=headers or {})
         return httpx.Response(
             r.status_code,
             content=r.content,
             headers={"content-type": "application/json"},
-            request=httpx.Request("POST", url),
+            request=httpx.Request(method, url),
         )
 
     class _LoopbackClient:
@@ -548,15 +599,15 @@ def test_remote_csflow_loopback_delegate_then_callback_complete(
             self, url: str, *, json: dict[str, Any] | None = None,
             headers: dict[str, str] | None = None,
         ) -> httpx.Response:
-            return _loopback_response(url, json=json, headers=headers)
+            return _loopback("POST", url, json=json, headers=headers)
+
+        async def get(
+            self, url: str, *, params: Any = None,
+            headers: dict[str, str] | None = None,
+        ) -> httpx.Response:
+            return _loopback("GET", url, params=params, headers=headers)
 
     monkeypatch.setattr(httpx, "AsyncClient", _LoopbackClient)
-    monkeypatch.setattr(
-        httpx, "post",
-        lambda url, **kw: _loopback_response(
-            url, json=kw.get("json"), headers=kw.get("headers"),
-        ),
-    )
 
     agent = FlowAgent(
         id="remote-node", kind=AgentKind.external,
@@ -577,18 +628,26 @@ def test_remote_csflow_loopback_delegate_then_callback_complete(
             "leaderAgentId": "leader",
         },
     ))
-    # Peer accepted the delegation (stubbed start_run).
+    # Peer accepted the delegation (stubbed start_run) and recorded WHO
+    # delegated it — the origin was never asked for an address.
     assert captured_start["run_id"]
     peer_run = storage.run_get(captured_start["run_id"])
     assert peer_run is not None
     assert peer_run.inputs[UNATTENDED_KEY] == "true"
-    marker = _json.loads(peer_run.inputs[EXTERNAL_CALLBACK_KEY])
-    assert marker["token"]
-    assert "/api/external/tasks/" in marker["url"]
-    assert origin_run.id in marker["url"]
+    assert EXTERNAL_CALLBACK_KEY not in peer_run.inputs
+    origin_marker = _json.loads(peer_run.inputs[DELEGATE_ORIGIN_KEY])
+    assert origin_marker["pairTokenName"] == "peer-local"
+    assert origin_marker["sourceRunId"] == origin_run.id
 
-    # Peer finishes → run_update fires the delegate callback on a daemon
-    # thread; the loopback httpx client routes it to origin /complete.
+    # While the peer run is live, the origin's poll just keeps waiting.
+    waiting, _ = asyncio.run(ext_svc.poll_external_task(
+        storage=storage, run=origin_run, agent=agent, task_id="t1",
+    ))
+    assert waiting == "waiting"
+    assert fake.mailbox_calls == []
+
+    # Peer finishes → the origin's next poll reads the leader report and
+    # completes its own task.
     storage.event_append(RunEvent(
         run_id=peer_run.id, type="run_terminal_execution_log",
         payload={"worker_report_history": [
@@ -598,16 +657,102 @@ def test_remote_csflow_loopback_delegate_then_callback_complete(
     peer_run.status = RunStatus.completed
     storage.run_update(peer_run)
 
-    # Wait briefly for the daemon callback thread.
-    import time as _time
-    for _ in range(50):
-        if fake.mailbox_calls:
-            break
-        _time.sleep(0.05)
-
-    assert fake.mailbox_calls, "origin never received the peer callback"
+    recorded, _ = asyncio.run(ext_svc.poll_external_task(
+        storage=storage, run=origin_run, agent=agent, task_id="t1",
+    ))
+    assert recorded == "recorded"
     assert "peer done" in fake.mailbox_calls[0]["content"]
     assert fake.task_updates[0]["task_id"] == "CT-rem"
+
+
+def test_delegated_run_status_is_scoped_to_the_delegating_credential(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pairing credential may only read the runs it delegated itself."""
+    _stub_start_run(monkeypatch)
+    save_config(load_config().model_copy(update={
+        "external_pair_tokens": {"machine-a": "s3cret", "machine-b": "other"},
+    }))
+    flow = _mk_flow()
+    r = app_client.post(
+        "/api/external/delegate",
+        json={"flowId": flow.id, "sourceRunId": "run-remote"},
+        headers={"Authorization": "Bearer s3cret"},
+    )
+    assert r.status_code == 202, r.text
+    run_id = r.json()["id"]
+
+    live = app_client.get(
+        f"/api/external/delegated-runs/{run_id}",
+        headers={"Authorization": "Bearer s3cret"},
+    )
+    assert live.status_code == 200, live.text
+    assert live.json()["status"] == "running"
+    assert live.json()["summary"] == ""
+
+    # Another peer's credential must not see it (404, not 403 — no probing).
+    other = app_client.get(
+        f"/api/external/delegated-runs/{run_id}",
+        headers={"Authorization": "Bearer other"},
+    )
+    assert other.status_code == 404
+    # An ordinary (non-delegated) run is invisible too.
+    plain = get_storage().run_create(FlowRun(
+        flow_id=flow.id, flow_version=1, team_name="csflow-plain",
+        status=RunStatus.completed, inputs={}, user="alice",
+    ))
+    assert app_client.get(
+        f"/api/external/delegated-runs/{plain.id}",
+        headers={"Authorization": "Bearer s3cret"},
+    ).status_code == 404
+    assert app_client.get(
+        f"/api/external/delegated-runs/{run_id}",
+    ).status_code == 401
+
+
+def test_delegated_run_status_reports_terminal_result(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal peer run → success/failed plus the leader work report."""
+    _stub_start_run(monkeypatch)
+    save_config(load_config().model_copy(update={
+        "external_pair_tokens": {"machine-a": "s3cret"},
+    }))
+    flow = _mk_flow()
+    run_id = app_client.post(
+        "/api/external/delegate",
+        json={"flowId": flow.id},
+        headers={"Authorization": "Bearer s3cret"},
+    ).json()["id"]
+    storage = get_storage()
+    storage.event_append(RunEvent(
+        run_id=run_id, type="run_terminal_execution_log",
+        payload={"worker_report_history": [
+            {"from_agent": "leader", "summary": "leader final reply: all done"},
+        ]},
+    ))
+    row = storage.run_get(run_id)
+    assert row is not None
+    row.status = RunStatus.completed
+    storage.run_update(row)
+
+    ok = app_client.get(
+        f"/api/external/delegated-runs/{run_id}",
+        headers={"Authorization": "Bearer s3cret"},
+    ).json()
+    assert ok["status"] == "success"
+    assert ok["runStatus"] == "completed"
+    assert "all done" in ok["summary"]
+
+    row = storage.run_get(run_id)
+    assert row is not None
+    row.status = RunStatus.failed
+    storage.run_update(row)
+    bad = app_client.get(
+        f"/api/external/delegated-runs/{run_id}",
+        headers={"Authorization": "Bearer s3cret"},
+    ).json()
+    assert bad["status"] == "failed"
 
 
 # ── remote-node one-click wiring (remote-call-info / register-remote) ──

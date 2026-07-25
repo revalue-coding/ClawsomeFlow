@@ -29,12 +29,12 @@ export type ExternalTaskSheetFields = {
 const WEBHOOK_NOTES_EN =
   "This is a remote task. Absolute paths mentioned in upstream outputs "
   + "may not exist on your machine — do not open or fetch them locally. "
-  + "In your callback summary, do not include local file paths; describe "
+  + "In your result summary, do not include local file paths; describe "
   + "necessary results in plain text (links or references are fine).";
 
 const WEBHOOK_NOTES_ZH =
   "这是远程任务。上游产出中出现的绝对路径在你本机上可能不存在——"
-  + "请勿在本地打开或拉取。回传摘要时不要写入本机文件路径；"
+  + "请勿在本地打开或拉取。结果摘要中不要写入本机文件路径；"
   + "用纯文本描述必要结果（链接或引用即可）。";
 
 function rebuildExternalTaskSheet(
@@ -92,13 +92,21 @@ function rebuildExternalTaskSheet(
     upstreamBlock = `${header}\n${lines.join("\n")}`;
   }
 
+  // Webhook / remote peers answer ClawsomeFlow's request (or its polls); only a
+  // human submits through the WebUI. Mirrors prompts.build_external_task_text.
+  const outboundOnly = fields.channel === "webhook"
+    || fields.channel === "remote_csflow";
   const intro = zh
     ? "## ClawsomeFlow 外部任务\n"
-      + "请完成下方任务后，通过 Run 详情页的任务卡片或回调 API 回传结果。\n"
+      + (outboundOnly
+        ? "请完成下方任务；结果沿派发请求的响应返回，或受理后由 ClawsomeFlow 轮询获取。\n"
+        : "请完成下方任务后，在 Run 详情页的任务卡片提交结果。\n")
       + `Run：\`${runId || "?"}\`${team ? `  ·  团队：\`${team}\`` : ""}`
     : "## ClawsomeFlow External Task\n"
-      + "Complete the work below, then submit the result via the Run "
-      + "detail card or the callback API.\n"
+      + (outboundOnly
+        ? "Complete the work below; return the result in your response to the "
+          + "dispatch request, or accept it and let ClawsomeFlow poll you for it.\n"
+        : "Complete the work below, then submit the result on the Run detail card.\n")
       + `Run ID: \`${runId || "?"}\`${team ? `  ·  Team: \`${team}\`` : ""}`;
 
   const submit = zh

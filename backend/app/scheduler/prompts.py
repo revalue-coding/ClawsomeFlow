@@ -180,6 +180,12 @@ class DispatchContext:
     # cite post-merge baseline absolute paths (the worktree is deleted at run end).
     self_merge: bool = False
 
+    # Extra guidance the user typed on the failure pause banner before pressing
+    # 继续执行, staged per failed task (run_metadata.FAILURE_GUIDANCE_KEY). Non-empty
+    # ONLY on the re-dispatch of that task; the staging area is emptied right
+    # after, so it never carries over to another dispatch.
+    user_guidance: str = ""
+
     # True in dev/easy modes only (flow_modes.merge_reference_enabled): inject the
     # generic merge + repo-lock reference and the upstream/worker repo_root values
     # needed to target a cross-worktree merge. Normal mode keeps it False (even a
@@ -207,6 +213,8 @@ def build_worker_dispatch(ctx: DispatchContext) -> str:
          only when ``ctx.merge_reference``; the *mandate* to merge stays in the
          checklist)
       7. ``## Task #{id}: {subject}`` + description + ``## Completion Checklist``
+      8. ``## Additional Guidance From The User`` (only on a re-dispatch the user
+         annotated on the failure pause banner — see ``ctx.user_guidance``)
     """
     blocks = [
         _scheduling_context_block(ctx),
@@ -216,6 +224,7 @@ def build_worker_dispatch(ctx: DispatchContext) -> str:
         _upstream_outputs_block(ctx),
         _git_merge_reference_block(ctx),
         _task_block(ctx),
+        _user_guidance_block(ctx),
         _remote_param_collection_block(ctx),
         _worker_completion_steps(ctx),
     ]
@@ -242,6 +251,7 @@ def build_leader_dispatch(ctx: DispatchContext) -> str:
         _worker_reports_block(ctx),
         _git_merge_reference_block(ctx),
         _task_block(ctx),
+        _user_guidance_block(ctx),
         _leader_completion_steps(ctx),
     ]
     # Drop empty blocks (e.g. _git_merge_reference_block when merge_reference is off).
@@ -470,6 +480,25 @@ def _task_block(ctx: DispatchContext) -> str:
     return (
         f"## Task #{ctx.task.id}: {ctx.task.subject}\n"
         f"{desc}"
+    )
+
+
+def _user_guidance_block(ctx: DispatchContext) -> str:
+    """Guidance the user added on the failure pause banner for THIS re-dispatch.
+
+    Returns ``""`` (dropped by the block join) for every ordinary dispatch, so a
+    prompt only ever carries guidance the user staged for this exact task after
+    it reported FAILED.
+    """
+    text = (ctx.user_guidance or "").strip()
+    if not text:
+        return ""
+    return (
+        "## Additional Guidance From The User (this attempt only)\n"
+        "Your previous attempt at this task reported FAILED. The user diagnosed "
+        "the failure and added the guidance below — follow it while re-executing "
+        "the task described above (it amends the task, it does not replace it):\n"
+        f"{text}"
     )
 
 
@@ -817,12 +846,12 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
 WEBHOOK_REMOTE_NOTES = (
     "This is a remote task. Absolute paths mentioned in upstream outputs "
     "may not exist on your machine — do not open or fetch them locally. "
-    "In your callback summary, do not include local file paths; describe "
+    "In your result summary, do not include local file paths; describe "
     "necessary results in plain text (links or references are fine)."
 )
 WEBHOOK_REMOTE_NOTES_ZH = (
     "这是远程任务。上游产出中出现的绝对路径在你本机上可能不存在——"
-    "请勿在本地打开或拉取。回传摘要时不要写入本机文件路径；"
+    "请勿在本地打开或拉取。结果摘要中不要写入本机文件路径；"
     "用纯文本描述必要结果（链接或引用即可）。"
 )
 
@@ -890,11 +919,23 @@ def build_external_task_text(
     from app.models import ExternalChannel
 
     resolved = "zh" if (lang or "").strip().lower() == "zh" else "en"
+    ext = getattr(ctx.agent, "external", None)
+    # Webhook / remote peers answer ClawsomeFlow's own request (or its polls);
+    # only a human submits through the WebUI. Never tell a remote executor to
+    # call back into this instance — the protocol never asks it to.
+    outbound_only = getattr(ext, "channel", None) in (
+        ExternalChannel.webhook, ExternalChannel.remote_csflow,
+    )
     if resolved == "zh":
         intro = (
             "## ClawsomeFlow 外部任务\n"
-            "请完成下方任务后，通过 Run 详情页的任务卡片或回调 API 回传结果。\n"
-            f"Run：`{ctx.run_id}`  ·  团队：`{ctx.team_name}`"
+            + (
+                "请完成下方任务；结果沿派发请求的响应返回，"
+                "或受理后由 ClawsomeFlow 轮询获取。\n"
+                if outbound_only else
+                "请完成下方任务后，在 Run 详情页的任务卡片提交结果。\n"
+            )
+            + f"Run：`{ctx.run_id}`  ·  团队：`{ctx.team_name}`"
         )
         submit = (
             "## 结果提交\n"
@@ -911,9 +952,15 @@ def build_external_task_text(
     else:
         intro = (
             "## ClawsomeFlow External Task\n"
-            "Complete the work below, then submit the result via the Run "
-            "detail card or the callback API.\n"
-            f"Run ID: `{ctx.run_id}`  ·  Team: `{ctx.team_name}`"
+            + (
+                "Complete the work below; return the result in your response to "
+                "the dispatch request, or accept it and let ClawsomeFlow poll "
+                "you for it.\n"
+                if outbound_only else
+                "Complete the work below, then submit the result on the Run "
+                "detail card.\n"
+            )
+            + f"Run ID: `{ctx.run_id}`  ·  Team: `{ctx.team_name}`"
         )
         submit = (
             "## Result Submission\n"
@@ -941,7 +988,6 @@ def build_external_task_text(
         f"{task_h}\n{task_desc}",
         submit,
     ]
-    ext = getattr(ctx.agent, "external", None)
     if ext is not None and ext.channel == ExternalChannel.webhook:
         notes = WEBHOOK_REMOTE_NOTES_ZH if resolved == "zh" else WEBHOOK_REMOTE_NOTES
         blocks.append(f"{notes_h}\n{notes}")

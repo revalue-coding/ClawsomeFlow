@@ -220,6 +220,10 @@ export function RunDetail() {
   const [aborting, setAborting] = useState(false);
   const [pausing, setPausing] = useState(false);
   const [continuing, setContinuing] = useState(false);
+  // Extra guidance for the failed node, submitted together with 继续执行. Staged
+  // server-side for that one re-dispatch only, so this box starts empty again
+  // after every resume.
+  const [failureGuidance, setFailureGuidance] = useState("");
   const [complaintText, setComplaintText] = useState("");
   const [complaintSubmitting, setComplaintSubmitting] = useState(false);
   const [complaintActionCommitted, setComplaintActionCommitted] = useState(false);
@@ -486,7 +490,8 @@ export function RunDetail() {
     // returns. Both continue + terminate stay disabled meanwhile.
     setContinuing(true);
     try {
-      const r = await api.continueRun(run.id);
+      const r = await api.continueRun(run.id, failureGuidance.trim() || undefined);
+      setFailureGuidance("");
       setRun({ ...run, status: r.status, pause: r.pause ?? null });
     } catch (e) {
       void alert(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
@@ -1020,6 +1025,30 @@ export function RunDetail() {
                     );
                   })()}
                 </div>
+              </div>
+            ) : null}
+            {/* Extra guidance for the re-dispatch of the failed node. Local
+                agents only — an external node's task sheet has no prompt to
+                amend. Submitted with 继续执行. */}
+            {run.pause?.reason === "failure"
+              && pauseFailureReport
+              && !pauseFailureIsExternal ? (
+              <div className="mt-3 space-y-1.5">
+                <label className="label" htmlFor="pause-failure-guidance">
+                  {t("runDetail.pauseFailureGuidanceLabel")}
+                </label>
+                <p className="text-xs text-ink-500">
+                  {t("runDetail.pauseFailureGuidanceHint")}
+                </p>
+                <textarea
+                  id="pause-failure-guidance"
+                  className="textarea h-24"
+                  value={failureGuidance}
+                  onChange={(e) => setFailureGuidance(e.target.value)}
+                  placeholder={t("runDetail.pauseFailureGuidancePlaceholder")}
+                  maxLength={4000}
+                  disabled={continuing}
+                />
               </div>
             ) : null}
             {/* Structured failure card already covers detail; keep raw detail
