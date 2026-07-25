@@ -6,9 +6,15 @@
  *   1. longest-path depth → columns (summary pinned to the rightmost column)
  *   2. barycenter ordering within columns (a few LTR/RTL passes)
  *   3. preferred column/row gaps, compressed only when the graph is dense
+ *      AND within ``DAG_HSCROLL_COL_THRESHOLD`` columns (wider graphs keep
+ *      preferred gaps; the UI scrolls horizontally instead of shrinking)
  *   4. content block centered inside max(minCanvas, naturalSize) — never
  *      stretch sparse graphs across empty canvas, never upscale node size
  */
+
+/** Past this many columns, layout stops compressing gaps; the graph UI
+ *  should scroll horizontally at the scale of a 5-column fit. */
+export const DAG_HSCROLL_COL_THRESHOLD = 5;
 
 export interface DagLayoutInputNode {
   id: string;
@@ -52,6 +58,14 @@ export interface DagLayoutResult {
   /** Base worker radius derived from gaps; hard-capped so sparse graphs stay calm. */
   suggestedNodeRadius: number;
   maxDepth: number;
+  /** Number of depth columns (including the summary column). */
+  colCount: number;
+  /**
+   * ViewBox width of the same layout clipped to
+   * ``DAG_HSCROLL_COL_THRESHOLD`` columns. The UI sizes the SVG so this
+   * width maps to 100% of the viewport; wider graphs overflow and scroll.
+   */
+  fitWidth: number;
 }
 
 const DEFAULTS = {
@@ -127,6 +141,8 @@ export function layoutDagLayered(
       height: cfg.minHeight,
       suggestedNodeRadius: cfg.nodeRadiusMin,
       maxDepth: 0,
+      colCount: 0,
+      fitWidth: cfg.minWidth,
     };
   }
 
@@ -215,13 +231,17 @@ export function layoutDagLayered(
 
   const maxColSize = Math.max(1, ...columns.map((c) => c.length));
 
-  // Preferred gaps, compressed only when the natural canvas would exceed
-  // the soft ceiling. Sparse graphs keep pref gaps and stay compact.
+  // Preferred gaps. Horizontal compression only applies while the graph
+  // still fits in the scroll threshold — beyond that we keep preferred
+  // spacing and let the UI scroll rather than shrink nodes/edges.
   let gapX = cfg.colGapPref;
   let gapY = cfg.rowGapPref;
   if (colCount > 1) {
     const naturalW = cfg.padX * 2 + (colCount - 1) * gapX;
-    if (naturalW > cfg.maxWidth) {
+    if (
+      colCount <= DAG_HSCROLL_COL_THRESHOLD
+      && naturalW > cfg.maxWidth
+    ) {
       gapX = Math.max(cfg.colGapMin, (cfg.maxWidth - cfg.padX * 2) / (colCount - 1));
     }
     gapX = clamp(gapX, cfg.colGapMin, cfg.colGapMax);
@@ -272,6 +292,10 @@ export function layoutDagLayered(
     cfg.nodeRadiusMax,
   );
 
+  const fitCols = Math.min(colCount, DAG_HSCROLL_COL_THRESHOLD);
+  const fitBlockW = fitCols > 1 ? (fitCols - 1) * gapX : 0;
+  const fitWidth = Math.max(cfg.minWidth, fitBlockW + cfg.padX * 2);
+
   return {
     nodes,
     positions,
@@ -279,5 +303,7 @@ export function layoutDagLayered(
     height,
     suggestedNodeRadius,
     maxDepth,
+    colCount,
+    fitWidth,
   };
 }

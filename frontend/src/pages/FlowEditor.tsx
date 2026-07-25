@@ -41,7 +41,10 @@ import { Card, CardTitle, ErrorBox, Loading, Modal, StatusPill } from "@/compone
 import { useDialog } from "@/components/dialog";
 import { ChatIcon } from "@/components/icons";
 import { cn } from "@/lib/cn";
-import { layoutDagLayered } from "@/lib/dagLayeredLayout";
+import {
+  DAG_HSCROLL_COL_THRESHOLD,
+  layoutDagLayered,
+} from "@/lib/dagLayeredLayout";
 import { useTheme } from "@/lib/theme";
 import {
   DEFAULT_TARGET_BRANCH,
@@ -4475,7 +4478,7 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
   const layout = useMemo(() => computeGraphLayout(tasks), [tasks]);
   if (layout.nodes.length === 0) return null;
 
-  const { nodes, edges, width, height, baseRadius } = layout;
+  const { nodes, edges, width, height, baseRadius, colCount, fitWidth } = layout;
   const hovered = nodes.find((n) => n.id === hover);
   // Radius tracks layered gaps but stays hard-capped — sparse graphs must
   // not balloon dots just to fill the card.
@@ -4484,6 +4487,12 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
     const scaled = node.isSummary ? Math.min(worker + 2.2, 13) : worker;
     return isHover ? scaled + 1.4 : scaled;
   };
+  // Past 5 columns, lock the on-screen scale to a 5-column fit and scroll
+  // the overflow instead of shrinking nodes/edges further.
+  const needsHScroll = colCount > DAG_HSCROLL_COL_THRESHOLD;
+  const scrollContentWidthPct = needsHScroll
+    ? `${(width / Math.max(1, fitWidth)) * 100}%`
+    : undefined;
   const hoveredLeft = hovered
     ? `${Math.max(2, Math.min(98, (hovered.x / Math.max(1, width)) * 100))}%`
     : "0%";
@@ -4496,8 +4505,11 @@ function DependencyGraph({ tasks }: { tasks: TaskRow[] }) {
       <div className="text-xs text-ink-500 mb-2">
         {t("flowEditor.graphTitle")}
       </div>
-      <div className="min-w-0 w-full min-h-[320px] overflow-hidden rounded-md border border-ink-200 bg-gradient-to-br from-ink-50/40 to-surface">
-        <div className="relative w-full">
+      <div className="min-w-0 w-full min-h-[320px] overflow-x-auto overflow-y-hidden rounded-md border border-ink-200 bg-gradient-to-br from-ink-50/40 to-surface">
+        <div
+          className="relative min-w-full"
+          style={scrollContentWidthPct ? { width: scrollContentWidthPct } : undefined}
+        >
           {/* Faint dotted grid — matches the Run board canvas for a cohesive
               "blueprint" feel across orchestration and execution views. */}
           <div
@@ -4806,10 +4818,20 @@ function computeGraphLayout(tasks: TaskRow[]): {
   width: number;
   height: number;
   baseRadius: number;
+  colCount: number;
+  fitWidth: number;
 } {
   const usableTasks = tasks.filter((r) => r.id.trim());
   if (usableTasks.length === 0) {
-    return { nodes: [], edges: [], width: 0, height: 0, baseRadius: 8 };
+    return {
+      nodes: [],
+      edges: [],
+      width: 0,
+      height: 0,
+      baseRadius: 8,
+      colCount: 0,
+      fitWidth: 0,
+    };
   }
   const byId = new Map<string, TaskRow>();
   for (const r of usableTasks) byId.set(r.id, r);
@@ -4878,6 +4900,8 @@ function computeGraphLayout(tasks: TaskRow[]): {
     width: laid.width,
     height: laid.height,
     baseRadius: laid.suggestedNodeRadius,
+    colCount: laid.colCount,
+    fitWidth: laid.fitWidth,
   };
 }
 

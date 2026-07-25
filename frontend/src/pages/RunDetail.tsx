@@ -33,7 +33,10 @@ import {
   StatusPill,
 } from "@/components/ui";
 import { useDialog } from "@/components/dialog";
-import { layoutDagLayered } from "@/lib/dagLayeredLayout";
+import {
+  DAG_HSCROLL_COL_THRESHOLD,
+  layoutDagLayered,
+} from "@/lib/dagLayeredLayout";
 import { pickExternalTaskSheet } from "@/lib/externalTaskSheet";
 import { DEFAULT_TARGET_BRANCH, getDevMode } from "@/lib/flowRuntime";
 import { useSessionBackedState } from "@/lib/sessionState";
@@ -140,6 +143,9 @@ type TaskBoardModel = {
   height: number;
   /** Layered-layout base radius; hard-capped so sparse boards stay calm. */
   baseRadius: number;
+  colCount: number;
+  /** ViewBox width of a ≤5-column fit; wider boards scroll at this scale. */
+  fitWidth: number;
 };
 
 type MergeFailureKind = "conflict" | "environment_error" | "unknown";
@@ -200,6 +206,8 @@ const EMPTY_TASK_BOARD: TaskBoardModel = {
   width: 720,
   height: 320,
   baseRadius: 8,
+  colCount: 0,
+  fitWidth: 720,
 };
 
 export function RunDetail() {
@@ -1969,6 +1977,10 @@ function TaskDependencyBoard({
     if (n.state === "dispatched") return Math.min(base + 1, 11.5);
     return Math.min(base, 11);
   };
+  const needsHScroll = board.colCount > DAG_HSCROLL_COL_THRESHOLD;
+  const scrollContentWidthPct = needsHScroll
+    ? `${(board.width / Math.max(1, board.fitWidth)) * 100}%`
+    : undefined;
   // Literal colors (not theme tokens): the board canvas is a fixed dark
   // surface, so theme-inverting `emerald-*`/`amber-*` tokens would lose
   // contrast in dark mode.
@@ -2097,8 +2109,11 @@ function TaskDependencyBoard({
         >
           <div className="my-auto h-16 w-1 rounded-full bg-[#2a3558] transition-colors group-hover:bg-[#4f79de] group-active:bg-[#4f79de]" />
         </div>
-        <div className="flex min-w-0 w-full min-h-[360px] flex-col overflow-hidden rounded-md border border-[#2a3558] bg-[#0d152b]">
-          <div className="relative w-full flex-1">
+        <div className="flex min-w-0 w-full min-h-[360px] flex-col overflow-x-auto overflow-y-hidden rounded-md border border-[#2a3558] bg-[#0d152b]">
+          <div
+            className="relative min-w-full flex-1"
+            style={scrollContentWidthPct ? { width: scrollContentWidthPct } : undefined}
+          >
             {/* Faint dotted grid so the canvas reads as a "radar" surface. */}
             <div
               className="pointer-events-none absolute inset-0"
@@ -4100,6 +4115,8 @@ function buildTaskBoard(
       width: 720,
       height: 320,
       baseRadius: 8,
+      colCount: 0,
+      fitWidth: 720,
     };
   }
 
@@ -4192,6 +4209,8 @@ function buildTaskBoard(
       width: 720,
       height: 320,
       baseRadius: 8,
+      colCount: 0,
+      fitWidth: 720,
     };
   }
 
@@ -4288,6 +4307,8 @@ function buildTaskBoard(
     width: laid.width,
     height: laid.height,
     baseRadius: laid.suggestedNodeRadius,
+    colCount: laid.colCount,
+    fitWidth: laid.fitWidth,
   };
 }
 
