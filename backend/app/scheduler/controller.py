@@ -279,6 +279,14 @@ _RUNTIME_SOCKET_TAIL_CHARS = 1800
 _RUNTIME_SOCKET_RECOVERY_LIMIT = 2
 _RUNTIME_SOCKET_MIN_ELAPSED_SEC = 8.0
 _RUNTIME_SOCKET_PROMPTLESS_RECOVERY_SEC = 45.0
+# ``task_list`` coming back empty while tasks are still open is tolerated as a
+# blip (MCP hiccup) for this many consecutive ticks; past it the run is stopped
+# with a reason instead of stalling at "running" forever.
+_MAX_EMPTY_SNAPSHOT_TICKS = 30
+# How many times in a row a dispatched task may fail to reach ``in_progress`` in
+# ClawTeam before the run stops. Each failure means the next snapshot requeues
+# the task and the same work is handed out again.
+_MAX_STATUS_SYNC_FAILURES = 3
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -306,6 +314,10 @@ class _TaskBook:
     last_dispatch_message_id: str | None = None
     last_dispatch_message: str | None = None
     last_failure: FailureRecord | None = None
+    #: Set by the dispatch step when handing this task out failed; consumed by
+    #: the same tick's failure handling (never carried across ticks — a resume
+    #: re-dispatches from scratch).
+    pending_dispatch_failure: FailureRecord | None = None
     runtime_socket_recoveries: int = 0
 
 
@@ -356,6 +368,21 @@ class RunOutcome:
     failed_task_ids: list[str] = field(default_factory=list)
     skipped_task_ids: list[str] = field(default_factory=list)
     reason: str = ""
+
+
+class SchedulerBlockedError(RuntimeError):
+    """An in-run condition the scheduler cannot make progress through.
+
+    Raised — never swallowed — from inside a tick so ``run_loop``'s scenario-9
+    handler stops the run through the ONE existing path
+    (:meth:`RunController._backend_stop_after_internal_error`: pause with
+    "confirm before resume" for an attended run, terminal ``failed`` for an
+    unattended one). Use it for a condition that would otherwise make the tick
+    retry the same failing operation forever, where the retry cannot be
+    distinguished from a code/state bug — a *node's* failure is not this: that
+    goes through :class:`FailureRecord` so the pause banner can explain it and
+    继续执行 re-runs just that node.
+    """
 
 
 @dataclass
@@ -477,6 +504,14 @@ class RunController:
         # needed to poll is re-derivable from the event stream, so a rebuilt
         # controller just polls one round early.
         self._external_poll_due: dict[str, float] = {}
+        # Consecutive ticks whose ``task_list`` came back empty while tasks were
+        # still open. ClawTeam is the source of truth for dispatch decisions, so
+        # we cannot progress without it — bounded so the run stops with a reason
+        # instead of stalling silently forever.
+        self._empty_snapshot_ticks = 0
+        # task id → consecutive failures to push its dispatched state into
+        # ClawTeam. Cleared on the first success.
+        self._status_sync_failures: dict[str, int] = {}
         self._terminal_snapshot_persisted = False
         self._task_outputs: dict[str, list[dict[str, Any]]] = {}
         self._worker_report_history: list[dict[str, Any]] = []
@@ -1585,6 +1620,7 @@ class RunController:
         snapshots = await self._fetch_snapshots()
         if snapshots:
             self._snapshot_missing_warned = False
+            self._empty_snapshot_ticks = 0
             activity = self._apply_snapshots(snapshots) or activity
         elif any(
             b.state in (
@@ -1605,6 +1641,17 @@ class RunController:
                     },
                 )
                 self._snapshot_missing_warned = True
+            self._empty_snapshot_ticks += 1
+            if self._empty_snapshot_ticks >= _MAX_EMPTY_SNAPSHOT_TICKS:
+                # Not a transient blip any more: every following tick would take
+                # this same early return, i.e. the run would sit at "running"
+                # forever with nothing driving it. Stop with a reason instead.
+                raise SchedulerBlockedError(
+                    "ClawTeam task_list has returned no tasks for "
+                    f"{self._empty_snapshot_ticks} consecutive ticks while this run "
+                    "still has open tasks; the scheduler cannot decide what to "
+                    "dispatch without it"
+                )
             # ClawTeam is source-of-truth for pending/unblock decisions;
             # without a fresh snapshot we do not dispatch.
             return activity
@@ -1711,9 +1758,13 @@ class RunController:
                 return_exceptions=True,
             )
             startup_error: SessionStartupError | None = None
+            blocked_error: SchedulerBlockedError | None = None
             first_success: _TaskBook | None = None
             for book, res in zip(dispatchable, results):
                 if isinstance(res, Exception):
+                    if isinstance(res, SchedulerBlockedError):
+                        blocked_error = blocked_error or res
+                        continue
                     if isinstance(res, SessionStartupError):
                         self._forced_failed = True
                         self._failed_task_ids.add(book.task.id)
@@ -1752,6 +1803,13 @@ class RunController:
                         task_id=book.task.id,
                         payload={"error": str(res)[:1000]},
                     )
+                    # An unexpected exception in the dispatch path is not a node
+                    # failure and not something a further tick can fix — the same
+                    # call would raise again. Stop with a reason rather than
+                    # spinning on it.
+                    blocked_error = blocked_error or SchedulerBlockedError(
+                        f"dispatching task {book.task.id!r} raised {type(res).__name__}: {res}"
+                    )
                     continue
                 if (
                     self._first_dispatch_task_id is None
@@ -1767,6 +1825,19 @@ class RunController:
                 # Hard-stop the run: session startup failures are terminal and
                 # should not be retried forever across ticks.
                 raise startup_error
+            if blocked_error is not None:
+                raise blocked_error
+            # A refused dispatch is a node-level failure: surface it through the
+            # same one-at-a-time path as every other failure signal, so the pause
+            # banner names the task and 继续执行 re-runs exactly that node.
+            for book in dispatchable:
+                rec = book.pending_dispatch_failure
+                if rec is None:
+                    continue
+                book.pending_dispatch_failure = None
+                if self._pause_evt.is_set():
+                    continue  # already pausing on an earlier failure this tick
+                await self._handle_failure(rec)
 
         return activity
 
@@ -2282,6 +2353,7 @@ class RunController:
                     )
         if outcome.success:
             self._last_dispatch_failures.pop(agent.id, None)
+            book.pending_dispatch_failure = None
             synced = await self._update_clawteam_task_status(
                 book.task.id,
                 status="in_progress",
@@ -2295,6 +2367,21 @@ class RunController:
                     task_id=book.task.id,
                     payload={"target_status": "in_progress"},
                 )
+                # The executor HAS the task but ClawTeam still says pending, so
+                # the next snapshot requeues it and we hand the SAME work out
+                # again. One blip is tolerated (the next tick usually syncs);
+                # past the bound the state is genuinely inconsistent and only a
+                # human can judge it, so stop instead of re-dispatching forever.
+                seen = self._status_sync_failures.get(book.task.id, 0) + 1
+                self._status_sync_failures[book.task.id] = seen
+                if seen >= _MAX_STATUS_SYNC_FAILURES:
+                    raise SchedulerBlockedError(
+                        f"task {book.task.id!r} was dispatched to {agent.id!r} "
+                        f"{seen} times but ClawTeam could not be moved to "
+                        "in_progress; the task would be re-dispatched every tick"
+                    )
+            else:
+                self._status_sync_failures.pop(book.task.id, None)
             book.state = _TaskState.in_progress
             book.dispatched_at = outcome.dispatched_at
             book.last_dispatch_message = message
@@ -2309,7 +2396,14 @@ class RunController:
                 payload={"decision": "dispatch", "session_state": after},
             )
         else:
-            # Dispatch itself failed; let failure detection pick it up next tick.
+            # Dispatch itself failed. The bounded self-heal above (tmux target
+            # missing) already had its one retry, so this is a real failure:
+            # stage it for the tick's failure step, which resets the node to
+            # pending, tells the user why, and PAUSES. Re-dispatching it on the
+            # next tick instead would repeat the same refusal roughly once a
+            # second until the task times out (hours, or never for an external
+            # node with ``timeout_seconds=0``) — and every attempt is an outbound
+            # POST to somebody else's service.
             payload = self._dispatch_failure_payload(outcome)
             if first_outcome is not outcome:
                 payload["initial_failure"] = self._dispatch_failure_payload(first_outcome)
@@ -2330,6 +2424,17 @@ class RunController:
                 agent_id=agent.id,
                 task_id=book.task.id,
                 payload=payload,
+            )
+            book.pending_dispatch_failure = FailureRecord(
+                task_id=book.task.id,
+                agent_id=agent.id,
+                reason=FailureReason.dispatch_failed,
+                detail=(outcome.detail or "")[:1000],
+                # An external node persists its dispatch event BEFORE the
+                # outbound, so a refused package still has a nonce. Carrying it
+                # makes the Run-detail external card show this attempt as failed
+                # (its indicator is nonce-keyed) instead of "still waiting".
+                external_nonce=self._latest_external_nonce(agent, book.task.id),
             )
 
     def _dispatch_failure_payload(self, outcome: DispatchOutcome) -> dict[str, Any]:
@@ -2966,6 +3071,23 @@ class RunController:
 
     # ── failure handling ─────────────────────────────────────────────
 
+    def _latest_external_nonce(self, agent: FlowAgent, task_id: str) -> str:
+        """Nonce of *task_id*'s latest external dispatch (``""`` if not external).
+
+        Fully defensive: this only enriches a failure record, so a storage hiccup
+        must never turn into a second failure.
+        """
+        if agent.kind != AgentKind.external:
+            return ""
+        from app.services.external_tasks import latest_dispatch_event
+        try:
+            disp = latest_dispatch_event(
+                self.storage, run_id=self.run.id, task_id=task_id,
+            )
+            return str((disp.payload or {}).get("nonce") or "") if disp else ""
+        except Exception:  # pragma: no cover - defensive
+            return ""
+
     def _external_failure_receipt(self, task_id: str) -> tuple[str, str] | None:
         """Return ``(nonce, summary)`` iff *task_id*'s LATEST external dispatch
         received a FAILURE receipt, else ``None``.
@@ -3137,7 +3259,11 @@ class RunController:
         # marker) is authoritative EVEN IF the node is marked ``completed`` — an
         # agent may finish the ClawTeam task yet report its WORK failed. A
         # non-explicit signal (timeout) on an already-completed task is ignored.
-        explicit = rec.reason.value in ("leader_inbox_failed", "worker_reported")
+        # ``dispatch_failed`` joins them: handing the task out did not work, so
+        # there is nothing to wait for and nothing a retry loop could fix.
+        explicit = rec.reason.value in (
+            "leader_inbox_failed", "worker_reported", "dispatch_failed",
+        )
         if book.state == _TaskState.completed and not explicit:
             return
         book.last_failure = rec

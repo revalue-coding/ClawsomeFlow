@@ -359,7 +359,7 @@ export interface RunPauseState {
   failureTaskId?: string;
   failureTaskSubject?: string;
   failureAgentId?: string;
-  /** leader_inbox_failed | worker_reported | timeout */
+  /** leader_inbox_failed | worker_reported | timeout | dispatch_failed */
   failureSignal?: string;
   failureDetail?: string;
   needsConfirmation: boolean;

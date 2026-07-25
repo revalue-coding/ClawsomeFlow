@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import sys
 import threading
 import time
 import uuid
@@ -444,7 +445,9 @@ def main() -> None:
     print(
         f"mock webhook node listening on http://{args.host}:{args.port}\n"
         f"  endpoint for Flow : http://<this-host>:{args.port}/hook\n"
-        f"  inspect           : http://<this-host>:{args.port}/",
+        f"  inspect           : http://<this-host>:{args.port}/\n"
+        "  this is a server: it holds the terminal until Ctrl-C. To background it:\n"
+        f"    nohup python3 {sys.argv[0]} --port {args.port} > /tmp/mock-webhook.log 2>&1 &",
         flush=True,
     )
     try:

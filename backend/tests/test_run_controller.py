@@ -34,7 +34,7 @@ from app.models import (
 from app.scheduler.prompts import WorkerReport
 from app.scheduler.compiler import CompileResult
 from app.scheduler import controller as ctrl_mod
-from app.scheduler.controller import RunController, _TaskState
+from app.scheduler.controller import RunController, SchedulerBlockedError, _TaskState
 from app.scheduler.failure import TaskSnapshot
 from app.scheduler.naming import team_name_for_run
 from app.scheduler.sessions.base import (
@@ -2535,6 +2535,104 @@ async def test_live_external_failure_detected_via_nonce_not_inbox(
 
     # Same nonce, still in_progress snapshot → NOT re-detected (handled).
     assert rc._detect_external_failures(snaps) == []
+
+
+@pytest.mark.asyncio
+async def test_refused_external_dispatch_fails_the_task_and_pauses(
+    fake_lookup,
+) -> None:
+    """A partner that refuses the package fails the task — it is NOT re-POSTed.
+
+    The tick runs about once a second while an external task's timeout can be
+    hours (or unbounded), so retrying across ticks would flood a third-party
+    endpoint. Instead the dispatch failure travels the explicit-failure path:
+    ``task_failed`` + pause(reason=failure), so the banner explains it and
+    继续执行 re-runs that one node.
+    """
+    spec = _external_only_spec()
+    run = _persist_flow_and_run(spec)
+    compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
+
+    snapshots = [
+        TaskSnapshot(
+            task_id="t_ext", owner_agent_id="ext", status="pending",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+        TaskSnapshot(
+            task_id="ts", owner_agent_id="leader", status="blocked",
+            locked_by_agent=None, metadata={}, dispatched_at_epoch=None,
+        ),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    class _RefusingSession(_RecordingSession):
+        async def dispatch(self, *, task_id: str, message: str) -> DispatchOutcome:
+            del task_id, message
+            return DispatchOutcome(
+                success=False,
+                detail="external endpoint returned HTTP 400: missing fields",
+                error_type="RuntimeError",
+            )
+
+    rc = RunController(
+        run=run, spec=spec, flow_description="d", worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RefusingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider, compile_result=compile_result,
+    )
+
+    await rc.tick()
+
+    assert rc._pause_evt.is_set()
+    assert rc._tasks["t_ext"].state == _TaskState.pending
+    assert "t_ext" in rc._failed_task_ids
+    events = get_storage().event_list(run_id=run.id, since_id=None, limit=200)
+    failed = [e for e in events if e.type == "task_failed" and e.task_id == "t_ext"]
+    assert len(failed) == 1
+    assert (failed[0].payload or {}).get("reason") == "dispatch_failed"
+    # Pause carries the reason the banner shows (the blob itself is stamped at
+    # finalize, so assert the controller-side fields a single tick produces).
+    assert rc._pause_reason == "failure"
+    assert rc._pause_failure_signal == "dispatch_failed"
+    assert "400" in rc._pause_failure_detail
+    assert "派发失败" in rc._pause_detail or "dispatch failed" in rc._pause_detail
+
+    # The staged failure is consumed, so a second tick does not re-fail it.
+    assert rc._tasks["t_ext"].pending_dispatch_failure is None
+
+
+@pytest.mark.asyncio
+async def test_permanently_empty_task_list_stops_the_run_instead_of_stalling(
+    fake_lookup,
+) -> None:
+    """No snapshots = no source of truth for dispatch decisions.
+
+    ClawTeam is authoritative for pending/unblock, so the tick can only return
+    early — forever, if ``task_list`` stays broken (it also returns ``[]`` when
+    the MCP call raises). Tolerated as a blip, then stopped with a reason via
+    the scenario-9 path rather than sitting at ``running`` for good.
+    """
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    rc = RunController(
+        run=run, spec=spec, flow_description="d", worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=_empty_snapshots,
+    )
+
+    from app.scheduler.controller import _MAX_EMPTY_SNAPSHOT_TICKS
+
+    for _ in range(_MAX_EMPTY_SNAPSHOT_TICKS - 1):
+        await rc.tick()
+    assert rc._empty_snapshot_ticks == _MAX_EMPTY_SNAPSHOT_TICKS - 1
+
+    with pytest.raises(SchedulerBlockedError):
+        await rc.tick()
 
 
 @pytest.mark.asyncio

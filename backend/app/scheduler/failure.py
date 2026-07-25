@@ -15,6 +15,13 @@ The active signals:
 3. **leader_inbox_failed** — leader received an inbox message starting with
    ``FAILED:`` (a final-resort signal we honour even if the worker forgot to
    set the metadata key).
+4. **dispatch_failed** — handing the task OUT failed (a webhook partner refused
+   the package, a tmux inject died, …). Not produced by :func:`detect_failures`
+   (there is no snapshot to look at — the dispatch never took): the controller
+   raises it from its dispatch step. It is deliberately in this enum so it
+   travels the ONE explicit-failure path: reset to pending, ``task_failed``,
+   pause. Retrying it every tick instead would hammer a third-party endpoint at
+   tick rate for the whole (possibly unbounded) task timeout.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ class FailureReason(str, Enum):
     worker_reported = "worker_reported"
     timeout = "timeout"
     leader_inbox_failed = "leader_inbox_failed"
+    dispatch_failed = "dispatch_failed"
 
 
 @dataclass(frozen=True)
@@ -251,11 +259,13 @@ _FAILURE_SIGNAL_LABEL = {
         FailureReason.leader_inbox_failed.value: "节点回报 FAILED",
         FailureReason.worker_reported.value: "节点标记失败",
         FailureReason.timeout.value: "超时",
+        FailureReason.dispatch_failed.value: "派发失败",
     },
     "en": {
         FailureReason.leader_inbox_failed.value: "agent reported FAILED",
         FailureReason.worker_reported.value: "agent marked failed",
         FailureReason.timeout.value: "timeout",
+        FailureReason.dispatch_failed.value: "dispatch failed",
     },
 }
 

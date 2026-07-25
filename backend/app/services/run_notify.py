@@ -219,12 +219,12 @@ def flow_channels_for_run(run: FlowRun) -> list[dict[str, Any]]:
 #: Channel value → human-readable label in external-dispatch notifications.
 _EXTERNAL_CHANNEL_LABELS_EN = {
     "human": "Human",
-    "webhook": "Generic interface (webhook)",
+    "webhook": "Generic interface",
     "remote_csflow": "Remote ClawsomeFlow",
 }
 _EXTERNAL_CHANNEL_LABELS_ZH = {
     "human": "人工",
-    "webhook": "通用接口（webhook）",
+    "webhook": "通用接口",
     "remote_csflow": "远程ClawsomeFlow",
 }
 

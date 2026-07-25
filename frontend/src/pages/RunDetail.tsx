@@ -990,7 +990,8 @@ export function RunDetail() {
                     {pauseFailureReport.signal &&
                     (pauseFailureReport.signal === "leader_inbox_failed" ||
                       pauseFailureReport.signal === "worker_reported" ||
-                      pauseFailureReport.signal === "timeout") ? (
+                      pauseFailureReport.signal === "timeout" ||
+                      pauseFailureReport.signal === "dispatch_failed") ? (
                       <span className="ml-2 text-xs text-ink-500">
                         (
                         {t(
@@ -1008,6 +1009,14 @@ export function RunDetail() {
                       pauseFailureReport.message ||
                       (pauseFailureReport.signal === "timeout"
                         ? t("runDetail.pauseFailureSyntheticTimeout", {
+                            detail: pauseFailureReport.detail
+                              ? `${detailSep}${pauseFailureReport.detail}`
+                              : "",
+                          })
+                        : pauseFailureReport.signal === "dispatch_failed"
+                        // Not an agent-authored FAILED line — the hand-off never
+                        // reached the node, so don't dress it up as one.
+                        ? t("runDetail.pauseFailureSyntheticDispatchFailed", {
                             detail: pauseFailureReport.detail
                               ? `${detailSep}${pauseFailureReport.detail}`
                               : "",
@@ -3693,7 +3702,10 @@ function ExternalTasksCard({
   const [redispatching, setRedispatching] = useState<string | null>(null);
   /** Optimistic dismiss so the card vanishes before the WS completion event. */
   const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(() => new Set());
-  /** Controlled open state — native <details> resets on parent remount/WS ticks. */
+  /** Controlled open state — native <details> resets on parent remount/WS ticks.
+   *  Keyed by task id ONLY: a re-dispatch mints a new nonce (a refused webhook
+   *  gets several), and a nonce-keyed entry would silently collapse the sheet
+   *  the user just opened. */
   const [openSheets, setOpenSheets] = useState<Set<string>>(() => new Set());
   const [failModal, setFailModal] = useState<{
     taskId: string;
@@ -3777,7 +3789,7 @@ function ExternalTasksCard({
       <div className="space-y-3">
         {visibleItems.map((item) => {
           const sheetKey = `${item.taskId}:${item.nonce}`;
-          const sheetOpen = openSheets.has(sheetKey);
+          const sheetOpen = openSheets.has(item.taskId);
           const isHuman = item.channel === "human";
           const canRedispatch =
             item.channel === "webhook" || item.channel === "remote_csflow";
@@ -3841,8 +3853,8 @@ function ExternalTasksCard({
                       onClick={() =>
                         setOpenSheets((prev) => {
                           const next = new Set(prev);
-                          if (next.has(sheetKey)) next.delete(sheetKey);
-                          else next.add(sheetKey);
+                          if (next.has(item.taskId)) next.delete(item.taskId);
+                          else next.add(item.taskId);
                           return next;
                         })
                       }
