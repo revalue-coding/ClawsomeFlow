@@ -212,6 +212,11 @@ export interface ExternalNodeConfig {
    *  (its param fields); merged (user wins) over upstream-reported values at
    *  dispatch time and sent as the delegate request's `inputs`. */
   inputs?: Record<string, string> | null;
+  /** remote_csflow channel: passthrough bindings from remote param field to
+   *  a declared run-param field of THIS Flow (remote field -> local field).
+   *  Kept separate from `inputs` so field labels are never confused with
+   *  user-typed literals. */
+  inputParamRefs?: Record<string, string> | null;
   /** remote_csflow channel: the remote Flow's declared param-field NAMES,
    *  captured from its "remote call info". Names only — never secrets. */
   remoteParamFields?: string[] | null;

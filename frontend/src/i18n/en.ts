@@ -503,6 +503,14 @@ const en = {
       externalFlowId: "Remote Flow ID *",
       externalPairTokenRef: "Pairing credential name *",
       externalPairTokenRefPlaceholder: "Name registered via `csflow external add-remote`",
+      externalRemoteFlow: "Remote Flow",
+      externalRemoteNotConfigured: "No remote call info configured yet",
+      externalRemoteCallInfoAction: "Paste remote call info",
+      externalRemoteCallInfoUpdateAction: "Update call info",
+      externalRemoteCallInfoModalTitle: "Paste remote Flow call info",
+      externalRemoteCallInfoModalHint:
+        "On the target Flow's editor, click \"Copy remote call info\" and paste the JSON here. It will be parsed now and registered when you save the subtask.",
+      externalRemoteCallInfoApply: "Parse and use",
       externalRemoteCallInfo: "Remote Flow call info *",
       externalRemoteCallInfoPlaceholder:
         "On the target Flow's editor click \"Copy remote call info\", paste the JSON here; it is parsed and registered when you save the subtask.",
@@ -530,6 +538,14 @@ const en = {
       externalInputsRequired: "Remote Flow param field values *",
       externalInputsNoUpstreamHint:
         "This task has no upstream dependencies; the remote Flow uses only the values you enter here.",
+      externalInputsPassthroughHint:
+        "Supports Flow runtime-parameter passthrough: type a literal value directly, or pick one of this Flow's param fields from the dropdown.",
+      externalInputPassthroughBadge: "Flow param",
+      externalInputPassthroughSelect: "Pass through…",
+      externalInputPassthroughClear: "Clear passthrough",
+      externalInputPassthroughStale:
+        "This field no longer exists in the current Flow param list — reselect or clear it.",
+      externalInputManualPlaceholder: "Enter a literal value",
       newAgentName: "AGENT name *",
       newAgentNamePlaceholder: "Create new, or pick an existing temporary agent in this Flow",
       leaderNewAgentPlaceholder: "New temporary agent name",

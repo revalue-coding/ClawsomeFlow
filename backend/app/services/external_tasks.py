@@ -1370,7 +1370,7 @@ def _clear_delegate_callback_sent(run_id: str) -> None:
 
 
 def retry_poisoned_delegate_callbacks(
-    storage: "StorageBackend | None" = None,
+    storage: StorageBackend | None = None,
     *,
     limit_per_status: int = 100,
 ) -> int:

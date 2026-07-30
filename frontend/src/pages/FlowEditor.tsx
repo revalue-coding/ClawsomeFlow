@@ -138,6 +138,11 @@ interface TaskRow {
    *  fields (keyed by field name). Optional — upstream reports fill the rest.
    *  Serialized into FlowAgent.external.inputs on save. */
   externalInputValues: Record<string, string>;
+  /** remote_csflow only: passthrough bindings keyed by remote field name,
+   *  whose value is a declared run-param field of THIS Flow. Serialized into
+   *  FlowAgent.external.inputParamRefs on save; mutually exclusive with the
+   *  manual value for the same remote field. */
+  externalInputParamRefs: Record<string, string>;
   externalAssignee: string;
   /** human channel: externally reachable origin of this instance for the
    *  reply-form link (e.g. http://x.x.x.x:17017). Empty = local-only feedback. */
@@ -281,6 +286,7 @@ function blankRow(): TaskRow {
     externalRemoteFlowName: "",
     externalRemoteFlowDescription: "",
     externalInputValues: {},
+    externalInputParamRefs: {},
     externalAssignee: "",
     externalReplyBaseUrl: "",
     externalNotifyWebhookUrl: "",
@@ -1529,8 +1535,8 @@ export function FlowEditor() {
     [hermesOptions],
   );
   const issues = useMemo(
-    () => validate(tasks, validationMessages, openclawIds, hermesIds),
-    [tasks, validationMessages, openclawIds, hermesIds],
+    () => validate(tasks, validationMessages, openclawIds, hermesIds, runInputFields),
+    [tasks, validationMessages, openclawIds, hermesIds, runInputFields],
   );
   // Auto-dismiss the save-blockers rail as soon as the user starts
   // fixing things — otherwise a stale list lingers until the next
@@ -3456,7 +3462,13 @@ function TaskEditModal({
       setSaveError(validationMessages.cycleDetected(cycle.join(" -> ")));
       return;
     }
-    const rowIssue = validate(prospective, validationMessages, openclawIds, hermesIds).find(
+    const rowIssue = validate(
+      prospective,
+      validationMessages,
+      openclawIds,
+      hermesIds,
+      runInputFields,
+    ).find(
       (i) => i.rowKey === draft.rowKey,
     );
     if (rowIssue) {
@@ -3640,6 +3652,9 @@ function TaskFormBody({
   const { t } = useTranslation();
   const { alert } = useDialog();
   const [pickingRepo, setPickingRepo] = useState(false);
+  const [remoteCallInfoOpen, setRemoteCallInfoOpen] = useState(false);
+  const [remoteCallInfoDraft, setRemoteCallInfoDraft] = useState("");
+  const [remoteCallInfoError, setRemoteCallInfoError] = useState<string | null>(null);
   const ownerLocked = readOnly || isSummary;
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
@@ -3657,6 +3672,45 @@ function TaskFormBody({
 
   function commitRepoPath(repo: string) {
     onRepoPathCommit(repo.trim());
+  }
+
+  function openRemoteCallInfoModal() {
+    setRemoteCallInfoDraft("");
+    setRemoteCallInfoError(null);
+    setRemoteCallInfoOpen(true);
+  }
+
+  function applyRemoteCallInfoDraft() {
+    const raw = remoteCallInfoDraft.trim();
+    const parsed = parseRemoteCallInfoBlob(raw);
+    if (!parsed.ok) {
+      setRemoteCallInfoError(
+        parsed.reason === "empty"
+          ? t("flowEditor.taskFields.externalRemoteCallInfoEmpty")
+          : parsed.reason === "shape"
+          ? t("flowEditor.taskFields.externalRemoteCallInfoShapeInvalid")
+          : t("flowEditor.taskFields.externalRemoteCallInfoInvalid"),
+      );
+      return;
+    }
+    const fields = parsed.paramFields;
+    onChange({
+      externalRemoteCallInfo: raw,
+      externalRemoteParamFields: fields,
+      externalRemoteFlowName: parsed.info.flowName || "",
+      externalRemoteFlowDescription: parsed.info.flowDescription || "",
+      externalInputValues:
+        fields.length > 0
+          ? reconcileExternalInputValues(fields, row.externalInputValues)
+          : {},
+      externalInputParamRefs:
+        fields.length > 0
+          ? reconcileExternalInputParamRefs(fields, row.externalInputParamRefs)
+          : {},
+    });
+    setRemoteCallInfoOpen(false);
+    setRemoteCallInfoDraft("");
+    setRemoteCallInfoError(null);
   }
 
   // Dependable list = every other non-summary task. Keeping summary tasks
@@ -4157,73 +4211,35 @@ function TaskFormBody({
               <>
                 <div className="md:col-span-2">
                   <label className="label">
-                    {t("flowEditor.taskFields.externalRemoteCallInfo")}
+                    {t("flowEditor.taskFields.externalRemoteFlow")}
                   </label>
-                  <textarea
-                    className="textarea h-28 font-mono text-xs"
-                    value={row.externalRemoteCallInfo}
-                    readOnly={ownerLocked}
-                    placeholder={t(
-                      "flowEditor.taskFields.externalRemoteCallInfoPlaceholder",
+                  <div className="flex items-center justify-between gap-3 rounded-md border border-ink-200 bg-surface px-3 py-2.5 dark:border-ink-400">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-ink-900">
+                        {row.externalRemoteFlowName
+                          || row.externalFlowId
+                          || t("flowEditor.taskFields.externalRemoteNotConfigured")}
+                      </div>
+                      {row.externalRemoteFlowDescription && (
+                        <div className="mt-0.5 line-clamp-2 text-xs text-ink-500">
+                          {row.externalRemoteFlowDescription}
+                        </div>
+                      )}
+                    </div>
+                    {!ownerLocked && (
+                      <button
+                        type="button"
+                        className="btn-outline shrink-0"
+                        onClick={openRemoteCallInfoModal}
+                      >
+                        {row.externalRemoteFlowName
+                          || row.externalFlowId
+                          || row.externalRemoteCallInfo
+                          ? t("flowEditor.taskFields.externalRemoteCallInfoUpdateAction")
+                          : t("flowEditor.taskFields.externalRemoteCallInfoAction")}
+                      </button>
                     )}
-                    onChange={(e) =>
-                      onChange({ externalRemoteCallInfo: e.target.value })
-                    }
-                    onBlur={(e) => {
-                      if (ownerLocked) return;
-                      const raw = e.target.value.trim();
-                      if (!raw) {
-                        if (!remoteCsflowConfigured(row)) {
-                          void alert(
-                            t("flowEditor.taskFields.externalRemoteCallInfoEmpty"),
-                          );
-                        }
-                        return;
-                      }
-                      const parsed = parseRemoteCallInfoBlob(raw);
-                      if (!parsed.ok) {
-                        void alert(
-                          parsed.reason === "shape"
-                            ? t(
-                                "flowEditor.taskFields.externalRemoteCallInfoShapeInvalid",
-                              )
-                            : t(
-                                "flowEditor.taskFields.externalRemoteCallInfoInvalid",
-                              ),
-                        );
-                        return;
-                      }
-                      // Valid paste → surface param-fields UI immediately
-                      // (credential registration still happens on save).
-                      const fields = parsed.paramFields;
-                      const same =
-                        fields.length === row.externalRemoteParamFields.length
-                        && fields.every(
-                          (f, i) => f === row.externalRemoteParamFields[i],
-                        );
-                      if (
-                        same
-                        && (parsed.info.flowName || "") === row.externalRemoteFlowName
-                        && (parsed.info.flowDescription || "")
-                          === row.externalRemoteFlowDescription
-                      ) {
-                        return;
-                      }
-                      onChange({
-                        externalRemoteParamFields: fields,
-                        externalRemoteFlowName: parsed.info.flowName || "",
-                        externalRemoteFlowDescription:
-                          parsed.info.flowDescription || "",
-                        externalInputValues:
-                          fields.length > 0
-                            ? reconcileExternalInputValues(
-                                fields,
-                                row.externalInputValues,
-                              )
-                            : {},
-                      });
-                    }}
-                  />
+                  </div>
                 </div>
                 <div className="md:col-span-2">
                   <label className="label">
@@ -4268,28 +4284,121 @@ function TaskFormBody({
                         {t("flowEditor.taskFields.externalInputsNoUpstreamHint")}
                       </p>
                     )}
+                    <p className="mb-2 rounded-md border border-brand-100 bg-brand-50/60 px-2.5 py-2 text-xs text-ink-600">
+                      {t("flowEditor.taskFields.externalInputsPassthroughHint")}
+                    </p>
                     <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                      {row.externalRemoteParamFields.map((field) => (
-                        <div key={field}>
-                          <label className="label text-xs font-normal text-ink-600">
-                            {field}
-                            {row.dependsOn.length === 0 ? " *" : ""}
-                          </label>
-                          <input
-                            className="input"
-                            value={row.externalInputValues[field] ?? ""}
-                            readOnly={ownerLocked}
-                            onChange={(e) =>
-                              onChange({
-                                externalInputValues: {
-                                  ...row.externalInputValues,
-                                  [field]: e.target.value,
-                                },
-                              })
-                            }
-                          />
-                        </div>
-                      ))}
+                      {row.externalRemoteParamFields.map((field) => {
+                        const selectedRef = (row.externalInputParamRefs[field] ?? "").trim();
+                        const refIsStale = selectedRef !== ""
+                          && !runInputFields.includes(selectedRef);
+                        return (
+                          <div key={field}>
+                            <label className="label text-xs font-normal text-ink-600">
+                              {field}
+                              {row.dependsOn.length === 0 ? " *" : ""}
+                            </label>
+                            <div className="flex gap-2">
+                              <div className="min-w-0 flex-1">
+                                {selectedRef ? (
+                                  <div className={`input flex items-center justify-between gap-2 ${
+                                    refIsStale
+                                      ? "border-amber-300 bg-amber-50"
+                                      : "border-brand-200 bg-brand-50"
+                                  }`}>
+                                    <span className="inline-flex min-w-0 items-center gap-1.5 text-xs">
+                                      <span className={`shrink-0 rounded-full px-2 py-0.5 font-medium ${
+                                        refIsStale
+                                          ? "bg-amber-100 text-amber-800"
+                                          : "bg-brand-100 text-brand-700"
+                                      }`}>
+                                        {t("flowEditor.taskFields.externalInputPassthroughBadge")}
+                                      </span>
+                                      <span className="truncate font-medium text-ink-800">
+                                        {selectedRef}
+                                      </span>
+                                    </span>
+                                    {!ownerLocked && (
+                                      <button
+                                        type="button"
+                                        className="shrink-0 text-ink-400 hover:text-ink-700"
+                                        title={t("flowEditor.taskFields.externalInputPassthroughClear")}
+                                        onClick={() => {
+                                          const nextRefs = { ...row.externalInputParamRefs };
+                                          delete nextRefs[field];
+                                          onChange({ externalInputParamRefs: nextRefs });
+                                        }}
+                                      >
+                                        ×
+                                      </button>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <input
+                                    className="input"
+                                    value={row.externalInputValues[field] ?? ""}
+                                    readOnly={ownerLocked}
+                                    placeholder={t(
+                                      "flowEditor.taskFields.externalInputManualPlaceholder",
+                                    )}
+                                    onChange={(e) => {
+                                      const nextRefs = { ...row.externalInputParamRefs };
+                                      delete nextRefs[field];
+                                      onChange({
+                                        externalInputValues: {
+                                          ...row.externalInputValues,
+                                          [field]: e.target.value,
+                                        },
+                                        externalInputParamRefs: nextRefs,
+                                      });
+                                    }}
+                                  />
+                                )}
+                              </div>
+                              {!ownerLocked && runInputFields.length > 0 && (
+                                <select
+                                  className="input w-36 shrink-0 text-xs"
+                                  value={selectedRef}
+                                  title={t(
+                                    "flowEditor.taskFields.externalInputPassthroughSelect",
+                                  )}
+                                  onChange={(e) => {
+                                    const localField = e.target.value;
+                                    const nextRefs = { ...row.externalInputParamRefs };
+                                    if (!localField) {
+                                      delete nextRefs[field];
+                                      onChange({ externalInputParamRefs: nextRefs });
+                                      return;
+                                    }
+                                    nextRefs[field] = localField;
+                                    onChange({
+                                      externalInputValues: {
+                                        ...row.externalInputValues,
+                                        [field]: "",
+                                      },
+                                      externalInputParamRefs: nextRefs,
+                                    });
+                                  }}
+                                >
+                                  <option value="">
+                                    {t("flowEditor.taskFields.externalInputPassthroughSelect")}
+                                  </option>
+                                  {runInputFields.map((localField) => (
+                                    <option key={localField} value={localField}>
+                                      {localField}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
+                            {refIsStale && (
+                              <p className="mt-1 text-xs text-amber-700">
+                                {t("flowEditor.taskFields.externalInputPassthroughStale")}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -4379,6 +4488,45 @@ function TaskFormBody({
           </div>
         </div>
       )}
+
+      <Modal
+        open={remoteCallInfoOpen}
+        onClose={() => setRemoteCallInfoOpen(false)}
+        title={t("flowEditor.taskFields.externalRemoteCallInfoModalTitle")}
+        width="max-w-2xl"
+      >
+        <p className="mb-3 text-xs text-ink-600">
+          {t("flowEditor.taskFields.externalRemoteCallInfoModalHint")}
+        </p>
+        <textarea
+          className="textarea h-44 font-mono text-xs"
+          value={remoteCallInfoDraft}
+          placeholder={t("flowEditor.taskFields.externalRemoteCallInfoPlaceholder")}
+          onChange={(e) => {
+            setRemoteCallInfoDraft(e.target.value);
+            setRemoteCallInfoError(null);
+          }}
+        />
+        {remoteCallInfoError && (
+          <div className="mt-2 text-sm text-rose-700">{remoteCallInfoError}</div>
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            className="btn-outline"
+            onClick={() => setRemoteCallInfoOpen(false)}
+          >
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={applyRemoteCallInfoDraft}
+          >
+            {t("flowEditor.taskFields.externalRemoteCallInfoApply")}
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -5036,8 +5184,12 @@ function validate(
   messages: ValidationMessages,
   openclawIds: Set<string>,
   hermesIds: Set<string>,
+  runInputFields: string[] = [],
 ): { rowKey?: string; message: string }[] {
   const issues: { rowKey?: string; message: string }[] = [];
+  const validRunInputFields = new Set(
+    runInputFields.map((f) => f.trim()).filter(Boolean),
+  );
   const ids = new Set<string>();
   const ownerRepoBranch = new Map<string, { repo: string; branch: string }>();
   const ownerConflictReported = new Set<string>();
@@ -5152,9 +5304,11 @@ function validate(
         r.externalChannel === "remote_csflow"
         && r.externalRemoteParamFields.length > 0
         && r.dependsOn.length === 0
-        && r.externalRemoteParamFields.some(
-          (f) => !(r.externalInputValues[f] ?? "").trim(),
-        )
+        && r.externalRemoteParamFields.some((f) => {
+          const literal = (r.externalInputValues[f] ?? "").trim();
+          const ref = (r.externalInputParamRefs[f] ?? "").trim();
+          return !literal && (!ref || !validRunInputFields.has(ref));
+        })
       ) {
         issues.push({
           rowKey: r.rowKey,
@@ -5458,6 +5612,10 @@ async function registerRemoteCallInfoOnSave(
           fields.length > 0
             ? reconcileExternalInputValues(fields, row.externalInputValues)
             : {},
+        externalInputParamRefs:
+          fields.length > 0
+            ? reconcileExternalInputParamRefs(fields, row.externalInputParamRefs)
+            : {},
       },
     };
   } catch (e) {
@@ -5480,6 +5638,19 @@ function reconcileExternalInputValues(
   return out;
 }
 
+/** Keep passthrough bindings whose remote field still exists. */
+function reconcileExternalInputParamRefs(
+  fields: string[],
+  existing: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of fields) {
+    const source = (existing[f] ?? "").trim();
+    if (source) out[f] = source;
+  }
+  return out;
+}
+
 /** Build FlowAgent.external.inputs from per-field draft values (non-empty only). */
 function buildExternalInputs(
   values: Record<string, string>,
@@ -5489,6 +5660,22 @@ function buildExternalInputs(
     const trimmed = (v ?? "").trim();
     if (!k.trim() || !trimmed) continue;
     out[k] = trimmed;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Build FlowAgent.external.inputParamRefs (non-empty bindings only). */
+function buildExternalInputParamRefs(
+  refs: Record<string, string>,
+  allowedLocalFields: string[],
+): Record<string, string> | null {
+  const allowed = new Set(allowedLocalFields.map((f) => f.trim()).filter(Boolean));
+  const out: Record<string, string> = {};
+  for (const [remoteField, localField] of Object.entries(refs)) {
+    const remote = remoteField.trim();
+    const local = (localField ?? "").trim();
+    if (!remote || !allowed.has(local)) continue;
+    out[remote] = local;
   }
   return Object.keys(out).length > 0 ? out : null;
 }
@@ -5532,6 +5719,13 @@ function rowsToSpec(
               flowId: r.externalFlowId.trim() || null,
               pairTokenRef: r.externalPairTokenRef.trim() || null,
               inputs: buildExternalInputs(r.externalInputValues),
+              inputParamRefs:
+                r.externalChannel === "remote_csflow"
+                  ? buildExternalInputParamRefs(
+                      r.externalInputParamRefs,
+                      runInputFields,
+                    )
+                  : null,
               remoteParamFields:
                 r.externalChannel === "remote_csflow"
                 && r.externalRemoteParamFields.length > 0
@@ -6237,6 +6431,7 @@ function proposalToRows(
       externalRemoteFlowName: "",
       externalRemoteFlowDescription: "",
       externalInputValues: {},
+      externalInputParamRefs: {},
       externalAssignee: meta.externalAssignee,
       externalReplyBaseUrl: "",
       externalNotifyWebhookUrl: "",
@@ -6314,6 +6509,10 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       externalInputValues: reconcileExternalInputValues(
         a?.external?.remoteParamFields ?? [],
         a?.external?.inputs ?? {},
+      ),
+      externalInputParamRefs: reconcileExternalInputParamRefs(
+        a?.external?.remoteParamFields ?? [],
+        a?.external?.inputParamRefs ?? {},
       ),
       externalAssignee: a?.external?.assignee ?? "",
       externalReplyBaseUrl: a?.external?.replyBaseUrl ?? "",

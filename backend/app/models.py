@@ -377,6 +377,14 @@ class ExternalNodeConfig(_ApiBase):
     # as ``runtimePrompt``. Optional with a safe default → old specs load
     # unchanged.
     inputs: dict[str, str] | None = None
+    # remote_csflow only: per-remote-field passthrough bindings into THIS
+    # Flow's declared run-param fields (``csflow.runtime.param_fields``).
+    # Mapping is ``remote field name -> current Flow param field name``. At
+    # dispatch time the scheduler resolves each target from ``run.inputs`` and
+    # sends that value to the peer. Kept separate from ``inputs`` so a chosen
+    # field label can never be confused with a literal user-typed string.
+    # Safe default None → old specs load unchanged.
+    input_param_refs: dict[str, str] | None = None
     # remote_csflow only: the declared param-field NAMES of the remote Flow
     # (captured from its "remote call info" blob at configure time). The
     # scheduler uses them to (a) tell upstream executors which fields to

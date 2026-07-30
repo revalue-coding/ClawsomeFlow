@@ -26,12 +26,10 @@ their determinism.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from app.models import AgentKind, FlowAgent, FlowTask
 from app.repo_merge_lock import merge_lock_reference, self_merge_instruction
 from app.worktree.lookup import WorktreeInfo
-
 
 # Canonical anti-loop header used by all scheduler dispatch messages.
 _CONTEXT_HEADER = "## ClawsomeFlow Dispatch Context"
@@ -826,11 +824,11 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
         + "If you can't produce the deliverable for any reason (worker outputs "
         + "missing / conflicting / tool failure / etc.), DO NOT leave the "
         + "summary task pending — that stalls Run finalization. Instead:\n"
-        + f"1. Commit whatever partial deliverable you can plus a `## Failure` "
+        + "1. Commit whatever partial deliverable you can plus a `## Failure` "
         + "section explaining what went wrong and which worker outputs were missing.\n"
         + f"2. `clawteam inbox send {team} {ctx.agent.id} "
         + "\"leader final reply: FAILED — <one-line blocker and current status>\"`.\n"
-        + f"3. **VERY IMPORTANT: you MUST execute** "
+        + "3. **VERY IMPORTANT: you MUST execute** "
         + f"`clawteam task update {team} {ct_task_id} --status completed` "
         + "(scheduler can then enter finalize).\n"
         + "4. End your turn. The user will see your `## Failure` section in "

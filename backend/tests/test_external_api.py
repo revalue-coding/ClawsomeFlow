@@ -589,7 +589,7 @@ def test_remote_csflow_loopback_delegate_then_polled_to_completion(
         def __init__(self, **kw: Any) -> None:
             pass
 
-        async def __aenter__(self) -> "_LoopbackClient":
+        async def __aenter__(self) -> _LoopbackClient:
             return self
 
         async def __aexit__(self, *a: Any) -> None:

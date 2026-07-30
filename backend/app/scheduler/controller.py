@@ -36,8 +36,8 @@ import asyncio
 import json
 import os
 import re
-import shutil
 import shlex
+import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -45,6 +45,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from app.config import load_config
+from app.flow_modes import flow_mode, merge_reference_enabled, task_self_merges
+from app.integrations.openclaw_cli import resolve_openclaw_executable
+from app.integrations.openclaw_install import (
+    looks_like_pending_scope_approval,
+    repair_pending_scope_upgrades,
+)
 from app.logging_setup import (
     bind_context,
     get_logger,
@@ -52,13 +59,6 @@ from app.logging_setup import (
     task_dispatched,
     task_state_transition,
 )
-from app.integrations.openclaw_cli import resolve_openclaw_executable
-from app.integrations.openclaw_install import (
-    looks_like_pending_scope_approval,
-    repair_pending_scope_upgrades,
-)
-from app.config import load_config
-from app.flow_modes import flow_mode, merge_reference_enabled, task_self_merges
 from app.models import (
     AgentKind,
     ExternalChannel,
@@ -67,12 +67,29 @@ from app.models import (
     FlowRun,
     FlowSpec,
     FlowTask,
-    MergeStrategy,
     OnFailure,
     RunStatus,
     iso_utc,
 )
+from app.repo_merge_lock import self_merge_instruction
 from app.scheduler.compiler import CompileResult
+from app.scheduler.failure import (
+    MIN_TASK_TIMEOUT_SECONDS,
+    FailureReason,
+    FailureRecord,
+    TaskSnapshot,
+    apply_on_failure,
+    detect_failures,
+    failed_inbox_message_for_pause,
+    format_pause_failure_detail,
+    resolve_ui_language,
+)
+from app.scheduler.finalize import (
+    FinalizeInput,
+    finalize_run,
+    run_terminal_tail_cleanup,
+)
+from app.scheduler.naming import openclaw_session_id_for_run, team_name_for_run
 from app.scheduler.prompts import (
     EMPTY_PARAM_PLACEHOLDER,
     REMOTE_ORIGIN_NOTE,
@@ -87,22 +104,7 @@ from app.scheduler.prompts import (
     build_openclaw_self_merge,
     build_worker_dispatch,
 )
-from app.scheduler.failure import (
-    MIN_TASK_TIMEOUT_SECONDS,
-    FailureRecord,
-    FailureReason,
-    TaskSnapshot,
-    apply_on_failure,
-    detect_failures,
-    failed_inbox_message_for_pause,
-    format_pause_failure_detail,
-    resolve_ui_language,
-)
-from app.scheduler.finalize import (
-    FinalizeInput,
-    finalize_run,
-    run_terminal_tail_cleanup,
-)
+from app.scheduler.providers import DispatchClock
 from app.scheduler.run_metadata import (
     PAUSE_REASON_FAILURE,
     PAUSE_REASON_INTERNAL_ERROR,
@@ -118,10 +120,6 @@ from app.scheduler.run_metadata import (
     write_checkpoint_state,
     write_pause_state,
 )
-from app.scheduler.naming import openclaw_session_id_for_run, team_name_for_run
-from app.repo_merge_lock import self_merge_instruction
-from app.scheduler.providers import DispatchClock
-from app.services import subprocess_registry
 from app.scheduler.sessions.base import (
     DispatchOutcome,
     SessionState,
@@ -129,11 +127,11 @@ from app.scheduler.sessions.base import (
 )
 from app.scheduler.sessions.external import ExternalNodeSession
 from app.scheduler.sessions.openclaw_tmux import OpenClawTmuxSession
-from app.scheduler.sessions.tmux_ready import tmux_capture_pane, wait_shell_ready
 from app.scheduler.sessions.tmux_live import (
     TmuxLiveSession,
-    UnsupportedAgentKind,
 )
+from app.scheduler.sessions.tmux_ready import tmux_capture_pane, wait_shell_ready
+from app.services import subprocess_registry
 from app.storage import StorageBackend, get_storage
 from app.user_context import get_request_user, set_request_user
 from app.worktree.audit import run_post_task_audit
@@ -238,6 +236,44 @@ def _extract_remote_params_block(
     if not isinstance(obj, dict):
         return {}
     return {str(k): ("" if v is None else str(v)) for k, v in obj.items()}
+
+
+_RUNTIME_PARAM_FIELDS_KEY = "csflow.runtime.param_fields"
+_LEGACY_RUNTIME_REQUIREMENT_KEY = "csflow.runtime.requirement"
+
+
+def _declared_flow_param_fields(spec: FlowSpec) -> list[str]:
+    """Return THIS Flow's user-declared run-parameter field names.
+
+    Mirrors the WebUI ``getRunInputFields`` codec (JSON array first,
+    comma/newline fallback, legacy single-requirement fallback). Used to
+    whitelist remote-node passthrough bindings so ``run.inputs`` internal
+    scheduler keys can never be selected into a delegate payload.
+    """
+    variables = spec.variables or {}
+    raw = variables.get(_RUNTIME_PARAM_FIELDS_KEY)
+    fields: list[str] = []
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                fields = [str(x) for x in parsed]
+        except (TypeError, ValueError):
+            fields = re.split(r"[\r\n,]+", raw)
+    if not fields:
+        legacy = variables.get(_LEGACY_RUNTIME_REQUIREMENT_KEY)
+        if isinstance(legacy, str) and legacy.strip():
+            fields = [legacy]
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in fields:
+        cleaned = str(item).strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
 _LEADER_COMPLAINT_RELAY_RE = re.compile(
     r"^\s*\[csflow-complaint-relay:(?P<relay_task_id>[A-Za-z0-9._-]+):"
     r"(?P<target_agent_id>[A-Za-z0-9._-]+)\]\s*(?P<body>.*)$",
@@ -1584,7 +1620,7 @@ class RunController:
                     final_status = await self._invoke_finalize(outcome)
                     outcome.final_status = final_status
                     self._set_status(final_status, reason=outcome.reason or "finalize")
-                    return outcome
+            return outcome
         finally:
             set_request_user(prev_user)
 
@@ -1772,7 +1808,7 @@ class RunController:
             startup_error: SessionStartupError | None = None
             blocked_error: SchedulerBlockedError | None = None
             first_success: _TaskBook | None = None
-            for book, res in zip(dispatchable, results):
+            for book, res in zip(dispatchable, results, strict=True):
                 if isinstance(res, Exception):
                     if isinstance(res, SchedulerBlockedError):
                         blocked_error = blocked_error or res
@@ -3151,7 +3187,8 @@ class RunController:
         (:meth:`prepare_resume`). Fully defensive.
         """
         from app.services.external_tasks import (
-            find_completion_event, latest_dispatch_event,
+            find_completion_event,
+            latest_dispatch_event,
         )
         try:
             disp = latest_dispatch_event(
@@ -3821,12 +3858,13 @@ class RunController:
     ) -> dict[str, str]:
         """Compute the ``inputs`` dict delegated to a remote_csflow Flow.
 
-        Precedence (per field): user-typed override (``external.inputs``) >
-        union of upstream-reported values > headless-leader fill (any leader
-        kind; only when an upstream is itself a remote_csflow whose returned
-        content might hold it) > the literal placeholder ``参数为空``.
-        Non-declared user keys are passed through verbatim so a purely-static
-        config keeps working.
+        Precedence (per field): current-Flow run-param passthrough
+        (``external.input_param_refs``) > user-typed override
+        (``external.inputs``) > union of upstream-reported values >
+        headless-leader fill (any leader kind; only when an upstream is itself
+        a remote_csflow whose returned content might hold it) > the literal
+        placeholder ``参数为空``. Non-declared user keys are passed through
+        verbatim so a purely-static config keeps working.
         """
         ext = agent.external
         assert ext is not None  # caller guarantees remote_csflow
@@ -3838,13 +3876,29 @@ class RunController:
             # No declared param schema → legacy behaviour: send static inputs.
             return user_inputs
 
-        # Root remote node (no upstream deps): operator-typed inputs are the
-        # sole source — skip inbox union and headless-leader fill.
+        declared = set(_declared_flow_param_fields(self.spec))
+        param_refs: dict[str, str] = {}
+        for remote_field, source_field in (ext.input_param_refs or {}).items():
+            remote = str(remote_field).strip()
+            source = str(source_field).strip()
+            if remote and source in declared:
+                param_refs[remote] = source
+        run_inputs = self.run.inputs or {}
+        ref_values: dict[str, str] = {}
+        for remote, source in param_refs.items():
+            raw = run_inputs.get(source)
+            value = "" if raw is None else str(raw).strip()
+            if value:
+                ref_values[remote] = value
+
+        # Root remote node (no upstream deps): operator-configured values are
+        # the sole source — skip inbox union and headless-leader fill.
         if not task.depends_on:
             resolved = {}
             for f in fields:
+                ref_val = ref_values.get(f, "")
                 user_val = str(user_inputs.get(f, "")).strip()
-                resolved[f] = user_val if user_val else EMPTY_PARAM_PLACEHOLDER
+                resolved[f] = ref_val or user_val or EMPTY_PARAM_PLACEHOLDER
             logger.info(
                 "remote_delegate_inputs_resolved",
                 run_id=self.run.id,
@@ -3855,6 +3909,7 @@ class RunController:
                 from_user=sorted(
                     f for f in fields if str(user_inputs.get(f, "")).strip()
                 ),
+                from_flow_params=sorted(ref_values),
                 placeholders=sorted(
                     f for f in fields if resolved.get(f) == EMPTY_PARAM_PLACEHOLDER
                 ),
@@ -3900,14 +3955,17 @@ class RunController:
                 if summary:
                     remote_upstream_summaries.append(summary)
 
-        # 2) Assemble in precedence order: union first, user overrides on top.
+        # 2) Assemble in precedence order: union first, user override next,
+        #    explicit current-Flow param passthrough last (highest priority).
         resolved: dict[str, str] = dict(user_inputs)
         for f in fields:
+            if union.get(f):
+                resolved[f] = union[f]
             user_val = str(user_inputs.get(f, "")).strip()
             if user_val:
                 resolved[f] = user_val
-            elif union.get(f):
-                resolved[f] = union[f]
+            if ref_values.get(f):
+                resolved[f] = ref_values[f]
 
         # 3) Headless-leader fallback ONLY when an upstream is itself
         #    remote_csflow (cannot self-report params) AND fields are still
@@ -3947,6 +4005,7 @@ class RunController:
             fields=fields,
             from_upstream=sorted(union.keys()),
             from_user=sorted(k for k in fields if str(user_inputs.get(k, "")).strip()),
+            from_flow_params=sorted(ref_values),
             placeholders=sorted(
                 f for f in fields if resolved.get(f) == EMPTY_PARAM_PLACEHOLDER
             ),

@@ -493,6 +493,14 @@ const zh = {
       externalFlowId: "远端 Flow ID *",
       externalPairTokenRef: "配对凭证名称 *",
       externalPairTokenRefPlaceholder: "通过 `csflow external add-remote` 注册的名称",
+      externalRemoteFlow: "远端 Flow",
+      externalRemoteNotConfigured: "尚未配置远程调用信息",
+      externalRemoteCallInfoAction: "粘贴远程调用信息",
+      externalRemoteCallInfoUpdateAction: "更新调用信息",
+      externalRemoteCallInfoModalTitle: "粘贴远程 Flow 调用信息",
+      externalRemoteCallInfoModalHint:
+        "在目标 Flow 的编辑页点击「复制远程调用信息」，把得到的 JSON 粘贴到这里；这里会先解析，保存子任务时自动注册。",
+      externalRemoteCallInfoApply: "解析并使用",
       externalRemoteCallInfo: "远端 Flow调用信息 *",
       externalRemoteCallInfoPlaceholder:
         "在目标 Flow 的编辑页点击「复制远程调用信息」，把得到的 JSON 粘贴到这里；保存子任务时自动解析并注册。",
@@ -519,6 +527,14 @@ const zh = {
       externalInputsRequired: "远端Flow参数字段值 *",
       externalInputsNoUpstreamHint:
         "本任务没有上游依赖，远端 Flow 将完全使用此处填写的参数值。",
+      externalInputsPassthroughHint:
+        "支持 Flow 执行参数透传：可直接手动输入，也可从下拉框选择当前 Flow 的参数字段。",
+      externalInputPassthroughBadge: "Flow参数",
+      externalInputPassthroughSelect: "透传参数…",
+      externalInputPassthroughClear: "取消透传",
+      externalInputPassthroughStale:
+        "该字段已不在当前 Flow 的参数字段列表中，请重新选择或取消透传。",
+      externalInputManualPlaceholder: "手动输入固定值",
       newAgentName: "AGENT 名称 *",
       newAgentNamePlaceholder: "新建或选择本Flow已有临时AGENT",
       leaderNewAgentPlaceholder: "新建临时 Agent 名称",
