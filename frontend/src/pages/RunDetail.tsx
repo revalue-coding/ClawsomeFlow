@@ -1294,6 +1294,10 @@ export function RunDetail() {
         />
       )}
 
+      {/* Receipt attachments submitted with external-task results (kept
+          downloadable after the todo card disappears). */}
+      <ExternalAttachmentsCard runId={run.id} events={events} />
+
       {mergeFailures.length > 0 && (
         <Card className="border-rose-200">
           <CardTitle hint={t("runDetail.mergeFailureHint")}>
@@ -3623,6 +3627,9 @@ type ExternalTaskItem = {
   messageZh: string;
   messageEn: string;
   nonce: string;
+  /** Shareable reply-form link for THIS dispatch (empty when the resolved
+   *  reply base is loopback — nothing useful to copy/forward). */
+  replyUrl: string;
   /** Per-task output-summary requirement (from the Flow editor field). */
   outputRequirement: string;
   description: string;
@@ -3667,6 +3674,7 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
         messageZh: String(payload.messageZh ?? payload.message_zh ?? ""),
         messageEn: String(payload.messageEn ?? payload.message_en ?? ""),
         nonce: String(payload.nonce ?? ""),
+        replyUrl: String(payload.replyUrl ?? payload.reply_url ?? ""),
         outputRequirement: String(
           payload.outputRequirement ?? payload.output_requirement ?? "",
         ).trim(),
@@ -3713,6 +3721,91 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
   );
 }
 
+type ExternalAttachmentEntry = {
+  taskId: string;
+  nonce: string;
+  name: string;
+  size: number;
+};
+
+/** Receipt attachments from every ``external_task_completed`` event. The
+ *  download endpoint is nonce-scoped, so entries stay valid even after a task
+ *  was re-dispatched or the run finished. */
+function collectExternalAttachments(
+  events: RunWsEvent[],
+): ExternalAttachmentEntry[] {
+  const out: ExternalAttachmentEntry[] = [];
+  for (const e of [...events].sort((a, b) => a.id - b.id)) {
+    if (e.type !== "external_task_completed") continue;
+    const tid = typeof e.taskId === "string" ? e.taskId : "";
+    const payload = (e.payload ?? {}) as Record<string, unknown>;
+    const nonce = String(payload.nonce ?? "");
+    const list = payload.attachments;
+    if (!tid || !nonce || !Array.isArray(list)) continue;
+    for (const raw of list) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Record<string, unknown>;
+      const name = String(item.name ?? "").trim();
+      if (!name) continue;
+      out.push({
+        taskId: tid,
+        nonce,
+        name,
+        size: Number(item.size ?? 0) || 0,
+      });
+    }
+  }
+  return out;
+}
+
+function formatAttachmentSize(size: number): string {
+  if (size <= 0) return "";
+  if (size < 1024) return `${size}B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)}KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function ExternalAttachmentsCard({
+  runId,
+  events,
+}: {
+  runId: string;
+  events: RunWsEvent[];
+}) {
+  const { t } = useTranslation();
+  const items = useMemo(() => collectExternalAttachments(events), [events]);
+  if (items.length === 0) return null;
+  return (
+    <Card>
+      <CardTitle hint={t("runDetail.external.attachmentsCardHint")}>
+        {t("runDetail.external.attachmentsCardTitle")} ({items.length})
+      </CardTitle>
+      <ul className="space-y-1 text-sm">
+        {items.map((it) => (
+          <li
+            key={`${it.taskId}:${it.nonce}:${it.name}`}
+            className="flex items-center gap-2"
+          >
+            <span className="font-mono text-xs text-ink-500">{it.taskId}</span>
+            <a
+              className="text-brand-700 underline underline-offset-2 hover:text-brand-800"
+              href={`/api/runs/${encodeURIComponent(runId)}/external-tasks/${encodeURIComponent(it.taskId)}/attachments/${encodeURIComponent(it.nonce)}/${encodeURIComponent(it.name)}`}
+              download={it.name}
+            >
+              {it.name}
+            </a>
+            {it.size > 0 && (
+              <span className="text-xs text-ink-400">
+                {formatAttachmentSize(it.size)}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 function ExternalTasksCard({
   runId,
   teamName,
@@ -3727,6 +3820,10 @@ function ExternalTasksCard({
   const uiLang = i18n.language?.startsWith("zh") ? "zh" : "en";
   const items = useMemo(() => collectExternalTasks(events), [events]);
   const [summaries, setSummaries] = useState<Record<string, string>>({});
+  /** Selected receipt attachments per task id (human channel). */
+  const [attachFiles, setAttachFiles] = useState<Record<string, File[]>>({});
+  /** Task id whose reply link was just copied (transient label swap). */
+  const [copiedReplyTask, setCopiedReplyTask] = useState<string | null>(null);
   /** Task id currently completing or redistributing — locks sibling buttons. */
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [redispatching, setRedispatching] = useState<string | null>(null);
@@ -3758,15 +3855,25 @@ function ExternalTasksCard({
     nonce: string,
     status: "success" | "failed",
     summary: string,
+    files: File[] = [],
   ) {
     const key = `${taskId}:${nonce}`;
     setSubmitting(taskId);
     try {
-      await api.completeExternalTask(runId, taskId, status, summary);
+      if (files.length > 0) {
+        await api.completeExternalTaskForm(runId, taskId, status, summary, files);
+      } else {
+        await api.completeExternalTask(runId, taskId, status, summary);
+      }
       // Drop the card immediately; WS will confirm with external_task_completed.
       setDismissedKeys((prev) => {
         const next = new Set(prev);
         next.add(key);
+        return next;
+      });
+      setAttachFiles((prev) => {
+        const next = { ...prev };
+        delete next[taskId];
         return next;
       });
       setFailModal(null);
@@ -3776,6 +3883,38 @@ function ExternalTasksCard({
     } finally {
       setSubmitting(null);
     }
+  }
+
+  function pickAttachments(taskId: string, list: FileList | null) {
+    const files = Array.from(list ?? []);
+    if (files.length > 10) {
+      void alert(t("runDetail.external.attachmentsTooMany"));
+      return;
+    }
+    const oversized = files.find((f) => f.size > 50 * 1024 * 1024);
+    if (oversized) {
+      void alert(
+        t("runDetail.external.attachmentTooLarge", { name: oversized.name }),
+      );
+      return;
+    }
+    setAttachFiles((prev) => ({ ...prev, [taskId]: files }));
+  }
+
+  function copyReplyLink(taskId: string, url: string) {
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        setCopiedReplyTask(taskId);
+        window.setTimeout(
+          () => setCopiedReplyTask((cur) => (cur === taskId ? null : cur)),
+          2000,
+        );
+      } catch {
+        // Clipboard denied (rare) — show the URL for manual copy.
+        void alert(url);
+      }
+    })();
   }
 
   async function redispatch(taskId: string) {
@@ -3843,6 +3982,19 @@ function ExternalTasksCard({
                     <span className="pill-info">
                       {t("runDetail.external.assignee")}: {item.assignee}
                     </span>
+                  )}
+                  {/* Present only when the dispatch minted a SHAREABLE link
+                      (node/global public base configured — loopback mints none). */}
+                  {isHuman && item.replyUrl && (
+                    <button
+                      type="button"
+                      className="btn-outline !px-2 !py-0.5 text-xs"
+                      onClick={() => copyReplyLink(item.taskId, item.replyUrl)}
+                    >
+                      {copiedReplyTask === item.taskId
+                        ? t("runDetail.external.replyLinkCopied")
+                        : t("runDetail.external.copyReplyLink")}
+                    </button>
                   )}
                 </div>
               </div>
@@ -3922,6 +4074,20 @@ function ExternalTasksCard({
                       }))
                     }
                   />
+                  <div>
+                    <label className="label text-xs font-normal text-ink-600">
+                      {t("runDetail.external.attachmentsLabel")}
+                    </label>
+                    <input
+                      type="file"
+                      multiple
+                      className="block w-full text-xs text-ink-600"
+                      disabled={actionsBusy}
+                      onChange={(e) => {
+                        pickAttachments(item.taskId, e.target.files);
+                      }}
+                    />
+                  </div>
                   <div className="flex items-center justify-end gap-2">
                     <button
                       type="button"
@@ -3944,6 +4110,7 @@ function ExternalTasksCard({
                           item.nonce,
                           "success",
                           summaries[item.taskId] ?? "",
+                          attachFiles[item.taskId] ?? [],
                         )
                       }
                     >

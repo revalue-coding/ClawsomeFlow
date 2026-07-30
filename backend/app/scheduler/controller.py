@@ -3838,6 +3838,30 @@ class RunController:
             # No declared param schema → legacy behaviour: send static inputs.
             return user_inputs
 
+        # Root remote node (no upstream deps): operator-typed inputs are the
+        # sole source — skip inbox union and headless-leader fill.
+        if not task.depends_on:
+            resolved = {}
+            for f in fields:
+                user_val = str(user_inputs.get(f, "")).strip()
+                resolved[f] = user_val if user_val else EMPTY_PARAM_PLACEHOLDER
+            logger.info(
+                "remote_delegate_inputs_resolved",
+                run_id=self.run.id,
+                task_id=task.id,
+                agent_id=agent.id,
+                fields=fields,
+                from_upstream=[],
+                from_user=sorted(
+                    f for f in fields if str(user_inputs.get(f, "")).strip()
+                ),
+                placeholders=sorted(
+                    f for f in fields if resolved.get(f) == EMPTY_PARAM_PLACEHOLDER
+                ),
+                no_upstream_deps=True,
+            )
+            return resolved
+
         # 1) Per-upstream reports addressed to THIS downstream task
         #    (``csflow-remote-params: <dep> <this_task>``; legacy single-block
         #    still accepted). remote_csflow upstreams cannot emit that block

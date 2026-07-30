@@ -30,6 +30,9 @@ dependencies = [
     "rich>=13.0.0,<15.0.0",
     "questionary>=2.0.1,<3.0.0",
     "httpx>=0.27.0,<1.0.0",
+    # Multipart form parsing for the external reply form + WebUI attachment
+    # uploads (FastAPI ``File``/``Form`` params require it).
+    "python-multipart>=0.0.9,<1.0.0",
     "watchfiles>=0.21.0,<2.0.0",
     "anyio>=4.0.0,<5.0.0",
     "clawteam>=0.3.0",

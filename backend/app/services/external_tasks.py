@@ -144,6 +144,10 @@ _TICKET_CONTEXT = "csflow-external"
 EXTERNAL_SCHEMA_VERSION = 2
 _EVENT_SCAN_LIMIT = 5000
 _OUTBOUND_TIMEOUT_SEC = 15.0
+#: Ceiling for a human-channel ``dispatch_command`` delivery script. Delivery
+#: is a notification-scale action (post to IM / ticket system), NOT agent work
+#: — a hung script must fail the dispatch (→ pause) rather than stall the tick.
+DISPATCH_COMMAND_TIMEOUT_SEC = 120.0
 #: Result polling (outbound GET). Interval is fixed by the scheduler — partners
 #: only tell us WHERE to poll (``poll.url``), not how often.
 _POLL_TIMEOUT_SEC = 10.0
@@ -359,6 +363,42 @@ def sanitize_external_callback_base_url(config: Config | None = None) -> Config:
     return cfg
 
 
+def resolve_reply_base_url(ext: Any, config: Config | None = None) -> str:
+    """Base origin for this node's human reply-form links.
+
+    Three-level fallback: the node's own ``reply_base_url`` (typed in the Flow
+    editor next to the task — "this step goes to someone on the outside") →
+    the instance-wide ``Config.external_callback_base_url`` → the loopback
+    default. Loopback means "no shareable link": the reply form still works
+    from this machine, but notifications/UI won't advertise it (see
+    :func:`reply_base_is_shareable`).
+    """
+    node_base = str(getattr(ext, "reply_base_url", None) or "").strip().rstrip("/")
+    if node_base:
+        return node_base
+    return resolve_external_callback_base_url(config)
+
+
+def reply_base_is_shareable(base_url: str) -> bool:
+    """True when *base_url* plausibly works for someone who is NOT on this box."""
+    parsed = _split_host_port(base_url)
+    if parsed is None:
+        return False
+    return not _host_is_loopback(parsed[0])
+
+
+def build_reply_url(
+    *, base_url: str, run_id: str, task_id: str, ticket: str,
+) -> str:
+    """Public reply-form URL for one dispatch attempt (ticket carries auth)."""
+    from urllib.parse import quote
+
+    return (
+        f"{base_url.rstrip('/')}/api/external/reply/"
+        f"{quote(run_id, safe='')}/{quote(task_id, safe='')}?t={quote(ticket, safe='')}"
+    )
+
+
 # ── Result vocabulary (tolerant in, strict out) ───────────────────────
 # An integrator should not have to read our source to guess the exact word for
 # "done". Anything unrecognised counts as "still working" — never a failure,
@@ -472,6 +512,18 @@ async def dispatch_external_task(
     nonce = secrets.token_urlsafe(16)
     ticket = mint_ticket(run_id, task_id, nonce, config=cfg)
 
+    # Human channel: mint the public reply-form link for THIS attempt. Only a
+    # shareable (non-loopback) base is advertised — a 127.0.0.1 link is useless
+    # to the person the notification reaches, so feedback then stays local
+    # (WebUI card / same-origin form).
+    reply_url: str | None = None
+    if ext.channel == ExternalChannel.human:
+        reply_base = resolve_reply_base_url(ext, cfg)
+        if reply_base_is_shareable(reply_base):
+            reply_url = build_reply_url(
+                base_url=reply_base, run_id=run_id, task_id=task_id, ticket=ticket,
+            )
+
     # UI-only bilingual sheets (Run detail card). Never send to webhook/peer.
     package_wire = dict(package)
     message_zh = package_wire.pop("messageZh", None)
@@ -490,6 +542,8 @@ async def dispatch_external_task(
         "reply": _reply_contract(str(ext.endpoint_url or "")),
         **package_wire,
     }
+    if reply_url:
+        outbound_package["replyUrl"] = reply_url
     # Webhook partners run on a different host — remind them not to chase
     # foreign absolute paths or echo local paths back in the summary.
     if ext.channel == ExternalChannel.webhook:
@@ -509,6 +563,10 @@ async def dispatch_external_task(
         "message": message,
         **package_wire,
     }
+    if reply_url:
+        # The WebUI copy-reply-link button keys off this field: absent when the
+        # resolved base is loopback (nothing shareable to copy).
+        event_payload["replyUrl"] = reply_url
     if isinstance(message_zh, str) and message_zh.strip():
         event_payload["messageZh"] = message_zh
     if isinstance(message_en, str) and message_en.strip():
@@ -528,10 +586,22 @@ async def dispatch_external_task(
         )
 
     if ext.channel == ExternalChannel.human:
-        # A person answers on the Run detail card (same-origin endpoint), so
+        # Custom delivery adapter first: it is the DISPATCH itself (a failed
+        # script = failed hand-off → the controller pauses; 继续执行 re-runs
+        # it with a fresh ticket). The chat notification below stays
+        # best-effort either way.
+        if ext.dispatch_command:
+            await _run_dispatch_command(
+                command=list(ext.dispatch_command),
+                package=outbound_package,
+                run_id=run_id,
+                task_id=task_id,
+            )
+        # A person answers via the reply link or the Run detail card, so
         # there is no outbound reply to interpret and nothing to poll.
         _notify_flow_channels_async(
             storage, run_id=run_id, package=outbound_package, message=message,
+            channels_override=_node_notify_channels(ext),
         )
         return
     if ext.channel == ExternalChannel.webhook:
@@ -569,6 +639,71 @@ async def dispatch_external_task(
         )
         return
     raise RuntimeError(f"unsupported external channel: {ext.channel!r}")
+
+
+def _node_notify_channels(ext: Any) -> list[dict[str, Any]] | None:
+    """Per-node notification channel override, or None (use Flow channels)."""
+    url = str(getattr(ext, "notify_webhook_url", None) or "").strip()
+    if not url:
+        return None
+    fmt = str(getattr(ext, "notify_webhook_format", None) or "").strip().lower()
+    return [{"url": url, "format": fmt or None}]
+
+
+async def _run_dispatch_command(
+    *,
+    command: list[str],
+    package: dict[str, Any],
+    run_id: str,
+    task_id: str,
+) -> None:
+    """Run a human-channel custom delivery script (package JSON on stdin).
+
+    The script only DELIVERS the task (post to an IM bot, a ticket system,
+    SMS…); the person's answer always comes back through the reply form /
+    WebUI. Non-zero exit or timeout raises = dispatch failure (run pauses).
+    Timeout/cancellation kill the whole process group — the standard
+    subprocess tier convention (no orphaned children).
+    """
+    import asyncio as _asyncio
+
+    from app.services import subprocess_registry
+
+    argv = [str(part) for part in command if str(part).strip()]
+    if not argv:
+        raise RuntimeError("dispatch_command is empty")
+    payload = json.dumps(package, ensure_ascii=False).encode("utf-8")
+    proc = await _asyncio.create_subprocess_exec(
+        *argv,
+        stdin=_asyncio.subprocess.PIPE,
+        stdout=_asyncio.subprocess.PIPE,
+        stderr=_asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    subprocess_registry.register(proc)
+    try:
+        stdout, _ = await _asyncio.wait_for(
+            proc.communicate(payload), timeout=DISPATCH_COMMAND_TIMEOUT_SEC,
+        )
+    except _asyncio.TimeoutError:
+        subprocess_registry.kill_group(proc)
+        raise RuntimeError(
+            f"dispatch_command timed out after {DISPATCH_COMMAND_TIMEOUT_SEC:.0f}s"
+        ) from None
+    except _asyncio.CancelledError:
+        subprocess_registry.kill_group(proc)
+        raise
+    finally:
+        subprocess_registry.unregister(proc)
+    output = (stdout or b"").decode("utf-8", errors="replace")[-500:]
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"dispatch_command exited with {proc.returncode}: {output}"
+        )
+    logger.info(
+        "external_dispatch_command_ok",
+        run_id=run_id, task_id=task_id, command=argv[0],
+    )
 
 
 def _delegate_poll_spec(ext: Any, remote_run_id: str | None) -> dict[str, Any]:
@@ -915,6 +1050,7 @@ def build_external_dispatch_notification(
         "channel": package.get("channel") or "",
         "assignee": package.get("assignee") or "",
         "runUrl": f"{base.rstrip('/')}/runs/{run.id}",
+        "replyUrl": str(package.get("replyUrl") or ""),
         "content": brief[:_NOTIFY_CONTENT_MAX_CHARS],
     }
 
@@ -925,19 +1061,21 @@ def _notify_flow_channels_async(
     run_id: str,
     package: dict[str, Any],
     message: str,
+    channels_override: list[dict[str, Any]] | None = None,
 ) -> None:
     """Best-effort: push the human todo card to the Flow's notify webhooks.
 
     Reuses the per-Flow ``csflow.notify_webhooks`` channels so a Feishu/
-    Telegram/... bot pings the human that a task is waiting. Never raises,
-    never blocks the scheduler (daemon thread)."""
+    Telegram/... bot pings the human that a task is waiting; a node-level
+    ``notify_webhook_url`` (``channels_override``) replaces the Flow list for
+    that node. Never raises, never blocks the scheduler (daemon thread)."""
     try:
         from app.services.run_notify import flow_channels_for_run, post_webhook
 
         run = storage.run_get(run_id)
         if run is None:
             return
-        channels = flow_channels_for_run(run)
+        channels = channels_override or flow_channels_for_run(run)
         if not channels:
             return
         flow_name: str | None = None
@@ -983,14 +1121,23 @@ async def complete_external_task(
     ok: bool,
     summary: str,
     source: str,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Record an external task result and push it into ClawTeam.
 
     Success path mirrors what a regular worker does itself (inbox send with
     the strict ``task <id> done:`` prefix, then ``task_update completed``).
-    Failure path sends the legacy ``FAILED:<task_id>:<reason>`` leader-inbox
-    signal so the existing failure detector applies the agent's ``on_failure``
-    policy (retry re-dispatches with a fresh nonce). Idempotent per nonce.
+    Failure path records ONLY the ``external_task_completed(ok=false, nonce)``
+    event — matched to the current dispatch nonce by
+    ``RunController._external_failure_receipt`` — and deliberately does NOT
+    send a ``FAILED:`` leader-inbox message (see the else branch below).
+    The existing failure detector applies the agent's ``on_failure`` policy
+    (retry re-dispatches with a fresh nonce). Idempotent per nonce.
+
+    *attachments* (already saved via ``services/external_attachments``) are
+    recorded structurally on the completion event AND appended to the summary
+    as a local-path block, so downstream agent prompts receive the file paths
+    through the ordinary upstream-output passthrough.
     """
     # Telemetry: stamp the MOMENT a receipt lands, so the logs can later confirm
     # receipts arrive promptly + exactly when. structlog adds the wall-clock ``ts``
@@ -1054,6 +1201,16 @@ async def complete_external_task(
     leader_id = str(payload.get("leaderAgentId") or "")
     ct_task_id = str(payload.get("clawteamTaskId") or "") or task_id
     summary_text = (summary or "").strip()
+    attachment_records = [dict(a) for a in (attachments or [])]
+    if attachment_records:
+        from app.services.external_attachments import format_attachments_block
+        from app.services.run_notify import resolve_notify_language
+
+        block = format_attachments_block(
+            attachment_records,
+            lang=resolve_notify_language({"content": summary_text}),
+        )
+        summary_text = f"{summary_text}\n\n{block}".strip() if summary_text else block
 
     from app.integrations.clawteam_mcp import get_mcp_client
 
@@ -1092,18 +1249,27 @@ async def complete_external_task(
 
     from app.events import publish_run_event
 
+    completion_payload: dict[str, Any] = {
+        "nonce": nonce,
+        "ok": ok,
+        "summary": summary_text[:4000],
+        "source": source,
+    }
+    if attachment_records:
+        completion_payload["attachments"] = [
+            {
+                "name": str(a.get("name") or ""),
+                "size": int(a.get("size") or 0),
+            }
+            for a in attachment_records
+        ]
     publish_run_event(
         storage,
         run_id=run.id,
         event_type=EXTERNAL_TASK_COMPLETED_EVENT,
         agent_id=agent_id,
         task_id=task_id,
-        payload={
-            "nonce": nonce,
-            "ok": ok,
-            "summary": summary_text[:4000],
-            "source": source,
-        },
+        payload=completion_payload,
     )
     logger.info(
         "external_receipt_recorded",
@@ -1335,10 +1501,14 @@ __all__ = [
     "EXTERNAL_TASK_ACCEPTED_EVENT",
     "EXTERNAL_TASK_COMPLETED_EVENT",
     "EXTERNAL_TASK_DISPATCHED_EVENT",
+    "DISPATCH_COMMAND_TIMEOUT_SEC",
     "ExternalTaskError",
+    "build_reply_url",
     "classify_result_status",
     "complete_external_task",
     "dispatch_external_task",
+    "reply_base_is_shareable",
+    "resolve_reply_base_url",
     "find_completion_event",
     "latest_accepted_event",
     "latest_dispatch_event",

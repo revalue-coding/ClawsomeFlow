@@ -48,7 +48,8 @@ from datetime import datetime, timezone
 from pathlib import Path as FsPath
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Path, Query, status
+from fastapi import APIRouter, Body, Depends, File, Form, Path, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
@@ -3398,6 +3399,109 @@ async def complete_external_task_webui(
     except ExternalTaskError as exc:
         raise ApiError(exc.code, exc.message, status_code=exc.status_code) from exc
     return _to_summary(run)
+
+
+@router.post(
+    "/runs/{run_id}/external-tasks/{task_id}/complete-form",
+    response_model=RunSummary,
+)
+async def complete_external_task_webui_form(
+    run_id: Annotated[str, Path()],
+    task_id: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+    task_status: Annotated[str, Form(alias="status")] = "success",
+    summary: Annotated[str, Form()] = "",
+    attachments: Annotated[list[UploadFile] | None, File()] = None,
+) -> RunSummary:
+    """Multipart twin of ``.../complete`` — WebUI human submissions with files.
+
+    Attachments are stored under ``.runs/{run}/attachments/{task}/{nonce}/``
+    and recorded on the completion event; the summary gains the standard
+    local-path block so downstream prompts see the files.
+    """
+    from app.services.external_attachments import (
+        AttachmentError,
+        save_attachments,
+    )
+    from app.services.external_tasks import (
+        ExternalTaskError,
+        complete_external_task,
+        latest_dispatch_event,
+    )
+
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    if run.status in _TERMINAL:
+        raise ApiError(
+            "EXTERNAL_RUN_NOT_ACTIVE",
+            "external task completion requires the run to still be active",
+            status_code=409,
+        )
+    if task_status not in ("success", "failed"):
+        raise ApiError(
+            "INVALID_PAYLOAD", "status must be 'success' or 'failed'",
+            status_code=400,
+        )
+    dispatch_ev = latest_dispatch_event(storage, run_id=run.id, task_id=task_id)
+    if dispatch_ev is None:
+        raise ApiError(
+            "EXTERNAL_TASK_NOT_DISPATCHED",
+            f"task {task_id!r} has no outstanding external dispatch",
+            status_code=409,
+        )
+    nonce = str((dispatch_ev.payload or {}).get("nonce") or "")
+    incoming = [
+        (f.filename, f.file)
+        for f in (attachments or [])
+        if f is not None and (f.filename or "").strip()
+    ]
+    try:
+        saved = save_attachments(
+            run_id=run.id, task_id=task_id, nonce=nonce, files=incoming,
+        )
+    except AttachmentError as exc:
+        raise ApiError(exc.code, exc.message, status_code=400) from exc
+    try:
+        await complete_external_task(
+            storage=storage,
+            run=run,
+            task_id=task_id,
+            nonce=nonce,
+            ok=(task_status == "success"),
+            summary=summary,
+            source="webui",
+            attachments=saved,
+        )
+    except ExternalTaskError as exc:
+        raise ApiError(exc.code, exc.message, status_code=exc.status_code) from exc
+    return _to_summary(run)
+
+
+@router.get("/runs/{run_id}/external-tasks/{task_id}/attachments/{nonce}/{name}")
+async def download_external_task_attachment(
+    run_id: Annotated[str, Path()],
+    task_id: Annotated[str, Path()],
+    nonce: Annotated[str, Path()],
+    name: Annotated[str, Path()],
+    user: UserDep,
+    storage: StorageDep,
+) -> FileResponse:
+    """Download one receipt attachment (same-origin, run owner only)."""
+    from app.services.external_attachments import resolve_attachment_path
+
+    run = storage.run_get(run_id)
+    if run is None:
+        raise ApiError("NOT_FOUND", f"run {run_id!r} not found", status_code=404)
+    _ensure_owner(run, user)
+    path = resolve_attachment_path(run_id, task_id, nonce, name)
+    if path is None:
+        raise ApiError(
+            "NOT_FOUND", f"attachment {name!r} not found", status_code=404,
+        )
+    return FileResponse(path, filename=name)
 
 
 @router.post(

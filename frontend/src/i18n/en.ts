@@ -423,7 +423,8 @@ const en = {
       externalChannelRequired: "\"{{subject}}\": pick an owner kind for external execution (Human / Remote ClawsomeFlow / Generic interface).",
       externalEndpointRequired: "\"{{subject}}\": the generic interface requires an endpoint URL.",
       externalRemoteFieldsRequired: "\"{{subject}}\": Remote ClawsomeFlow — paste the \"Remote Flow call info\" and fill in a reachable remote base URL (registered automatically when you save the subtask).",
-      externalInputsInvalid: "\"{{subject}}\": remote Flow params must be a JSON object, e.g. {\"field\": \"value\"}.",
+      externalRemoteParamsRequiredWhenRoot:
+        "\"{{subject}}\" is a root task with no upstream dependencies — fill every remote Flow param field (no upstream can supply them).",
       agentRepoInvalid: "Agent \"{{agentId}}\" repository \"{{repo}}\" is not a usable git repository.",
       agentBranchMissing: "Agent \"{{agentId}}\" target branch \"{{branch}}\" does not exist in its repository.",
       saveBlockedTitle: "Fix the following before saving the Flow:",
@@ -475,6 +476,28 @@ const en = {
       externalChannelRemoteCsflow: "Remote ClawsomeFlow",
       externalAssignee: "Assignee (optional)",
       externalAssigneePlaceholder: "Display hint, e.g. Alice",
+      externalReplyBaseUrl: "Public base URL (optional)",
+      externalReplyBaseUrlHint:
+        "The externally reachable address and port of this ClawsomeFlow "
+        + "instance (e.g. http://x.x.x.x:17017). When set, dispatch "
+        + "notifications carry a reply link the person opens to submit the "
+        + "result and attachments; when empty, feedback is local-only (WebUI).",
+      externalReplyBaseUrlInvalid:
+        "The public base URL must be a full http(s):// address, "
+        + "e.g. http://x.x.x.x:17017.",
+      externalNotifyWebhookUrl: "Node notify channel (optional)",
+      externalNotifyWebhookUrlHint:
+        "When set, this node's dispatch notification goes only to this "
+        + "webhook (Feishu/DingTalk/WeCom/Telegram etc., format auto-detected "
+        + "by host); when empty, the Flow-level notify channels are used.",
+      externalDispatchCommand: "Custom dispatch command (optional)",
+      externalDispatchCommandPlaceholder:
+        "/usr/local/bin/send-task.sh\n--channel\nops",
+      externalDispatchCommandHint:
+        "One argument per line (first line is the executable). The dispatch "
+        + "package JSON (incl. the reply link) is piped to stdin; the script "
+        + "only delivers the task — a non-zero exit fails the dispatch and "
+        + "pauses the run.",
       externalEndpointUrl: "Dispatch endpoint URL *",
       externalBaseUrl: "Remote base URL *",
       externalFlowId: "Remote Flow ID *",
@@ -501,8 +524,12 @@ const en = {
       externalRemoteHint: "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output.",
       externalRemoteHintWithParams:
         "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output. The remote Flow declares param fields: upstream tasks will fill them intelligently; you may also enter known values yourself (they override upstream reports).",
-      externalInputs: "Your own remote param-field values (optional, JSON object)",
-      externalInputsFields: "Fillable fields: {{fields}}",
+      externalRemoteHintParamsNoUpstream:
+        "Delegates to a Flow on a remote ClawsomeFlow; its final report becomes this node’s output. This task has no upstream dependencies — remote param values come only from the fields below.",
+      externalInputs: "Remote Flow param field values (optional)",
+      externalInputsRequired: "Remote Flow param field values *",
+      externalInputsNoUpstreamHint:
+        "This task has no upstream dependencies; the remote Flow uses only the values you enter here.",
       newAgentName: "AGENT name *",
       newAgentNamePlaceholder: "Create new, or pick an existing temporary agent in this Flow",
       leaderNewAgentPlaceholder: "New temporary agent name",
@@ -971,6 +998,13 @@ const en = {
       nodeLabel: "External node",
       showTaskSheet: "Show task sheet",
       summaryPlaceholder: "Completion summary — briefly describe what was done, key conclusions or data; attach absolute paths / links to deliverables as needed.",
+      copyReplyLink: "Copy reply link",
+      replyLinkCopied: "Copied",
+      attachmentsCardTitle: "Receipt attachments",
+      attachmentsCardHint: "Files submitted with external-task receipts; stored in this machine's run directory.",
+      attachmentsLabel: "Attachments (optional, up to 10 files, ≤ 50MB each)",
+      attachmentsTooMany: "At most 10 attachments.",
+      attachmentTooLarge: "Attachment {{name}} exceeds the 50MB limit.",
       failReasonTitle: "Report failure",
       failReasonPlaceholder: "Describe the failure reason to report to the scheduler.",
       failReasonEmpty: "Please enter the failure information to report.",

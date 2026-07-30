@@ -221,6 +221,19 @@ export interface ExternalNodeConfig {
   remoteFlowDescription?: string | null;
   /** human channel: display-only assignee hint. */
   assignee?: string | null;
+  /** human channel: externally reachable origin of THIS instance (e.g.
+   *  http://x.x.x.x:17017) used to mint the shareable reply-form link for
+   *  this node. Unset → global callback base; loopback → no shareable link
+   *  (feedback stays local: WebUI). */
+  replyBaseUrl?: string | null;
+  /** human channel: per-node dispatch-notification webhook override
+   *  (replaces the Flow-level notify channels for this node). */
+  notifyWebhookUrl?: string | null;
+  /** human channel: explicit webhook format (unset = auto-detect by host). */
+  notifyWebhookFormat?: string | null;
+  /** human channel: custom delivery command (argv list); receives the
+   *  dispatch package JSON on stdin. */
+  dispatchCommand?: string[] | null;
 }
 
 /** Paste-able "remote call info" produced by a peer Flow's editor. */
@@ -1232,6 +1245,27 @@ export const api = {
       `/api/runs/${id}/external-tasks/${taskId}/complete`,
       { status, summary },
     ),
+  /** Multipart twin of completeExternalTask — human submissions with files. */
+  completeExternalTaskForm: (
+    id: string,
+    taskId: string,
+    status: "success" | "failed",
+    summary: string,
+    files: File[],
+  ) => {
+    const fd = new FormData();
+    fd.set("status", status);
+    fd.set("summary", summary);
+    for (const f of files) fd.append("attachments", f);
+    // Passing the body via `init` keeps Content-Type unset so the browser
+    // writes the multipart boundary itself.
+    return request<RunSummary>(
+      "POST",
+      `/api/runs/${id}/external-tasks/${taskId}/complete-form`,
+      undefined,
+      { body: fd },
+    );
+  },
   redispatchExternalTask: (id: string, taskId: string) =>
     request<RunSummary>(
       "POST",

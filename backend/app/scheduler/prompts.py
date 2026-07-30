@@ -1052,7 +1052,19 @@ def build_external_notify_brief(
             lines.extend(["", f"**输出要求** {requirement}"])
         if upstream_lines:
             lines.extend(["", "**上游产出**", *upstream_lines])
-        lines.extend(["", "完成后请在 Run 详情页提交结果。"])
+        reply_url = str(package.get("replyUrl") or "").strip()
+        if reply_url:
+            lines.extend([
+                "",
+                f"**回执链接**（打开即可提交结果与附件）：{reply_url}",
+            ])
+        else:
+            lines.extend([
+                "",
+                "完成后请在 Run 详情页提交结果。"
+                "（未配置对外访问地址，无法生成远程回执链接；"
+                "可在该人工节点填写「对外访问地址」后重新派发。）",
+            ])
         return "\n".join(lines).strip()
 
     lines = []
@@ -1068,7 +1080,20 @@ def build_external_notify_brief(
         lines.extend(["", f"**Output** {requirement}"])
     if upstream_lines:
         lines.extend(["", "**Upstream**", *upstream_lines])
-    lines.extend(["", "Submit the result on the Run detail page when done."])
+    reply_url = str(package.get("replyUrl") or "").strip()
+    if reply_url:
+        lines.extend([
+            "",
+            f"**Reply link** (open to submit the result and attachments): {reply_url}",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Submit the result on the Run detail page when done. "
+            "(No public base URL is configured, so no remote reply link could "
+            "be generated; set the node's public base URL and re-dispatch to "
+            "get one.)",
+        ])
     return "\n".join(lines).strip()
 
 

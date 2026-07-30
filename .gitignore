@@ -40,6 +40,7 @@ node_modules/
 .next/
 .vite/
 dist/
+*.tsbuildinfo
 
 # ClawsomeFlow runtime data (not committed; lives in ~/.clawsomeflow/)
 

@@ -418,7 +418,8 @@ const zh = {
       externalChannelRequired: "「{{subject}}」：请为外部执行选择 Owner 类型（人工 / 远程ClawsomeFlow / 通用接口）。",
       externalEndpointRequired: "「{{subject}}」：通用接口需要填写派发端点 URL。",
       externalRemoteFieldsRequired: "「{{subject}}」：远程ClawsomeFlow 请粘贴「远端 Flow调用信息」并填写可达的远端地址（保存子任务时自动解析注册）。",
-      externalInputsInvalid: "「{{subject}}」：远端 Flow 参数必须是 JSON 对象，如 {\"字段名\": \"值\"}。",
+      externalRemoteParamsRequiredWhenRoot:
+        "「{{subject}}」为起始任务且无上游依赖：须填写该远端 Flow 的全部参数字段（无上游可代为填入）。",
       agentRepoInvalid: "Agent「{{agentId}}」的仓库「{{repo}}」不是可用的 Git 仓库。",
       agentBranchMissing: "Agent「{{agentId}}」的目标分支「{{branch}}」在其仓库中不存在。",
       saveBlockedTitle: "Flow 还有以下问题需要先修复：",
@@ -470,6 +471,23 @@ const zh = {
       externalChannelRemoteCsflow: "远程ClawsomeFlow",
       externalAssignee: "指派给（可选）",
       externalAssigneePlaceholder: "仅作展示提示，如：Alice",
+      externalReplyBaseUrl: "对外访问地址（可选）",
+      externalReplyBaseUrlHint:
+        "当前 ClawsomeFlow 对外可访问的地址与端口（如 http://x.x.x.x:17017）。"
+        + "填写后派发通知会附带「回执链接」，执行人打开即可提交结果与附件；"
+        + "不填写则只能在本机 WebUI 反馈人工回复。",
+      externalReplyBaseUrlInvalid:
+        "对外访问地址必须是 http(s):// 开头的完整地址，例如 http://x.x.x.x:17017。",
+      externalNotifyWebhookUrl: "本节点通知渠道（可选）",
+      externalNotifyWebhookUrlHint:
+        "填写后该节点的派发通知只发到这个 webhook（飞书/钉钉/企微/Telegram 等，"
+        + "按地址自动识别格式）；不填则使用 Flow 级通知渠道。",
+      externalDispatchCommand: "自定义派发脚本（可选）",
+      externalDispatchCommandPlaceholder:
+        "/usr/local/bin/send-task.sh\n--channel\nops",
+      externalDispatchCommandHint:
+        "每行一个参数（第一行为可执行文件）。派发时任务包 JSON（含回执链接）"
+        + "从标准输入传入；脚本只负责送达，退出码非 0 视为派发失败并暂停执行流。",
       externalEndpointUrl: "派发端点 URL *",
       externalBaseUrl: "远端地址 *",
       externalFlowId: "远端 Flow ID *",
@@ -495,8 +513,12 @@ const zh = {
       externalRemoteHint: "委托给远端某条 Flow 执行，其最终报告作为本节点产出。",
       externalRemoteHintWithParams:
         "委托给远端某条 Flow 执行，其最终报告作为本节点产出。该远端 Flow 声明了参数字段：上游任务会智能填入字段值；你也可以自行填写确定的参数值（将覆盖上游回报）。",
-      externalInputs: "自主填写的远端参数字段值（可选，JSON 对象）",
-      externalInputsFields: "可填写字段：{{fields}}",
+      externalRemoteHintParamsNoUpstream:
+        "委托给远端某条 Flow 执行，其最终报告作为本节点产出。本任务无上游依赖，远端 Flow 的参数字段只能由你在下方填写。",
+      externalInputs: "远端Flow参数字段值（可选）",
+      externalInputsRequired: "远端Flow参数字段值 *",
+      externalInputsNoUpstreamHint:
+        "本任务没有上游依赖，远端 Flow 将完全使用此处填写的参数值。",
       newAgentName: "AGENT 名称 *",
       newAgentNamePlaceholder: "新建或选择本Flow已有临时AGENT",
       leaderNewAgentPlaceholder: "新建临时 Agent 名称",
@@ -957,6 +979,13 @@ const zh = {
       nodeLabel: "外部节点",
       showTaskSheet: "查看任务说明",
       summaryPlaceholder: "完成摘要——简述任务完成情况、核心结论或数据，可按需附上产出物的绝对路径/链接。",
+      copyReplyLink: "复制回执链接",
+      replyLinkCopied: "已复制",
+      attachmentsCardTitle: "回执附件",
+      attachmentsCardHint: "人工/外部节点随回执提交的文件，保存在本机的 Run 目录中。",
+      attachmentsLabel: "附件（可选，最多 10 个，单个 ≤ 50MB）",
+      attachmentsTooMany: "最多上传 10 个附件。",
+      attachmentTooLarge: "附件 {{name}} 超过 50MB 上限。",
       failReasonTitle: "报告失败",
       failReasonPlaceholder: "请描述失败原因，将上报给调度器。",
       failReasonEmpty: "请填写要上报的失败信息。",

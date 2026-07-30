@@ -390,9 +390,42 @@ class ExternalNodeConfig(_ApiBase):
     remote_flow_description: str | None = None
     # human channel (display hint only)
     assignee: str | None = None
+    # human channel: the externally-reachable origin of THIS ClawsomeFlow
+    # instance (e.g. ``http://x.x.x.x:17017``) used to mint the reply-form
+    # link for this node's dispatches. Optional; when unset the global
+    # ``Config.external_callback_base_url`` applies and, if that is loopback
+    # too, no shareable reply link is produced (feedback stays local: WebUI).
+    # Safe default None → old specs load unchanged.
+    reply_base_url: str | None = None
+    # human channel: per-node dispatch-notification webhook override. When
+    # set, the "task waits on a human" notification goes to THIS channel
+    # instead of the Flow-level ``csflow.notify_webhooks`` list. ``format``
+    # follows run_notify.WEBHOOK_FORMATS (None = auto-detect by host).
+    # Safe defaults None → old specs load unchanged.
+    notify_webhook_url: str | None = None
+    notify_webhook_format: str | None = None
+    # human channel: custom delivery adapter. The dispatch package JSON
+    # (including ``replyUrl`` when available) is piped to this command's
+    # stdin; a non-zero exit / timeout is a dispatch failure (run pauses,
+    # 继续执行 re-dispatches with a fresh ticket). The script only DELIVERS —
+    # feedback always comes back through the reply form / WebUI.
+    # Safe default None → old specs load unchanged.
+    dispatch_command: list[str] | None = None
 
     @model_validator(mode="after")
     def _check_channel_fields(self) -> ExternalNodeConfig:
+        reply_base = (self.reply_base_url or "").strip()
+        if reply_base and not reply_base.startswith(("http://", "https://")):
+            raise ValueError(
+                "external 'reply_base_url' must be an absolute http(s) URL "
+                "(e.g. http://x.x.x.x:17017)"
+            )
+        if self.dispatch_command is not None:
+            cleaned = [str(part) for part in self.dispatch_command if str(part).strip()]
+            if not cleaned:
+                raise ValueError(
+                    "external 'dispatch_command' must contain a non-empty executable"
+                )
         if self.channel == ExternalChannel.webhook:
             if not (self.endpoint_url or "").strip():
                 raise ValueError("external webhook channel requires 'endpoint_url'")

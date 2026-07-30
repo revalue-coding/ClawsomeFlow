@@ -128,17 +128,24 @@ interface TaskRow {
    *  operator-supplied via externalBaseUrl. */
   externalRemoteCallInfo: string;
   /** remote_csflow only: the remote Flow's declared param-field names,
-   *  captured from the pasted info. Guides externalInputs + drives the
+   *  captured from the pasted info. Guides externalInputValues + drives the
    *  upstream param-report protocol. */
   externalRemoteParamFields: string[];
   /** remote_csflow only: peer Flow name + overall goal from call info. */
   externalRemoteFlowName: string;
   externalRemoteFlowDescription: string;
-  /** remote_csflow only: JSON object text of the operator's OWN param values
-   *  for the remote Flow (its 参数字段). Optional — upstream reports fill the
-   *  rest. Parsed into FlowAgent.external.inputs on save. */
-  externalInputs: string;
+  /** remote_csflow only: operator-supplied values for the remote Flow's param
+   *  fields (keyed by field name). Optional — upstream reports fill the rest.
+   *  Serialized into FlowAgent.external.inputs on save. */
+  externalInputValues: Record<string, string>;
   externalAssignee: string;
+  /** human channel: externally reachable origin of this instance for the
+   *  reply-form link (e.g. http://x.x.x.x:17017). Empty = local-only feedback. */
+  externalReplyBaseUrl: string;
+  /** human channel: per-node notification webhook URL override. */
+  externalNotifyWebhookUrl: string;
+  /** human channel: custom delivery command, ONE argv per line. */
+  externalDispatchCommand: string;
   dependsOn: string[];
   isLeaderSummary: boolean;
   timeoutSeconds: number;
@@ -185,8 +192,8 @@ interface ValidationMessages {
   externalEndpointRequired: (subject: string) => string;
   /** External node remote_csflow channel: baseUrl/flowId/pairTokenRef required. */
   externalRemoteFieldsRequired: (subject: string) => string;
-  /** External node remote_csflow channel: params text is not a JSON object. */
-  externalInputsInvalid: (subject: string) => string;
+  /** Remote csflow root task (no upstream): every declared param field required. */
+  externalRemoteParamsRequiredWhenRoot: (subject: string) => string;
 }
 
 interface FlowSavePayload {
@@ -240,6 +247,15 @@ function repoBranchMessages(t: (key: string, opts?: Record<string, unknown>) => 
   };
 }
 
+/** Human-channel custom delivery command: ONE argv per line → string[]. */
+function parseDispatchCommandLines(raw: string): string[] | null {
+  const parts = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return parts.length > 0 ? parts : null;
+}
+
 function blankRow(): TaskRow {
   return {
     rowKey: newRowKey(),
@@ -264,8 +280,11 @@ function blankRow(): TaskRow {
     externalRemoteParamFields: [],
     externalRemoteFlowName: "",
     externalRemoteFlowDescription: "",
-    externalInputs: "",
+    externalInputValues: {},
     externalAssignee: "",
+    externalReplyBaseUrl: "",
+    externalNotifyWebhookUrl: "",
+    externalDispatchCommand: "",
     dependsOn: [],
     isLeaderSummary: false,
     timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
@@ -1487,8 +1506,10 @@ export function FlowEditor() {
         t("flowEditor.validation.externalEndpointRequired", { subject }),
       externalRemoteFieldsRequired: (subject: string) =>
         t("flowEditor.validation.externalRemoteFieldsRequired", { subject }),
-      externalInputsInvalid: (subject: string) =>
-        t("flowEditor.validation.externalInputsInvalid", { subject }),
+      externalRemoteParamsRequiredWhenRoot: (subject: string) =>
+        t("flowEditor.validation.externalRemoteParamsRequiredWhenRoot", {
+          subject,
+        }),
     }),
     [t],
   );
@@ -3616,11 +3637,10 @@ function TaskFormBody({
   onOwnerModeChange: (mode: OwnerMode) => void;
   onChange: (patch: Partial<TaskRow>) => void;
 }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { alert } = useDialog();
   const [pickingRepo, setPickingRepo] = useState(false);
   const ownerLocked = readOnly || isSummary;
-  const paramFieldSep = i18n.language.startsWith("zh") ? "、" : ", ";
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
   const ownerIsExternal = ownerMode === "external" || isExternalKind(row.ownerKind);
@@ -4046,16 +4066,80 @@ function TaskFormBody({
         <div className="md:col-span-2">
           <div className="grid gap-2 md:grid-cols-2">
             {row.externalChannel === "human" && (
-              <div>
-                <label className="label">{t("flowEditor.taskFields.externalAssignee")}</label>
-                <input
-                  className="input"
-                  value={row.externalAssignee}
-                  readOnly={ownerLocked}
-                  placeholder={t("flowEditor.taskFields.externalAssigneePlaceholder")}
-                  onChange={(e) => onChange({ externalAssignee: e.target.value })}
-                />
-              </div>
+              <>
+                <div>
+                  <label className="label">{t("flowEditor.taskFields.externalAssignee")}</label>
+                  <input
+                    className="input"
+                    value={row.externalAssignee}
+                    readOnly={ownerLocked}
+                    placeholder={t("flowEditor.taskFields.externalAssigneePlaceholder")}
+                    onChange={(e) => onChange({ externalAssignee: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">
+                    {t("flowEditor.taskFields.externalReplyBaseUrl")}
+                  </label>
+                  <input
+                    className="input font-mono text-xs"
+                    value={row.externalReplyBaseUrl}
+                    readOnly={ownerLocked}
+                    placeholder="http://x.x.x.x:17017"
+                    onChange={(e) =>
+                      onChange({ externalReplyBaseUrl: e.target.value })
+                    }
+                    onBlur={(e) => {
+                      if (ownerLocked) return;
+                      const raw = e.target.value.trim();
+                      if (raw && !/^https?:\/\//.test(raw)) {
+                        void alert(
+                          t("flowEditor.taskFields.externalReplyBaseUrlInvalid"),
+                        );
+                      }
+                    }}
+                  />
+                  <p className="mt-1 text-xs text-ink-500">
+                    {t("flowEditor.taskFields.externalReplyBaseUrlHint")}
+                  </p>
+                </div>
+                <div>
+                  <label className="label">
+                    {t("flowEditor.taskFields.externalNotifyWebhookUrl")}
+                  </label>
+                  <input
+                    className="input font-mono text-xs"
+                    value={row.externalNotifyWebhookUrl}
+                    readOnly={ownerLocked}
+                    placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+                    onChange={(e) =>
+                      onChange({ externalNotifyWebhookUrl: e.target.value })
+                    }
+                  />
+                  <p className="mt-1 text-xs text-ink-500">
+                    {t("flowEditor.taskFields.externalNotifyWebhookUrlHint")}
+                  </p>
+                </div>
+                <div>
+                  <label className="label">
+                    {t("flowEditor.taskFields.externalDispatchCommand")}
+                  </label>
+                  <textarea
+                    className="textarea h-20 font-mono text-xs"
+                    value={row.externalDispatchCommand}
+                    readOnly={ownerLocked}
+                    placeholder={t(
+                      "flowEditor.taskFields.externalDispatchCommandPlaceholder",
+                    )}
+                    onChange={(e) =>
+                      onChange({ externalDispatchCommand: e.target.value })
+                    }
+                  />
+                  <p className="mt-1 text-xs text-ink-500">
+                    {t("flowEditor.taskFields.externalDispatchCommandHint")}
+                  </p>
+                </div>
+              </>
             )}
             {row.externalChannel === "webhook" && (
               <div>
@@ -4130,7 +4214,13 @@ function TaskFormBody({
                         externalRemoteFlowName: parsed.info.flowName || "",
                         externalRemoteFlowDescription:
                           parsed.info.flowDescription || "",
-                        externalInputs: fields.length > 0 ? row.externalInputs : "",
+                        externalInputValues:
+                          fields.length > 0
+                            ? reconcileExternalInputValues(
+                                fields,
+                                row.externalInputValues,
+                              )
+                            : {},
                       });
                     }}
                   />
@@ -4168,23 +4258,39 @@ function TaskFormBody({
                 </div>
                 {row.externalRemoteParamFields.length > 0 && (
                   <div className="md:col-span-2">
-                    <label className="label">{t("flowEditor.taskFields.externalInputs")}</label>
-                    <div className="mb-1 text-xs text-ink-600">
-                      {t("flowEditor.taskFields.externalInputsFields", {
-                        fields: row.externalRemoteParamFields.join(paramFieldSep),
-                      })}
+                    <label className="label">
+                      {row.dependsOn.length === 0
+                        ? t("flowEditor.taskFields.externalInputsRequired")
+                        : t("flowEditor.taskFields.externalInputs")}
+                    </label>
+                    {row.dependsOn.length === 0 && (
+                      <p className="mb-2 text-xs text-ink-600">
+                        {t("flowEditor.taskFields.externalInputsNoUpstreamHint")}
+                      </p>
+                    )}
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      {row.externalRemoteParamFields.map((field) => (
+                        <div key={field}>
+                          <label className="label text-xs font-normal text-ink-600">
+                            {field}
+                            {row.dependsOn.length === 0 ? " *" : ""}
+                          </label>
+                          <input
+                            className="input"
+                            value={row.externalInputValues[field] ?? ""}
+                            readOnly={ownerLocked}
+                            onChange={(e) =>
+                              onChange({
+                                externalInputValues: {
+                                  ...row.externalInputValues,
+                                  [field]: e.target.value,
+                                },
+                              })
+                            }
+                          />
+                        </div>
+                      ))}
                     </div>
-                    <textarea
-                      className="textarea h-20 font-mono text-xs"
-                      value={row.externalInputs}
-                      readOnly={ownerLocked}
-                      placeholder={
-                        `{\n${row.externalRemoteParamFields
-                          .map((f) => `  "${f}": ""`)
-                          .join(",\n")}\n}`
-                      }
-                      onChange={(e) => onChange({ externalInputs: e.target.value })}
-                    />
                   </div>
                 )}
               </>
@@ -4197,7 +4303,9 @@ function TaskFormBody({
                 : row.externalChannel === "remote_csflow"
                 ? (
                   row.externalRemoteParamFields.length > 0
-                    ? t("flowEditor.taskFields.externalRemoteHintWithParams")
+                    ? row.dependsOn.length === 0
+                      ? t("flowEditor.taskFields.externalRemoteHintParamsNoUpstream")
+                      : t("flowEditor.taskFields.externalRemoteHintWithParams")
                     : t("flowEditor.taskFields.externalRemoteHint")
                 )
                 : t("flowEditor.taskFields.externalHumanHint")}
@@ -4857,6 +4965,8 @@ function computeGraphLayout(tasks: TaskRow[]): {
       minHeight: 280,
       padX: 56,
       padY: 48,
+      // Lock on-screen node scale to a 4-column-wide layout even when sparse.
+      minDisplayCols: 4,
     },
   );
 
@@ -5040,12 +5150,15 @@ function validate(
         });
       } else if (
         r.externalChannel === "remote_csflow"
-        && r.externalInputs.trim()
-        && parseExternalInputs(r.externalInputs) === null
+        && r.externalRemoteParamFields.length > 0
+        && r.dependsOn.length === 0
+        && r.externalRemoteParamFields.some(
+          (f) => !(r.externalInputValues[f] ?? "").trim(),
+        )
       ) {
         issues.push({
           rowKey: r.rowKey,
-          message: messages.externalInputsInvalid(subjectLabel),
+          message: messages.externalRemoteParamsRequiredWhenRoot(subjectLabel),
         });
       }
     }
@@ -5341,7 +5454,10 @@ async function registerRemoteCallInfoOnSave(
         externalRemoteParamFields: fields,
         externalRemoteFlowName: (res.flowName || "").trim(),
         externalRemoteFlowDescription: (res.flowDescription || "").trim(),
-        externalInputs: fields.length > 0 ? row.externalInputs : "",
+        externalInputValues:
+          fields.length > 0
+            ? reconcileExternalInputValues(fields, row.externalInputValues)
+            : {},
       },
     };
   } catch (e) {
@@ -5352,24 +5468,29 @@ async function registerRemoteCallInfoOnSave(
   }
 }
 
-/** Parse the remote-csflow params draft (JSON object text) into the
- *  FlowAgent.external.inputs dict. Invalid / non-object JSON → null (save
- *  validation reports it before this ever runs). */
-function parseExternalInputs(text: string): Record<string, string> | null {
-  const raw = (text || "").trim();
-  if (!raw) return null;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!k.trim()) continue;
-      out[k] = typeof v === "string" ? v : JSON.stringify(v);
-    }
-    return Object.keys(out).length > 0 ? out : null;
-  } catch {
-    return null;
+/** Keep operator-entered values when remote param-field names change. */
+function reconcileExternalInputValues(
+  fields: string[],
+  existing: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of fields) {
+    out[f] = existing[f] ?? "";
   }
+  return out;
+}
+
+/** Build FlowAgent.external.inputs from per-field draft values (non-empty only). */
+function buildExternalInputs(
+  values: Record<string, string>,
+): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(values)) {
+    const trimmed = (v ?? "").trim();
+    if (!k.trim() || !trimmed) continue;
+    out[k] = trimmed;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 function rowsToSpec(
@@ -5410,7 +5531,7 @@ function rowsToSpec(
               baseUrl: r.externalBaseUrl.trim() || null,
               flowId: r.externalFlowId.trim() || null,
               pairTokenRef: r.externalPairTokenRef.trim() || null,
-              inputs: parseExternalInputs(r.externalInputs),
+              inputs: buildExternalInputs(r.externalInputValues),
               remoteParamFields:
                 r.externalChannel === "remote_csflow"
                 && r.externalRemoteParamFields.length > 0
@@ -5425,6 +5546,18 @@ function rowsToSpec(
                   ? r.externalRemoteFlowDescription.trim() || null
                   : null,
               assignee: r.externalAssignee.trim() || null,
+              replyBaseUrl:
+                r.externalChannel === "human"
+                  ? r.externalReplyBaseUrl.trim().replace(/\/+$/, "") || null
+                  : null,
+              notifyWebhookUrl:
+                r.externalChannel === "human"
+                  ? r.externalNotifyWebhookUrl.trim() || null
+                  : null,
+              dispatchCommand:
+                r.externalChannel === "human"
+                  ? parseDispatchCommandLines(r.externalDispatchCommand)
+                  : null,
             },
           }
         : {
@@ -6103,8 +6236,11 @@ function proposalToRows(
       externalRemoteParamFields: [],
       externalRemoteFlowName: "",
       externalRemoteFlowDescription: "",
-      externalInputs: "",
+      externalInputValues: {},
       externalAssignee: meta.externalAssignee,
+      externalReplyBaseUrl: "",
+      externalNotifyWebhookUrl: "",
+      externalDispatchCommand: "",
       dependsOn,
       isLeaderSummary: !!(tk.isLeaderSummary ?? tk.is_leader_summary),
       timeoutSeconds: Number(
@@ -6175,10 +6311,14 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       externalRemoteParamFields: a?.external?.remoteParamFields ?? [],
       externalRemoteFlowName: a?.external?.remoteFlowName ?? "",
       externalRemoteFlowDescription: a?.external?.remoteFlowDescription ?? "",
-      externalInputs: a?.external?.inputs
-        ? JSON.stringify(a.external.inputs, null, 2)
-        : "",
+      externalInputValues: reconcileExternalInputValues(
+        a?.external?.remoteParamFields ?? [],
+        a?.external?.inputs ?? {},
+      ),
       externalAssignee: a?.external?.assignee ?? "",
+      externalReplyBaseUrl: a?.external?.replyBaseUrl ?? "",
+      externalNotifyWebhookUrl: a?.external?.notifyWebhookUrl ?? "",
+      externalDispatchCommand: (a?.external?.dispatchCommand ?? []).join("\n"),
       dependsOn: tk.dependsOn ?? [],
       isLeaderSummary: !!tk.isLeaderSummary,
       timeoutSeconds: tk.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,

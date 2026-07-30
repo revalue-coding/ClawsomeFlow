@@ -1154,3 +1154,138 @@ def test_config_new_fields_have_safe_defaults() -> None:
     assert cfg.external_callback_base_url is None
     assert cfg.external_pair_tokens == {}
     assert cfg.external_remote_targets == {}
+
+
+# ── human channel: reply link + custom delivery (dispatch side) ──────────
+
+
+def _human_agent(**ext_kw: Any) -> FlowAgent:
+    return FlowAgent(
+        id="ext-node", kind=AgentKind.external, external=_human_cfg(**ext_kw),
+    )
+
+
+def _dispatch_human(run: FlowRun, agent: FlowAgent) -> RunEvent:
+    asyncio.run(ext_svc.dispatch_external_task(
+        storage=get_storage(), run_id=run.id, team_name=run.team_name,
+        agent=agent, task_id="t1", message="sheet",
+        package={"subject": "s", "clawteamTaskId": "CT-1"},
+    ))
+    ev = ext_svc.latest_dispatch_event(
+        get_storage(), run_id=run.id, task_id="t1",
+    )
+    assert ev is not None
+    return ev
+
+
+def test_human_dispatch_mints_reply_url_from_node_base() -> None:
+    """A node-level public base yields a shareable, ticket-authed reply link."""
+    run = _mk_run_for_dispatch()
+    ev = _dispatch_human(
+        run, _human_agent(reply_base_url="http://203.0.113.5:17017/"),
+    )
+    payload = ev.payload or {}
+    reply_url = str(payload.get("replyUrl") or "")
+    assert reply_url.startswith(
+        f"http://203.0.113.5:17017/api/external/reply/{run.id}/t1?t=",
+    )
+    # The embedded ticket is THIS dispatch's credential.
+    ticket = reply_url.split("?t=", 1)[1]
+    from urllib.parse import unquote
+
+    assert verify_ticket(unquote(ticket), run_id=run.id, task_id="t1") == str(
+        payload.get("nonce"),
+    )
+
+
+def test_human_dispatch_no_reply_url_when_base_is_loopback() -> None:
+    """No public base (node or global) → no shareable link is advertised."""
+    run = _mk_run_for_dispatch()
+    ev = _dispatch_human(run, _human_agent())
+    assert "replyUrl" not in (ev.payload or {})
+
+
+def test_human_dispatch_reply_base_falls_back_to_global_config() -> None:
+    cfg = load_config()
+    save_config(cfg.model_copy(
+        update={"external_callback_base_url": "http://198.51.100.7:17017"},
+    ))
+    try:
+        run = _mk_run_for_dispatch()
+        ev = _dispatch_human(run, _human_agent())
+        assert str((ev.payload or {}).get("replyUrl") or "").startswith(
+            "http://198.51.100.7:17017/api/external/reply/",
+        )
+    finally:
+        save_config(cfg.model_copy(update={"external_callback_base_url": None}))
+
+
+def test_reply_base_url_must_be_absolute_http() -> None:
+    with pytest.raises(ValueError):
+        _human_cfg(reply_base_url="x.x.x.x:17017")
+    # Old specs without the new fields keep loading (upgrade parity).
+    cfg = _human_cfg()
+    assert cfg.reply_base_url is None
+    assert cfg.notify_webhook_url is None
+    assert cfg.dispatch_command is None
+
+
+def test_dispatch_command_receives_package_on_stdin(tmp_path: Path) -> None:
+    """The custom delivery script gets the full package JSON (incl. replyUrl)."""
+    sink = tmp_path / "delivered.json"
+    script = tmp_path / "deliver.sh"
+    script.write_text(f"#!/bin/sh\ncat > {sink}\n")
+    script.chmod(0o755)
+    run = _mk_run_for_dispatch()
+    _dispatch_human(run, _human_agent(
+        reply_base_url="http://203.0.113.5:17017",
+        dispatch_command=[str(script)],
+    ))
+    delivered = json.loads(sink.read_text())
+    assert delivered["event"] == "external_task_dispatch"
+    assert delivered["taskId"] == "t1"
+    assert delivered["replyUrl"].startswith("http://203.0.113.5:17017/")
+    assert delivered["taskToken"].count(".") == 1
+
+
+def test_dispatch_command_failure_fails_the_dispatch(tmp_path: Path) -> None:
+    """Non-zero exit = failed hand-off → raises (controller pauses the run)."""
+    script = tmp_path / "broken.sh"
+    script.write_text("#!/bin/sh\necho boom >&2\nexit 3\n")
+    script.chmod(0o755)
+    run = _mk_run_for_dispatch()
+    with pytest.raises(RuntimeError, match="exited with 3"):
+        asyncio.run(ext_svc.dispatch_external_task(
+            storage=get_storage(), run_id=run.id, team_name=run.team_name,
+            agent=_human_agent(dispatch_command=[str(script)]),
+            task_id="t1", message="sheet",
+            package={"subject": "s", "clawteamTaskId": "CT-1"},
+        ))
+
+
+def test_node_notify_webhook_override_channels() -> None:
+    assert ext_svc._node_notify_channels(_human_cfg()) is None
+    channels = ext_svc._node_notify_channels(_human_cfg(
+        notify_webhook_url="https://open.feishu.cn/x", notify_webhook_format="feishu",
+    ))
+    assert channels == [{"url": "https://open.feishu.cn/x", "format": "feishu"}]
+
+
+def test_notify_brief_includes_reply_link_or_config_hint() -> None:
+    from app.scheduler.prompts import build_external_notify_brief
+
+    with_link = build_external_notify_brief(
+        {"taskId": "t1", "subject": "s",
+         "replyUrl": "http://203.0.113.5:17017/api/external/reply/r/t1?t=x"},
+        lang="zh",
+    )
+    assert "回执链接" in with_link
+    assert "http://203.0.113.5:17017/api/external/reply/r/t1?t=x" in with_link
+    without = build_external_notify_brief(
+        {"taskId": "t1", "subject": "s"}, lang="zh",
+    )
+    assert "未配置对外访问地址" in without
+    without_en = build_external_notify_brief(
+        {"taskId": "t1", "subject": "s"}, lang="en",
+    )
+    assert "No public base URL" in without_en

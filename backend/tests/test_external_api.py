@@ -847,3 +847,172 @@ def test_register_remote_target_rejects_incomplete_info(app_client) -> None:
     )
     assert resp.status_code == 400
     assert resp.json()["error"] == "INVALID_PAYLOAD"
+
+
+# ── human reply form (shareable link) ───────────────────────────────────
+
+
+def _reply_ticket(run: Any, nonce: str = "n-1") -> str:
+    return mint_ticket(run.id, "t1", nonce)
+
+
+def test_reply_form_renders_task_sheet(app_client: TestClient) -> None:
+    run = _mk_run_with_dispatch()
+    r = app_client.get(
+        f"/api/external/reply/{run.id}/t1", params={"t": _reply_ticket(run)},
+    )
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    # Task identity + the multipart form posting back to the same route.
+    assert "t1" in r.text
+    assert "multipart/form-data" in r.text
+    assert f"/api/external/reply/{run.id}/t1" in r.text
+    assert 'name="attachments"' in r.text.replace("'", '"')
+
+
+def test_reply_form_rejects_bad_and_stale_tickets(app_client: TestClient) -> None:
+    run = _mk_run_with_dispatch(nonce="n-latest")
+    r_bad = app_client.get(
+        f"/api/external/reply/{run.id}/t1", params={"t": "nope.bad"},
+    )
+    assert r_bad.status_code == 401
+    # Valid signature but a superseded attempt → friendly "stale" page.
+    r_stale = app_client.get(
+        f"/api/external/reply/{run.id}/t1",
+        params={"t": mint_ticket(run.id, "t1", "n-old")},
+    )
+    assert r_stale.status_code == 409
+
+
+def test_reply_form_terminal_run_page(app_client: TestClient) -> None:
+    run = _mk_run_with_dispatch(nonce="n-t", status=RunStatus.completed)
+    r = app_client.get(
+        f"/api/external/reply/{run.id}/t1",
+        params={"t": mint_ticket(run.id, "t1", "n-t")},
+    )
+    assert r.status_code == 409
+
+
+def test_reply_submit_success_with_attachments(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The receipt completes the task; files land in the run dir; the summary
+    gains the local-path block downstream prompts will see."""
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch(nonce="n-att")
+    ticket = mint_ticket(run.id, "t1", "n-att")
+    r = app_client.post(
+        f"/api/external/reply/{run.id}/t1",
+        data={"t": ticket, "status": "success", "summary": "checked, all good"},
+        files=[
+            ("attachments", ("report.pdf", b"%PDF fake", "application/pdf")),
+            ("attachments", ("../evil.txt", b"x", "text/plain")),
+        ],
+    )
+    assert r.status_code == 200, r.text
+    # Completion flowed through the ONE choke point.
+    assert fake.task_updates[0]["task_id"] == "CT-77"
+    mailbox = fake.mailbox_calls[0]["content"]
+    assert mailbox.startswith("task t1 done: checked, all good")
+    assert "report.pdf" in mailbox  # attachments block with local paths
+    # Files are stored under the run's own state dir, traversal neutralised.
+    from app.paths import run_dir
+
+    att_dir = run_dir(run.id) / "attachments" / "t1" / "n-att"
+    assert (att_dir / "report.pdf").read_bytes() == b"%PDF fake"
+    assert (att_dir / "evil.txt").exists()  # basename only, inside the dir
+    assert not (att_dir.parent.parent.parent / "evil.txt").exists()
+    # Structured records on the completion event (WebUI download links).
+    events = get_storage().event_list(run_id=run.id, limit=100)
+    done = [e for e in events if e.type == "external_task_completed"][-1]
+    names = {a["name"] for a in done.payload["attachments"]}
+    assert names == {"report.pdf", "evil.txt"}
+    # Idempotent: replaying the form returns the "already recorded" page.
+    r2 = app_client.post(
+        f"/api/external/reply/{run.id}/t1",
+        data={"t": ticket, "status": "success", "summary": "dup"},
+    )
+    assert r2.status_code == 200
+    assert len(fake.task_updates) == 1
+    # And the WebUI download endpoint serves the stored file.
+    r3 = app_client.get(
+        f"/api/runs/{run.id}/external-tasks/t1/attachments/n-att/report.pdf",
+    )
+    assert r3.status_code == 200
+    assert r3.content == b"%PDF fake"
+
+
+def test_reply_submit_failed_records_failure_receipt(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`失败` on the form = the nonce-identified failure receipt — ClawTeam
+    stays untouched; the scheduler tick surfaces it and pauses (one at a
+    time), exactly like the WebUI failure path."""
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch(nonce="n-fail")
+    r = app_client.post(
+        f"/api/external/reply/{run.id}/t1",
+        data={
+            "t": mint_ticket(run.id, "t1", "n-fail"),
+            "status": "failed",
+            "summary": "cannot reach the site",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert fake.task_updates == [] and fake.mailbox_calls == []
+    events = get_storage().event_list(run_id=run.id, limit=100)
+    done = [e for e in events if e.type == "external_task_completed"][-1]
+    assert done.payload["ok"] is False
+    assert done.payload["nonce"] == "n-fail"
+
+
+def test_reply_submit_rejects_oversized_attachment(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import external_attachments as att_mod
+
+    _fake_mcp(monkeypatch)
+    monkeypatch.setattr(att_mod, "MAX_ATTACHMENT_BYTES", 8)
+    run = _mk_run_with_dispatch(nonce="n-big")
+    r = app_client.post(
+        f"/api/external/reply/{run.id}/t1",
+        data={"t": mint_ticket(run.id, "t1", "n-big"), "status": "success",
+              "summary": "s"},
+        files=[("attachments", ("big.bin", b"0123456789", "application/octet-stream"))],
+    )
+    assert r.status_code == 400
+    # Nothing was recorded — the task is still open for a clean retry.
+    events = get_storage().event_list(run_id=run.id, limit=100)
+    assert not [e for e in events if e.type == "external_task_completed"]
+
+
+def test_webui_complete_form_multipart(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-origin multipart twin used by the Run-detail human card."""
+    fake = _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch(nonce="n-form")
+    r = app_client.post(
+        f"/api/runs/{run.id}/external-tasks/t1/complete-form",
+        data={"status": "success", "summary": "done via webui"},
+        files=[("attachments", ("photo.jpg", b"jpegdata", "image/jpeg"))],
+    )
+    assert r.status_code == 200, r.text
+    assert fake.task_updates[0]["task_id"] == "CT-77"
+    assert "photo.jpg" in fake.mailbox_calls[0]["content"]
+    events = get_storage().event_list(run_id=run.id, limit=100)
+    done = [e for e in events if e.type == "external_task_completed"][-1]
+    assert done.payload["attachments"] == [
+        {"name": "photo.jpg", "size": len(b"jpegdata")},
+    ]
+
+
+def test_attachment_download_rejects_traversal_names(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_mcp(monkeypatch)
+    run = _mk_run_with_dispatch(nonce="n-dl")
+    r = app_client.get(
+        f"/api/runs/{run.id}/external-tasks/t1/attachments/n-dl/..%2Fconfig.json",
+    )
+    assert r.status_code == 404

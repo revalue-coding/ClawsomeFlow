@@ -32,10 +32,12 @@ endpoints carry their own, narrower credentials.
 from __future__ import annotations
 
 import hmac
+import html as html_mod
 import json
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, Header, Path, status
+from fastapi import APIRouter, Body, File, Form, Header, Path, Query, UploadFile, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
@@ -139,6 +141,303 @@ async def complete_task(
     except ExternalTaskError as exc:
         raise ApiError(exc.code, exc.message, status_code=exc.status_code) from exc
     return ExternalCompleteResponse(status=result["status"], task_id=task_id)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Human reply form (shareable link: any channel that can carry a URL)
+# ──────────────────────────────────────────────────────────────────────
+#
+# ``GET  /reply/{run}/{task}?t=<ticket>`` — self-contained, mobile-friendly
+# HTML form (NOT the SPA: the SPA is same-origin only, while this prefix is
+# the one surface remote clients may reach). The ticket in the link is the
+# same one-time dispatch credential the legacy receipt uses; a re-dispatch
+# invalidates it, so a link identifies exactly one attempt of one task.
+# ``POST /reply/{run}/{task}`` — multipart submit (status, summary, files).
+# Attachments are stored under the run's own state dir and funnel through
+# the ONE completion choke point together with the summary.
+
+_REPLY_TEXTS = {
+    "zh": {
+        "title": "ClawsomeFlow 人工任务回执",
+        "task": "任务",
+        "assignee": "指派",
+        "requirement": "输出要求",
+        "result": "执行结果",
+        "success": "成功",
+        "failed": "失败 / 无法完成",
+        "summary": "结果摘要",
+        "summary_ph": "说明结论、关键数据；失败时写明原因。",
+        "attachments": "附件（可选，最多 {max_count} 个，单个 ≤ {max_mb}MB）",
+        "submit": "提交回执",
+        "done_title": "回执已提交",
+        "done_body": "结果已记录，任务流程将继续。可以关闭本页面。",
+        "already_title": "回执已存在",
+        "already_body": "这次派发的结果此前已提交过，无需重复操作。",
+        "stale_title": "链接已失效",
+        "stale_body": "该任务已被重新派发或已完成，此链接对应的派发已不再有效。"
+                      "请使用最新的回执链接，或联系任务发起人。",
+        "invalid_title": "链接无效",
+        "invalid_body": "回执链接不完整或签名无效，请核对后重试。",
+        "run_over_title": "执行流已结束",
+        "run_over_body": "该执行流已结束，无法再提交回执。",
+        "error_title": "提交失败",
+    },
+    "en": {
+        "title": "ClawsomeFlow Human Task Receipt",
+        "task": "Task",
+        "assignee": "Assignee",
+        "requirement": "Output requirement",
+        "result": "Result",
+        "success": "Success",
+        "failed": "Failed / cannot complete",
+        "summary": "Summary",
+        "summary_ph": "State the conclusion and key data; on failure, the reason.",
+        "attachments": "Attachments (optional, up to {max_count} files, ≤ {max_mb}MB each)",
+        "submit": "Submit receipt",
+        "done_title": "Receipt submitted",
+        "done_body": "The result has been recorded and the flow will continue. "
+                     "You can close this page.",
+        "already_title": "Already recorded",
+        "already_body": "A result for this dispatch was already submitted; "
+                        "nothing else to do.",
+        "stale_title": "Link no longer valid",
+        "stale_body": "This task was re-dispatched or already finished, so this "
+                      "link's dispatch is no longer valid. Use the newest reply "
+                      "link or contact the flow owner.",
+        "invalid_title": "Invalid link",
+        "invalid_body": "The reply link is incomplete or its signature is "
+                        "invalid. Please check and retry.",
+        "run_over_title": "Run finished",
+        "run_over_body": "This run already finished; receipts can no longer be "
+                         "submitted.",
+        "error_title": "Submission failed",
+    },
+}
+
+_REPLY_PAGE_CSS = (
+    "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
+    "'PingFang SC','Microsoft YaHei',sans-serif;background:#f6f7f9;color:#1a202c;"
+    "margin:0;padding:16px}main{max-width:640px;margin:0 auto;background:#fff;"
+    "border:1px solid #e2e8f0;border-radius:12px;padding:20px}h1{font-size:18px;"
+    "margin:0 0 12px}h2{font-size:15px;margin:16px 0 6px}p{line-height:1.6}"
+    "pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;"
+    "border:1px solid #e2e8f0;border-radius:8px;padding:10px;font-size:13px}"
+    "label{display:block;font-weight:600;margin:14px 0 6px}textarea{width:100%;"
+    "box-sizing:border-box;min-height:110px;border:1px solid #cbd5e1;"
+    "border-radius:8px;padding:8px;font-size:14px}input[type=file]{width:100%}"
+    ".radio{display:flex;gap:18px;font-weight:400}.radio label{display:flex;"
+    "align-items:center;gap:6px;font-weight:400;margin:0}button{margin-top:18px;"
+    "width:100%;padding:12px;border:0;border-radius:8px;background:#4f46e5;"
+    "color:#fff;font-size:15px;font-weight:600;cursor:pointer}"
+    ".muted{color:#64748b;font-size:13px}"
+)
+
+
+def _reply_lang(subject: str = "", description: str = "") -> str:
+    from app.services.run_notify import resolve_notify_language
+
+    return resolve_notify_language(
+        {"taskSubject": subject, "content": description},
+    )
+
+
+def _reply_page(title: str, body_html: str, *, status_code: int = 200) -> HTMLResponse:
+    doc = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{html_mod.escape(title)}</title>"
+        f"<style>{_REPLY_PAGE_CSS}</style></head>"
+        f"<body><main><h1>{html_mod.escape(title)}</h1>{body_html}</main></body></html>"
+    )
+    return HTMLResponse(doc, status_code=status_code)
+
+
+def _reply_message_page(
+    lang: str, title_key: str, body_key: str, *, status_code: int = 200,
+) -> HTMLResponse:
+    texts = _REPLY_TEXTS[lang]
+    return _reply_page(
+        texts[title_key],
+        f"<p>{html_mod.escape(texts[body_key])}</p>",
+        status_code=status_code,
+    )
+
+
+def _load_reply_context(
+    run_id: str, task_id: str, token: str,
+) -> tuple[HTMLResponse | None, Any, Any, str, str]:
+    """Shared GET/POST validation. Returns (error_page, run, dispatch_ev, nonce, lang)."""
+    from app.services.external_tasks import latest_dispatch_event
+
+    lang = _reply_lang()
+    token = (token or "").strip()
+    if not token:
+        return _reply_message_page(lang, "invalid_title", "invalid_body",
+                                   status_code=401), None, None, "", lang
+    try:
+        nonce = verify_ticket(token, run_id=run_id, task_id=task_id)
+    except ExternalTaskError:
+        return _reply_message_page(lang, "invalid_title", "invalid_body",
+                                   status_code=401), None, None, "", lang
+    storage = get_storage()
+    run = storage.run_get(run_id)
+    if run is None:
+        return _reply_message_page(lang, "invalid_title", "invalid_body",
+                                   status_code=404), None, None, "", lang
+    if run.status in TERMINAL_RUN_STATUSES:
+        return _reply_message_page(lang, "run_over_title", "run_over_body",
+                                   status_code=409), None, None, "", lang
+    dispatch_ev = latest_dispatch_event(storage, run_id=run_id, task_id=task_id)
+    if dispatch_ev is None:
+        return _reply_message_page(lang, "stale_title", "stale_body",
+                                   status_code=409), None, None, "", lang
+    current_nonce = str((dispatch_ev.payload or {}).get("nonce") or "")
+    if not current_nonce or nonce != current_nonce:
+        return _reply_message_page(lang, "stale_title", "stale_body",
+                                   status_code=409), None, None, "", lang
+    payload = dispatch_ev.payload or {}
+    lang = _reply_lang(
+        str(payload.get("subject") or ""), str(payload.get("description") or ""),
+    )
+    return None, run, dispatch_ev, nonce, lang
+
+
+@router.get("/reply/{run_id}/{task_id}", response_class=HTMLResponse)
+async def reply_form(
+    run_id: Annotated[str, Path()],
+    task_id: Annotated[str, Path()],
+    t: Annotated[str | None, Query()] = None,
+) -> HTMLResponse:
+    """Render the human reply form for one dispatch attempt (ticket in ``t``)."""
+    from app.services.external_attachments import (
+        MAX_ATTACHMENT_BYTES,
+        MAX_ATTACHMENT_COUNT,
+    )
+    from app.services.external_tasks import find_completion_event
+
+    error, run, dispatch_ev, nonce, lang = _load_reply_context(
+        run_id, task_id, t or "",
+    )
+    if error is not None:
+        return error
+    if find_completion_event(
+        get_storage(), run_id=run_id, task_id=task_id, nonce=nonce,
+    ) is not None:
+        return _reply_message_page(lang, "already_title", "already_body")
+
+    texts = _REPLY_TEXTS[lang]
+    payload = dispatch_ev.payload or {}
+    subject = str(payload.get("subject") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    requirement = str(payload.get("outputRequirement") or "").strip()
+    assignee = str(payload.get("assignee") or "").strip()
+
+    esc = html_mod.escape
+    info_parts: list[str] = [
+        f"<p><strong>{esc(texts['task'])}</strong>: "
+        f"{esc(task_id)}{' · ' + esc(subject) if subject else ''}</p>"
+    ]
+    if assignee:
+        info_parts.append(
+            f"<p class='muted'>{esc(texts['assignee'])}: {esc(assignee)}</p>"
+        )
+    if description:
+        info_parts.append(f"<pre>{esc(description)}</pre>")
+    if requirement:
+        info_parts.append(
+            f"<h2>{esc(texts['requirement'])}</h2><pre>{esc(requirement)}</pre>"
+        )
+    attach_label = texts["attachments"].format(
+        max_count=MAX_ATTACHMENT_COUNT,
+        max_mb=MAX_ATTACHMENT_BYTES // (1024 * 1024),
+    )
+    form_html = (
+        "".join(info_parts)
+        + f"<form method='post' enctype='multipart/form-data' "
+          f"action='/api/external/reply/{esc(run_id)}/{esc(task_id)}'>"
+        + f"<input type='hidden' name='t' value='{esc(t or '')}'>"
+        + f"<label>{esc(texts['result'])}</label>"
+        + "<div class='radio'>"
+        + f"<label><input type='radio' name='status' value='success' checked>"
+          f"{esc(texts['success'])}</label>"
+        + f"<label><input type='radio' name='status' value='failed'>"
+          f"{esc(texts['failed'])}</label>"
+        + "</div>"
+        + f"<label>{esc(texts['summary'])}</label>"
+        + f"<textarea name='summary' placeholder='{esc(texts['summary_ph'])}'>"
+          "</textarea>"
+        + f"<label>{esc(attach_label)}</label>"
+        + "<input type='file' name='attachments' multiple>"
+        + f"<button type='submit'>{esc(texts['submit'])}</button>"
+        + "</form>"
+    )
+    return _reply_page(texts["title"], form_html)
+
+
+@router.post("/reply/{run_id}/{task_id}", response_class=HTMLResponse)
+async def reply_submit(
+    run_id: Annotated[str, Path()],
+    task_id: Annotated[str, Path()],
+    t: Annotated[str, Form()] = "",
+    status_value: Annotated[str, Form(alias="status")] = "success",
+    summary: Annotated[str, Form()] = "",
+    attachments: Annotated[list[UploadFile] | None, File()] = None,
+) -> HTMLResponse:
+    """Accept the human's receipt (multipart): status + summary + attachments."""
+    from app.services.external_attachments import (
+        AttachmentError,
+        save_attachments,
+    )
+    from app.services.external_tasks import find_completion_event
+
+    error, run, _dispatch_ev, nonce, lang = _load_reply_context(run_id, task_id, t)
+    if error is not None:
+        return error
+    storage = get_storage()
+    if find_completion_event(
+        storage, run_id=run_id, task_id=task_id, nonce=nonce,
+    ) is not None:
+        return _reply_message_page(lang, "already_title", "already_body")
+    texts = _REPLY_TEXTS[lang]
+
+    ok = (status_value or "").strip().lower() != "failed"
+    incoming = [
+        (f.filename, f.file)
+        for f in (attachments or [])
+        # Browsers submit one empty part for an untouched <input type=file>.
+        if f is not None and (f.filename or "").strip()
+    ]
+    try:
+        saved = save_attachments(
+            run_id=run_id, task_id=task_id, nonce=nonce, files=incoming,
+        )
+    except AttachmentError as exc:
+        return _reply_page(
+            texts["error_title"],
+            f"<p>{html_mod.escape(exc.message)}</p>",
+            status_code=400,
+        )
+    try:
+        await complete_external_task(
+            storage=storage,
+            run=run,
+            task_id=task_id,
+            nonce=nonce,
+            ok=ok,
+            summary=summary or "",
+            source="external_reply_form",
+            attachments=saved,
+        )
+    except ExternalTaskError as exc:
+        if exc.code in ("EXTERNAL_TICKET_STALE",):
+            return _reply_message_page(lang, "stale_title", "stale_body",
+                                       status_code=409)
+        return _reply_page(
+            texts["error_title"],
+            f"<p>{html_mod.escape(exc.message)}</p>",
+            status_code=exc.status_code,
+        )
+    return _reply_message_page(lang, "done_title", "done_body")
 
 
 # ──────────────────────────────────────────────────────────────────────
