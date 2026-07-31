@@ -394,12 +394,12 @@ async def test_workspace_cleanup_deletes_agent_branch_after_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_path, check=True)
     subprocess.run(
         ["git", "commit", "--allow-empty", "-m", "init"],
-        cwd=repo,
+        cwd=repo_path,
         env={
             **dict(__import__("os").environ),
             "GIT_AUTHOR_NAME": "t",
@@ -409,8 +409,11 @@ async def test_workspace_cleanup_deletes_agent_branch_after_success(
         },
         check=True,
     )
-    agent_branch = "clawteam/csflow-x/alice"
-    subprocess.run(["git", "branch", agent_branch], cwd=repo, check=True)
+    # Deliberately NOT the derived `clawteam/{team}/{agent}` name: this pins that
+    # cleanup honours the branch_name reported by `workspace_list` rather than
+    # silently falling back to the derived name.
+    agent_branch = "clawteam/csflow-x/alice-custom-wt"
+    subprocess.run(["git", "branch", agent_branch], cwd=repo_path, check=True)
 
     async def _fake_run(argv: list[str], *, env: dict[str, str]):
         del env
@@ -422,7 +425,7 @@ async def test_workspace_cleanup_deletes_agent_branch_after_success(
             {
                 "agent_name": "alice",
                 "branch_name": agent_branch,
-                "repo_root": str(repo),
+                "repo_root": str(repo_path),
             }
         ]
 
@@ -431,12 +434,12 @@ async def test_workspace_cleanup_deletes_agent_branch_after_success(
     ok = await ClawTeamCli().workspace_cleanup(
         team="csflow-x",
         agent="alice",
-        repo=str(repo),
+        repo=str(repo_path),
     )
     assert ok is True
     branches = subprocess.run(
         ["git", "branch", "--format=%(refname:short)"],
-        cwd=repo,
+        cwd=repo_path,
         capture_output=True,
         text=True,
         check=True,
