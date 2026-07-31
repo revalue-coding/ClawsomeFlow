@@ -262,7 +262,7 @@ def _check_dag_acyclic(spec: FlowSpec) -> None:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def validate_flow_against_db(spec: FlowSpec, storage: "StorageBackend") -> None:
+def validate_flow_against_db(spec: FlowSpec, storage: StorageBackend) -> None:
     """Validate :class:`FlowSpec` plus storage-aware references.
 
     1. Run pure :func:`validate_flow_spec` first.

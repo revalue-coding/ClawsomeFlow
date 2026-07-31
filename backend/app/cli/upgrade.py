@@ -15,12 +15,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from app import __version__, config as cfg_mod, paths, upgrade
+from app import __version__, paths, upgrade
+from app import config as cfg_mod
 from app.cli import app
 from app.cli._openclaw_runtime import ensure_openclaw_version_compatible_or_exit
-from app.cli.deps import render_agent_platform_summary
 from app.cli._runtime import is_alive, read_pid, remove_pid, stop_process
 from app.cli._user_service import ServiceError, restart_and_enable, stop_if_running
+from app.cli.deps import render_agent_platform_summary
 
 console = Console()
 _DEFAULT_UPGRADE_SCRIPT_URL = "https://clawsomeflow.com/upgrade.sh"

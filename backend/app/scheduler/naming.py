@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 _TEAM_NAME_RUN_ID_LEN = 8
 
 

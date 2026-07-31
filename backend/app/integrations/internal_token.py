@@ -37,7 +37,6 @@ from hashlib import sha256
 
 from app.config import Config, load_config
 
-
 _DEFAULT_TTL_SEC = 300  # 5 minutes
 _PURPOSE_AGENT_MGMT = "openclaw_agent_mgmt"
 

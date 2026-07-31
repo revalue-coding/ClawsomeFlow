@@ -23,7 +23,6 @@ from app.scheduler.naming import team_name_for_run
 from app.storage import get_storage
 from app.worktree.lookup import WorktreeInfo
 
-
 # ── stubs --------------------------------------------------------------
 
 

@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import structlog
 from structlog.contextvars import (
@@ -30,7 +31,6 @@ from structlog.contextvars import (
 from structlog.types import EventDict
 
 from app import paths
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Setup

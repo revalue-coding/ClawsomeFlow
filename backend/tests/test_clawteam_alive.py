@@ -16,7 +16,6 @@ import pytest
 
 from app.integrations.clawteam_alive import is_agent_alive, list_dead_agents
 
-
 requires_clawteam_pkg = pytest.mark.skipif(
     not shutil.which("clawteam"),
     reason="clawteam package not installed",

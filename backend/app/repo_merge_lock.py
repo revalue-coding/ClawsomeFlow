@@ -29,9 +29,9 @@ import shlex
 import sys
 import threading
 import time
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import AsyncIterator, Callable, Iterator
 
 from app import logging_setup
 from app.paths import clawsomeflow_home_path, openclaw_agent_tools_dir

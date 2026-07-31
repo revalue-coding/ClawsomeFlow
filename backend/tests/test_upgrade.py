@@ -10,7 +10,6 @@ import pytest
 from app import paths, upgrade
 from app.config import Config
 
-
 # ── version marker round-trip ─────────────────────────────────────────
 
 
@@ -203,7 +202,6 @@ def test_run_upgrade_seeds_opencode_permission_when_installed(
     fake_config: Config,
 ) -> None:
     """Upgrade-path parity: opencode's global config gets permission:allow."""
-    import json
 
     from app.integrations import opencode_config as oc
 
@@ -228,7 +226,6 @@ def test_run_upgrade_seeds_qoder_codebuddy_trust_when_installed(
     fake_config: Config,
 ) -> None:
     """Upgrade-path parity: Qoder/CodeBuddy folder-trust configs get seeded."""
-    import json
 
     from app.integrations import temp_agent_trust as tat
 
@@ -254,7 +251,6 @@ def test_run_upgrade_sets_clawteam_spawn_ready_timeout(
     fake_config: Config,
 ) -> None:
     """Upgrade-path parity: ClawTeam spawn_ready_timeout lowered from stock 30s."""
-    import json
 
     from app.integrations import clawteam_spawn_config as csc
 
@@ -623,7 +619,7 @@ def test_run_upgrade_creates_hermes_agent_table(
 # ── stable ↔ beta switching: ledger gate + high-watermark marker ──────
 
 
-def _counting_migration(version: str, counter: dict) -> "upgrade.Migration":
+def _counting_migration(version: str, counter: dict) -> upgrade.Migration:
     def _apply(_cfg):  # noqa: ANN001
         counter[version] = counter.get(version, 0) + 1
     return upgrade.Migration(version, f"count {version}", apply=_apply)

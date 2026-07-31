@@ -17,17 +17,16 @@ import pytest
 
 import app.integrations.clawteam_cli as cli_mod
 from app.integrations.clawteam_cli import (
-    AntiLoopViolation,
     BANNED_SKILLS,
-    CliInvocationError,
+    AntiLoopViolation,
     ClawTeamCli,
-    _ensure_repo_on_target_branch,
+    CliInvocationError,
     _enforce_anti_loop,
+    _ensure_repo_on_target_branch,
     _is_empty_git_revert_output,
     _SpawnArgs,
 )
 from app.user_context import set_request_user
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Unit tests — argv shape + defences

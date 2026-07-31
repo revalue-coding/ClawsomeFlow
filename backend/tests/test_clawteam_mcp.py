@@ -10,7 +10,6 @@ Skipped automatically if ``clawteam-mcp`` isn't on PATH.
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 import subprocess
 import tempfile
@@ -18,7 +17,6 @@ import tempfile
 import pytest
 
 from app.integrations.clawteam_mcp import ClawTeamMcpClient
-
 
 requires_mcp = pytest.mark.skipif(
     not shutil.which("clawteam-mcp"),

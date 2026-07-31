@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from app.api import errors  # noqa: F401 — registers exception handlers
 from app.api import (
     agent_store,
     clawteam_board,
+    errors,  # noqa: F401 — registers exception handlers
     external,
     flows,
     hermes_agents,

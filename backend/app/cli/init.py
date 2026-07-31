@@ -17,11 +17,12 @@ import asyncio
 import typer
 from rich.console import Console
 
-from app import bootstrap, config as cfg_mod
+from app import bootstrap
+from app import config as cfg_mod
 from app.cli import app
 from app.cli._openclaw_runtime import ensure_openclaw_version_compatible_or_exit
-from app.cli.deps import render_agent_platform_summary
 from app.cli._user_service import ServiceError, restart_and_enable
+from app.cli.deps import render_agent_platform_summary
 from app.config import (
     DEFAULT_CLAWTEAM_BOARD_PORT,
     DEFAULT_PORT,
@@ -154,7 +155,8 @@ def init(
         f"  [dim]storage[/dim] sqlite (local)"
     )
 
-    from app import __version__, upgrade as upgrade_mod
+    from app import __version__
+    from app import upgrade as upgrade_mod
 
     # Existing deployment: install/init acts as a unified upgrade entrypoint.
     if home_preexisting:

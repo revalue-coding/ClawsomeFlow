@@ -62,12 +62,12 @@ from app.services import chat_attachments as attachment_svc
 from app.services import openclaw_agents as svc
 from app.services import openclaw_chat as chat_progress
 from app.services import openclaw_chat_history as chat_history
+from app.services import subprocess_registry as _subproc_registry
 from app.services.chat_retry import (
     CHAT_CONNECTION_RETRY_ATTEMPTS,
     CHAT_CONNECTION_RETRY_DELAYS_SEC,
     is_transient_connection_error,
 )
-from app.services import subprocess_registry as _subproc_registry
 from app.storage import StorageBackend, get_storage
 
 router = APIRouter(prefix="/openclaw/agents", tags=["openclaw"])

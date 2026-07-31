@@ -35,7 +35,6 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
 
 from app import paths
 from app.config import Config, load_config
@@ -50,7 +49,7 @@ class BoardProxyManager:
 
     def __init__(self, *, config: Config | None = None) -> None:
         self._cfg = config or load_config()
-        self._proc: Optional[subprocess.Popen] = None
+        self._proc: subprocess.Popen | None = None
         self._log_handle = None
         self._last_error: str | None = None
         self._clawteam_bin: str | None = None

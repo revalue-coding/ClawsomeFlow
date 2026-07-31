@@ -9,7 +9,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api import hermes_agents as hermes_api
-
 from app.main import create_app
 from app.models import HermesAgent
 from app.scheduler.naming import hermes_user_chat_session_id

@@ -16,8 +16,8 @@ import os
 import platform
 import plistlib
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path

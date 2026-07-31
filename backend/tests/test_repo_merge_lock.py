@@ -12,7 +12,6 @@ from app.repo_merge_lock import (
     build_generic_locked_merge_command,
     main_repo_file_lock,
     main_repo_lock_path,
-    merge_script_path,
     self_merge_instruction,
 )
 

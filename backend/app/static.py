@@ -82,7 +82,7 @@ def mount_frontend(app: FastAPI) -> Path | None:
                 "To build it:\n"
                 "    cd frontend && npm install && npm run build\n\n"
                 "Or set CSFLOW_FRONTEND_DIST to a prebuilt dist directory.\n"
-                f"API docs: /docs\n",
+                "API docs: /docs\n",
             )
         logger.info("frontend_static_missing", message="serving fallback page on /")
         return None

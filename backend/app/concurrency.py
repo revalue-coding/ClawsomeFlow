@@ -19,8 +19,9 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Protocol
+from typing import Protocol
 
 from app import logging_setup
 from app.config import Config, load_config

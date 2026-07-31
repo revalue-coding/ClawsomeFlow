@@ -18,7 +18,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from app import config as cfg_mod, paths
+from app import config as cfg_mod
+from app import paths
 from app.cli import app
 from app.cli._runtime import is_alive, read_pid, remove_pid, stop_process
 from app.cli._user_service import (

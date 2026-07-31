@@ -14,7 +14,6 @@ from typing import Any
 from app import paths
 from app.fileutil import atomic_write_json, file_locked
 
-
 _STATE_FILE = "hermes-chat-sessions.json"
 
 

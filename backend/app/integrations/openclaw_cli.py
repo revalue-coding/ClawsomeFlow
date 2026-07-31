@@ -12,8 +12,8 @@ import re
 import shlex
 import shutil
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 _LOGIN_SHELL_PROBE_TIMEOUT_SEC = 2.0
 _NPM_PREFIX_PROBE_TIMEOUT_SEC = 2.0

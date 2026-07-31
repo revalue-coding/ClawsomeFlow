@@ -108,3 +108,10 @@ target-version = "py310"
 select = ["E", "F", "I", "N", "W", "UP", "B"]
 ignore = ["E501", "B008"]
 
+[tool.ruff.lint.per-file-ignores]
+# Side-effect imports registering @app.command on the Typer app. isort would
+# split the single grouped import into separate statements, stranding the
+# `noqa: E402,F401` on the first one and exposing the rest to deletion by a
+# later `--fix`. Losing any of them silently drops CLI commands.
+"app/cli/__init__.py" = ["I001"]
+

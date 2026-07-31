@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import typer
 from rich.console import Console
 from rich.table import Table
 
-from app import __version__, bootstrap, config as cfg_mod
+from app import __version__, bootstrap
+from app import config as cfg_mod
 from app.cli import app
 from app.cli._runtime import is_alive, pid_file, read_pid
 

@@ -177,8 +177,8 @@ async def test_audit_emits_run_event_on_violation(tmp_path: Path) -> None:
     main = _init_repo(tmp_path / "main")
     (main / "leak.txt").write_text("x")  # dirty
 
-    from app.storage import get_storage
     from app.models import Flow, FlowRun, RunStatus
+    from app.storage import get_storage
     storage = get_storage()
     flow = Flow(name="t", description="", owner_user="alice").with_spec(
         __import__("app.models", fromlist=["FlowSpec"]).FlowSpec(

@@ -27,7 +27,6 @@ from app.models import (
     split_description,
 )
 
-
 # ── raw helpers ───────────────────────────────────────────────────────
 
 

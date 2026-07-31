@@ -9,8 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 from typer.main import get_command
+from typer.testing import CliRunner
 
 from app import paths
 from app.cli import app

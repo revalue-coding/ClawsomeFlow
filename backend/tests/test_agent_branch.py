@@ -8,9 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.integrations.git_repo import (
-    branch_exists_in_repo,
     clawteam_agent_branch_name,
-    conventional_branch,
     delete_clawteam_agent_branch,
     delete_clawteam_team_branches,
     delete_local_branch,

@@ -31,12 +31,12 @@ from app.models import (
     RunEvent,
     RunStatus,
 )
-from app.scheduler.prompts import WorkerReport
-from app.scheduler.compiler import CompileResult
 from app.scheduler import controller as ctrl_mod
+from app.scheduler.compiler import CompileResult
 from app.scheduler.controller import RunController, SchedulerBlockedError, _TaskState
 from app.scheduler.failure import TaskSnapshot
 from app.scheduler.naming import team_name_for_run
+from app.scheduler.prompts import WorkerReport
 from app.scheduler.sessions.base import (
     DispatchOutcome,
     SessionState,
@@ -45,7 +45,6 @@ from app.scheduler.sessions.base import (
 from app.scheduler.sessions.tmux_ready import wait_tui_ready  # noqa: F401
 from app.storage import get_storage
 from app.worktree.lookup import WorktreeInfo, WorktreeLookup
-
 
 # ── stub session that records every action ------------------------------
 

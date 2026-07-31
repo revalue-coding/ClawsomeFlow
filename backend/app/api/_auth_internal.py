@@ -25,7 +25,6 @@ from fastapi import Depends, Header, Request
 from app.api.errors import ApiError
 from app.integrations import internal_token as it
 
-
 #: Hosts considered safe to call the Internal API. ``testclient`` is the
 #: Starlette ``TestClient`` default (so unit tests don't need to spoof IPs);
 #: real production callers always come from 127.0.0.1 / ::1.

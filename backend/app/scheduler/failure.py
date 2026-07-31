@@ -27,9 +27,10 @@ The active signals:
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any
 
 from app.logging_setup import failure_detected, get_logger
 from app.models import AgentKind, FlowAgent, FlowTask, OnFailure

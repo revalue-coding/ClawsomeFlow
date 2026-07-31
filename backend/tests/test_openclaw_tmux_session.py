@@ -7,8 +7,8 @@ import pytest
 from app.integrations.clawteam_cli import CliInvocationError
 from app.models import AgentKind, FlowAgent, MergeStrategy, OnFailure
 from app.scheduler.sessions.openclaw_tmux import (
-    OpenClawTmuxSession,
     _INLINE_LONG_MESSAGE_THRESHOLD_CHARS,
+    OpenClawTmuxSession,
 )
 
 

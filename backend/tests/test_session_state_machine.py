@@ -11,15 +11,14 @@ import asyncio
 import pytest
 
 import app.scheduler.sessions.tmux_live as tmux_live_mod
-from app.scheduler.sessions.tmux_ready import TuiReadyResult
 from app.models import AgentKind, FlowAgent, MergeStrategy, OnFailure
 from app.scheduler.sessions.base import (
-    DispatchOutcome,
     InvalidStateTransition,
     SessionState,
     WorkerSession,
 )
 from app.scheduler.sessions.tmux_live import TmuxLiveSession
+from app.scheduler.sessions.tmux_ready import TuiReadyResult
 from app.worktree.lookup import WorktreeInfo
 
 

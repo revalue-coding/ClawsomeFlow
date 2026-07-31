@@ -21,13 +21,12 @@ import getpass
 import json
 import os
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from app import paths
 from app.fileutil import atomic_write_json, file_locked
-
 
 # Default port chosen to avoid common conflicts (8080 / 3000 / 5000 / 8000 / 8888).
 DEFAULT_PORT = 17017
@@ -198,7 +197,7 @@ def reset_config_cache() -> None:
     _cached = None
 
 
-def patch_env_from_config(config: Optional[Config] = None) -> None:
+def patch_env_from_config(config: Config | None = None) -> None:
     """Export ``CLAWTEAM_USER`` (and friends) to env from config.
 
     All ClawTeam CLI/MCP calls expect this to be set; centralising the

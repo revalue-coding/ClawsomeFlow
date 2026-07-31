@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 
 MCP_SDK_SPEC = "mcp>=1.0.0,<2.0.0"
 

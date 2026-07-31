@@ -845,7 +845,8 @@ def put_ui_language(
     _user: UserDep = "",
 ) -> UiLanguageResponse:
     """Persist the WebUI language pill so server-side webhooks match it."""
-    from app.config import load_config as _lc, save_config
+    from app.config import load_config as _lc
+    from app.config import save_config
 
     lang = payload.language
     cfg = _lc()

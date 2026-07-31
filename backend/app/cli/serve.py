@@ -8,8 +8,6 @@ so users who manage their own setup (systemd unit, supervisor, foreman,
 
 from __future__ import annotations
 
-import os
-
 import typer
 import uvicorn
 from rich.console import Console

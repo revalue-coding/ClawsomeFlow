@@ -6,7 +6,6 @@ import json
 
 import pytest
 
-
 from app import config as cfg_mod
 
 

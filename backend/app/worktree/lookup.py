@@ -55,7 +55,7 @@ class WorktreeInfo:
     base_branch: str
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "WorktreeInfo":
+    def from_dict(cls, raw: dict[str, Any]) -> WorktreeInfo:
         return cls(
             agent_name=raw["agent_name"],
             branch_name=raw["branch_name"],

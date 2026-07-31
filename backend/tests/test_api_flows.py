@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,8 +14,6 @@ from app import paths
 from app.config import load_config, save_config
 from app.integrations import openclaw_json as oj
 from app.main import create_app
-from datetime import datetime, timezone
-
 from app.models import FlowRun, FlowRunSchedule, RunEvent, RunStatus
 from app.storage import get_storage
 

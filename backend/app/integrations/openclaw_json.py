@@ -25,14 +25,14 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from app import logging_setup, paths
 from app.concurrency import LockManager, get_lock_manager
 from app.config import Config, load_config
 from app.fileutil import atomic_write_json, file_locked
-
 
 _MANAGED_REGISTRY_FILENAME = "openclaw-managed-agents.json"
 _INVALID_MANAGED_AGENT_KEYS = frozenset({"description", "_managed_by", "timeoutSeconds"})

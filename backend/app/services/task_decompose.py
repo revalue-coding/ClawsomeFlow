@@ -32,23 +32,24 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.config import Config, load_config
 from app.integrations import internal_token as it
+from app.integrations.git_repo import git_init_repo
+from app.integrations.openclaw_bridge import (
+    OpenclawBridge,
+    OpenclawBridgeError,
+)
 from app.integrations.openclaw_cli import resolve_openclaw_executable
 from app.integrations.openclaw_install import (
     looks_like_pending_scope_approval,
     repair_pending_scope_upgrades,
 )
-from app.integrations.openclaw_bridge import (
-    OpenclawBridge,
-    OpenclawBridgeError,
-)
-from app.integrations.git_repo import git_init_repo
 from app.logging_setup import get_logger
 from app.models import (
     DEFAULT_TARGET_BRANCH,
@@ -1560,6 +1561,8 @@ async def start_decompose_request(
     try:
         from app.services.hermes_agents import (
             RECONCILE_FAST,
+        )
+        from app.services.hermes_agents import (
             list_agents as _hermes_list_agents,
         )
 

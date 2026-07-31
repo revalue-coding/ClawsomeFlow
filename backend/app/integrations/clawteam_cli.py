@@ -25,10 +25,11 @@ import os
 import re
 import shlex
 import signal
+from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from app import logging_setup
 from app.concurrency import LockManager, get_lock_manager
@@ -36,7 +37,6 @@ from app.config import Config, load_config
 from app.integrations.git_repo import delete_clawteam_agent_branch
 from app.repo_merge_lock import async_main_repo_file_lock
 from app.user_context import get_request_user
-
 
 # Skills banned from ever being passed to ``clawteam spawn`` (DEV.md §4 / §5).
 # ``clawteam`` skill teaches workers to self-poll which would bypass the

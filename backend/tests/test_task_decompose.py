@@ -32,7 +32,6 @@ from app.models import AgentKind, OpenclawAgent, TaskDecomposeRequest, TaskDecom
 from app.services import task_decompose as svc
 from app.storage import get_storage
 
-
 # ── shared fixtures ----------------------------------------------------
 
 
@@ -240,7 +239,7 @@ def test_non_openclaw_delivery_uses_stdout_json() -> None:
     assert "/api/internal/task-decompose/commit" not in body
 
 
-def _compose_body_for_target(target: "svc._LeaderTarget") -> str:
+def _compose_body_for_target(target: svc._LeaderTarget) -> str:
     msgs = svc._compose_messages(
         request_id="req-1", user="alice", goal="Build a newsletter pipeline.",
         leader_target=target, api_base="http://127.0.0.1:17017", token="tok-123",
@@ -1939,10 +1938,13 @@ def test_reinstall_skills_excludes_removed_decomposer(
     """``reinstall_skills`` no longer installs the removed decomposer skill."""
     if not _has_git():
         pytest.skip("git not available")
-    from app.services.openclaw_agents import (
-        CommitInput, commit_agent, reinstall_skills,
-    )
     import asyncio
+
+    from app.services.openclaw_agents import (
+        CommitInput,
+        commit_agent,
+        reinstall_skills,
+    )
 
     agent = asyncio.run(commit_agent(
         CommitInput(id="fresh", name="Fresh"), user="alice",

@@ -68,9 +68,9 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from app import __version__, paths
 from app.config import Config, load_config, save_config
@@ -761,8 +761,9 @@ def run_upgrade(
     # 3. OpenClaw integration: re-seed skills + redeploy common payload.
     if include_openclaw:
         try:
-            from app.integrations.openclaw_install import install_into_openclaw
             import asyncio
+
+            from app.integrations.openclaw_install import install_into_openclaw
             asyncio.run(install_into_openclaw(config=cfg))
             report.skills_reseeded = True
             report.redeploy_performed = True

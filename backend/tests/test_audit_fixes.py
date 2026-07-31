@@ -28,14 +28,12 @@ from app.models import (
     OnFailure,
     RunStatus,
 )
-from app.scheduler import controller as ctrl_mod
 from app.scheduler.compiler import CompileResult
-from app.scheduler.controller import RunController, _TaskState
+from app.scheduler.controller import RunController
 from app.scheduler.failure import TaskSnapshot
 from app.scheduler.naming import team_name_for_run
 from app.scheduler.sessions.base import SessionState, WorkerSession
 from app.storage import get_storage
-
 
 # ── shared stubs ------------------------------------------------------
 
@@ -371,8 +369,8 @@ async def test_e2_retry_calls_mcp_task_update_pending(
 
 @pytest.mark.asyncio
 async def test_e4_finalize_stamps_finished_at() -> None:
+    from app.models import Flow
     from app.scheduler.finalize import FinalizeInput, finalize_run
-    from app.models import Flow, FlowSpec
     spec = _spec_two_tasks_same_owner()
     run = _persist_flow_and_run(spec)
     flow = Flow(
@@ -406,8 +404,8 @@ async def test_e4_finalize_stamps_finished_at() -> None:
 
 @pytest.mark.asyncio
 async def test_e4_finalize_failed_path_stamps_finished_at() -> None:
-    from app.scheduler.finalize import FinalizeInput, finalize_run
     from app.models import Flow
+    from app.scheduler.finalize import FinalizeInput, finalize_run
     spec = _spec_two_tasks_same_owner()
     run = _persist_flow_and_run(spec)
     flow = Flow(

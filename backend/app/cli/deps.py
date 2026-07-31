@@ -30,9 +30,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from rich.console import Console
 from rich.table import Table
@@ -666,11 +666,11 @@ def render_agent_platform_summary(*, console: Console) -> None:
 
     console.print(table)
     console.print(
-        f"[bold]Currently available agents:[/bold] "
+        "[bold]Currently available agents:[/bold] "
         + (", ".join(available_labels) if available_labels else "(none)")
     )
     console.print(
-        f"[bold]Also supported (setup required):[/bold] "
+        "[bold]Also supported (setup required):[/bold] "
         + (", ".join(missing_labels) if missing_labels else "(none)")
     )
     console.print(

@@ -25,10 +25,10 @@ The bridge reads ``gateway.auth.token`` directly from
 
 from __future__ import annotations
 
-import asyncio
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -99,7 +99,7 @@ class OpenclawBridge:
         self._owns_client = client is None
 
     @classmethod
-    def from_config(cls, config: Config | None = None) -> "OpenclawBridge":
+    def from_config(cls, config: Config | None = None) -> OpenclawBridge:
         """Build a bridge from ClawsomeFlow + OpenClaw config.
 
         Reads ``gateway.auth.token`` from ``~/.openclaw/openclaw.json``.
@@ -125,7 +125,7 @@ class OpenclawBridge:
             base = cfg.openclaw_gateway_url
         return cls(base, token)
 
-    async def __aenter__(self) -> "OpenclawBridge":
+    async def __aenter__(self) -> OpenclawBridge:
         return self
 
     async def __aexit__(self, *exc) -> None:

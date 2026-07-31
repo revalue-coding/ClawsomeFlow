@@ -37,7 +37,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 from app.logging_setup import get_logger
 

@@ -74,7 +74,7 @@ class ClawTeamMcpClient:
     @classmethod
     async def start(
         cls, *, acting_user: str | None = None, config: Config | None = None,
-    ) -> "ClawTeamMcpClient":
+    ) -> ClawTeamMcpClient:
         """Spawn the MCP server subprocess and complete the handshake."""
         c = cls(acting_user=acting_user, config=config)
         await c._connect()

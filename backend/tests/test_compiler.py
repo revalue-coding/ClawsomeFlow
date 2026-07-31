@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from app.models import (
@@ -15,7 +13,6 @@ from app.models import (
     OnFailure,
 )
 from app.scheduler import compiler
-
 
 # ── stubs --------------------------------------------------------------
 

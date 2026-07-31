@@ -11,8 +11,8 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from app.cli import app
 from app import paths
+from app.cli import app
 
 
 @pytest.fixture
@@ -506,8 +506,8 @@ def test_start_first_boot_forces_local_mode(
 def test_start_existing_config_always_runs_safe_redeploy(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.cli import start as start_mod
     from app import upgrade as upgrade_mod
+    from app.cli import start as start_mod
 
     cfg_path = paths.config_path()
     cfg_path.parent.mkdir(parents=True, exist_ok=True)

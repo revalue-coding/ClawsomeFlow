@@ -32,8 +32,8 @@ from app.integrations.github_store_repo import (
 )
 from app.integrations.store_server import (
     StoreAcquireResult,
-    StoreAuthActionResult,
     StoreAuthAccount,
+    StoreAuthActionResult,
     StoreAuthLoginResult,
     StoreOwnedListing,
     StoreServerClient,

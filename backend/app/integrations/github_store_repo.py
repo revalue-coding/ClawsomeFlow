@@ -68,7 +68,6 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from pydantic.alias_generators import to_camel
 
-
 _DEFAULT_GITHUB_REF = "main"
 _DEFAULT_CATALOG_PATH = "catalog/index.json"
 _DEFAULT_HTTP_TIMEOUT_SECONDS = 15.0
@@ -100,7 +99,7 @@ class StorePricing(_CamelModel):
     amount: float = 0.0
 
     @model_validator(mode="after")
-    def _validate_amount(self) -> "StorePricing":
+    def _validate_amount(self) -> StorePricing:
         if self.amount < 0:
             raise ValueError("pricing.amount must be >= 0")
         if self.mode == StorePricingMode.free and self.amount != 0:
@@ -144,7 +143,7 @@ class StoreCatalog(_CamelModel):
     listings: list[StoreCatalogListing]
 
     @model_validator(mode="after")
-    def _validate_unique_listing_id(self) -> "StoreCatalog":
+    def _validate_unique_listing_id(self) -> StoreCatalog:
         seen: set[str] = set()
         for item in self.listings:
             if item.listing_id in seen:
@@ -160,7 +159,7 @@ class StoreSingleManifest(_CamelModel):
     agent: StoreAgentDefinition
 
     @model_validator(mode="after")
-    def _ensure_single(self) -> "StoreSingleManifest":
+    def _ensure_single(self) -> StoreSingleManifest:
         if self.type != StoreListingType.single:
             raise ValueError("single manifest must use type=single")
         return self
@@ -174,7 +173,7 @@ class StoreTeamManifest(_CamelModel):
     agents: list[StoreAgentDefinition]
 
     @model_validator(mode="after")
-    def _ensure_team(self) -> "StoreTeamManifest":
+    def _ensure_team(self) -> StoreTeamManifest:
         if self.type != StoreListingType.team:
             raise ValueError("team manifest must use type=team")
         if not self.team_name.strip():

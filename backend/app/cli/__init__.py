@@ -82,6 +82,14 @@ def api_token(
 # ── lifecycle commands ────────────────────────────────────────────────
 
 # Importing these registers their @app.command decorators on `app`.
+#
+# ruff: do NOT run `ruff check --fix` on this block (I001 is intentionally left
+# unfixed here, and this file is excluded from the isort rule in pyproject.toml).
+# Sorting splits this single grouped import into ~10 separate `from app.cli
+# import x` statements and keeps the `noqa: E402,F401` on the FIRST one only —
+# every other module then loses its F401 exemption and a later `--fix` would
+# delete them as "unused". They are side-effect imports: dropping any one of
+# them silently removes its commands from the CLI tree.
 from app.cli import (  # noqa: E402,F401  (side-effect imports)
     init as _init_mod,
     serve as _serve_mod,
