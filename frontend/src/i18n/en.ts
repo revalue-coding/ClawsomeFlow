@@ -1052,7 +1052,7 @@ const en = {
       stateRerunRequested: "Rerun requested",
       approve: "Approve",
       approved: "Approved",
-      rerun: "Rerun",
+      rerun: "Submit feedback & rerun",
       redispatch: "Re-dispatch",
       externalItemBadge: "External · {{channel}}",
       rerunModalTitle: "Rerun current checkpoint task",

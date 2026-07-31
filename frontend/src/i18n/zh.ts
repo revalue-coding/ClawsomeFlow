@@ -1033,7 +1033,7 @@ const zh = {
       stateRerunRequested: "已请求重跑",
       approve: "通过审查",
       approved: "已通过",
-      rerun: "重新执行",
+      rerun: "提交改进要求并执行",
       redispatch: "重新派发",
       externalItemBadge: "外部执行 · {{channel}}",
       rerunModalTitle: "重新执行当前检查任务",
