@@ -105,6 +105,7 @@ from app.scheduler.run_metadata import (
 )
 from app.scheduler.sessions.tmux_ready import tmux_capture_pane
 from app.services import run_schedules as run_schedule_svc
+from app.services.dev_pr import run_pr_command as _run_pr_command
 from app.services.run_notify import NOTIFIED_MARKER_KEY
 from app.services.run_report import extract_leader_report
 from app.storage import StorageBackend, get_storage
@@ -283,33 +284,40 @@ class RunDiffAgentView(_CamelModel):
     deletions: int = 0
 
 
-class RunPrRecordView(_CamelModel):
-    """One PR opened from a run worktree branch ("本次执行的修改" PR entry).
+class RunPrLink(_CamelModel):
+    """One PR link inside a worktree's PR group entry."""
 
-    ``source`` is informational only ("auto" = backend hook, "manual" = user
-    one-click from the pending-PR module, "discovered" = found via
-    ``gh pr list`` — e.g. opened by the agent itself); the UI never
-    distinguishes who opened a PR.
-    """
-
-    agent_id: str
-    task_id: str | None = None
-    branch: str = ""
-    target_branch: str = ""
-    repo_root: str = ""
     pr_url: str
     title: str = ""
     state: str = ""
     source: str = "auto"
+    task_id: str | None = None
     at: str = ""
+
+
+class RunPrGroupView(_CamelModel):
+    """All PRs opened from ONE agent worktree ("本次执行的修改" PR entry).
+
+    Grouped per agent (worktree) exactly like the merge entries: one row per
+    worktree, listing every PR opened from its branch — backend auto-PR,
+    manual one-click submissions, and PRs discovered via ``gh pr list``
+    (e.g. opened by the agent itself). ``source`` on each link is
+    informational only; the UI never distinguishes who opened a PR.
+    """
+
+    agent_id: str
+    branch: str = ""
+    target_branch: str = ""
+    repo_root: str = ""
+    prs: list[RunPrLink] = Field(default_factory=list)
 
 
 class RunDiffView(_CamelModel):
     items: list[RunDiffAgentView] = Field(default_factory=list)
-    # PR entries belonging to the same "本次执行的修改" module: shown as PR
-    # links (no baseline diff). A worktree with BOTH merged content and PRs
-    # appears once in ``items`` and once per PR here.
-    prs: list[RunPrRecordView] = Field(default_factory=list)
+    # PR entries belonging to the same "本次执行的修改" module: one entry per
+    # agent worktree (links only, no baseline diff). A worktree with BOTH
+    # merged content and PRs appears once in ``items`` and once here.
+    prs: list[RunPrGroupView] = Field(default_factory=list)
 
 
 class RunAgentDiffView(RunDiffAgentView):
@@ -1974,48 +1982,96 @@ def _run_diff_agents(run: FlowRun, storage: StorageBackend) -> list[FlowAgent]:
 
 async def _collect_run_pr_entries(
     *, run: FlowRun, storage: StorageBackend,
-) -> list[RunPrRecordView]:
-    """PR entries for the "本次执行的修改" module.
+) -> list[RunPrGroupView]:
+    """PR entries for the "本次执行的修改" module — one entry per agent worktree.
 
     Two sources, unioned and de-duplicated by PR URL:
 
     * Recorded PRs (``RUN_PR_RECORDS_KEY``) — backend auto-PR hook and manual
       one-click submissions.
     * Discovered PRs — developer-mode runs only: ``gh pr list --head
-      <worktree-branch> --state all`` per non-OpenClaw agent, which also
-      surfaces PRs the agent opened by itself (possibly several per worktree).
-      Discovery is best-effort and never fails the endpoint.
+      <worktree-branch> --state all`` per non-OpenClaw agent (skipped
+      entirely when ``gh`` is not installed), which also surfaces PRs the
+      agent opened by itself (possibly several per worktree). Discovery is
+      best-effort and never fails the endpoint.
+
+    Every agent with ≥1 PR yields exactly ONE group entry holding all its PR
+    links, mirroring the per-worktree merge entries.
     """
     from app.services.dev_pr import list_branch_prs
 
-    entries: dict[str, RunPrRecordView] = {}
+    groups: dict[str, RunPrGroupView] = {}
+    links: dict[str, dict[str, RunPrLink]] = {}
+
+    def _group(agent_id: str, branch: str, target: str, repo: str) -> RunPrGroupView:
+        key = agent_id
+        grp = groups.get(key)
+        if grp is None:
+            grp = RunPrGroupView(
+                agent_id=agent_id, branch=branch,
+                target_branch=target, repo_root=repo,
+            )
+            groups[key] = grp
+            links[key] = {}
+        else:
+            if not grp.branch and branch:
+                grp.branch = branch
+            if not grp.target_branch and target:
+                grp.target_branch = target
+            if not grp.repo_root and repo:
+                grp.repo_root = repo
+        return grp
+
+    def _add(agent_id: str, branch: str, target: str, repo: str,
+             link: RunPrLink) -> None:
+        grp = _group(agent_id, branch, target, repo)
+        slot = links[agent_id]
+        existing = slot.get(link.pr_url)
+        if existing is not None:
+            # Enrich a recorded link with live title/state from discovery.
+            if not existing.title:
+                existing.title = link.title
+            if not existing.state:
+                existing.state = link.state
+            return
+        slot[link.pr_url] = link
+        grp.prs.append(link)
+
     for r in read_run_pr_records(run):
         url = str(r.get("pr_url") or "").strip()
-        if not url:
+        agent_id = str(r.get("agent_id") or "").strip()
+        if not url or not agent_id:
             continue
-        entries[url] = RunPrRecordView(
-            agent_id=str(r.get("agent_id") or ""),
-            task_id=(str(r["task_id"]) if r.get("task_id") else None),
-            branch=str(r.get("branch") or ""),
-            target_branch=str(r.get("target_branch") or ""),
-            repo_root=str(r.get("repo_root") or ""),
-            pr_url=url,
-            source=str(r.get("source") or "auto"),
-            at=str(r.get("at") or ""),
+        _add(
+            agent_id,
+            str(r.get("branch") or ""),
+            str(r.get("target_branch") or ""),
+            str(r.get("repo_root") or ""),
+            RunPrLink(
+                pr_url=url,
+                source=str(r.get("source") or "auto"),
+                task_id=(str(r["task_id"]) if r.get("task_id") else None),
+                at=str(r.get("at") or ""),
+            ),
         )
     flow = storage.flow_get(run.flow_id)
     if not _flow_currently_dev_mode(flow):
-        return list(entries.values())
+        return list(groups.values())
     try:
         spec = FlowSpec.model_validate((flow.spec if flow else None) or {})
     except Exception:
-        return list(entries.values())
+        return list(groups.values())
     recorded_branches: dict[str, set[str]] = {}
-    for e in entries.values():
-        if e.branch:
-            recorded_branches.setdefault(e.agent_id, set()).add(e.branch)
+    for r in read_run_pr_records(run):
+        aid = str(r.get("agent_id") or "").strip()
+        br = str(r.get("branch") or "").strip()
+        if aid and br:
+            recorded_branches.setdefault(aid, set()).add(br)
     for agent in spec.agents:
-        if agent.kind == AgentKind.openclaw or agent.merge_strategy == MergeStrategy.skip:
+        if (
+            agent.kind in (AgentKind.openclaw, AgentKind.external)
+            or agent.merge_strategy == MergeStrategy.skip
+        ):
             continue
         repo = _resolve_agent_repo_for_run(run=run, agent_id=agent.id, storage=storage)
         if not repo or not FsPath(repo).exists():
@@ -2031,25 +2087,16 @@ async def _collect_run_pr_entries(
                 url = str(d.get("url") or "").strip()
                 if not url:
                     continue
-                existing = entries.get(url)
-                if existing is not None:
-                    # Enrich the recorded entry with live title/state.
-                    if not existing.title:
-                        existing.title = str(d.get("title") or "")
-                    if not existing.state:
-                        existing.state = str(d.get("state") or "")
-                    continue
-                entries[url] = RunPrRecordView(
-                    agent_id=agent.id,
-                    branch=branch,
-                    target_branch=str(d.get("base") or ""),
-                    repo_root=repo,
-                    pr_url=url,
-                    title=str(d.get("title") or ""),
-                    state=str(d.get("state") or ""),
-                    source="discovered",
+                _add(
+                    agent.id, branch, str(d.get("base") or ""), repo,
+                    RunPrLink(
+                        pr_url=url,
+                        title=str(d.get("title") or ""),
+                        state=str(d.get("state") or ""),
+                        source="discovered",
+                    ),
                 )
-    return list(entries.values())
+    return list(groups.values())
 
 
 @router.get("/runs/{run_id}/run-diff", response_model=RunDiffView)
@@ -2372,42 +2419,8 @@ async def _find_pending_pr_workspace_row(
     return None
 
 
-_PR_PUSH_TIMEOUT_SEC = 300.0
-_PR_CREATE_TIMEOUT_SEC = 120.0
-
-
-async def _run_pr_command(
-    argv: list[str], *, cwd: str, timeout_sec: float,
-) -> tuple[int, str, str]:
-    """Run one PR-pipeline subprocess with a hard timeout + group kill."""
-    import os
-    import signal
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-    except FileNotFoundError:
-        return 127, "", f"command not found: {argv[0]}"
-    try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout_sec,
-        )
-    except asyncio.TimeoutError:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
-            pass
-        return 124, "", f"timed out after {int(timeout_sec)}s: {' '.join(argv)}"
-    return (
-        proc.returncode or 0,
-        (stdout_b or b"").decode(errors="replace"),
-        (stderr_b or b"").decode(errors="replace"),
-    )
+# The PR pipeline (push + create + discovery) lives in app.services.dev_pr —
+# git-native first, optional ``gh`` fallback.
 
 
 async def _pending_pr_tail_cleanup_if_done(
@@ -2632,11 +2645,12 @@ async def submit_pending_pr(
     """One-click PR: push the worktree branch, open a PR against the baseline.
 
     Remote validity is the developer's responsibility by design (dev mode
-    only): we simply run ``git push -u origin <branch>`` then
-    ``gh pr create --base <baseline> --head <branch>`` inside the worktree and
-    surface any failure verbatim (frontend shows it in an alert; nothing is
-    mutated on failure). On success the local worktree is removed and the agent
-    leaves the module.
+    only): we run the git-native-first pipeline in
+    :func:`app.services.dev_pr.push_and_create_pr` (plain ``git push`` →
+    push-options MR creation → optional ``gh pr create`` when installed →
+    pre-filled create-PR page link) and surface any failure verbatim
+    (frontend shows it in an alert; nothing is mutated on failure). On
+    success the local worktree is removed and the agent leaves the module.
     """
     run = storage.run_get(run_id)
     if run is None:
@@ -2678,45 +2692,25 @@ async def submit_pending_pr(
     await _clear_worktree_uncommitted(
         run=run, storage=storage, agent_id=agent_id, worktree=worktree,
     )
-    rc, out, err = await _run_pr_command(
-        ["git", "push", "-u", "origin", branch],
-        cwd=worktree, timeout_sec=_PR_PUSH_TIMEOUT_SEC,
-    )
-    if rc != 0:
-        detail = (err or out).strip()[:1000]
-        _emit_run_event(
-            storage, run.id, "dev_pr_submit_failed", agent_id=agent_id,
-            payload={"step": "push", "branch": branch, "detail": detail},
-        )
-        return PendingPrSubmitResponse(
-            agent_id=agent_id, success=False,
-            message=f"git push failed: {detail}",
-        )
+    from app.services import dev_pr
 
-    title = f"[ClawsomeFlow] {agent_id}: {branch} -> {target}"
-    body = (
-        f"Automated PR opened by ClawsomeFlow developer mode.\n\n"
-        f"- Run: {run.id}\n- Agent: {agent_id}\n- Branch: `{branch}` -> `{target}`"
+    title, body = dev_pr.pr_title_body(
+        run_id=run.id, agent_id=agent_id, branch=branch, target_branch=target,
     )
-    rc, out, err = await _run_pr_command(
-        ["gh", "pr", "create", "--base", target, "--head", branch,
-         "--title", title, "--body", body],
-        cwd=worktree, timeout_sec=_PR_CREATE_TIMEOUT_SEC,
+    ok, pr_url, step, detail = await dev_pr.push_and_create_pr(
+        worktree=worktree, branch=branch, target_branch=target,
+        title=title, body=body,
     )
-    if rc != 0:
-        detail = (err or out).strip()[:1000]
+    if not ok:
         _emit_run_event(
             storage, run.id, "dev_pr_submit_failed", agent_id=agent_id,
-            payload={"step": "pr_create", "branch": branch, "detail": detail},
+            payload={"step": step, "branch": branch, "detail": detail},
         )
+        label = "git push failed" if step == "push" else "PR create failed"
         return PendingPrSubmitResponse(
             agent_id=agent_id, success=False,
-            message=f"gh pr create failed: {detail}",
+            message=f"{label}: {detail}",
         )
-    pr_url = next(
-        (ln.strip() for ln in reversed(out.splitlines()) if ln.strip().startswith("http")),
-        "",
-    )
     _emit_run_event(
         storage, run.id, "dev_pr_submitted", agent_id=agent_id,
         payload={"branch": branch, "target_branch": target, "pr_url": pr_url},

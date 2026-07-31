@@ -129,6 +129,11 @@ def test_task_dev_submit_pr_resolution() -> None:
         on_failure=OnFailure.retry, max_retries=2,
     )
     assert task_dev_submit_pr(mode="dev", task=t1, agent=oc) is False
+    # External execution nodes own no worktree — never a PR task.
+    from types import SimpleNamespace
+
+    ext = SimpleNamespace(kind=AgentKind.external)
+    assert task_dev_submit_pr(mode="dev", task=t1, agent=ext) is False
     # A PR task never self-merges (even when dev_auto_merge is also True).
     both = t1.model_copy(update={"dev_auto_merge": True})
     assert task_self_merges(
@@ -242,8 +247,9 @@ def test_run_diff_lists_recorded_prs(
     prs = r.json()["prs"]
     assert len(prs) == 1
     assert prs[0]["agentId"] == "alice"
-    assert prs[0]["prUrl"] == "https://github.com/a/b/pull/1"
-    assert prs[0]["source"] == "auto"
+    assert len(prs[0]["prs"]) == 1
+    assert prs[0]["prs"][0]["prUrl"] == "https://github.com/a/b/pull/1"
+    assert prs[0]["prs"][0]["source"] == "auto"
 
 
 def test_run_diff_discovers_agent_opened_prs(
@@ -270,13 +276,15 @@ def test_run_diff_discovers_agent_opened_prs(
     r = app_client.get(f"/api/runs/{run.id}/run-diff")
     assert r.status_code == 200, r.text
     prs = r.json()["prs"]
-    urls = {p["prUrl"] for p in prs}
+    # Multiple PRs from ONE worktree collapse into a single group entry.
+    assert len(prs) == 1
+    assert prs[0]["agentId"] == "alice"
+    urls = {p["prUrl"] for p in prs[0]["prs"]}
     assert urls == {
         "https://github.com/a/b/pull/9",
         "https://github.com/a/b/pull/10",
     }
-    assert all(p["agentId"] == "alice" for p in prs)
-    assert all(p["source"] == "discovered" for p in prs)
+    assert all(p["source"] == "discovered" for p in prs[0]["prs"])
 
 
 def test_run_diff_discovery_dedupes_and_enriches_records(
@@ -298,7 +306,9 @@ def test_run_diff_discovery_dedupes_and_enriches_records(
     )
 
     async def fake_list_branch_prs(*, cwd: str, branch: str):
-        del cwd, branch
+        del cwd
+        if branch != "clawteam/x/alice":
+            return []
         return [
             {"url": "https://github.com/a/b/pull/1", "title": "auto PR",
              "state": "OPEN", "base": "main"},
@@ -310,9 +320,11 @@ def test_run_diff_discovery_dedupes_and_enriches_records(
     r = app_client.get(f"/api/runs/{run.id}/run-diff")
     prs = r.json()["prs"]
     assert len(prs) == 1
-    assert prs[0]["source"] == "auto"  # recorded entry wins
-    assert prs[0]["title"] == "auto PR"  # enriched with live title
-    assert prs[0]["state"] == "OPEN"
+    assert len(prs[0]["prs"]) == 1
+    link = prs[0]["prs"][0]
+    assert link["source"] == "auto"  # recorded entry wins
+    assert link["title"] == "auto PR"  # enriched with live title
+    assert link["state"] == "OPEN"
 
 
 def test_run_diff_no_prs_outside_dev_mode(
@@ -400,7 +412,11 @@ def test_manual_pending_pr_submit_records_pr(
             return 0, "", ""
         return 0, "https://github.com/acme/x/pull/7\n", ""
 
-    monkeypatch.setattr(runs_mod, "_run_pr_command", fake_run_pr_command)
+    from app.services import dev_pr
+
+    # gh is the only URL source in this fake → exercises the gh fallback path.
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run_pr_command)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: True)
 
     async def fake_cleanup(*, run, agent_id, storage, **kw):
         del run, agent_id, storage, kw
@@ -430,11 +446,14 @@ def test_manual_pending_pr_submit_records_pr(
     assert read_dev_pr_failed_agent_ids(refreshed) == set()
 
 
-# ── auto-PR service pipeline ──────────────────────────────────────────
+# ── auto-PR service pipeline (git-native first) ───────────────────────
 
 
 @pytest.mark.asyncio
-async def test_push_and_create_pr_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_push_pr_url_harvested_from_push_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Platform prints an existing/created PR link on push → done, one command."""
     from app.services import dev_pr
 
     commands: list[list[str]] = []
@@ -442,19 +461,90 @@ async def test_push_and_create_pr_happy_path(monkeypatch: pytest.MonkeyPatch) ->
     async def fake_run(argv, *, cwd, timeout_sec):
         del cwd, timeout_sec
         commands.append(list(argv))
-        if argv[0] == "git":
-            return 0, "", ""
-        return 0, "https://github.com/a/b/pull/3\n", ""
+        return 0, "", "remote: https://github.com/a/b/pull/3"
 
     monkeypatch.setattr(dev_pr, "run_pr_command", fake_run)
-    ok, url, step, detail = await dev_pr.push_and_create_pr(
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: False)
+    ok, url, step, _detail = await dev_pr.push_and_create_pr(
         worktree="/tmp/wt", branch="br", target_branch="main",
         title="t", body="b",
     )
-    assert ok is True and url == "https://github.com/a/b/pull/3"
-    assert step == "" and detail == ""
-    assert commands[0][:2] == ["git", "push"]
-    assert commands[1][:3] == ["gh", "pr", "create"]
+    assert ok is True and url == "https://github.com/a/b/pull/3" and step == ""
+    assert commands == [["git", "push", "-u", "origin", "br"]]
+
+
+@pytest.mark.asyncio
+async def test_push_pr_created_via_git_push_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitLab/Gitee style: ``git push -o merge_request.create`` (git-native)."""
+    from app.services import dev_pr
+
+    commands: list[list[str]] = []
+
+    async def fake_run(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        commands.append(list(argv))
+        if "merge_request.create" in argv:
+            return 0, "", "remote: https://gitlab.com/a/b/-/merge_requests/5"
+        return 0, "", ""
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: False)
+    ok, url, _step, _detail = await dev_pr.push_and_create_pr(
+        worktree="/tmp/wt", branch="br", target_branch="main",
+        title="t", body="b",
+    )
+    assert ok is True and url == "https://gitlab.com/a/b/-/merge_requests/5"
+    assert commands[1][:3] == ["git", "push", "-o"]
+
+
+@pytest.mark.asyncio
+async def test_push_pr_gh_fallback_when_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional gh fallback covers GitHub auto-creation when gh exists."""
+    from app.services import dev_pr
+
+    async def fake_run(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        if argv[0] == "gh":
+            return 0, "https://github.com/a/b/pull/8\n", ""
+        return 0, "", ""  # push ok, push-options tolerated failure/no URL
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: True)
+    ok, url, _step, _detail = await dev_pr.push_and_create_pr(
+        worktree="/tmp/wt", branch="br", target_branch="main",
+        title="t", body="b",
+    )
+    assert ok is True and url == "https://github.com/a/b/pull/8"
+
+
+@pytest.mark.asyncio
+async def test_push_pr_falls_back_to_create_page_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No gh, no push-options: GitHub's pre-filled create-PR page from push output."""
+    from app.services import dev_pr
+
+    async def fake_run(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        if "merge_request.create" in argv:
+            return 128, "", "error: push options not supported"
+        return 0, "", (
+            "remote: Create a pull request for 'br' on GitHub by visiting:\n"
+            "remote:      https://github.com/a/b/pull/new/br"
+        )
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: False)
+    ok, url, step, _detail = await dev_pr.push_and_create_pr(
+        worktree="/tmp/wt", branch="br", target_branch="main",
+        title="t", body="b",
+    )
+    assert ok is True and step == ""
+    assert url == "https://github.com/a/b/pull/new/br"
 
 
 @pytest.mark.asyncio
@@ -475,6 +565,43 @@ async def test_push_and_create_pr_push_failure(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
+async def test_push_pr_total_failure_without_any_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No URL anywhere → honest pr_create failure (never blocks the run)."""
+    from app.services import dev_pr
+
+    async def fake_run(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        if argv[0] == "gh":
+            return 1, "", "gh boom"
+        return 0, "", ""
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: True)
+    ok, url, step, detail = await dev_pr.push_and_create_pr(
+        worktree="/tmp/wt", branch="br", target_branch="main",
+        title="t", body="b",
+    )
+    assert ok is False and url == "" and step == "pr_create"
+    assert "gh boom" in detail
+
+
+@pytest.mark.asyncio
+async def test_list_branch_prs_without_gh_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import dev_pr
+
+    async def boom(argv, *, cwd, timeout_sec):
+        raise AssertionError("must not run any command without gh")
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", boom)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: False)
+    assert await dev_pr.list_branch_prs(cwd="/tmp", branch="br") == []
+
+
+@pytest.mark.asyncio
 async def test_list_branch_prs_tolerates_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services import dev_pr
 
@@ -483,4 +610,5 @@ async def test_list_branch_prs_tolerates_failure(monkeypatch: pytest.MonkeyPatch
         return 1, "", "no git remote"
 
     monkeypatch.setattr(dev_pr, "run_pr_command", fake_run)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: True)
     assert await dev_pr.list_branch_prs(cwd="/tmp", branch="br") == []

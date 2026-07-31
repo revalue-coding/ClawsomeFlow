@@ -71,14 +71,15 @@ def task_dev_submit_pr(
 ) -> bool:
     """Return True when *task* is a developer-mode "submit PR" task.
 
-    **dev mode only, non-OpenClaw owners only** (OpenClaw always self-merges,
-    never PRs). The leader summary task is eligible like any other task. When
-    both ``dev_submit_pr`` and ``dev_auto_merge`` are somehow True (the UI
+    **dev mode only, worktree-owning owners only** — OpenClaw always
+    self-merges (never PRs) and external execution nodes own no worktree at
+    all. The leader summary task is eligible like any other task. When both
+    ``dev_submit_pr`` and ``dev_auto_merge`` are somehow True (the UI
     enforces mutual exclusion), the PR behaviour wins — such a task must not
     self-merge (see :func:`task_self_merges`).
     """
-    is_openclaw = getattr(agent.kind, "value", agent.kind) == "openclaw"
-    if mode != "dev" or is_openclaw:
+    kind = getattr(agent.kind, "value", agent.kind)
+    if mode != "dev" or kind in ("openclaw", "external"):
         return False
     return bool(getattr(task, "dev_submit_pr", False))
 

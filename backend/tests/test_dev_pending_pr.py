@@ -454,11 +454,13 @@ def test_submit_pending_pr_success_removes_marker_and_cleans_worktree(
     async def fake_run_pr_command(argv, *, cwd, timeout_sec):
         del cwd, timeout_sec
         commands.append(list(argv))
-        if argv[0] == "git":
-            return 0, "", ""
-        return 0, "https://github.com/acme/x/pull/7\n", ""
+        # Platform prints the (already existing / created) PR link on push.
+        return 0, "", "remote: https://github.com/acme/x/pull/7"
 
-    monkeypatch.setattr(runs_mod, "_run_pr_command", fake_run_pr_command)
+    from app.services import dev_pr
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run_pr_command)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: False)
 
     cleaned: list[str] = []
 
@@ -487,7 +489,8 @@ def test_submit_pending_pr_success_removes_marker_and_cleans_worktree(
     assert body["success"] is True
     assert body["prUrl"] == "https://github.com/acme/x/pull/7"
     assert commands[0][:2] == ["git", "push"]
-    assert commands[1][:3] == ["gh", "pr", "create"]
+    # PR link harvested from the push output → no second command needed.
+    assert len(commands) == 1
     refreshed = get_storage().run_get(run.id)
     assert DEV_PENDING_PR_AGENT_IDS_KEY not in (refreshed.inputs or {})
     assert cleaned == ["alice"]
@@ -512,7 +515,9 @@ def test_submit_pending_pr_push_failure_keeps_everything(
         del cwd, timeout_sec
         return 1, "", "fatal: no configured push destination"
 
-    monkeypatch.setattr(runs_mod, "_run_pr_command", fake_run_pr_command)
+    from app.services import dev_pr
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run_pr_command)
 
     r = app_client.post(f"/api/runs/{run.id}/pending-prs/alice/submit")
     assert r.status_code == 200, r.text
@@ -760,11 +765,21 @@ def _patch_pr_pipeline(monkeypatch, runs_mod):
             return 0, "https://github.com/acme/x/pull/9\n", ""
         return 0, "", ""
 
+    async def fake_pr_cmd(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        calls["cmds"].append(list(argv))
+        # Platform prints the PR link right on the push output.
+        return 0, "", "remote: https://github.com/acme/x/pull/9"
+
+    from app.services import dev_pr
+
     monkeypatch.setattr(
         runs_mod, "cleanup_non_openclaw_workspace_after_review_decision", fake_cleanup,
     )
     monkeypatch.setattr(runs_mod, "_cleanup_terminal_tail", fake_tail)
     monkeypatch.setattr(runs_mod, "_run_pr_command", fake_cmd)
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_pr_cmd)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: False)
     return calls
 
 
@@ -837,7 +852,8 @@ def test_submit_clears_uncommitted_and_instruments(
     assert calls["cmds"][0] == ["git", "reset", "--hard", "HEAD"]
     assert calls["cmds"][1] == ["git", "clean", "-fd"]
     assert calls["cmds"][2][:2] == ["git", "push"]
-    assert calls["cmds"][3][:3] == ["gh", "pr", "create"]
+    # PR link harvested from the push output → no further command needed.
+    assert len(calls["cmds"]) == 3
     events = get_storage().event_list(run_id=run.id, since_id=None, limit=50)
     cleared = [e for e in events if e.type == "worktree_uncommitted_cleared"]
     assert len(cleared) == 1

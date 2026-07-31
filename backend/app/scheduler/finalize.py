@@ -968,7 +968,7 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
     pending: set[str] = set(read_dev_pr_failed_agent_ids(run))
     for task in spec.tasks:
         agent = agents_by_id.get(task.owner_agent_id)
-        if agent is None or agent.kind == AgentKind.openclaw:
+        if agent is None or agent.kind in (AgentKind.openclaw, AgentKind.external):
             continue
         if task_dev_submit_pr(mode="dev", task=task, agent=agent):
             # Auto-PR task: only a FAILED attempt (unioned above) lands the
@@ -984,7 +984,7 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
         pending.add(agent.id)
     return [
         a.id for a in spec.agents
-        if a.id in pending and a.kind != AgentKind.openclaw
+        if a.id in pending and a.kind not in (AgentKind.openclaw, AgentKind.external)
     ]
 
 

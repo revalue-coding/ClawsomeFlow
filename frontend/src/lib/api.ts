@@ -465,26 +465,31 @@ export interface RunAgentDiff extends RunDiffAgent {
   patchTruncated: boolean;
 }
 
-/** One PR opened from a run worktree branch ("本次执行的修改" PR entry). */
-export interface RunPrRecord {
-  agentId: string;
-  taskId?: string | null;
-  branch: string;
-  targetBranch: string;
-  repoRoot: string;
+/** One PR link inside a worktree's PR group entry. */
+export interface RunPrLink {
   prUrl: string;
   title: string;
   state: string;
   /** "auto" | "manual" | "discovered" — informational only; the UI does not
    *  distinguish who opened the PR. */
   source: string;
+  taskId?: string | null;
   at: string;
+}
+
+/** All PRs opened from ONE agent worktree — a single entry in "本次执行的修改". */
+export interface RunPrGroup {
+  agentId: string;
+  branch: string;
+  targetBranch: string;
+  repoRoot: string;
+  prs: RunPrLink[];
 }
 
 /** The post-run "Run diff" module payload: merge entries + PR entries. */
 export interface RunDiff {
   items: RunDiffAgent[];
-  prs?: RunPrRecord[];
+  prs?: RunPrGroup[];
 }
 
 /** Result of the "撤销合入" (revert-merge) action for one agent. */
