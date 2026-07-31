@@ -14,8 +14,22 @@ must import the constants from here.
   survive terminal team cleanup (merge-conflict follow-up).
 * :data:`REVERTED_MERGE_AGENT_IDS_KEY` — agent ids whose run-diff merges the user
   reverted ("撤销合入"); excluded from the post-run Run-diff module.
+* :data:`DEV_PR_FAILED_AGENT_IDS_KEY` — developer-mode runs only: non-OpenClaw
+  agent ids whose backend auto-PR (``dev_submit_pr`` task completed → push +
+  ``gh pr create``) FAILED. Best-effort PR failures never block the run, but
+  the agent is surfaced in the Run detail "待提交PR" module so the user can
+  retry manually. Written by the controller's auto-PR hook; cleared for an
+  agent when a (manual or automatic) PR succeeds.
+* :data:`RUN_PR_RECORDS_KEY` — append-only list of PR records for a run:
+  ``{"agent_id", "task_id" (or null), "branch", "target_branch", "repo_root",
+  "pr_url", "source" ("auto"|"manual"), "at"}``. Powers the PR entries in the
+  Run detail "本次执行的修改" module. On read, the API additionally discovers
+  PRs opened out-of-band (e.g. by the agent itself) via ``gh pr list`` and
+  merges them in — the module never distinguishes who opened a PR.
 * :data:`DEV_PENDING_PR_AGENT_IDS_KEY` — developer-mode runs only: non-OpenClaw
-  agent ids that owned at least one no-merge (``devAutoMerge=false``) task.
+  agent ids that owned at least one no-merge (``devAutoMerge=false``, and not a
+  ``dev_submit_pr`` task) task, unioned at finalize with
+  :data:`DEV_PR_FAILED_AGENT_IDS_KEY`.
   Their worktrees survive terminal cleanup so the user can inspect / one-click
   PR / discard them from the Run detail "PR" module. Written at finalize time,
   so it doubles as the "this run executed in developer mode" record (a Flow
@@ -89,6 +103,8 @@ POST_REVIEW_TERMINAL_STATUS_KEY = "_csflow_post_review_terminal_status"
 PRESERVE_WORKTREE_AGENT_IDS_KEY = "_csflow_preserve_worktree_agent_ids"
 REVERTED_MERGE_AGENT_IDS_KEY = "_csflow_reverted_merge_agent_ids"
 DEV_PENDING_PR_AGENT_IDS_KEY = "_csflow_dev_pending_pr_agent_ids"
+DEV_PR_FAILED_AGENT_IDS_KEY = "_csflow_dev_pr_failed_agent_ids"
+RUN_PR_RECORDS_KEY = "_csflow_run_pr_records"
 FAILED_AUTO_MERGE_AGENT_IDS_KEY = "_csflow_failed_auto_merge_agent_ids"
 UNATTENDED_KEY = "_csflow_unattended"
 DELEGATE_ORIGIN_KEY = "_csflow_delegate_origin"
@@ -160,7 +176,26 @@ def coalesce_reverted_merge_markers(run: Any, storage: Any) -> None:
     merged = _as_set(local.get(REVERTED_MERGE_AGENT_IDS_KEY)) | _as_set(
         db_inputs.get(REVERTED_MERGE_AGENT_IDS_KEY),
     )
+    # Append-only PR records: union DB + local (dedupe on agent+url) so a
+    # controller persist never drops a record written by the API (and the
+    # API read-modify-write in append_run_pr_record covers the other direction).
+    def _records(raw: Any) -> list[dict]:
+        return [dict(r) for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
+
+    rec_seen: set[tuple[str, str]] = set()
+    rec_merged: list[dict] = []
+    for r in _records(db_inputs.get(RUN_PR_RECORDS_KEY)) + _records(
+        local.get(RUN_PR_RECORDS_KEY)
+    ):
+        key = (str(r.get("agent_id") or ""), str(r.get("pr_url") or ""))
+        if key in rec_seen:
+            continue
+        rec_seen.add(key)
+        rec_merged.append(r)
+    if rec_merged:
+        local[RUN_PR_RECORDS_KEY] = rec_merged
     if not merged:
+        run.inputs = local
         return
     local[REVERTED_MERGE_AGENT_IDS_KEY] = sorted(merged)
     run.inputs = local
@@ -190,6 +225,78 @@ def read_failed_auto_merge_agent_ids(run: Any) -> set[str]:
     if not isinstance(raw, list):
         return set()
     return {str(a).strip() for a in raw if str(a or "").strip()}
+
+
+def read_dev_pr_failed_agent_ids(run: Any) -> set[str]:
+    """Agent ids whose backend auto-PR failed (developer-mode runs)."""
+    raw = (getattr(run, "inputs", None) or {}).get(DEV_PR_FAILED_AGENT_IDS_KEY)
+    if not isinstance(raw, list):
+        return set()
+    return {str(a).strip() for a in raw if str(a or "").strip()}
+
+
+def write_dev_pr_failed_agent_ids(run: Any, agent_ids: set[str]) -> None:
+    """Replace the auto-PR-failed marker in place (drops the key when empty)."""
+    inputs = dict(getattr(run, "inputs", None) or {})
+    cleaned = sorted({str(a).strip() for a in agent_ids if str(a or "").strip()})
+    if cleaned:
+        inputs[DEV_PR_FAILED_AGENT_IDS_KEY] = cleaned
+    else:
+        inputs.pop(DEV_PR_FAILED_AGENT_IDS_KEY, None)
+    run.inputs = inputs
+
+
+def read_run_pr_records(run: Any) -> list[dict[str, Any]]:
+    """PR records for the run (append-only; safe default ``[]``)."""
+    raw = (getattr(run, "inputs", None) or {}).get(RUN_PR_RECORDS_KEY)
+    if not isinstance(raw, list):
+        return []
+    return [dict(r) for r in raw if isinstance(r, dict)]
+
+
+def append_run_pr_record(run: Any, storage: Any, record: dict[str, Any]) -> None:
+    """Append *record* to the run's PR records and persist immediately.
+
+    Read-modify-write against the DB copy first, so a concurrent controller
+    holding a stale ``run.inputs`` does not clobber records written from the
+    API side (and vice versa). De-duplicates on ``(agent_id, pr_url)`` — the
+    same PR is never recorded twice. Also mutates ``run.inputs`` in place so
+    the caller's object stays current.
+    """
+    url = str(record.get("pr_url") or "").strip()
+    agent_id = str(record.get("agent_id") or "").strip()
+    if not url or not agent_id:
+        return
+    existing: list[dict[str, Any]] = []
+    if storage is not None and hasattr(storage, "run_get"):
+        try:
+            db_run = storage.run_get(getattr(run, "id", None))
+            if db_run is not None:
+                existing = read_run_pr_records(db_run)
+        except Exception:
+            existing = read_run_pr_records(run)
+    else:
+        existing = read_run_pr_records(run)
+    seen = {
+        (str(r.get("agent_id") or ""), str(r.get("pr_url") or "")) for r in existing
+    }
+    if (agent_id, url) in seen:
+        run.inputs = {**dict(getattr(run, "inputs", None) or {}), RUN_PR_RECORDS_KEY: existing}
+        return
+    blob = {
+        "agent_id": agent_id,
+        "task_id": (str(record["task_id"]) if record.get("task_id") else None),
+        "branch": str(record.get("branch") or ""),
+        "target_branch": str(record.get("target_branch") or ""),
+        "repo_root": str(record.get("repo_root") or ""),
+        "pr_url": url,
+        "source": str(record.get("source") or "auto"),
+        "at": str(record.get("at") or ""),
+    }
+    merged = existing + [blob]
+    run.inputs = {**dict(getattr(run, "inputs", None) or {}), RUN_PR_RECORDS_KEY: merged}
+    if storage is not None and hasattr(storage, "run_update"):
+        storage.run_update(run)
 
 
 def write_pause_state(
@@ -389,6 +496,8 @@ def clear_checkpoint_state(run: Any) -> None:
 __all__ = [
     "CHECKPOINT_STATE_KEY",
     "DEV_PENDING_PR_AGENT_IDS_KEY",
+    "DEV_PR_FAILED_AGENT_IDS_KEY",
+    "RUN_PR_RECORDS_KEY",
     "FAILED_AUTO_MERGE_AGENT_IDS_KEY",
     "DELEGATE_ORIGIN_KEY",
     "EXTERNAL_CALLBACK_KEY",
@@ -405,6 +514,7 @@ __all__ = [
     "PRESERVE_WORKTREE_AGENT_IDS_KEY",
     "REVERTED_MERGE_AGENT_IDS_KEY",
     "UNATTENDED_KEY",
+    "append_run_pr_record",
     "clear_checkpoint_state",
     "clear_failure_guidance",
     "clear_pause_state",
@@ -413,11 +523,14 @@ __all__ = [
     "pause_reason_rank",
     "read_checkpoint_state",
     "read_delegate_origin",
+    "read_dev_pr_failed_agent_ids",
     "read_failed_auto_merge_agent_ids",
+    "read_run_pr_records",
     "read_failure_guidance",
     "read_pause_state",
     "run_is_unattended",
     "write_checkpoint_state",
+    "write_dev_pr_failed_agent_ids",
     "write_failure_guidance",
     "write_pause_state",
 ]

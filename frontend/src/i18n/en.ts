@@ -581,6 +581,8 @@ const en = {
       autoMergeDisabledShort: "No merge",
       autoMergeOpenclawLocked: "OpenClaw subtasks always auto-merge and can't be changed",
       autoMergeSyncedNotice: "Synced merge status for this agent's other subtasks",
+      submitPrShort: "Submit PR",
+      submitPrHint: "After the subtask completes, the backend pushes the branch and opens a PR to the baseline branch (mutually exclusive with auto-merge)",
       remove: "Remove task",
     },
     decompose: {
@@ -903,6 +905,7 @@ const en = {
     runDiffLoadError: "Failed to load the changes from this run.",
     runDiffAgentSummary: "{{commits}} commit(s) · {{files}} file(s)",
     runDiffViewDiff: "View changes",
+    runDiffViewPr: "View PR",
     runDiffModalTitle: "Changes — {{agent}}",
     runDiffPatchEmpty: "No changes to display.",
     runDiffTruncated:

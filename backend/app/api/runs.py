@@ -94,8 +94,12 @@ from app.scheduler.run_metadata import (
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
     REVERTED_MERGE_AGENT_IDS_KEY,
     UNATTENDED_KEY,
+    append_run_pr_record,
     read_delegate_origin,
+    read_dev_pr_failed_agent_ids,
     read_pause_state,
+    read_run_pr_records,
+    write_dev_pr_failed_agent_ids,
     write_failure_guidance,
     write_pause_state,
 )
@@ -279,8 +283,33 @@ class RunDiffAgentView(_CamelModel):
     deletions: int = 0
 
 
+class RunPrRecordView(_CamelModel):
+    """One PR opened from a run worktree branch ("本次执行的修改" PR entry).
+
+    ``source`` is informational only ("auto" = backend hook, "manual" = user
+    one-click from the pending-PR module, "discovered" = found via
+    ``gh pr list`` — e.g. opened by the agent itself); the UI never
+    distinguishes who opened a PR.
+    """
+
+    agent_id: str
+    task_id: str | None = None
+    branch: str = ""
+    target_branch: str = ""
+    repo_root: str = ""
+    pr_url: str
+    title: str = ""
+    state: str = ""
+    source: str = "auto"
+    at: str = ""
+
+
 class RunDiffView(_CamelModel):
     items: list[RunDiffAgentView] = Field(default_factory=list)
+    # PR entries belonging to the same "本次执行的修改" module: shown as PR
+    # links (no baseline diff). A worktree with BOTH merged content and PRs
+    # appears once in ``items`` and once per PR here.
+    prs: list[RunPrRecordView] = Field(default_factory=list)
 
 
 class RunAgentDiffView(RunDiffAgentView):
@@ -1943,6 +1972,86 @@ def _run_diff_agents(run: FlowRun, storage: StorageBackend) -> list[FlowAgent]:
     return [a for a in spec.agents if a.merge_strategy != MergeStrategy.skip]
 
 
+async def _collect_run_pr_entries(
+    *, run: FlowRun, storage: StorageBackend,
+) -> list[RunPrRecordView]:
+    """PR entries for the "本次执行的修改" module.
+
+    Two sources, unioned and de-duplicated by PR URL:
+
+    * Recorded PRs (``RUN_PR_RECORDS_KEY``) — backend auto-PR hook and manual
+      one-click submissions.
+    * Discovered PRs — developer-mode runs only: ``gh pr list --head
+      <worktree-branch> --state all`` per non-OpenClaw agent, which also
+      surfaces PRs the agent opened by itself (possibly several per worktree).
+      Discovery is best-effort and never fails the endpoint.
+    """
+    from app.services.dev_pr import list_branch_prs
+
+    entries: dict[str, RunPrRecordView] = {}
+    for r in read_run_pr_records(run):
+        url = str(r.get("pr_url") or "").strip()
+        if not url:
+            continue
+        entries[url] = RunPrRecordView(
+            agent_id=str(r.get("agent_id") or ""),
+            task_id=(str(r["task_id"]) if r.get("task_id") else None),
+            branch=str(r.get("branch") or ""),
+            target_branch=str(r.get("target_branch") or ""),
+            repo_root=str(r.get("repo_root") or ""),
+            pr_url=url,
+            source=str(r.get("source") or "auto"),
+            at=str(r.get("at") or ""),
+        )
+    flow = storage.flow_get(run.flow_id)
+    if not _flow_currently_dev_mode(flow):
+        return list(entries.values())
+    try:
+        spec = FlowSpec.model_validate((flow.spec if flow else None) or {})
+    except Exception:
+        return list(entries.values())
+    recorded_branches: dict[str, set[str]] = {}
+    for e in entries.values():
+        if e.branch:
+            recorded_branches.setdefault(e.agent_id, set()).add(e.branch)
+    for agent in spec.agents:
+        if agent.kind == AgentKind.openclaw or agent.merge_strategy == MergeStrategy.skip:
+            continue
+        repo = _resolve_agent_repo_for_run(run=run, agent_id=agent.id, storage=storage)
+        if not repo or not FsPath(repo).exists():
+            continue
+        branches = {f"clawteam/{run.team_name}/{agent.id}"}
+        branches |= recorded_branches.get(agent.id, set())
+        for branch in sorted(branches):
+            try:
+                discovered = await list_branch_prs(cwd=repo, branch=branch)
+            except Exception:  # pragma: no cover - defensive
+                continue
+            for d in discovered:
+                url = str(d.get("url") or "").strip()
+                if not url:
+                    continue
+                existing = entries.get(url)
+                if existing is not None:
+                    # Enrich the recorded entry with live title/state.
+                    if not existing.title:
+                        existing.title = str(d.get("title") or "")
+                    if not existing.state:
+                        existing.state = str(d.get("state") or "")
+                    continue
+                entries[url] = RunPrRecordView(
+                    agent_id=agent.id,
+                    branch=branch,
+                    target_branch=str(d.get("base") or ""),
+                    repo_root=repo,
+                    pr_url=url,
+                    title=str(d.get("title") or ""),
+                    state=str(d.get("state") or ""),
+                    source="discovered",
+                )
+    return list(entries.values())
+
+
 @router.get("/runs/{run_id}/run-diff", response_model=RunDiffView)
 async def get_run_diff(
     run_id: Annotated[str, Path()],
@@ -2001,7 +2110,8 @@ async def get_run_diff(
                 deletions=int(result.get("deletions") or 0),
             )
         )
-    return RunDiffView(items=items)
+    prs = await _collect_run_pr_entries(run=run, storage=storage)
+    return RunDiffView(items=items, prs=prs)
 
 
 @router.get(
@@ -2176,13 +2286,19 @@ async def revert_run_agent_merge(
 
 
 def _list_dev_pending_pr_agent_ids(run: FlowRun) -> list[str]:
-    """Marker list in original (spec) order, de-duplicated."""
+    """Marker list in original (spec) order, de-duplicated.
+
+    Unioned with the auto-PR-failed marker: an auto-PR attempt can fail AFTER
+    finalize wrote the pending marker (the hook is fire-and-forget), and such
+    agents must still surface in the module for a manual retry.
+    """
     raw = (run.inputs or {}).get(DEV_PENDING_PR_AGENT_IDS_KEY)
-    if not isinstance(raw, list):
-        return []
+    failed = read_dev_pr_failed_agent_ids(run)
     out: list[str] = []
     seen: set[str] = set()
-    for item in raw:
+    items = list(raw) if isinstance(raw, list) else []
+    items.extend(a for a in sorted(failed))
+    for item in items:
         aid = str(item or "").strip()
         if aid and aid not in seen:
             out.append(aid)
@@ -2605,6 +2721,24 @@ async def submit_pending_pr(
         storage, run.id, "dev_pr_submitted", agent_id=agent_id,
         payload={"branch": branch, "target_branch": target, "pr_url": pr_url},
     )
+    # Record the PR so it appears in the "本次执行的修改" module, and clear any
+    # auto-PR failure marker for this agent (the manual retry succeeded).
+    if pr_url:
+        append_run_pr_record(
+            run, storage,
+            {
+                "agent_id": agent_id, "task_id": None, "branch": branch,
+                "target_branch": target,
+                "repo_root": str(row.get("repo_root") or ""),
+                "pr_url": pr_url, "source": "manual",
+                "at": iso_utc(datetime.now(timezone.utc)),
+            },
+        )
+    failed = read_dev_pr_failed_agent_ids(run)
+    if agent_id in failed:
+        failed.discard(agent_id)
+        write_dev_pr_failed_agent_ids(run, failed)
+        storage.run_update(run)
     remaining = _remove_dev_pending_pr_agent(run=run, storage=storage, agent_id=agent_id)
     await _pending_pr_post_action_cleanup(
         run=run, storage=storage, agent_id=agent_id, remaining=remaining,

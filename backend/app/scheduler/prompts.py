@@ -178,6 +178,13 @@ class DispatchContext:
     # cite post-merge baseline absolute paths (the worktree is deleted at run end).
     self_merge: bool = False
 
+    # True when THIS task is a developer-mode "submit PR" task
+    # (``FlowTask.dev_submit_pr``; mutually exclusive with ``self_merge``).
+    # The worker must commit its changes but must NOT merge, push, or open a
+    # PR itself — the backend opens the PR automatically once the task
+    # completes.
+    dev_submit_pr: bool = False
+
     # Extra guidance the user typed on the failure pause banner before pressing
     # 继续执行, staged per failed task (run_metadata.FAILURE_GUIDANCE_KEY). Non-empty
     # ONLY on the re-dispatch of that task; the staging area is emptied right
@@ -580,6 +587,16 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
         merge_steps, next_no = _unattended_self_merge_steps(ctx, next_no)
         steps.extend(merge_steps)
 
+    if ctx.dev_submit_pr:
+        steps.append(
+            f"{next_no}. Do NOT merge your branch into the baseline branch, do "
+            "NOT push, and do NOT open a pull request yourself — once you mark "
+            "this task completed, the ClawsomeFlow backend will automatically "
+            "push your worktree branch and open a PR against the baseline "
+            "branch. Just make sure every change is committed (step above)."
+        )
+        next_no += 1
+
     if not ctx.task.is_leader_summary:
         steps.append(
             f"{next_no}. `clawteam inbox send {team} {leader} "
@@ -781,6 +798,16 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     if ctx.self_merge:
         merge_steps, next_no = _unattended_self_merge_steps(ctx, next_no)
         steps.extend(merge_steps)
+
+    if ctx.dev_submit_pr:
+        steps.append(
+            f"{next_no}. Do NOT merge your branch into the baseline branch, do "
+            "NOT push, and do NOT open a pull request yourself — once you mark "
+            "this task completed, the ClawsomeFlow backend will automatically "
+            "push your worktree branch and open a PR against the baseline "
+            "branch. Just make sure every change is committed (step above)."
+        )
+        next_no += 1
 
     if ctx.self_merge:
         steps.append(

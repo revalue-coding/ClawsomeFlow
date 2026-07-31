@@ -569,6 +569,8 @@ const zh = {
       autoMergeDisabledShort: "禁止合入",
       autoMergeOpenclawLocked: "Openclaw Agent 子任务固定自动合入，不可修改",
       autoMergeSyncedNotice: "已同步修改该Agent其他子任务的合入状态",
+      submitPrShort: "提交PR",
+      submitPrHint: "子任务完成后由后台自动推送分支并提交 PR 到基线分支（与自动合入互斥）",
       remove: "移除任务",
     },
     decompose: {
@@ -885,6 +887,7 @@ const zh = {
     runDiffLoadError: "加载本次执行的修改失败。",
     runDiffAgentSummary: "{{commits}} 个提交 · {{files}} 个文件",
     runDiffViewDiff: "查看修改",
+    runDiffViewPr: "查看 PR",
     runDiffModalTitle: "修改内容 — {{agent}}",
     runDiffPatchEmpty: "没有可展示的修改内容。",
     runDiffTruncated: "修改内容过大已截断（可到项目仓库查看完整内容）。",

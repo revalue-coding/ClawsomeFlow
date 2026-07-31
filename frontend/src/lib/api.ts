@@ -315,6 +315,9 @@ export interface FlowTask {
   /** Developer-mode per-task auto-merge switch (only meaningful in 开发者模式).
    *  Omitted / undefined defaults to true (auto-merge enabled). */
   devAutoMerge?: boolean;
+  /** Developer-mode per-task "submit PR" switch (only meaningful in 开发者模式).
+   *  Default false; mutually exclusive with devAutoMerge (PR wins if both set). */
+  devSubmitPr?: boolean;
   dependsOn?: string[];
   isLeaderSummary?: boolean;
   timeoutSeconds?: number;
@@ -460,6 +463,28 @@ export interface RunDiffAgent {
 export interface RunAgentDiff extends RunDiffAgent {
   patch: string;
   patchTruncated: boolean;
+}
+
+/** One PR opened from a run worktree branch ("本次执行的修改" PR entry). */
+export interface RunPrRecord {
+  agentId: string;
+  taskId?: string | null;
+  branch: string;
+  targetBranch: string;
+  repoRoot: string;
+  prUrl: string;
+  title: string;
+  state: string;
+  /** "auto" | "manual" | "discovered" — informational only; the UI does not
+   *  distinguish who opened the PR. */
+  source: string;
+  at: string;
+}
+
+/** The post-run "Run diff" module payload: merge entries + PR entries. */
+export interface RunDiff {
+  items: RunDiffAgent[];
+  prs?: RunPrRecord[];
 }
 
 /** Result of the "撤销合入" (revert-merge) action for one agent. */
@@ -1167,7 +1192,7 @@ export const api = {
       `/api/runs/${id}/pending-merges/${encodeURIComponent(agentId)}/diff`,
     ),
   getRunDiff: (id: string) =>
-    request<{ items: RunDiffAgent[] }>("GET", `/api/runs/${id}/run-diff`),
+    request<RunDiff>("GET", `/api/runs/${id}/run-diff`),
   getRunAgentDiff: (id: string, agentId: string) =>
     request<RunAgentDiff>(
       "GET",

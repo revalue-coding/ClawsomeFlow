@@ -21,6 +21,7 @@ import {
   RunAgentDiff,
   RunDetail as RunDetailT,
   RunDiffAgent,
+  RunPrRecord,
   RunTaskTerminal,
   api,
 } from "@/lib/api";
@@ -2964,6 +2965,7 @@ function RunDiffCard({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [agents, setAgents] = useState<RunDiffAgent[]>([]);
+  const [prs, setPrs] = useState<RunPrRecord[]>([]);
   const [openAgent, setOpenAgent] = useState<string | null>(null);
   const [revertingId, setRevertingId] = useState<string | null>(null);
 
@@ -2973,6 +2975,7 @@ function RunDiffCard({
     try {
       const res = await api.getRunDiff(runId);
       setAgents(res.items ?? []);
+      setPrs(res.prs ?? []);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -3024,7 +3027,7 @@ function RunDiffCard({
         <Loading />
       ) : error ? (
         <ErrorBox>{t("runDetail.runDiffLoadError")}</ErrorBox>
-      ) : agents.length === 0 ? (
+      ) : agents.length === 0 && prs.length === 0 ? (
         <div className="text-sm text-ink-500">{t("runDetail.runDiffEmpty")}</div>
       ) : (
         <div className="space-y-2">
@@ -3074,6 +3077,40 @@ function RunDiffCard({
                     ? t("runDetail.runDiffReverting")
                     : t(revertLabelKey)}
                 </button>
+              </div>
+            </div>
+          ))}
+          {prs.map((p) => (
+            <div
+              key={`pr-${p.prUrl}`}
+              className="flex items-center justify-between gap-3 rounded-md border border-purple-200 bg-purple-50/40 px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="truncate font-medium text-ink-900">
+                  {p.agentId}
+                  <span className="ml-2 rounded bg-purple-100 px-1.5 py-0.5 text-xs font-semibold text-purple-700">
+                    PR
+                  </span>
+                </div>
+                <div className="truncate text-xs text-ink-500 font-mono">
+                  {p.branch}
+                  {p.targetBranch ? ` → ${p.targetBranch}` : ""}
+                </div>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                {p.title ? (
+                  <span className="hidden max-w-64 truncate text-xs text-ink-500 md:inline">
+                    {p.title}
+                  </span>
+                ) : null}
+                <a
+                  href={p.prUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn-outline text-purple-700"
+                >
+                  {t("runDetail.runDiffViewPr")}
+                </a>
               </div>
             </div>
           ))}

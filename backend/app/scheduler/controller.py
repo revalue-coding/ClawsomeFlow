@@ -46,7 +46,12 @@ from pathlib import Path
 from typing import Any
 
 from app.config import load_config
-from app.flow_modes import flow_mode, merge_reference_enabled, task_self_merges
+from app.flow_modes import (
+    flow_mode,
+    merge_reference_enabled,
+    task_dev_submit_pr,
+    task_self_merges,
+)
 from app.integrations.openclaw_cli import resolve_openclaw_executable
 from app.integrations.openclaw_install import (
     looks_like_pending_scope_approval,
@@ -60,6 +65,7 @@ from app.logging_setup import (
     task_state_transition,
 )
 from app.models import (
+    DEFAULT_TARGET_BRANCH,
     AgentKind,
     ExternalChannel,
     Flow,
@@ -109,15 +115,18 @@ from app.scheduler.run_metadata import (
     PAUSE_REASON_FAILURE,
     PAUSE_REASON_INTERNAL_ERROR,
     POST_COMPLAINT_STATUS_KEY,
+    append_run_pr_record,
     clear_checkpoint_state,
     clear_failure_guidance,
     coalesce_reverted_merge_markers,
     pause_reason_outranks,
     read_checkpoint_state,
+    read_dev_pr_failed_agent_ids,
     read_failure_guidance,
     read_pause_state,
     run_is_unattended,
     write_checkpoint_state,
+    write_dev_pr_failed_agent_ids,
     write_pause_state,
 )
 from app.scheduler.sessions.base import (
@@ -524,6 +533,12 @@ class RunController:
         self._leader_inbox_provider = leader_inbox_provider
         self._finalize_fn = finalize_fn or finalize_run
         self._completed_audited: set[str] = set()
+        # Task ids whose dev-mode auto-PR (``dev_submit_pr``) hook already
+        # fired — success OR failure (a failure is retried by the user from
+        # the pending-PR module, not by re-firing the hook). Seeded on resume
+        # from ``dev_pr_auto_submitted`` / ``dev_pr_auto_failed`` events so a
+        # controller restart never pushes/opens the same PR twice.
+        self._dev_pr_hook_fired: set[str] = set()
         self._snapshot_missing_warned = False
         self._forced_failed = False
         self._failed_task_ids: set[str] = set()
@@ -812,6 +827,15 @@ class RunController:
             )
         except Exception:  # pragma: no cover - defensive
             announced_completed = set()
+        # Seed the auto-PR dedupe set from past hook outcomes so a resumed
+        # controller never re-fires push + ``gh pr create`` for the same task.
+        for etype in ("dev_pr_auto_submitted", "dev_pr_auto_failed"):
+            try:
+                self._dev_pr_hook_fired |= set(
+                    self.storage.event_task_ids_with_type(run_id=self.run.id, type=etype)
+                )
+            except Exception:  # pragma: no cover - defensive
+                pass
         reset_task_ids: list[str] = []
         for s in snaps or []:
             book = self._tasks.get(s.task_id)
@@ -3018,6 +3042,7 @@ class RunController:
         """
         changed = False
         audit_targets: list[tuple[FlowAgent, FlowTask]] = []
+        pr_targets: list[tuple[FlowAgent, FlowTask]] = []
         for s in snapshots:
             book = self._tasks.get(s.task_id)
             if book is None:
@@ -3051,6 +3076,17 @@ class RunController:
                 ):
                     audit_targets.append((agent, book.task))
                     self._completed_audited.add(s.task_id)
+                # Queue a dev-mode auto-PR (deduped; fire-and-forget — a PR
+                # failure must never block the run).
+                if (
+                    agent is not None
+                    and s.task_id not in self._dev_pr_hook_fired
+                    and task_dev_submit_pr(
+                        mode=self._flow_mode(), task=book.task, agent=agent,
+                    )
+                ):
+                    pr_targets.append((agent, book.task))
+                    self._dev_pr_hook_fired.add(s.task_id)
             elif new == _TaskState.pending:
                 # ClawTeam says task is pending, so there is no active dispatch
                 # in flight. Clear local dispatch tracking to avoid waiting for
@@ -3094,6 +3130,9 @@ class RunController:
         # Fire-and-forget audits — they never block the loop.
         for agent, ftask in audit_targets:
             asyncio.create_task(self._run_audit(agent, ftask))
+        # Fire-and-forget dev-mode auto-PRs — same non-blocking guarantee.
+        for agent, ftask in pr_targets:
+            asyncio.create_task(self._run_dev_task_pr(agent, ftask))
         return changed
 
     async def _reset_clawteam_task(
@@ -3153,6 +3192,169 @@ class RunController:
                 "post_task_audit_failed",
                 agent_id=agent.id, task_id=task.id, error=str(exc),
             )
+
+    async def _resolve_dev_pr_worktree_row(
+        self, agent: FlowAgent,
+    ) -> dict[str, Any] | None:
+        """Live worktree row for the auto-PR hook (session first, ClawTeam fallback)."""
+        sess = self._sessions.get(agent.id)
+        wt = sess.worktree if sess else None
+        if wt is not None and str(wt.worktree_path or "").strip():
+            return {
+                "worktree_path": str(wt.worktree_path),
+                "branch_name": str(wt.branch_name or ""),
+                "base_branch": str(wt.base_branch or ""),
+                "repo_root": str(wt.repo_root or ""),
+            }
+        from app.integrations.clawteam_cli import get_clawteam_cli
+
+        repo = str(Path(str(agent.repo or "").strip()).expanduser()) if str(
+            agent.repo or "",
+        ).strip() else None
+        try:
+            rows = await get_clawteam_cli().workspace_list(
+                team=self.team_name, repo=repo,
+            )
+        except Exception as exc:
+            logger.warning(
+                "dev_pr_workspace_list_failed",
+                run_id=self.run.id, agent_id=agent.id, error=str(exc),
+            )
+            return None
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("agent_name") or "").strip() == agent.id:
+                return row
+        return None
+
+    async def _run_dev_task_pr(self, agent: FlowAgent, task: FlowTask) -> None:
+        """Best-effort auto-PR hook for ``dev_submit_pr`` tasks.
+
+        Fires on the task's completed transition: push the worktree branch and
+        open a PR against the agent's target branch. **Never raises, never
+        blocks the run** — every failure is logged + recorded so the agent
+        lands in the Run detail "待提交PR" module for a manual retry.
+        """
+        from app.services import dev_pr
+
+        run_id = self.run.id
+        failed = read_dev_pr_failed_agent_ids(self.run)
+
+        def _persist_failed() -> None:
+            write_dev_pr_failed_agent_ids(self.run, failed)
+            try:
+                self.storage.run_update(self.run)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        try:
+            row = await self._resolve_dev_pr_worktree_row(agent)
+            worktree = str((row or {}).get("worktree_path") or "").strip()
+            if not row or not worktree or not Path(worktree).expanduser().exists():
+                failed.add(agent.id)
+                _persist_failed()
+                logger.warning(
+                    "dev_pr_auto_workspace_missing",
+                    run_id=run_id, agent_id=agent.id, task_id=task.id,
+                )
+                self._emit_event(
+                    "dev_pr_auto_failed", agent_id=agent.id, task_id=task.id,
+                    payload={"step": "workspace", "detail": "worktree not found"},
+                )
+                return
+            worktree = str(Path(worktree).expanduser())
+            branch = str(row.get("branch_name") or "").strip() or (
+                f"clawteam/{self.team_name}/{agent.id}"
+            )
+            target = (agent.target_branch or DEFAULT_TARGET_BRANCH).strip() or (
+                DEFAULT_TARGET_BRANCH
+            )
+            repo_root = str(row.get("repo_root") or "").strip()
+            # Defensive: only committed content may ride into the PR.
+            from app.integrations.clawteam_cli import get_clawteam_cli
+
+            try:
+                dirty, entries = await get_clawteam_cli(
+                ).workspace_has_uncommitted_changes(worktree_path=worktree)
+            except Exception as exc:
+                logger.warning(
+                    "dev_pr_dirty_check_failed",
+                    run_id=run_id, agent_id=agent.id, error=str(exc),
+                )
+                dirty, entries = True, []
+            if dirty:
+                if entries:
+                    logger.warning(
+                        "agent_left_uncommitted_changes",
+                        run_id=run_id, agent_id=agent.id,
+                        worktree=worktree, entries=entries[:50],
+                    )
+                    self._emit_event(
+                        "worktree_uncommitted_cleared", agent_id=agent.id,
+                        payload={"worktree": worktree, "entries": entries[:50]},
+                    )
+                for argv in (["git", "reset", "--hard", "HEAD"], ["git", "clean", "-fd"]):
+                    await dev_pr.run_pr_command(argv, cwd=worktree, timeout_sec=60.0)
+            title, body = dev_pr.pr_title_body(
+                run_id=run_id, agent_id=agent.id, branch=branch, target_branch=target,
+            )
+            ok, pr_url, step, detail = await dev_pr.push_and_create_pr(
+                worktree=worktree, branch=branch, target_branch=target,
+                title=title, body=body,
+            )
+            if not ok or not pr_url:
+                failed.add(agent.id)
+                _persist_failed()
+                logger.warning(
+                    "dev_pr_auto_failed",
+                    run_id=run_id, agent_id=agent.id, task_id=task.id,
+                    step=step or "pr_create", detail=detail or "empty PR url",
+                )
+                self._emit_event(
+                    "dev_pr_auto_failed", agent_id=agent.id, task_id=task.id,
+                    payload={
+                        "step": step or "pr_create", "branch": branch,
+                        "target_branch": target,
+                        "detail": detail or "gh pr create returned no PR url",
+                    },
+                )
+                return
+            failed.discard(agent.id)
+            _persist_failed()
+            append_run_pr_record(
+                self.run, self.storage,
+                {
+                    "agent_id": agent.id, "task_id": task.id, "branch": branch,
+                    "target_branch": target, "repo_root": repo_root,
+                    "pr_url": pr_url, "source": "auto",
+                    "at": iso_utc(datetime.now(timezone.utc)),
+                },
+            )
+            logger.info(
+                "dev_pr_auto_submitted",
+                run_id=run_id, agent_id=agent.id, task_id=task.id, pr_url=pr_url,
+            )
+            self._emit_event(
+                "dev_pr_auto_submitted", agent_id=agent.id, task_id=task.id,
+                payload={
+                    "branch": branch, "target_branch": target, "pr_url": pr_url,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive; never block the run
+            failed.add(agent.id)
+            _persist_failed()
+            logger.warning(
+                "dev_pr_auto_failed",
+                run_id=run_id, agent_id=agent.id, task_id=task.id, error=str(exc),
+            )
+            try:
+                self._emit_event(
+                    "dev_pr_auto_failed", agent_id=agent.id, task_id=task.id,
+                    payload={"step": "internal", "detail": str(exc)[:500]},
+                )
+            except Exception:
+                pass
 
     # ── failure handling ─────────────────────────────────────────────
 
@@ -5243,6 +5445,7 @@ class RunController:
             task=task,
             agent=agent,
         )
+        dev_submit_pr = task_dev_submit_pr(mode=mode, task=task, agent=agent)
 
         return DispatchContext(
             run_id=self.run.id,
@@ -5259,6 +5462,7 @@ class RunController:
             worker_reports=worker_reports,
             upstream_outputs=upstream_outputs,
             self_merge=self_merge,
+            dev_submit_pr=dev_submit_pr,
             merge_reference=merge_reference_enabled(mode=mode),
             remote_param_targets=self._downstream_remote_param_targets(task.id),
             user_guidance=self._staged_guidance_for(task.id),

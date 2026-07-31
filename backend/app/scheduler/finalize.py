@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import load_config
-from app.flow_modes import flow_mode, task_self_merges
+from app.flow_modes import flow_mode, task_dev_submit_pr, task_self_merges
 from app.integrations.clawteam_cli import (
     ClawTeamCli,
     get_clawteam_cli,
@@ -67,6 +67,7 @@ from app.scheduler.run_metadata import (
     POST_COMPLAINT_STATUS_KEY,
     POST_REVIEW_TERMINAL_STATUS_KEY,
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
+    read_dev_pr_failed_agent_ids,
     read_failed_auto_merge_agent_ids,
     run_is_unattended,
 )
@@ -939,13 +940,22 @@ def read_dev_pending_pr_agent_ids(run: FlowRun) -> set[str]:
 
 
 def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
-    """Developer-mode runs only: non-OpenClaw agents owning ≥1 no-merge task.
+    """Developer-mode runs only: non-OpenClaw agents awaiting a PR decision.
 
-    Those agents' branches never self-merged into the baseline, so their
-    worktrees must survive terminal cleanup for the Run detail "PR" module
-    (inspect / one-click PR / discard). Returns ``[]`` for every other mode —
-    the resulting marker therefore also records "this run executed in dev
-    mode". Order follows the spec's agent order (deterministic UI).
+    Two sources, unioned:
+
+    * Agents owning ≥1 no-merge task (:func:`task_self_merges` False) that is
+      NOT a ``dev_submit_pr`` task — their branches never self-merged and the
+      backend makes no PR attempt for them.
+    * Agents whose backend auto-PR FAILED (``DEV_PR_FAILED_AGENT_IDS_KEY``) —
+      the run is never blocked by a PR failure, but the worktree is kept for
+      a manual retry from the "待提交PR" module.
+
+    Those agents' worktrees must survive terminal cleanup for the Run detail
+    "PR" module (inspect / one-click PR / discard). Returns ``[]`` for every
+    other mode — the resulting marker therefore also records "this run
+    executed in dev mode". Order follows the spec's agent order
+    (deterministic UI).
     """
     variables = (flow.spec or {}).get("variables") or {}
     if flow_mode(variables) != "dev":
@@ -955,10 +965,14 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
     except Exception:
         return []
     agents_by_id = {a.id: a for a in spec.agents}
-    pending: set[str] = set()
+    pending: set[str] = set(read_dev_pr_failed_agent_ids(run))
     for task in spec.tasks:
         agent = agents_by_id.get(task.owner_agent_id)
         if agent is None or agent.kind == AgentKind.openclaw:
+            continue
+        if task_dev_submit_pr(mode="dev", task=task, agent=agent):
+            # Auto-PR task: only a FAILED attempt (unioned above) lands the
+            # agent in the pending-PR module.
             continue
         if task_self_merges(
             mode="dev",
@@ -968,7 +982,10 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
         ):
             continue
         pending.add(agent.id)
-    return [a.id for a in spec.agents if a.id in pending]
+    return [
+        a.id for a in spec.agents
+        if a.id in pending and a.kind != AgentKind.openclaw
+    ]
 
 
 async def compute_failed_auto_merge_agent_ids(
@@ -1136,6 +1153,11 @@ async def _maybe_cleanup_team_after_terminal(
     dev_pending_pr_ids = (
         set() if abnormal_terminal else read_dev_pending_pr_agent_ids(run)
     )
+    # Auto-PR failures can land after the pending marker was computed (the
+    # hook is fire-and-forget) — preserve those worktrees too so the user can
+    # retry the PR manually from the module.
+    if not abnormal_terminal:
+        dev_pending_pr_ids |= read_dev_pr_failed_agent_ids(run)
     failed_auto_merge_ids = (
         set() if abnormal_terminal else read_failed_auto_merge_agent_ids(run)
     )

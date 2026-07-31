@@ -628,6 +628,17 @@ class FlowTask(_ApiBase):
     # otherwise. Default True (auto-merge enabled). OpenClaw tasks are forced to
     # self-merge regardless of this value. Allowed on the leader summary task.
     dev_auto_merge: bool = True
+    # Developer-mode per-task "submit PR" switch. Only consulted when the Flow
+    # is in developer mode; ignored otherwise. Default False. Mutually
+    # exclusive with ``dev_auto_merge`` (the UI enforces this; when both are
+    # somehow True the backend treats the task as a PR task — see
+    # ``app/flow_modes.task_dev_submit_pr``). When active, the task does NOT
+    # self-merge; after the task completes the backend pushes the worktree
+    # branch and opens a PR against the baseline branch (best-effort — a PR
+    # failure never blocks the run and lands the agent in the "pending PR"
+    # module instead). Ignored for OpenClaw owners (they always self-merge).
+    # Allowed on the leader summary task.
+    dev_submit_pr: bool = False
     timeout_seconds: int = 14400  # 240 min (4h) default
 
     @field_validator("id")

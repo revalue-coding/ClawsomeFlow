@@ -63,6 +63,26 @@ def flow_mode(variables: Mapping[str, object] | None) -> FlowMode:
     return "normal"
 
 
+def task_dev_submit_pr(
+    *,
+    mode: FlowMode,
+    task: FlowTask,
+    agent: FlowAgent,
+) -> bool:
+    """Return True when *task* is a developer-mode "submit PR" task.
+
+    **dev mode only, non-OpenClaw owners only** (OpenClaw always self-merges,
+    never PRs). The leader summary task is eligible like any other task. When
+    both ``dev_submit_pr`` and ``dev_auto_merge`` are somehow True (the UI
+    enforces mutual exclusion), the PR behaviour wins — such a task must not
+    self-merge (see :func:`task_self_merges`).
+    """
+    is_openclaw = getattr(agent.kind, "value", agent.kind) == "openclaw"
+    if mode != "dev" or is_openclaw:
+        return False
+    return bool(getattr(task, "dev_submit_pr", False))
+
+
 def task_self_merges(
     *,
     mode: FlowMode,
@@ -72,10 +92,11 @@ def task_self_merges(
 ) -> bool:
     """Return True when *task* must self-merge its worktree branch in-task.
 
-    * **dev** — OpenClaw is always forced to self-merge; every other agent
-      honours ``task.dev_auto_merge`` (default True). A no-merge task never
-      reaches the baseline branch; its worktree is discarded by terminal team
-      cleanup at run end.
+    * **dev** — OpenClaw is always forced to self-merge; a ``dev_submit_pr``
+      task never self-merges (the backend opens a PR after completion); every
+      other agent honours ``task.dev_auto_merge`` (default True). A no-merge
+      task never reaches the baseline branch; its worktree is discarded by
+      terminal team cleanup at run end.
     * **easy** — every task self-merges.
     * **normal** — only scheduled (unattended) runs self-merge in-task; manual
       runs defer merges to the review / complaint phases.
@@ -86,6 +107,8 @@ def task_self_merges(
     if mode == "dev":
         if is_openclaw:
             return True
+        if task_dev_submit_pr(mode=mode, task=task, agent=agent):
+            return False
         return bool(getattr(task, "dev_auto_merge", True))
     if mode == "easy":
         return True
@@ -113,5 +136,6 @@ __all__ = [
     "FlowMode",
     "flow_mode",
     "merge_reference_enabled",
+    "task_dev_submit_pr",
     "task_self_merges",
 ]
