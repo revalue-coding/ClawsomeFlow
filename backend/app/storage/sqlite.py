@@ -64,6 +64,32 @@ _TERMINAL_STATUSES: frozenset[RunStatus] = TERMINAL_RUN_STATUSES
 _ACTIVE_DRIVING_STATUSES: frozenset[RunStatus] = ACTIVE_DRIVING_RUN_STATUSES
 
 
+def _carry_forward_side_effect_markers(run: FlowRun, persisted: dict | None) -> None:
+    """Copy already-persisted "this side effect fired" markers onto *run*.
+
+    ``run_update`` writes ``run.inputs`` wholesale, and the caller's copy of
+    the row can predate another writer's commit — the abort API flips a run to
+    ``aborted`` (firing the terminal webhook) while the RunController still
+    holds the blob it loaded at run start, which finalize then persists. Left
+    alone that stale blob both re-fires the side effect (its dedupe marker is
+    missing) and erases the marker from disk. Reconciling the markers here
+    covers every writer at once instead of per-call-site.
+    """
+    from app.scheduler.run_metadata import EXTERNAL_CALLBACK_SENT_KEY
+    from app.services.run_notify import NOTIFIED_MARKER_KEY
+
+    if not persisted:
+        return
+    inputs = dict(run.inputs or {})
+    changed = False
+    for key in (NOTIFIED_MARKER_KEY, EXTERNAL_CALLBACK_SENT_KEY):
+        if key in persisted and key not in inputs:
+            inputs[key] = persisted[key]
+            changed = True
+    if changed:
+        run.inputs = inputs
+
+
 class SqliteStorage:
     """Implements :class:`StorageBackend` over the local SQLite db."""
 
@@ -290,34 +316,43 @@ class SqliteStorage:
             except Exception as exc:  # pragma: no cover — defensive
                 self._log_notify_guard(exc)
                 channels = []
-            try:
-                notification = (
-                    prepare_terminal_notification(run, channels=channels)
-                    if channels else None
-                )
-            except Exception as exc:  # pragma: no cover — defensive
-                self._log_notify_guard(exc)
-                notification = None
-            # Delegated-run result callback (external execution nodes): decision +
-            # dedupe marker land in the same commit, POST fires on a daemon thread
-            # after — exactly the run_notify pattern (same single choke point).
-            try:
-                delegate_callback = prepare_delegate_callback(run)
-            except Exception as exc:  # pragma: no cover — defensive
-                self._log_notify_guard(exc)
-                delegate_callback = None
         with self._session() as s:
             current = s.get(FlowRun, run.id)
             if current is None:
                 raise KeyError(run.id)
-            if not skip_side_effects and notification is None and channels:
+            if not skip_side_effects:
+                # Every dedupe decision below reads run.inputs, and callers
+                # legitimately hold a run object older than the row (the abort
+                # API flips the status while the controller still drives its
+                # own copy, which finalize then persists). Reconcile against
+                # the row FIRST so a stale blob can neither re-fire a
+                # side effect nor erase a marker already on disk.
+                _carry_forward_side_effect_markers(run, current.inputs)
                 try:
-                    notification = prepare_checkpoint_notification(
-                        run, old_status=current.status, channels=channels,
+                    notification = (
+                        prepare_terminal_notification(run, channels=channels)
+                        if channels else None
                     )
                 except Exception as exc:  # pragma: no cover — defensive
                     self._log_notify_guard(exc)
                     notification = None
+                if notification is None and channels:
+                    try:
+                        notification = prepare_checkpoint_notification(
+                            run, old_status=current.status, channels=channels,
+                        )
+                    except Exception as exc:  # pragma: no cover — defensive
+                        self._log_notify_guard(exc)
+                        notification = None
+                # Delegated-run result callback (external execution nodes):
+                # decision + dedupe marker land in the same commit, POST fires
+                # on a daemon thread after — exactly the run_notify pattern
+                # (same single choke point).
+                try:
+                    delegate_callback = prepare_delegate_callback(run)
+                except Exception as exc:  # pragma: no cover — defensive
+                    self._log_notify_guard(exc)
+                    delegate_callback = None
             for field in (
                 "status", "inputs", "finished_at", "pending_merges",
             ):

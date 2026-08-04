@@ -302,6 +302,9 @@ def test_build_external_task_text_zh_and_notify_brief() -> None:
         lang="zh",
     )
     assert "设计路线" in brief
+    assert "任务标题" in brief
+    assert "反馈结果要求" in brief
+    assert "旅行计划" not in brief
     assert "ClawsomeFlow External Task" not in brief
     assert build_delegate_runtime_prompt({
         "subject": "整合",
@@ -1006,12 +1009,16 @@ def test_build_external_dispatch_notification_payload() -> None:
     assert "do the review" in payload["content"]
     assert "ClawsomeFlow External Task" not in payload["content"]
 
+    # The rendered message is trimmed to what a PERSON needs: who it is for,
+    # the task briefing and the reply link. Orchestration identifiers are out.
     text = render_message_text(payload, lang="en")
-    assert "external task dispatched" in text
-    assert "Human" in text
+    assert "ClawsomeFlow manual task" in text
     assert "run finished" not in text  # the old buggy headline
+    assert "Assignee: Alice" in text
     assert "Task briefing" in text
     assert "Review the PCB" in text
+    for noise in ("Flow: ", "Run: ", "Team: ", "Channel: ", "Submit at"):
+        assert noise not in text
 
 
 def test_resolve_external_callback_base_url_rewrites_poisoned_loopback(

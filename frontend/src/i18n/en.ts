@@ -508,12 +508,10 @@ const en = {
       externalRemoteCallInfoAction: "Paste remote call info",
       externalRemoteCallInfoUpdateAction: "Update call info",
       externalRemoteCallInfoModalTitle: "Paste remote Flow call info",
-      externalRemoteCallInfoModalHint:
-        "On the target Flow's editor, click \"Copy remote call info\" and paste the JSON here. It will be parsed now and registered when you save the subtask.",
       externalRemoteCallInfoApply: "Parse and use",
       externalRemoteCallInfo: "Remote Flow call info *",
       externalRemoteCallInfoPlaceholder:
-        "On the target Flow's editor click \"Copy remote call info\", paste the JSON here; it is parsed and registered when you save the subtask.",
+        "On the target Flow's editor, click \"Copy remote call info\" and paste the JSON here",
       externalRemoteCallInfoEmpty: "Paste the remote Flow call info first.",
       externalRemoteCallInfoInvalid: "Call info is not valid JSON — copy it again from the target Flow.",
       externalRemoteCallInfoShapeInvalid:
@@ -1022,8 +1020,12 @@ const en = {
       attachmentsCardTitle: "Receipt attachments",
       attachmentsCardHint: "Files submitted with external-task receipts; stored in this machine's run directory.",
       attachmentsLabel: "Attachments (optional, up to 10 files, ≤ 50MB each)",
+      attachmentsAdd: "Add files",
+      attachmentsDropHint: "Drop files here, or click to choose",
+      attachmentRemove: "Remove",
       attachmentsTooMany: "At most 10 attachments.",
       attachmentTooLarge: "Attachment {{name}} exceeds the 50MB limit.",
+      attachmentEmpty: "{{name}} is an empty file or a folder and cannot be uploaded.",
       failReasonTitle: "Report failure",
       failReasonPlaceholder: "Describe the failure reason to report to the scheduler.",
       failReasonEmpty: "Please enter the failure information to report.",

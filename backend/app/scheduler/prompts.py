@@ -1025,16 +1025,15 @@ def build_external_task_text(
 def build_external_notify_brief(
     package: dict[str, object], *, lang: str | None = None,
 ) -> str:
-    """Compact, task-focused webhook body (zh/en) — no nested sheets.
+    """Compact human-task webhook body (zh/en) for chat notifications.
 
-    Prefer structured package fields over the full task sheet so Feishu/
-    Telegram messages stay short and do not repeat origin-delegate wrappers.
+    Only the three editor-facing task fields (title, description, output
+    summary requirement) plus the reply link — no Flow goal, upstream, or
+    task ids.
     """
     resolved = "zh" if (lang or "").strip().lower() == "zh" else "en"
     subject = str(package.get("subject") or "").strip()
-    task_id = str(package.get("taskId") or "").strip()
     description = str(package.get("description") or "").strip()
-    # Strip accidentally nested origin sheets from description.
     for marker in (
         "## ClawsomeFlow External Task",
         "## ClawsomeFlow 外部任务",
@@ -1043,40 +1042,20 @@ def build_external_notify_brief(
         if marker in description:
             description = description.split(marker, 1)[0].strip()
     requirement = str(package.get("outputRequirement") or "").strip()
-    flow_goal = str(package.get("flowDescription") or "").strip()
-    for marker in (
-        "## ClawsomeFlow External Task",
-        "## ClawsomeFlow 外部任务",
-        "## Run-time User Parameters",
-    ):
-        if marker in flow_goal:
-            flow_goal = flow_goal.split(marker, 1)[0].strip()
-
-    upstream = package.get("upstreamOutputs")
-    upstream_lines: list[str] = []
-    if isinstance(upstream, list):
-        for item in upstream:
-            if not isinstance(item, dict):
-                continue
-            u_subj = str(item.get("subject") or item.get("taskId") or "").strip()
-            u_sum = str(item.get("summary") or "").strip()
-            if u_subj or u_sum:
-                upstream_lines.append(
-                    f"- {u_subj}: {u_sum}" if u_sum else f"- {u_subj}"
-                )
 
     if resolved == "zh":
-        lines = []
-        if task_id or subject:
-            lines.append(f"**任务** {task_id}{' · ' if task_id and subject else ''}{subject}".strip())
-        if flow_goal:
-            lines.extend(["", f"**目标** {flow_goal}"])
+        lines: list[str] = []
+        if subject:
+            lines.append(f"**任务标题** {subject}")
         if description:
-            lines.extend(["", description])
+            if lines:
+                lines.append("")
+            lines.append("**任务详细说明**")
+            lines.append(description)
         if requirement:
-            lines.extend(["", f"**输出要求** {requirement}"])
-        if upstream_lines:
-            lines.extend(["", "**上游产出**", *upstream_lines])
+            if lines:
+                lines.append("")
+            lines.append(f"**反馈结果要求** {requirement}")
         reply_url = str(package.get("replyUrl") or "").strip()
         if reply_url:
             lines.extend([
@@ -1092,34 +1071,33 @@ def build_external_notify_brief(
             ])
         return "\n".join(lines).strip()
 
-    lines = []
-    if task_id or subject:
-        lines.append(
-            f"**Task** {task_id}{' · ' if task_id and subject else ''}{subject}".strip()
-        )
-    if flow_goal:
-        lines.extend(["", f"**Goal** {flow_goal}"])
+    lines_en: list[str] = []
+    if subject:
+        lines_en.append(f"**Task title** {subject}")
     if description:
-        lines.extend(["", description])
+        if lines_en:
+            lines_en.append("")
+        lines_en.append("**Task details**")
+        lines_en.append(description)
     if requirement:
-        lines.extend(["", f"**Output** {requirement}"])
-    if upstream_lines:
-        lines.extend(["", "**Upstream**", *upstream_lines])
+        if lines_en:
+            lines_en.append("")
+        lines_en.append(f"**Result requirements** {requirement}")
     reply_url = str(package.get("replyUrl") or "").strip()
     if reply_url:
-        lines.extend([
+        lines_en.extend([
             "",
             f"**Reply link** (open to submit the result and attachments): {reply_url}",
         ])
     else:
-        lines.extend([
+        lines_en.extend([
             "",
             "Submit the result on the Run detail page when done. "
             "(No public base URL is configured, so no remote reply link could "
             "be generated; set the node's public base URL and re-dispatch to "
             "get one.)",
         ])
-    return "\n".join(lines).strip()
+    return "\n".join(lines_en).strip()
 
 
 def build_delegate_runtime_prompt(package: dict[str, object]) -> str:

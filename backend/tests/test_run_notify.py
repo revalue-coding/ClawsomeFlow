@@ -223,6 +223,40 @@ def test_run_update_fires_once_and_persists_marker(monkeypatch) -> None:
     assert len(sent) == 1
 
 
+def test_run_update_from_stale_copy_does_not_refire(monkeypatch) -> None:
+    """Terminating a run flips it twice from two different in-memory copies.
+
+    ``POST /api/runs/{id}/abort`` writes ``aborted`` from the API's freshly
+    loaded row while the RunController still holds the blob it loaded at run
+    start, which finalize then persists. The controller's copy has no dedupe
+    marker, so before the reconcile step it re-fired the webhook AND erased the
+    marker from disk.
+    """
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        run_notify, "send_run_notification", lambda prepared: sent.append(prepared),
+    )
+    flow = _make_flow(name="abort-flow", channels=_ch())
+    storage = get_storage()
+    run = storage.run_create(FlowRun(
+        flow_id=flow.id, flow_version=1, team_name="csflow-abort",
+        status=RunStatus.running, inputs={}, user="alice",
+    ))
+    controller_copy = storage.run_get(run.id)
+    assert controller_copy is not None
+
+    api_copy = storage.run_get(run.id)
+    assert api_copy is not None
+    api_copy.status = RunStatus.aborted
+    storage.run_update(api_copy)
+    assert len(sent) == 1
+
+    controller_copy.status = RunStatus.aborted
+    persisted = storage.run_update(controller_copy)
+    assert len(sent) == 1
+    assert NOTIFIED_MARKER_KEY in persisted.inputs
+
+
 def test_scheduled_run_fires_terminal_webhook(monkeypatch) -> None:
     """Scheduled runs skip the review + complaint phases and go straight to
     ``completed`` — the terminal webhook must still fire (no is_scheduled gate),

@@ -498,12 +498,10 @@ const zh = {
       externalRemoteCallInfoAction: "粘贴远程调用信息",
       externalRemoteCallInfoUpdateAction: "更新调用信息",
       externalRemoteCallInfoModalTitle: "粘贴远程 Flow 调用信息",
-      externalRemoteCallInfoModalHint:
-        "在目标 Flow 的编辑页点击「复制远程调用信息」，把得到的 JSON 粘贴到这里；这里会先解析，保存子任务时自动注册。",
       externalRemoteCallInfoApply: "解析并使用",
       externalRemoteCallInfo: "远端 Flow调用信息 *",
       externalRemoteCallInfoPlaceholder:
-        "在目标 Flow 的编辑页点击「复制远程调用信息」，把得到的 JSON 粘贴到这里；保存子任务时自动解析并注册。",
+        "在目标 Flow 的编辑页点击「复制远程调用信息」，把得到的 JSON 粘贴到此处",
       externalRemoteCallInfoEmpty: "请先粘贴远端 Flow 调用信息。",
       externalRemoteCallInfoInvalid: "调用信息不是合法 JSON，请重新从目标 Flow 复制。",
       externalRemoteCallInfoShapeInvalid:
@@ -1003,8 +1001,12 @@ const zh = {
       attachmentsCardTitle: "回执附件",
       attachmentsCardHint: "人工/外部节点随回执提交的文件，保存在本机的 Run 目录中。",
       attachmentsLabel: "附件（可选，最多 10 个，单个 ≤ 50MB）",
+      attachmentsAdd: "添加文件",
+      attachmentsDropHint: "可拖拽文件到此，或点击选择",
+      attachmentRemove: "移除",
       attachmentsTooMany: "最多上传 10 个附件。",
       attachmentTooLarge: "附件 {{name}} 超过 50MB 上限。",
+      attachmentEmpty: "{{name}} 为空文件或文件夹，无法上传。",
       failReasonTitle: "报告失败",
       failReasonPlaceholder: "请描述失败原因，将上报给调度器。",
       failReasonEmpty: "请填写要上报的失败信息。",

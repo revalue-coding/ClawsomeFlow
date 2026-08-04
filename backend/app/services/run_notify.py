@@ -216,18 +216,6 @@ def flow_channels_for_run(run: FlowRun) -> list[dict[str, Any]]:
         return []
 
 
-#: Channel value → human-readable label in external-dispatch notifications.
-_EXTERNAL_CHANNEL_LABELS_EN = {
-    "human": "Human",
-    "webhook": "Generic interface",
-    "remote_csflow": "Remote ClawsomeFlow",
-}
-_EXTERNAL_CHANNEL_LABELS_ZH = {
-    "human": "人工",
-    "webhook": "通用接口",
-    "remote_csflow": "远程ClawsomeFlow",
-}
-
 #: Chat platforms whose default audience is Chinese-speaking.
 _ZH_PLATFORM_FORMATS = frozenset({"feishu", "dingtalk", "wecom", "serverchan"})
 
@@ -266,12 +254,6 @@ def resolve_notify_language(
     return "en"
 
 
-def _external_channel_label(payload: dict[str, Any], *, lang: str) -> str:
-    channel = str(payload.get("channel") or "")
-    table = _EXTERNAL_CHANNEL_LABELS_ZH if lang == "zh" else _EXTERNAL_CHANNEL_LABELS_EN
-    return table.get(channel, channel or "external")
-
-
 def _headline(payload: dict[str, Any], *, lang: str) -> str:
     event = payload.get("event")
     status = str(payload.get("status") or "")
@@ -282,13 +264,13 @@ def _headline(payload: dict[str, Any], *, lang: str) -> str:
             else "⏸️ ClawsomeFlow run paused — action required"
         )
     if event == "run_external_task":
-        # An external task was dispatched — this is a TASK notification, not a
-        # run-terminal one (rendering it as "run finished" was a bug).
-        channel = _external_channel_label(payload, lang=lang)
+        # A task now waits on a PERSON (the only external channel that
+        # notifies — webhook/remote peers are machine-to-machine). This is a
+        # TASK notification, not a run-terminal one.
         return (
-            f"📤 ClawsomeFlow 外部任务已派发 — {channel}"
+            "📋 ClawsomeFlow人工执行任务"
             if lang == "zh"
-            else f"📤 ClawsomeFlow external task dispatched — {channel}"
+            else "📋 ClawsomeFlow manual task"
         )
     if event == "run_terminal_test":
         return (
@@ -319,8 +301,7 @@ def _short_title(payload: dict[str, Any]) -> str:
     if event == "run_checkpoint":
         return f"ClawsomeFlow: action required ({status})"
     if event == "run_external_task":
-        channel = str(payload.get("channel") or "external")
-        return f"ClawsomeFlow: external task dispatched ({channel})"
+        return "ClawsomeFlow: manual task"
     if event == "run_terminal_test":
         return "ClawsomeFlow: webhook test"
     return f"ClawsomeFlow: run {status}"
@@ -347,10 +328,7 @@ def render_message_text(
             "flow": "Flow",
             "run": "Run",
             "team": "团队",
-            "task": "任务",
-            "channel": "通道",
             "assignee": "指派给",
-            "submit": "提交地址",
             "status": "状态",
             "trigger": "触发：定时",
             "started": "开始",
@@ -364,10 +342,7 @@ def render_message_text(
             "flow": "Flow",
             "run": "Run",
             "team": "Team",
-            "task": "Task",
-            "channel": "Channel",
             "assignee": "Assignee",
-            "submit": "Submit at",
             "status": "Status",
             "trigger": "Trigger: scheduled",
             "started": "Started",
@@ -382,18 +357,16 @@ def render_message_text(
         if value not in (None, ""):
             lines.append(f"{label}: {value}")
 
-    add(labels["flow"], payload.get("flowName") or payload.get("flowId"))
-    add(labels["run"], payload.get("runId"))
-    add(labels["team"], payload.get("teamName"))
     if event == "run_external_task":
-        # Task-dispatch notification: identify the TASK (not the run status).
-        task_line = str(payload.get("taskSubject") or "").strip()
-        task_id = str(payload.get("taskId") or "").strip()
-        add(labels["task"], f"{task_id} · {task_line}" if task_line else task_id)
-        add(labels["channel"], _external_channel_label(payload, lang=resolved))
+        # The recipient is a person who only needs to know what to do and
+        # where to answer. Orchestration identifiers (Flow / Run / team / task
+        # id / channel) are noise here; the briefing already names the task and
+        # carries the reply link.
         add(labels["assignee"], payload.get("assignee"))
-        add(labels["submit"], payload.get("runUrl"))
     else:
+        add(labels["flow"], payload.get("flowName") or payload.get("flowId"))
+        add(labels["run"], payload.get("runId"))
+        add(labels["team"], payload.get("teamName"))
         add(labels["status"], payload.get("status"))
         if payload.get("isScheduled"):
             lines.append(labels["trigger"])

@@ -4355,18 +4355,19 @@ function TaskFormBody({
                     <p className="mb-2 rounded-md border border-brand-100 bg-brand-50/60 px-2.5 py-2 text-xs text-ink-600">
                       {t("flowEditor.taskFields.externalInputsPassthroughHint")}
                     </p>
-                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <div className="mt-2 flex flex-col gap-3">
                       {row.externalRemoteParamFields.map((field) => {
                         const selectedRef = (row.externalInputParamRefs[field] ?? "").trim();
                         const refIsStale = selectedRef !== ""
                           && !runInputFields.includes(selectedRef);
                         return (
                           <div key={field}>
-                            <label className="label text-xs font-normal text-ink-600">
-                              {field}
-                              {row.dependsOn.length === 0 ? " *" : ""}
-                            </label>
-                            <div className="flex gap-2">
+                            <div className="flex items-center gap-3">
+                              <span className="shrink-0 text-sm font-bold text-brand-700">
+                                {field}
+                                {row.dependsOn.length === 0 ? " *" : ""}
+                              </span>
+                              <div className="flex min-w-0 flex-1 items-center gap-2">
                               <div className="min-w-0 flex-1">
                                 {selectedRef ? (
                                   <div className={`input flex items-center justify-between gap-2 ${
@@ -4458,6 +4459,7 @@ function TaskFormBody({
                                   ))}
                                 </select>
                               )}
+                              </div>
                             </div>
                             {refIsStale && (
                               <p className="mt-1 text-xs text-amber-700">
@@ -4563,9 +4565,6 @@ function TaskFormBody({
         title={t("flowEditor.taskFields.externalRemoteCallInfoModalTitle")}
         width="max-w-2xl"
       >
-        <p className="mb-3 text-xs text-ink-600">
-          {t("flowEditor.taskFields.externalRemoteCallInfoModalHint")}
-        </p>
         <textarea
           className="textarea h-44 font-mono text-xs"
           value={remoteCallInfoDraft}

@@ -3843,6 +3843,133 @@ function ExternalAttachmentsCard({
   );
 }
 
+/** Mirrors the backend's external_attachments limits (per receipt). */
+const EXTERNAL_ATTACHMENT_MAX_COUNT = 10;
+const EXTERNAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+
+/** Receipt-attachment picker for a human external task: drag-and-drop or
+ *  browse, selections accumulate, each file can be dropped individually —
+ *  the same interaction as the agent-chat composer. */
+function ExternalAttachmentPicker({
+  files,
+  disabled,
+  onChange,
+}: {
+  files: File[];
+  disabled: boolean;
+  onChange: (next: File[]) => void;
+}) {
+  const { t } = useTranslation();
+  const { alert } = useDialog();
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  function addFiles(incoming: File[]) {
+    if (incoming.length === 0) return;
+    const next = [...files];
+    let error: string | null = null;
+    for (const file of incoming) {
+      const duplicate = next.some(
+        (existing) =>
+          existing.name === file.name
+          && existing.size === file.size
+          && existing.lastModified === file.lastModified,
+      );
+      if (duplicate) continue;
+      if (file.size <= 0) {
+        // A dropped directory also arrives as a zero-byte File.
+        error ??= t("runDetail.external.attachmentEmpty", { name: file.name });
+        continue;
+      }
+      if (file.size > EXTERNAL_ATTACHMENT_MAX_BYTES) {
+        error ??= t("runDetail.external.attachmentTooLarge", { name: file.name });
+        continue;
+      }
+      if (next.length >= EXTERNAL_ATTACHMENT_MAX_COUNT) {
+        error ??= t("runDetail.external.attachmentsTooMany");
+        break;
+      }
+      next.push(file);
+    }
+    onChange(next);
+    if (error) void alert(error);
+  }
+
+  return (
+    <div>
+      <div className="label text-xs font-normal text-ink-600">
+        {t("runDetail.external.attachmentsLabel")}
+      </div>
+      <div
+        className={`mt-1 space-y-2 rounded-lg border border-dashed px-3 py-2 transition ${
+          dragging
+            ? "border-brand-400 bg-brand-50/40"
+            : "border-ink-200 bg-ink-50/40"
+        }`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (!dragging) setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+          setDragging(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          if (disabled) return;
+          addFiles(Array.from(e.dataTransfer.files ?? []));
+        }}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            addFiles(Array.from(e.target.files ?? []));
+            e.target.value = "";
+          }}
+        />
+        <div className="flex flex-wrap items-center gap-2 text-xs text-ink-500">
+          <button
+            type="button"
+            className="btn-outline !px-2 !py-1 text-xs"
+            disabled={disabled}
+            onClick={() => inputRef.current?.click()}
+          >
+            {t("runDetail.external.attachmentsAdd")}
+          </button>
+          <span>{t("runDetail.external.attachmentsDropHint")}</span>
+        </div>
+        {files.length > 0 && (
+          <div className="space-y-1">
+            {files.map((file, idx) => (
+              <div
+                key={`${file.name}-${file.size}-${file.lastModified}-${idx}`}
+                className="flex items-center justify-between rounded-md border border-ink-200 bg-surface px-2 py-1 text-xs text-ink-600"
+              >
+                <span className="truncate" title={file.name}>
+                  {file.name} · {formatAttachmentSize(file.size)}
+                </span>
+                <button
+                  type="button"
+                  className="ml-2 shrink-0 text-ink-400 hover:text-ink-700"
+                  disabled={disabled}
+                  title={t("runDetail.external.attachmentRemove")}
+                  onClick={() => onChange(files.filter((_, i) => i !== idx))}
+                >
+                  {t("runDetail.external.attachmentRemove")}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ExternalTasksCard({
   runId,
   teamName,
@@ -3920,22 +4047,6 @@ function ExternalTasksCard({
     } finally {
       setSubmitting(null);
     }
-  }
-
-  function pickAttachments(taskId: string, list: FileList | null) {
-    const files = Array.from(list ?? []);
-    if (files.length > 10) {
-      void alert(t("runDetail.external.attachmentsTooMany"));
-      return;
-    }
-    const oversized = files.find((f) => f.size > 50 * 1024 * 1024);
-    if (oversized) {
-      void alert(
-        t("runDetail.external.attachmentTooLarge", { name: oversized.name }),
-      );
-      return;
-    }
-    setAttachFiles((prev) => ({ ...prev, [taskId]: files }));
   }
 
   function copyReplyLink(taskId: string, url: string) {
@@ -4111,20 +4222,16 @@ function ExternalTasksCard({
                       }))
                     }
                   />
-                  <div>
-                    <label className="label text-xs font-normal text-ink-600">
-                      {t("runDetail.external.attachmentsLabel")}
-                    </label>
-                    <input
-                      type="file"
-                      multiple
-                      className="block w-full text-xs text-ink-600"
-                      disabled={actionsBusy}
-                      onChange={(e) => {
-                        pickAttachments(item.taskId, e.target.files);
-                      }}
-                    />
-                  </div>
+                  <ExternalAttachmentPicker
+                    files={attachFiles[item.taskId] ?? []}
+                    disabled={actionsBusy}
+                    onChange={(next) =>
+                      setAttachFiles((prev) => ({
+                        ...prev,
+                        [item.taskId]: next,
+                      }))
+                    }
+                  />
                   <div className="flex items-center justify-end gap-2">
                     <button
                       type="button"
