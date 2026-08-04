@@ -1103,35 +1103,6 @@ export function RunDetail() {
           runPaused ? `space-y-5 ${pausedUiLock}` : "space-y-5"
         }
       >
-      {/* Pending merges */}
-      {run.pendingMerges && run.pendingMerges.length > 0 && (
-        <Card className="border-amber-200">
-          <CardTitle hint={t("runDetail.pendingMergeHint")}>
-            {t("runDetail.pendingMerges")} ({run.pendingMerges.length})
-          </CardTitle>
-          <div className="space-y-3">
-            {run.pendingMerges.map((p) => (
-              <PendingMergeCard
-                key={p.agentId}
-                runId={run.id}
-                pending={p}
-                mergeRepoPath={
-                  (p.repoRoot ?? "").trim()
-                  || (
-                    (run.specSnapshot?.agents as Array<{ id?: string; repo?: string }> | undefined)
-                      ?.find((a) => String(a.id ?? "") === p.agentId)
-                      ?.repo
-                    ?? ""
-                  ).trim()
-                }
-                onMerge={() => onMerge(p.agentId)}
-                onDismiss={() => onDismiss(p.agentId)}
-              />
-            ))}
-          </div>
-        </Card>
-      )}
-
       {/* Checkpoint card is keyed off live snapshot/events — NOT run.status —
           so it coexists with awaiting_external / external todo cards. */}
       {Boolean(activeCheckpoint) && !TERMINAL.has(run.status) && (
@@ -1295,10 +1266,6 @@ export function RunDetail() {
         />
       )}
 
-      {/* Receipt attachments submitted with external-task results (kept
-          downloadable after the todo card disappears). */}
-      <ExternalAttachmentsCard runId={run.id} events={events} />
-
       {mergeFailures.length > 0 && (
         <Card className="border-rose-200">
           <CardTitle hint={t("runDetail.mergeFailureHint")}>
@@ -1441,6 +1408,38 @@ export function RunDetail() {
           </div>
         </Card>
       )}
+
+      {run.pendingMerges && run.pendingMerges.length > 0 && (
+        <Card className="border-amber-200">
+          <CardTitle hint={t("runDetail.pendingMergeHint")}>
+            {t("runDetail.pendingMerges")} ({run.pendingMerges.length})
+          </CardTitle>
+          <div className="space-y-3">
+            {run.pendingMerges.map((p) => (
+              <PendingMergeCard
+                key={p.agentId}
+                runId={run.id}
+                pending={p}
+                mergeRepoPath={
+                  (p.repoRoot ?? "").trim()
+                  || (
+                    (run.specSnapshot?.agents as Array<{ id?: string; repo?: string }> | undefined)
+                      ?.find((a) => String(a.id ?? "") === p.agentId)
+                      ?.repo
+                    ?? ""
+                  ).trim()
+                }
+                onMerge={() => onMerge(p.agentId)}
+                onDismiss={() => onDismiss(p.agentId)}
+              />
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Receipt attachments submitted with external-task results (kept
+          downloadable after the todo card disappears). */}
+      <ExternalAttachmentsCard runId={run.id} events={events} />
 
       {/* Run diff — what actually landed on the baseline branches. Shown from
           awaiting_user_complaint (worktrees still alive, cleanup deferred)
