@@ -1022,14 +1022,59 @@ def build_external_task_text(
     return "\n\n".join(b for b in blocks if b).strip() + "\n"
 
 
+def _compact_notify_upstream_summary(raw: str) -> str:
+    """Keep upstream output text human-readable in chat notifications."""
+    text = raw.strip()
+    for sep in (
+        "## 回执附件（本地绝对路径）",
+        "## Receipt Attachments (local absolute paths)",
+        "csflow-remote-params:",
+    ):
+        if sep in text:
+            text = text.split(sep, 1)[0].strip()
+    max_chars = 800
+    if len(text) > max_chars:
+        text = text[: max_chars - 1].rstrip() + "…"
+    return text
+
+
+def _notify_brief_upstream_lines(
+    package: dict[str, object],
+    *,
+    lang: str,
+) -> list[str]:
+    """One bullet per direct upstream: task title + output only (no ids/agents)."""
+    upstream = package.get("upstreamOutputs")
+    if not isinstance(upstream, list) or not upstream:
+        return []
+    bullets: list[str] = []
+    for item in upstream:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("subject") or "").strip()
+        if not title:
+            title = str(item.get("taskId") or "").strip()
+        summary = _compact_notify_upstream_summary(str(item.get("summary") or ""))
+        if not title and not summary:
+            continue
+        if summary:
+            bullets.append(f"- {title}: {summary}" if title else f"- {summary}")
+        elif title:
+            bullets.append(f"- {title}")
+    if not bullets:
+        return []
+    heading = "**上游产出**" if lang == "zh" else "**Upstream outputs**"
+    return [heading, *bullets]
+
+
 def build_external_notify_brief(
     package: dict[str, object], *, lang: str | None = None,
 ) -> str:
     """Compact human-task webhook body (zh/en) for chat notifications.
 
-    Only the three editor-facing task fields (title, description, output
-    summary requirement) plus the reply link — no Flow goal, upstream, or
-    task ids.
+    Task editor fields (title, description, output summary requirement),
+    a minimal upstream block (each upstream's title + output only), and
+    the reply link — no Flow goal or orchestration ids.
     """
     resolved = "zh" if (lang or "").strip().lower() == "zh" else "en"
     subject = str(package.get("subject") or "").strip()
@@ -1056,6 +1101,11 @@ def build_external_notify_brief(
             if lines:
                 lines.append("")
             lines.append(f"**反馈结果要求** {requirement}")
+        upstream_block = _notify_brief_upstream_lines(package, lang="zh")
+        if upstream_block:
+            if lines:
+                lines.append("")
+            lines.extend(upstream_block)
         reply_url = str(package.get("replyUrl") or "").strip()
         if reply_url:
             lines.extend([
@@ -1083,6 +1133,11 @@ def build_external_notify_brief(
         if lines_en:
             lines_en.append("")
         lines_en.append(f"**Result requirements** {requirement}")
+    upstream_block_en = _notify_brief_upstream_lines(package, lang="en")
+    if upstream_block_en:
+        if lines_en:
+            lines_en.append("")
+        lines_en.extend(upstream_block_en)
     reply_url = str(package.get("replyUrl") or "").strip()
     if reply_url:
         lines_en.extend([

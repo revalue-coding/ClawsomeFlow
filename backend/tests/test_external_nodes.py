@@ -306,6 +306,43 @@ def test_build_external_task_text_zh_and_notify_brief() -> None:
     assert "反馈结果要求" in brief
     assert "旅行计划" not in brief
     assert "ClawsomeFlow External Task" not in brief
+    brief_up = build_external_notify_brief(
+        {
+            "subject": "汇总",
+            "description": "整理结论",
+            "outputRequirement": "一页纸",
+            "upstreamOutputs": [
+                {
+                    "taskId": "t0",
+                    "subject": "调研",
+                    "fromAgent": "agent-a",
+                    "summary": "要点 A",
+                },
+                {"taskId": "t9", "subject": "评审", "summary": "通过"},
+            ],
+        },
+        lang="zh",
+    )
+    assert "**上游产出**" in brief_up
+    assert "调研: 要点 A" in brief_up
+    assert "评审: 通过" in brief_up
+    assert "agent-a" not in brief_up
+    assert "t0" not in brief_up
+    noisy = build_external_notify_brief(
+        {
+            "subject": "下游",
+            "upstreamOutputs": [
+                {
+                    "subject": "上游",
+                    "summary": "结论摘要\n\n## 回执附件（本地绝对路径）\n- /tmp/x",
+                },
+            ],
+        },
+        lang="zh",
+    )
+    assert "上游: 结论摘要" in noisy
+    assert "回执附件" not in noisy
+    assert "/tmp/x" not in noisy
     assert build_delegate_runtime_prompt({
         "subject": "整合",
         "description": "汇总前序结果",
