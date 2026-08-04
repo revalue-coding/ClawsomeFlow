@@ -168,6 +168,12 @@ _REPLY_TEXTS = {
         "summary": "结果摘要",
         "summary_ph": "说明结论、关键数据；失败时写明原因。",
         "attachments": "附件（可选，最多 {max_count} 个，单个 ≤ {max_mb}MB）",
+        "attachments_add": "添加文件",
+        "attachments_hint": "可拖拽文件到此，或点击选择",
+        "attachments_remove": "移除",
+        "attachments_too_many": "最多上传 {max_count} 个附件。",
+        "attachment_too_large": "附件 {name} 超过 {max_mb}MB 上限。",
+        "attachment_empty": "{name} 为空文件或文件夹，无法上传。",
         "submit": "提交回执",
         "done_title": "回执已提交",
         "done_body": "结果已记录，任务流程将继续。可以关闭本页面。",
@@ -193,6 +199,12 @@ _REPLY_TEXTS = {
         "summary": "Summary",
         "summary_ph": "State the conclusion and key data; on failure, the reason.",
         "attachments": "Attachments (optional, up to {max_count} files, ≤ {max_mb}MB each)",
+        "attachments_add": "Add files",
+        "attachments_hint": "Drop files here, or click to choose",
+        "attachments_remove": "Remove",
+        "attachments_too_many": "At most {max_count} attachments.",
+        "attachment_too_large": "Attachment {name} exceeds the {max_mb}MB limit.",
+        "attachment_empty": "{name} is an empty file or a folder and cannot be uploaded.",
         "submit": "Submit receipt",
         "done_title": "Receipt submitted",
         "done_body": "The result has been recorded and the flow will continue. "
@@ -230,7 +242,112 @@ _REPLY_PAGE_CSS = (
     "width:100%;padding:12px;border:0;border-radius:8px;background:#4f46e5;"
     "color:#fff;font-size:15px;font-weight:600;cursor:pointer}"
     ".muted{color:#64748b;font-size:13px}"
+    ".dropzone{border:1.5px dashed #cbd5e1;border-radius:10px;background:#f8fafc;"
+    "padding:12px;transition:border-color .15s,background .15s}"
+    ".dropzone.over{border-color:#4f46e5;background:#eef2ff}"
+    ".dropzone .row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}"
+    ".dropzone button.pick{margin:0;width:auto;padding:6px 12px;background:#fff;"
+    "color:#3730a3;border:1px solid #c7d2fe;font-size:13px}"
+    ".atts{list-style:none;margin:10px 0 0;padding:0}"
+    ".atts li{display:flex;align-items:center;gap:8px;margin-top:6px;padding:6px 10px;"
+    "background:#fff;border:1px solid #e2e8f0;border-radius:8px;font-size:13px}"
+    ".atts .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;"
+    "white-space:nowrap}"
+    ".atts button.rm{margin:0;width:auto;padding:2px 8px;background:none;"
+    "color:#64748b;font-size:13px;font-weight:400}"
+    ".att-err{color:#e11d48;font-size:13px;margin:8px 0 0}"
 )
+
+
+def _attachment_picker_html(
+    texts: dict[str, str], *, max_count: int, max_bytes: int,
+) -> str:
+    """File input + drag-drop zone, list and per-file remove (WebUI parity).
+
+    The plain ``<input type=file>`` is the actual submit payload and stays
+    usable without JavaScript; the script only takes over when ``DataTransfer``
+    is available, since rewriting ``input.files`` is what lets a removed file
+    disappear from the multipart body.
+    """
+    esc = html_mod.escape
+    max_mb = max_bytes // (1024 * 1024)
+    cfg = json.dumps(
+        {
+            "maxCount": max_count,
+            "maxBytes": max_bytes,
+            "remove": texts["attachments_remove"],
+            "tooMany": texts["attachments_too_many"].format(max_count=max_count),
+            "tooLarge": texts["attachment_too_large"].format(
+                name="{name}", max_mb=max_mb,
+            ),
+            "empty": texts["attachment_empty"].format(name="{name}"),
+        },
+        ensure_ascii=False,
+    ).replace("<", "\\u003c")
+    markup = (
+        "<div id='atts-zone' class='dropzone'>"
+        "<input type='file' id='atts-input' name='attachments' multiple>"
+        "<div class='row' id='atts-row' hidden>"
+        f"<button type='button' class='pick' id='atts-pick'>"
+        f"{esc(texts['attachments_add'])}</button>"
+        f"<span class='muted'>{esc(texts['attachments_hint'])}</span>"
+        "</div>"
+        "<ul class='atts' id='atts-list'></ul>"
+        "<p class='att-err' id='atts-err'></p>"
+        "</div>"
+    )
+    script = (
+        "<script>(function(){"
+        f"var C={cfg};"
+        "var input=document.getElementById('atts-input');"
+        "var zone=document.getElementById('atts-zone');"
+        "var row=document.getElementById('atts-row');"
+        "var list=document.getElementById('atts-list');"
+        "var err=document.getElementById('atts-err');"
+        "var pick=document.getElementById('atts-pick');"
+        "try{new DataTransfer();}catch(e){return;}"
+        "input.style.display='none';row.hidden=false;"
+        "var files=[];var depth=0;"
+        "function fmt(n){if(n<1024)return n+' B';"
+        "if(n<1048576)return (n/1024).toFixed(1)+' KB';"
+        "return (n/1048576).toFixed(1)+' MB';}"
+        "function sync(){var dt=new DataTransfer();"
+        "for(var i=0;i<files.length;i++)dt.items.add(files[i]);input.files=dt.files;}"
+        "function render(){list.textContent='';files.forEach(function(f,idx){"
+        "var li=document.createElement('li');"
+        "var nm=document.createElement('span');nm.className='nm';nm.title=f.name;"
+        "nm.textContent=f.name+' \\u00b7 '+fmt(f.size);"
+        "var rm=document.createElement('button');rm.type='button';rm.className='rm';"
+        "rm.textContent=C.remove;rm.title=C.remove;"
+        "rm.addEventListener('click',function(){files.splice(idx,1);sync();render();});"
+        "li.appendChild(nm);li.appendChild(rm);list.appendChild(li);});}"
+        "function add(incoming){var msg='';"
+        "for(var i=0;i<incoming.length;i++){var f=incoming[i];"
+        "var dup=files.some(function(x){return x.name===f.name&&x.size===f.size"
+        "&&x.lastModified===f.lastModified;});"
+        "if(dup)continue;"
+        "if(!f.size){msg=msg||C.empty.replace('{name}',f.name);continue;}"
+        "if(f.size>C.maxBytes){msg=msg||C.tooLarge.replace('{name}',f.name);continue;}"
+        "if(files.length>=C.maxCount){msg=msg||C.tooMany;break;}"
+        "files.push(f);}"
+        "err.textContent=msg;sync();render();}"
+        "pick.addEventListener('click',function(){input.click();});"
+        "input.addEventListener('change',function(){"
+        "add(Array.prototype.slice.call(input.files||[]));});"
+        "zone.addEventListener('dragenter',function(e){e.preventDefault();"
+        "depth+=1;zone.classList.add('over');});"
+        "zone.addEventListener('dragover',function(e){e.preventDefault();});"
+        "zone.addEventListener('dragleave',function(){"
+        "depth=Math.max(0,depth-1);if(!depth)zone.classList.remove('over');});"
+        "zone.addEventListener('drop',function(e){e.preventDefault();"
+        "depth=0;zone.classList.remove('over');"
+        "add(Array.prototype.slice.call((e.dataTransfer||{}).files||[]));});"
+        "['dragover','drop'].forEach(function(ev){"
+        "document.addEventListener(ev,function(e){"
+        "if(!zone.contains(e.target))e.preventDefault();});});"
+        "})();</script>"
+    )
+    return markup + script
 
 
 def _reply_lang(subject: str = "", description: str = "") -> str:
@@ -367,7 +484,11 @@ async def reply_form(
         + f"<textarea name='summary' placeholder='{esc(texts['summary_ph'])}'>"
           "</textarea>"
         + f"<label>{esc(attach_label)}</label>"
-        + "<input type='file' name='attachments' multiple>"
+        + _attachment_picker_html(
+            texts,
+            max_count=MAX_ATTACHMENT_COUNT,
+            max_bytes=MAX_ATTACHMENT_BYTES,
+        )
         + f"<button type='submit'>{esc(texts['submit'])}</button>"
         + "</form>"
     )

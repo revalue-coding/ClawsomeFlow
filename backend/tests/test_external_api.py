@@ -870,6 +870,32 @@ def test_reply_form_renders_task_sheet(app_client: TestClient) -> None:
     assert 'name="attachments"' in r.text.replace("'", '"')
 
 
+def test_reply_form_attachment_picker_matches_webui(app_client: TestClient) -> None:
+    """Drag-drop zone, file list and per-file remove, same as the WebUI card."""
+    run = _mk_run_with_dispatch()
+    r = app_client.get(
+        f"/api/external/reply/{run.id}/t1", params={"t": _reply_ticket(run)},
+    )
+    assert r.status_code == 200
+    body = r.text.replace("'", '"')
+    # The plain input is still the submit payload (works with JS disabled).
+    assert 'type="file" id="atts-input" name="attachments" multiple' in body
+    assert 'id="atts-zone" class="dropzone"' in body
+    assert 'id="atts-list"' in body
+    # Enhancement only engages where rewriting input.files is possible.
+    assert "new DataTransfer()" in body
+    for event in ("dragenter", "dragover", "dragleave", "drop"):
+        assert f'zone.addEventListener("{event}"' in body
+    # Limits mirror the backend's own caps.
+    from app.services.external_attachments import (
+        MAX_ATTACHMENT_BYTES,
+        MAX_ATTACHMENT_COUNT,
+    )
+
+    assert f'"maxCount": {MAX_ATTACHMENT_COUNT}' in body
+    assert f'"maxBytes": {MAX_ATTACHMENT_BYTES}' in body
+
+
 def test_reply_form_rejects_bad_and_stale_tickets(app_client: TestClient) -> None:
     run = _mk_run_with_dispatch(nonce="n-latest")
     r_bad = app_client.get(
