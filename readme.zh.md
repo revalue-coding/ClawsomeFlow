@@ -251,7 +251,7 @@ csflow mcp print-config --platform hermes     # YAML：mcp_servers: …
 </p>
 
 <p align="center">
-  <img src="./docs/assets/wechat-group-qr.png?v=5" alt="ClawsomeFlow 微信交流群" width="240" />
+  <img src="./docs/assets/wechat-group-qr.png?v=6" alt="ClawsomeFlow 微信交流群" width="240" />
 </p>
 
 ---
