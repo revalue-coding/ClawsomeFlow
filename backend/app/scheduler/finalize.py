@@ -69,6 +69,7 @@ from app.scheduler.run_metadata import (
     PRESERVE_WORKTREE_AGENT_IDS_KEY,
     read_dev_pr_failed_agent_ids,
     read_failed_auto_merge_agent_ids,
+    read_run_pr_records,
     run_is_unattended,
 )
 from app.storage import StorageBackend
@@ -225,8 +226,8 @@ async def finalize_run(
             # Scheduled dev runs still honour per-task devAutoMerge=false —
             # record those agents so their worktrees survive tail cleanup
             # for the Run-detail PR module.
-            dev_pending_pr = compute_dev_pending_pr_agent_ids(
-                flow=ipt.flow, run=ipt.run,
+            dev_pending_pr = await compute_dev_pending_pr_agent_ids(
+                flow=ipt.flow, run=ipt.run, cli=cli,
             )
             if dev_pending_pr:
                 merged_inputs[DEV_PENDING_PR_AGENT_IDS_KEY] = dev_pending_pr
@@ -273,8 +274,8 @@ async def finalize_run(
             # Dev mode: agents with no-merge (devAutoMerge=false) tasks keep
             # their worktrees at terminal cleanup for the PR module
             # (easy mode self-merges everything → helper returns []).
-            dev_pending_pr = compute_dev_pending_pr_agent_ids(
-                flow=ipt.flow, run=ipt.run,
+            dev_pending_pr = await compute_dev_pending_pr_agent_ids(
+                flow=ipt.flow, run=ipt.run, cli=cli,
             )
             if dev_pending_pr:
                 merged_inputs[DEV_PENDING_PR_AGENT_IDS_KEY] = dev_pending_pr
@@ -939,7 +940,9 @@ def read_dev_pending_pr_agent_ids(run: FlowRun) -> set[str]:
     return out
 
 
-def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
+async def compute_dev_pending_pr_agent_ids(
+    *, flow: Flow, run: FlowRun, cli: ClawTeamCli | None = None,
+) -> list[str]:
     """Developer-mode runs only: non-OpenClaw agents awaiting a PR decision.
 
     Two sources, unioned:
@@ -950,6 +953,17 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
     * Agents whose backend auto-PR FAILED (``DEV_PR_FAILED_AGENT_IDS_KEY``) —
       the run is never blocked by a PR failure, but the worktree is kept for
       a manual retry from the "待提交PR" module.
+
+    **Push-state refinement** (only when *cli* is provided — finalize time,
+    worktrees still alive): ``dev_submit_pr`` is per-task, so an agent may mix
+    PR tasks with no-merge tasks; task execution order is DAG-runtime
+    determined, so whether the no-merge commits already rode into the PR
+    cannot be decided statically. A statically-pending agent that has a
+    successful PR record for this run AND no local commits beyond
+    ``origin/<branch>`` has nothing left to submit and is dropped (its
+    worktree may be cleaned; the PR already carries everything). Any probe
+    error keeps the agent pending (conservative). Agents in the FAILED set
+    are never refined away — their worktree is needed for the manual retry.
 
     Those agents' worktrees must survive terminal cleanup for the Run detail
     "PR" module (inspect / one-click PR / discard). Returns ``[]`` for every
@@ -965,7 +979,8 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
     except Exception:
         return []
     agents_by_id = {a.id: a for a in spec.agents}
-    pending: set[str] = set(read_dev_pr_failed_agent_ids(run))
+    failed_ids = set(read_dev_pr_failed_agent_ids(run))
+    pending: set[str] = set(failed_ids)
     for task in spec.tasks:
         agent = agents_by_id.get(task.owner_agent_id)
         if agent is None or agent.kind in (AgentKind.openclaw, AgentKind.external):
@@ -982,10 +997,79 @@ def compute_dev_pending_pr_agent_ids(*, flow: Flow, run: FlowRun) -> list[str]:
         ):
             continue
         pending.add(agent.id)
-    return [
+    out = [
         a.id for a in spec.agents
         if a.id in pending and a.kind not in (AgentKind.openclaw, AgentKind.external)
     ]
+    if cli is None or not out:
+        return out
+    dropped = await _pending_pr_agents_fully_pushed(
+        candidates=[a for a in out if a not in failed_ids], run=run, cli=cli,
+    )
+    return [a for a in out if a not in dropped]
+
+
+async def _pending_pr_agents_fully_pushed(
+    *, candidates: list[str], run: FlowRun, cli: ClawTeamCli,
+) -> set[str]:
+    """Of *candidates*, the agents whose worktree branch is fully pushed.
+
+    "Fully pushed" = the agent has a successful PR record for this run AND
+    ``git rev-list --count origin/<branch>..<branch>`` in its worktree is 0
+    (every local commit already rides on the pushed PR branch). Best-effort:
+    any error (no worktree row, git failure, missing remote ref …) keeps the
+    agent pending.
+    """
+    from app.services.dev_pr import PR_DELTA_PROBE_TIMEOUT_SEC, run_pr_command
+
+    recorded = {
+        str(r.get("agent_id") or "")
+        for r in read_run_pr_records(run)
+        if str(r.get("pr_url") or "").strip()
+    }
+    probe_ids = [a for a in candidates if a in recorded]
+    if not probe_ids:
+        return set()
+    try:
+        rows = await cli.workspace_list(team=run.team_name)
+    except Exception as exc:
+        logger.warning(
+            "pending_pr_push_probe_workspace_list_failed",
+            run_id=run.id, error=str(exc),
+        )
+        return set()
+    rows_by_agent = {
+        str(r.get("agent_name") or "").strip(): r
+        for r in rows or [] if isinstance(r, dict)
+    }
+    dropped: set[str] = set()
+    for agent_id in probe_ids:
+        row = rows_by_agent.get(agent_id)
+        worktree = str((row or {}).get("worktree_path") or "").strip()
+        if not worktree or not Path(worktree).expanduser().exists():
+            continue
+        worktree = str(Path(worktree).expanduser())
+        branch = str(row.get("branch_name") or "").strip() or (
+            f"clawteam/{run.team_name}/{agent_id}"
+        )
+        rc, out_txt, _err = await run_pr_command(
+            ["git", "rev-list", "--count", f"origin/{branch}..{branch}"],
+            cwd=worktree, timeout_sec=PR_DELTA_PROBE_TIMEOUT_SEC,
+        )
+        txt = out_txt.strip()
+        if rc != 0 or not txt:
+            continue
+        try:
+            unpushed = int(txt)
+        except ValueError:
+            continue
+        if unpushed == 0:
+            dropped.add(agent_id)
+            logger.info(
+                "pending_pr_agent_fully_pushed",
+                run_id=run.id, agent_id=agent_id, branch=branch,
+            )
+    return dropped
 
 
 async def compute_failed_auto_merge_agent_ids(
@@ -1018,7 +1102,9 @@ async def compute_failed_auto_merge_agent_ids(
         spec = FlowSpec.model_validate(flow.spec)
     except Exception:
         return []
-    dev_pending = set(compute_dev_pending_pr_agent_ids(flow=flow, run=run))
+    dev_pending = set(
+        await compute_dev_pending_pr_agent_ids(flow=flow, run=run, cli=cli),
+    )
     agents_by_id = {a.id: a for a in spec.agents}
     expected: set[str] = set()
     for task in spec.tasks:

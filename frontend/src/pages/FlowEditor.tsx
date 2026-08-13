@@ -54,7 +54,6 @@ import {
   setEasyMode,
   getDevMode,
   setDevMode,
-  collectUpstreamAgentIds,
 } from "@/lib/flowRuntime";
 import { branchAfterRepoCheck, ensureRepoAndListBranches } from "@/lib/flowRepoBranch";
 import { alertIfNativeDirectoryBlocked } from "@/lib/remoteClient";
@@ -105,9 +104,10 @@ interface TaskRow {
   /** Developer-mode per-task auto-merge switch. Default true. Ignored unless
    *  the Flow is in developer mode; OpenClaw owners are forced to auto-merge. */
   autoMerge: boolean;
-  /** Developer-mode per-task "提交PR" switch. Default false. Mutually
-   *  exclusive with autoMerge (enabling one disables the other); ignored
-   *  unless the Flow is in developer mode; never set for OpenClaw owners. */
+  /** Developer-mode per-task "提交PR" switch. Default false. Fully
+   *  independent of autoMerge (both on = local self-merge + remote PR);
+   *  per-task (NOT agent-synced, unlike autoMerge); ignored unless the Flow
+   *  is in developer mode; never set for OpenClaw owners. */
   submitPr: boolean;
   ownerKind: OwnerKindDraft;
   ownerId: string;
@@ -2779,12 +2779,8 @@ export function FlowEditor() {
                           if (item.rowKey !== row.rowKey) return item;
                           if (item.autoMerge === enabled) return item;
                           changedAny = true;
-                          // 互斥:打开自动合入时关闭提交PR。
-                          return {
-                            ...item,
-                            autoMerge: enabled,
-                            submitPr: enabled ? false : item.submitPr,
-                          };
+                          // 与提交PR完全独立:只改合入开关,不动 submitPr。
+                          return { ...item, autoMerge: enabled };
                         }
                         if (item.isLeaderSummary || ownerKey(item) !== targetOwner) {
                           return item;
@@ -2794,34 +2790,21 @@ export function FlowEditor() {
                         }
                         changedAny = true;
                         if (item.rowKey !== row.rowKey) syncedOthers += 1;
-                        return {
-                          ...item,
-                          autoMerge: enabled,
-                          submitPr: enabled ? false : item.submitPr,
-                        };
+                        return { ...item, autoMerge: enabled };
                       });
                       if (changedAny) setTasks(nextTasks);
                       if (syncedOthers > 0) showAutoMergeSyncNotice();
                     }}
                     onSetSubmitPr={(enabled) => {
                       if (row.ownerKind === "openclaw") return;
-                      const targetOwner = ownerKey(row);
-                      const nextTasks = tasks.map((item) => {
-                        if (row.isLeaderSummary) {
-                          if (item.rowKey !== row.rowKey) return item;
-                        } else if (
-                          item.isLeaderSummary || ownerKey(item) !== targetOwner
-                        ) {
-                          return item;
-                        }
-                        // 互斥:打开提交PR时关闭自动合入。
-                        return {
-                          ...item,
-                          submitPr: enabled,
-                          autoMerge: enabled ? false : item.autoMerge,
-                        };
-                      });
-                      setTasks(nextTasks);
+                      // 提交PR是子任务级开关:不跨行联动,也不影响合入开关。
+                      setTasks((prev) =>
+                        prev.map((item) =>
+                          item.rowKey === row.rowKey
+                            ? { ...item, submitPr: enabled }
+                            : item,
+                        ),
+                      );
                     }}
                     onMove={(dir) => moveRow(row.rowKey, dir)}
                   />
@@ -3089,7 +3072,8 @@ function TaskListRow({
                 );
               })()}
               {devMode && row.ownerKind !== "external" && row.ownerKind !== "openclaw" && (
-                // “提交PR”开关:与自动合入互斥;OpenClaw 固定自动合入不提供。
+                // “提交PR”开关:子任务级、与自动合入完全独立(双开=本地合入+远端PR);
+                // OpenClaw 固定自动合入不提供。
                 <span className="inline-flex shrink-0 items-center gap-2">
                   <button
                     type="button"
@@ -3786,11 +3770,6 @@ function TaskFormBody({
   const dependableTasks = tasks
     .filter((r) => r.rowKey !== row.rowKey && !r.isLeaderSummary && r.id.trim())
     .map((r) => r.id);
-  const upstreamAgentIds = useMemo(
-    () => collectUpstreamAgentIds(row, tasks),
-    [row, tasks],
-  );
-
   async function onPickRepo() {
     if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     onRepoPathEditStart();
@@ -3888,23 +3867,6 @@ function TaskFormBody({
                 </span>
               ))}
             </span>
-          </div>
-        )}
-        {devMode && (
-          <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2 mb-2">
-            <p>{t("flowEditor.taskFields.descriptionCollabHint")}</p>
-            {upstreamAgentIds.length > 0 && (
-              <span className="mt-1 inline-flex flex-wrap gap-1.5">
-                {upstreamAgentIds.map((agentId) => (
-                  <span
-                    key={agentId}
-                    className="inline-flex items-center rounded-full border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900"
-                  >
-                    {agentId}
-                  </span>
-                ))}
-              </span>
-            )}
           </div>
         )}
         <textarea
@@ -5849,13 +5811,11 @@ function rowsToSpec(
     // Developer-mode per-task auto-merge (default true). OpenClaw is forced
     // on; external nodes have no worktree so the flag is meaningless — keep
     // it true so no "pending PR" style logic can ever consider them.
-    // "提交PR" (submitPr) is mutually exclusive: a PR task never self-merges.
+    // "提交PR" (submitPr) is fully independent (both on = merge + PR).
     devAutoMerge:
       r.ownerKind === "openclaw" || r.ownerKind === "external"
         ? true
-        : r.submitPr
-          ? false
-          : r.autoMerge !== false,
+        : r.autoMerge !== false,
     devSubmitPr:
       r.ownerKind === "openclaw" || r.ownerKind === "external"
         ? false
@@ -6485,9 +6445,7 @@ function proposalToRows(
       ),
       autoMerge: meta.kind === "openclaw"
         ? true
-        : (tk.devSubmitPr ?? tk.dev_submit_pr)
-          ? false
-          : (tk.devAutoMerge ?? tk.dev_auto_merge) !== false,
+        : (tk.devAutoMerge ?? tk.dev_auto_merge) !== false,
       submitPr: meta.kind === "openclaw"
         ? false
         : !!(tk.devSubmitPr ?? tk.dev_submit_pr),
@@ -6540,9 +6498,7 @@ function specToRows(spec: FlowSpec): TaskRow[] {
       requiresHumanCheckpoint: !!tk.requiresHumanCheckpoint,
       autoMerge: ownerKind === "openclaw"
         ? true
-        : tk.devSubmitPr
-          ? false
-          : tk.devAutoMerge !== false,
+        : tk.devAutoMerge !== false,
       submitPr: ownerKind === "openclaw" ? false : !!tk.devSubmitPr,
       ownerKind,
       ownerId: tk.ownerAgentId,

@@ -436,8 +436,6 @@ const en = {
       subjectPlaceholder: "Short title shown in dashboards",
       description: "Detailed instruction *",
       descriptionPlaceholder: "All work the worker must complete when receiving this task.",
-      descriptionCollabHint:
-        "Tip: you can direct upstream collaboration in this description, e.g. \"open a PR for [agent]\". Or wait until the run finishes and open a PR in one click. [agent] must be one of this task's upstream dependency agents:",
       paramFieldsHintPrefix: "Reference Flow parameter fields:",
       outputSummary: "Output summary requirement",
       outputSummaryHint: "(optional; the summary will be sent to downstream dependent tasks)",
@@ -580,7 +578,7 @@ const en = {
       autoMergeOpenclawLocked: "OpenClaw subtasks always auto-merge and can't be changed",
       autoMergeSyncedNotice: "Synced merge status for this agent's other subtasks",
       submitPrShort: "Submit PR",
-      submitPrHint: "After the subtask completes, the backend pushes the branch and opens a PR to the baseline branch (mutually exclusive with auto-merge)",
+      submitPrHint: "After the subtask completes, the backend pushes the branch and opens a PR to the baseline branch. Independent of auto-merge: with both on, the task merges into the local baseline AND a review PR is opened against the remote (nothing to PR is skipped, not a failure). Per-subtask setting (not synced across this agent's subtasks).",
       remove: "Remove task",
     },
     decompose: {

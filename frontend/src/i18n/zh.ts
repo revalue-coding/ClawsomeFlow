@@ -431,8 +431,6 @@ const zh = {
       subjectPlaceholder: "Dashboard 上展示的简短标题",
       description: "任务详细说明 *",
       descriptionPlaceholder: "Worker 收到本任务时需要完成的全部工作。",
-      descriptionCollabHint:
-        "提示：可在说明中直接指挥上游协作，例如「为 [agent] 提交 PR」。或者等待任务执行完后一键提交PR。可指挥的 [agent] 仅限本任务的上游依赖 Agent：",
       paramFieldsHintPrefix: "可引用Flow 参数字段：",
       outputSummary: "输出摘要要求",
       outputSummaryHint: "（可选；摘要将发送给下游依赖任务）",
@@ -568,7 +566,7 @@ const zh = {
       autoMergeOpenclawLocked: "Openclaw Agent 子任务固定自动合入，不可修改",
       autoMergeSyncedNotice: "已同步修改该Agent其他子任务的合入状态",
       submitPrShort: "提交PR",
-      submitPrHint: "子任务完成后由后台自动推送分支并提交 PR 到基线分支（与自动合入互斥）",
+      submitPrHint: "子任务完成后由后台自动推送分支并提交 PR 到基线分支。与自动合入完全独立：两者同开时任务先合入本地基线，同时向远端提交评审 PR（远端无增量则自动跳过，不算失败）。本开关为子任务级，不与该 Agent 其他子任务联动。",
       remove: "移除任务",
     },
     decompose: {

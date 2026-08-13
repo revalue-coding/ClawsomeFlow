@@ -316,7 +316,8 @@ export interface FlowTask {
    *  Omitted / undefined defaults to true (auto-merge enabled). */
   devAutoMerge?: boolean;
   /** Developer-mode per-task "submit PR" switch (only meaningful in 开发者模式).
-   *  Default false; mutually exclusive with devAutoMerge (PR wins if both set). */
+   *  Default false; fully independent of devAutoMerge (both on = local
+   *  self-merge + remote PR). */
   devSubmitPr?: boolean;
   dependsOn?: string[];
   isLeaderSummary?: boolean;

@@ -477,6 +477,42 @@ def test_leader_non_scheduled_final_reply_keeps_worktree_path_check() -> None:
     assert "baseline" not in msg.lower()
 
 
+# ── developer-mode "submit PR" steps (independent of self-merge) ──────
+
+
+def test_worker_dispatch_pr_only_forbids_merge_push_and_pr() -> None:
+    """PR without self-merge: the task must not merge, push, or open a PR."""
+    msg = prompts.build_worker_dispatch(_ctx(dev_submit_pr=True))
+    assert "Do NOT merge your branch into the baseline branch" in msg
+    assert "NOT open a pull request yourself" in msg
+    assert "**Self-merge:**" not in msg
+
+
+def test_worker_dispatch_merge_plus_pr_dual_mode() -> None:
+    """devAutoMerge and devSubmitPr are independent: both on = the local
+    self-merge steps STAY, and only push / self-opened PR are forbidden."""
+    msg = prompts.build_worker_dispatch(_ctx(self_merge=True, dev_submit_pr=True))
+    assert "**Self-merge:**" in msg
+    assert "Perform the self-merge steps above" in msg
+    assert "NOT open a pull request yourself" in msg
+    assert "Do NOT merge your branch into the baseline branch" not in msg
+
+
+def test_leader_dispatch_merge_plus_pr_dual_mode() -> None:
+    ctx = _ctx(
+        agent=_agent(id="leader", leader=True),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+        worktree=_wt(agent="leader", branch="clawteam/csflow-x/leader",
+                     path="/tmp/wt/leader", main="/tmp/main", base="main"),
+        self_merge=True,
+        dev_submit_pr=True,
+    )
+    msg = prompts.build_leader_dispatch(ctx)
+    assert "**Self-merge:**" in msg
+    assert "Perform the self-merge steps above" in msg
+    assert "Do NOT merge your branch into the baseline branch" not in msg
+
+
 # ── upstream-outputs block ────────────────────────────────────────────
 
 

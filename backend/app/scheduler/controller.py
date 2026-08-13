@@ -534,10 +534,11 @@ class RunController:
         self._finalize_fn = finalize_fn or finalize_run
         self._completed_audited: set[str] = set()
         # Task ids whose dev-mode auto-PR (``dev_submit_pr``) hook already
-        # fired — success OR failure (a failure is retried by the user from
-        # the pending-PR module, not by re-firing the hook). Seeded on resume
-        # from ``dev_pr_auto_submitted`` / ``dev_pr_auto_failed`` events so a
-        # controller restart never pushes/opens the same PR twice.
+        # fired — success, failure OR noop-skip (a failure is retried by the
+        # user from the pending-PR module, not by re-firing the hook). Seeded
+        # on resume from ``dev_pr_auto_submitted`` / ``dev_pr_auto_failed`` /
+        # ``dev_pr_auto_skipped`` events so a controller restart never
+        # pushes/opens the same PR twice.
         self._dev_pr_hook_fired: set[str] = set()
         self._snapshot_missing_warned = False
         self._forced_failed = False
@@ -829,7 +830,9 @@ class RunController:
             announced_completed = set()
         # Seed the auto-PR dedupe set from past hook outcomes so a resumed
         # controller never re-fires push + ``gh pr create`` for the same task.
-        for etype in ("dev_pr_auto_submitted", "dev_pr_auto_failed"):
+        for etype in (
+            "dev_pr_auto_submitted", "dev_pr_auto_failed", "dev_pr_auto_skipped",
+        ):
             try:
                 self._dev_pr_hook_fired |= set(
                     self.storage.event_task_ids_with_type(run_id=self.run.id, type=etype)
@@ -3271,7 +3274,20 @@ class RunController:
                 DEFAULT_TARGET_BRANCH
             )
             repo_root = str(row.get("repo_root") or "").strip()
-            # Defensive: only committed content may ride into the PR.
+            # Defensive: only committed content may ride into the PR. The
+            # reset/clean is gated to the agent's LAST task in this run: the
+            # hook is fire-and-forget, so by the time it runs the scheduler
+            # may already have dispatched this agent's NEXT task — a hard
+            # reset here would wipe that task's in-progress work. When other
+            # tasks remain we just push (a push only reads the branch ref;
+            # uncommitted files never ride into the PR anyway).
+            agent_has_remaining_tasks = any(
+                b.task.owner_agent_id == agent.id
+                and b.task.id != task.id
+                and b.state != _TaskState.completed
+                and b.task.id not in self._skipped_task_ids
+                for b in self._tasks.values()
+            )
             from app.integrations.clawteam_cli import get_clawteam_cli
 
             try:
@@ -3283,7 +3299,7 @@ class RunController:
                     run_id=run_id, agent_id=agent.id, error=str(exc),
                 )
                 dirty, entries = True, []
-            if dirty:
+            if dirty and not agent_has_remaining_tasks:
                 if entries:
                     logger.warning(
                         "agent_left_uncommitted_changes",
@@ -3303,6 +3319,25 @@ class RunController:
                 worktree=worktree, branch=branch, target_branch=target,
                 title=title, body=body,
             )
+            if ok and not pr_url:
+                # Noop: the branch has no commits beyond the remote baseline
+                # (merge+PR dual mode with a pushed baseline, or a re-fire
+                # after the PR merged). Nothing to PR — NOT a failure.
+                failed.discard(agent.id)
+                _persist_failed()
+                logger.info(
+                    "dev_pr_auto_skipped",
+                    run_id=run_id, agent_id=agent.id, task_id=task.id,
+                    reason=detail or dev_pr.NOOP_NO_REMOTE_DELTA,
+                )
+                self._emit_event(
+                    "dev_pr_auto_skipped", agent_id=agent.id, task_id=task.id,
+                    payload={
+                        "reason": detail or dev_pr.NOOP_NO_REMOTE_DELTA,
+                        "branch": branch, "target_branch": target,
+                    },
+                )
+                return
             if not ok or not pr_url:
                 failed.add(agent.id)
                 _persist_failed()

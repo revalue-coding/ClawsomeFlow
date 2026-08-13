@@ -38,6 +38,14 @@ from typing import Any
 PR_PUSH_TIMEOUT_SEC = 300.0
 PR_CREATE_TIMEOUT_SEC = 120.0
 PR_LIST_TIMEOUT_SEC = 60.0
+PR_DELTA_PROBE_TIMEOUT_SEC = 60.0
+
+#: ``detail`` marker returned by :func:`push_and_create_pr` when the branch
+#: has no commits beyond the remote baseline (nothing to PR — e.g. the task
+#: self-merged locally AND the baseline was already pushed, or a re-fire after
+#: the PR merged). Callers detect it via ``ok=True`` + empty ``pr_url``; the
+#: marker is for logs/events. NOT a failure.
+NOOP_NO_REMOTE_DELTA = "no_remote_delta"
 
 #: An existing / created PR or MR (GitHub ``/pull/<n>``, GitLab/Gitee
 #: ``/merge_requests/<n>``).
@@ -109,6 +117,36 @@ def pr_title_body(
     return title, body
 
 
+async def _remote_delta_count(
+    *, worktree: str, branch: str, target_branch: str,
+) -> int | None:
+    """Commits on *branch* not yet on ``origin/<target_branch>`` (``None`` =
+    cannot determine — missing ref, no remote, timeout … → caller proceeds).
+
+    Best-effort ``git fetch origin <target>`` first so the count reflects the
+    live remote; a stale-but-present ref still gives a safe answer for the
+    ``0`` case (reachability from an old target tip implies reachability from
+    any newer one, absent force pushes).
+    """
+    await run_pr_command(
+        ["git", "fetch", "origin", target_branch],
+        cwd=worktree, timeout_sec=PR_DELTA_PROBE_TIMEOUT_SEC,
+    )
+    rc, out, _err = await run_pr_command(
+        ["git", "rev-list", "--count", f"origin/{target_branch}..{branch}"],
+        cwd=worktree, timeout_sec=PR_DELTA_PROBE_TIMEOUT_SEC,
+    )
+    txt = out.strip()
+    # A real ``rev-list --count`` always prints a number; anything else
+    # (failure, empty, garbage) = indeterminate → caller proceeds normally.
+    if rc != 0 or not txt:
+        return None
+    try:
+        return int(txt)
+    except ValueError:
+        return None
+
+
 async def push_and_create_pr(
     *,
     worktree: str,
@@ -124,6 +162,12 @@ async def push_and_create_pr(
     stderr/stdout); empty on success. ``pr_url`` is a real PR/MR URL when one
     could be created or found, otherwise the platform's pre-filled create-PR
     page URL (see module docstring, step 4).
+
+    **Noop case**: when the pushed branch has no commits beyond the remote
+    baseline (e.g. the task self-merged locally and the baseline was already
+    pushed — the merge+PR "dual" mode; or a re-fire after the PR merged),
+    every platform would refuse an empty PR. That is NOT a failure: returns
+    ``(True, "", "", NOOP_NO_REMOTE_DELTA)`` — ``ok`` with an empty URL.
     """
     # Step 1 — plain git push.
     rc, out, err = await run_pr_command(
@@ -136,6 +180,15 @@ async def push_and_create_pr(
     url = _extract_pr_url(push_text)
     if url:
         return True, url, "", ""
+
+    # Noop probe — an empty branch-vs-remote-baseline delta means there is
+    # nothing to PR; skip the creation attempts (they would all fail with
+    # "no commits between …" and poison the pending-PR module).
+    delta = await _remote_delta_count(
+        worktree=worktree, branch=branch, target_branch=target_branch,
+    )
+    if delta == 0:
+        return True, "", "", NOOP_NO_REMOTE_DELTA
 
     # Step 2 — git-native MR creation via push options (GitLab/Gitee). On
     # platforms without push-option support this errors — tolerated.

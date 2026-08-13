@@ -134,10 +134,17 @@ def test_task_dev_submit_pr_resolution() -> None:
 
     ext = SimpleNamespace(kind=AgentKind.external)
     assert task_dev_submit_pr(mode="dev", task=t1, agent=ext) is False
-    # A PR task never self-merges (even when dev_auto_merge is also True).
+    # dev_submit_pr is fully INDEPENDENT of dev_auto_merge: both on = the
+    # task self-merges locally AND the backend opens a PR (dual mode) …
     both = t1.model_copy(update={"dev_auto_merge": True})
     assert task_self_merges(
         mode="dev", run_is_scheduled=False, task=both, agent=agents["alice"],
+    ) is True
+    assert task_dev_submit_pr(mode="dev", task=both, agent=agents["alice"]) is True
+    # … while a PR task with dev_auto_merge=False still never self-merges
+    # (because of the merge flag, not the PR flag).
+    assert task_self_merges(
+        mode="dev", run_is_scheduled=False, task=t1, agent=agents["alice"],
     ) is False
     # Leader summary PR task is eligible too.
     ts = next(t for t in spec.tasks if t.id == "ts")
@@ -152,17 +159,166 @@ def test_dev_submit_pr_defaults_false() -> None:
 # ── pending-PR marker computation ─────────────────────────────────────
 
 
-def test_pending_pr_marker_excludes_pr_tasks() -> None:
+@pytest.mark.asyncio
+async def test_pending_pr_marker_excludes_pr_tasks() -> None:
     flow, run = _make_flow_and_run()
     # alice (PR task) and leader (PR summary task) must NOT be pending.
-    assert fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run) == []
+    assert await fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run) == []
 
 
-def test_pending_pr_marker_unions_auto_pr_failures() -> None:
+@pytest.mark.asyncio
+async def test_pending_pr_marker_unions_auto_pr_failures() -> None:
     flow, run = _make_flow_and_run(
         inputs={DEV_PR_FAILED_AGENT_IDS_KEY: ["alice"]},
     )
-    assert fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run) == ["alice"]
+    assert await fin.compute_dev_pending_pr_agent_ids(
+        flow=flow, run=run,
+    ) == ["alice"]
+
+
+def _mixed_pr_spec(*, repo: str = "/tmp/r") -> FlowSpec:
+    """alice mixes a no-merge task (t0) with a PR task (t1) — per-task
+    ``dev_submit_pr`` independence."""
+    spec = _dev_spec(repo=repo)
+    tasks = [
+        FlowTask(id="t0", owner_agent_id="alice", subject="w",
+                 description="", depends_on=[], dev_auto_merge=False),
+        *spec.tasks,
+    ]
+    return spec.model_copy(update={"tasks": tasks})
+
+
+class _ProbeStubCli:
+    def __init__(self, rows: list[dict[str, str]]) -> None:
+        self.rows = rows
+
+    async def workspace_list(self, *, team: str, repo: str | None = None):
+        del team, repo
+        return list(self.rows)
+
+
+def _wt_row(run, agent_id: str, wt_path: str) -> dict[str, str]:
+    return {
+        "agent_name": agent_id,
+        "branch_name": f"clawteam/{run.team_name}/{agent_id}",
+        "worktree_path": wt_path,
+        "repo_root": "/tmp/r",
+        "team_name": run.team_name,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pending_pr_marker_drops_fully_pushed_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A statically-pending agent whose PR already carries every local commit
+    (successful PR record + zero unpushed commits) has nothing left to submit
+    — the push-state refinement drops it."""
+    wt = tmp_path / "wt-alice"
+    wt.mkdir()
+    flow, run = _make_flow_and_run(spec=_mixed_pr_spec(), inputs={
+        RUN_PR_RECORDS_KEY: [
+            {"agent_id": "alice", "task_id": "t1", "branch": "b",
+             "target_branch": "main", "repo_root": "/tmp/r",
+             "pr_url": "https://github.com/a/b/pull/1",
+             "source": "auto", "at": ""},
+        ],
+    })
+    # Static rule alone: alice pending (owns no-merge non-PR task t0).
+    assert await fin.compute_dev_pending_pr_agent_ids(
+        flow=flow, run=run,
+    ) == ["alice"]
+
+    async def fake_run_pr_command(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        assert argv[:3] == ["git", "rev-list", "--count"]
+        return 0, "0\n", ""
+
+    from app.services import dev_pr
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run_pr_command)
+    cli = _ProbeStubCli([_wt_row(run, "alice", str(wt))])
+    assert await fin.compute_dev_pending_pr_agent_ids(
+        flow=flow, run=run, cli=cli,
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_pending_pr_marker_keeps_agent_with_unpushed_commits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    wt = tmp_path / "wt-alice"
+    wt.mkdir()
+    flow, run = _make_flow_and_run(spec=_mixed_pr_spec(), inputs={
+        RUN_PR_RECORDS_KEY: [
+            {"agent_id": "alice", "task_id": "t1", "branch": "b",
+             "target_branch": "main", "repo_root": "/tmp/r",
+             "pr_url": "https://github.com/a/b/pull/1",
+             "source": "auto", "at": ""},
+        ],
+    })
+
+    async def fake_run_pr_command(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        return 0, "2\n", ""  # two commits landed after the PR push
+
+    from app.services import dev_pr
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run_pr_command)
+    cli = _ProbeStubCli([_wt_row(run, "alice", str(wt))])
+    assert await fin.compute_dev_pending_pr_agent_ids(
+        flow=flow, run=run, cli=cli,
+    ) == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_pending_pr_marker_never_drops_failed_agents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A FAILED auto-PR agent stays pending even if a probe would call it
+    fully pushed — its worktree is needed for the manual retry."""
+    wt = tmp_path / "wt-alice"
+    wt.mkdir()
+    flow, run = _make_flow_and_run(spec=_mixed_pr_spec(), inputs={
+        DEV_PR_FAILED_AGENT_IDS_KEY: ["alice"],
+        RUN_PR_RECORDS_KEY: [
+            {"agent_id": "alice", "task_id": "t1", "branch": "b",
+             "target_branch": "main", "repo_root": "/tmp/r",
+             "pr_url": "https://github.com/a/b/pull/1",
+             "source": "auto", "at": ""},
+        ],
+    })
+
+    async def fake_run_pr_command(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        return 0, "0\n", ""
+
+    from app.services import dev_pr
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run_pr_command)
+    cli = _ProbeStubCli([_wt_row(run, "alice", str(wt))])
+    assert await fin.compute_dev_pending_pr_agent_ids(
+        flow=flow, run=run, cli=cli,
+    ) == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_pending_pr_marker_probe_without_pr_record_keeps_static(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """No successful PR record → the probe never runs; static rule stands."""
+    flow, run = _make_flow_and_run(spec=_mixed_pr_spec())
+
+    async def boom(argv, *, cwd, timeout_sec):
+        raise AssertionError("probe must not run without a PR record")
+
+    from app.services import dev_pr
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", boom)
+    cli = _ProbeStubCli([])
+    assert await fin.compute_dev_pending_pr_agent_ids(
+        flow=flow, run=run, cli=cli,
+    ) == ["alice"]
 
 
 # ── run_metadata helpers ──────────────────────────────────────────────
@@ -496,7 +652,9 @@ async def test_push_pr_created_via_git_push_options(
         title="t", body="b",
     )
     assert ok is True and url == "https://gitlab.com/a/b/-/merge_requests/5"
-    assert commands[1][:3] == ["git", "push", "-o"]
+    # The remote-delta probe (fetch + rev-list) runs between the plain push
+    # and the push-options attempt — locate the latter by content.
+    assert any(c[:3] == ["git", "push", "-o"] for c in commands)
 
 
 @pytest.mark.asyncio
@@ -545,6 +703,60 @@ async def test_push_pr_falls_back_to_create_page_url(
     )
     assert ok is True and step == ""
     assert url == "https://github.com/a/b/pull/new/br"
+
+
+@pytest.mark.asyncio
+async def test_push_pr_noop_when_no_remote_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Branch fully contained in origin/<target> (merge+PR dual mode with a
+    pushed baseline, or a re-fire after the PR merged): nothing to PR →
+    ok-noop, NEVER a failure, and no PR-creation attempt is made."""
+    from app.services import dev_pr
+
+    commands: list[list[str]] = []
+
+    async def fake_run(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        commands.append(list(argv))
+        assert argv[0] == "git", "no PR-creation tool may run on a noop"
+        assert "merge_request.create" not in argv
+        if argv[:3] == ["git", "rev-list", "--count"]:
+            return 0, "0\n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: True)
+    ok, url, step, detail = await dev_pr.push_and_create_pr(
+        worktree="/tmp/wt", branch="br", target_branch="main",
+        title="t", body="b",
+    )
+    assert ok is True and url == "" and step == ""
+    assert detail == dev_pr.NOOP_NO_REMOTE_DELTA
+    assert commands[0] == ["git", "push", "-u", "origin", "br"]
+
+
+@pytest.mark.asyncio
+async def test_push_pr_proceeds_when_remote_delta_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import dev_pr
+
+    async def fake_run(argv, *, cwd, timeout_sec):
+        del cwd, timeout_sec
+        if argv[0] == "gh":
+            return 0, "https://github.com/a/b/pull/11\n", ""
+        if argv[:3] == ["git", "rev-list", "--count"]:
+            return 0, "3\n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(dev_pr, "run_pr_command", fake_run)
+    monkeypatch.setattr(dev_pr, "_gh_available", lambda: True)
+    ok, url, _step, _detail = await dev_pr.push_and_create_pr(
+        worktree="/tmp/wt", branch="br", target_branch="main",
+        title="t", body="b",
+    )
+    assert ok is True and url == "https://github.com/a/b/pull/11"
 
 
 @pytest.mark.asyncio

@@ -107,21 +107,24 @@ def _make_flow_and_run(
 # ── marker computation ────────────────────────────────────────────────
 
 
-def test_compute_marker_dev_mode_only_no_merge_agents() -> None:
+@pytest.mark.asyncio
+async def test_compute_marker_dev_mode_only_no_merge_agents() -> None:
     flow, run = _make_flow_and_run(mode="dev", alice_auto_merge=False)
-    ids = fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run)
+    ids = await fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run)
     assert ids == ["alice"]
 
 
-def test_compute_marker_empty_when_all_tasks_auto_merge() -> None:
+@pytest.mark.asyncio
+async def test_compute_marker_empty_when_all_tasks_auto_merge() -> None:
     flow, run = _make_flow_and_run(mode="dev", alice_auto_merge=True)
-    assert fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run) == []
+    assert await fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run) == []
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["easy", "normal"])
-def test_compute_marker_empty_outside_dev_mode(mode: str) -> None:
+async def test_compute_marker_empty_outside_dev_mode(mode: str) -> None:
     flow, run = _make_flow_and_run(mode=mode, alice_auto_merge=False)
-    assert fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run) == []
+    assert await fin.compute_dev_pending_pr_agent_ids(flow=flow, run=run) == []
 
 
 # ── finalize writes the marker ────────────────────────────────────────

@@ -73,10 +73,12 @@ def task_dev_submit_pr(
 
     **dev mode only, worktree-owning owners only** — OpenClaw always
     self-merges (never PRs) and external execution nodes own no worktree at
-    all. The leader summary task is eligible like any other task. When both
-    ``dev_submit_pr`` and ``dev_auto_merge`` are somehow True (the UI
-    enforces mutual exclusion), the PR behaviour wins — such a task must not
-    self-merge (see :func:`task_self_merges`).
+    all. The leader summary task is eligible like any other task.
+
+    Fully **independent** of ``dev_auto_merge`` (no mutual exclusion): a task
+    may both self-merge into the local baseline AND have the backend push its
+    branch + open a PR against the remote baseline ("local integration +
+    remote review PR"). See :func:`task_self_merges`.
     """
     kind = getattr(agent.kind, "value", agent.kind)
     if mode != "dev" or kind in ("openclaw", "external"):
@@ -93,11 +95,11 @@ def task_self_merges(
 ) -> bool:
     """Return True when *task* must self-merge its worktree branch in-task.
 
-    * **dev** — OpenClaw is always forced to self-merge; a ``dev_submit_pr``
-      task never self-merges (the backend opens a PR after completion); every
-      other agent honours ``task.dev_auto_merge`` (default True). A no-merge
-      task never reaches the baseline branch; its worktree is discarded by
-      terminal team cleanup at run end.
+    * **dev** — OpenClaw is always forced to self-merge; every other agent
+      honours ``task.dev_auto_merge`` (default True), **independent** of
+      ``dev_submit_pr`` (a task may self-merge locally AND get a backend PR).
+      A no-merge task never reaches the baseline branch; its worktree is
+      discarded by terminal team cleanup at run end.
     * **easy** — every task self-merges.
     * **normal** — only scheduled (unattended) runs self-merge in-task; manual
       runs defer merges to the review / complaint phases.
@@ -108,8 +110,6 @@ def task_self_merges(
     if mode == "dev":
         if is_openclaw:
             return True
-        if task_dev_submit_pr(mode=mode, task=task, agent=agent):
-            return False
         return bool(getattr(task, "dev_auto_merge", True))
     if mode == "easy":
         return True

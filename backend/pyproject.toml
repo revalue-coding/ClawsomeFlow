@@ -69,7 +69,10 @@ Repository = "https://github.com/clawsomeflow/clawsomeflow"
 Issues = "https://github.com/clawsomeflow/clawsomeflow/issues"
 
 [build-system]
-requires = ["hatchling"]
+# hatchling 1.32.0 starts rejecting readme paths outside the project dir
+# (ours is ../readme.md, shared with the repo root). Pin below it until the
+# readme layout is reworked.
+requires = ["hatchling<1.32"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

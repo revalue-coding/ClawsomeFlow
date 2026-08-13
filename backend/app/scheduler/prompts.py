@@ -179,10 +179,11 @@ class DispatchContext:
     self_merge: bool = False
 
     # True when THIS task is a developer-mode "submit PR" task
-    # (``FlowTask.dev_submit_pr``; mutually exclusive with ``self_merge``).
-    # The worker must commit its changes but must NOT merge, push, or open a
-    # PR itself — the backend opens the PR automatically once the task
-    # completes.
+    # (``FlowTask.dev_submit_pr``; fully independent of ``self_merge`` — both
+    # may be set, see ``_dev_submit_pr_step``). The worker must commit its
+    # changes but must NOT push or open a PR itself — the backend opens the
+    # PR automatically once the task completes. Without ``self_merge`` it
+    # must not merge either; with it, the self-merge steps still apply.
     dev_submit_pr: bool = False
 
     # Extra guidance the user typed on the failure pause banner before pressing
@@ -507,6 +508,34 @@ def _user_guidance_block(ctx: DispatchContext) -> str:
     )
 
 
+def _dev_submit_pr_step(ctx: DispatchContext) -> str:
+    """The developer-mode "submit PR" completion step (one numbered line).
+
+    Two flavours, keyed off ``ctx.self_merge`` (the flags are independent):
+
+    * **PR only** — the task must not merge/push/PR itself; the backend pushes
+      the branch and opens the PR once the task completes.
+    * **self-merge + PR ("dual")** — the self-merge steps above still apply
+      (local baseline integration); this step only forbids push / opening the
+      PR manually (the backend handles the remote side).
+    """
+    if ctx.self_merge:
+        return (
+            "Perform the self-merge steps above as instructed, but do NOT "
+            "push your branch and do NOT open a pull request yourself — once "
+            "you mark this task completed, the ClawsomeFlow backend will "
+            "automatically push your worktree branch and open a PR against "
+            "the baseline branch. Just make sure every change is committed."
+        )
+    return (
+        "Do NOT merge your branch into the baseline branch, do "
+        "NOT push, and do NOT open a pull request yourself — once you mark "
+        "this task completed, the ClawsomeFlow backend will automatically "
+        "push your worktree branch and open a PR against the baseline "
+        "branch. Just make sure every change is committed (step above)."
+    )
+
+
 def _unattended_self_merge_steps(
     ctx: DispatchContext, start_no: int,
 ) -> tuple[list[str], int]:
@@ -588,13 +617,7 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
         steps.extend(merge_steps)
 
     if ctx.dev_submit_pr:
-        steps.append(
-            f"{next_no}. Do NOT merge your branch into the baseline branch, do "
-            "NOT push, and do NOT open a pull request yourself — once you mark "
-            "this task completed, the ClawsomeFlow backend will automatically "
-            "push your worktree branch and open a PR against the baseline "
-            "branch. Just make sure every change is committed (step above)."
-        )
+        steps.append(f"{next_no}. {_dev_submit_pr_step(ctx)}")
         next_no += 1
 
     if not ctx.task.is_leader_summary:
@@ -800,13 +823,7 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
         steps.extend(merge_steps)
 
     if ctx.dev_submit_pr:
-        steps.append(
-            f"{next_no}. Do NOT merge your branch into the baseline branch, do "
-            "NOT push, and do NOT open a pull request yourself — once you mark "
-            "this task completed, the ClawsomeFlow backend will automatically "
-            "push your worktree branch and open a PR against the baseline "
-            "branch. Just make sure every change is committed (step above)."
-        )
+        steps.append(f"{next_no}. {_dev_submit_pr_step(ctx)}")
         next_no += 1
 
     if ctx.self_merge:

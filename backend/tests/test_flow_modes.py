@@ -28,13 +28,14 @@ def _agent(kind=AgentKind.claude) -> FlowAgent:
     )
 
 
-def _task(*, auto_merge=True, is_summary=False) -> FlowTask:
+def _task(*, auto_merge=True, submit_pr=False, is_summary=False) -> FlowTask:
     return FlowTask(
         id="t1",
         owner_agent_id="a1",
         subject="do",
         description="d",
         dev_auto_merge=auto_merge,
+        dev_submit_pr=submit_pr,
         is_leader_summary=is_summary,
     )
 
@@ -101,6 +102,21 @@ def test_dev_mode_no_merge_task_does_not_self_merge(scheduled: bool) -> None:
     assert task_self_merges(
         mode="dev", run_is_scheduled=scheduled,
         task=_task(auto_merge=False), agent=_agent(),
+    ) is False
+
+
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_dev_mode_submit_pr_is_independent_of_auto_merge(scheduled: bool) -> None:
+    # Both on = self-merge locally AND backend PR (dual mode) — the PR flag
+    # never suppresses the merge flag …
+    assert task_self_merges(
+        mode="dev", run_is_scheduled=scheduled,
+        task=_task(auto_merge=True, submit_pr=True), agent=_agent(),
+    ) is True
+    # … and a PR task with the merge flag off still does not self-merge.
+    assert task_self_merges(
+        mode="dev", run_is_scheduled=scheduled,
+        task=_task(auto_merge=False, submit_pr=True), agent=_agent(),
     ) is False
 
 
