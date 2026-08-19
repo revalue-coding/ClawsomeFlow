@@ -90,6 +90,19 @@ const en = {
       },
     },
   },
+  directoryBrowser: {
+    title: "Select a directory on the server",
+    hint:
+      "Browsing the ClawsomeFlow server's filesystem — the same filesystem agents run in. " +
+      "Navigate into a folder, then confirm with \"Use this directory\".",
+    pathPlaceholder: "/absolute/path/on/the/server",
+    go: "Go",
+    up: "Up one level",
+    empty: "No subdirectories",
+    truncated: "Too many subdirectories — only the first 500 are shown. Type a deeper path above.",
+    showHidden: "Show hidden directories",
+    selectCurrent: "Use this directory",
+  },
   nav: {
     groupOrchestration: "Workflows",
     groupAgents: "My Team",
@@ -1478,6 +1491,9 @@ const en = {
         pickWorkdir: "Browse",
         save: "Save & restart Gateway",
         saving: "Saving…",
+        restarting: "Restarting Gateway… (waits for in-flight turns to finish)",
+        restarted: "Gateway restarted",
+        restartFailed: "Gateway restart failed: {{message}}",
       },
       mcp: {
         hint:

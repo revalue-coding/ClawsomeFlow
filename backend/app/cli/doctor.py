@@ -38,6 +38,10 @@ def doctor() -> None:
     console.print(summary)
     console.print("")
 
+    # 2.5 WSL2 environment (Windows host) — informational, printed ONLY when
+    # actually inside WSL so plain Linux/macOS output is byte-identical.
+    _print_wsl_section()
+
     # 3. OpenClaw integration.
     try:
         from app.integrations.openclaw_install import install_summary
@@ -88,6 +92,35 @@ def doctor() -> None:
         "\n[green]✓ Required toolchain OK.[/green] "
         "[dim](OpenClaw integration status is reported separately above.)[/dim]"
     )
+
+
+def _print_wsl_section() -> None:
+    from pathlib import Path
+
+    from app import platform_wsl
+
+    if not platform_wsl.is_wsl():
+        return
+    wt = Table(title="WSL2 environment (Windows host)", show_header=False)
+    wt.add_column("k", style="bold")
+    wt.add_column("v")
+    wt.add_row("wsl_distro", platform_wsl.wsl_distro_name() or "(unknown)")
+    explorer = platform_wsl.find_windows_explorer()
+    wt.add_row(
+        "windows_interop",
+        "[green]yes[/green]" if explorer else "[yellow]no (explorer.exe not reachable)[/yellow]",
+    )
+    systemd_up = Path("/run/systemd/system").is_dir()
+    wt.add_row("systemd", "[green]yes[/green]" if systemd_up else "[red]no[/red]")
+    console.print(wt)
+    if not systemd_up:
+        console.print(
+            "[yellow]systemd is not running in this WSL distro — the csflow service "
+            "cannot autostart. Enable it once:\n"
+            '  echo -e "[boot]\\nsystemd=true" | sudo tee /etc/wsl.conf\n'
+            "then run `wsl --shutdown` from Windows and reopen the distro.[/yellow]"
+        )
+    console.print("")
 
 
 def _config_table(cfg) -> Table:

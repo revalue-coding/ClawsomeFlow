@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import PurePosixPath
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Path, Query
@@ -369,6 +370,13 @@ def _validate_flow_meta(*, description: str) -> None:
 
 
 def _collect_flow_save_warnings(spec: FlowSpec) -> list[FlowSaveWarning]:
+    warnings: list[FlowSaveWarning] = []
+    warnings.extend(_openclaw_runtime_warnings(spec))
+    warnings.extend(_wsl_windows_mount_warnings(spec))
+    return warnings
+
+
+def _openclaw_runtime_warnings(spec: FlowSpec) -> list[FlowSaveWarning]:
     openclaw_agent_ids = [a.id for a in spec.agents if a.kind == AgentKind.openclaw]
     if not openclaw_agent_ids:
         return []
@@ -390,6 +398,38 @@ def _collect_flow_save_warnings(spec: FlowSpec) -> list[FlowSaveWarning]:
                 "the runtime service is started."
             ),
             details={"reason": reason, "agentIds": openclaw_agent_ids},
+        )
+    ]
+
+
+def _wsl_windows_mount_warnings(spec: FlowSpec) -> list[FlowSaveWarning]:
+    """Warn (WSL only) when an agent repo sits on a 9P-mounted Windows drive.
+
+    ``/mnt/c/...`` repos work but are drastically slower than the distro's own
+    ext4 filesystem and are prone to git locking issues under concurrent
+    worktrees. Advisory only — the Flow still saves and runs.
+    """
+    from app import platform_wsl
+
+    if not platform_wsl.is_wsl():
+        return []
+    flagged: list[str] = []
+    for agent in spec.agents:
+        repo = (agent.repo or "").strip()
+        if repo and platform_wsl.is_windows_drive_mount(PurePosixPath(repo)):
+            flagged.append(agent.id)
+    if not flagged:
+        return []
+    return [
+        FlowSaveWarning(
+            code="WSL_WINDOWS_MOUNT_REPO",
+            message=(
+                "Some agent repositories live on a Windows drive mount (/mnt/*). "
+                "Under WSL2 these are much slower than the Linux filesystem and can "
+                "hit git locking issues. Consider cloning the repo into the WSL "
+                "filesystem (e.g. ~/work/...) instead."
+            ),
+            details={"agentIds": flagged},
         )
     ]
 

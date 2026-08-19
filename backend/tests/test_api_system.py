@@ -136,6 +136,76 @@ def test_open_directory_runtime_error_mapped(monkeypatch, tmp_path: Path) -> Non
     assert r.json()["error"] == "DIRECTORY_OPEN_UNAVAILABLE"
 
 
+def test_browse_directory_lists_subdirectories_only(tmp_path: Path) -> None:
+    # Dedicated root: the test harness plants csflow_home/ inside tmp_path.
+    root = tmp_path / "browse-root"
+    root.mkdir()
+    (root / "beta").mkdir()
+    (root / "Alpha").mkdir()
+    (root / ".hidden").mkdir()
+    (root / "file.txt").write_text("x")
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/browse-directory", json={"path": str(root)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["path"] == str(root.resolve())
+    assert body["parent"] == str(root.resolve().parent)
+    assert [e["name"] for e in body["entries"]] == ["Alpha", "beta"]
+    assert body["entries"][0]["path"] == str(root.resolve() / "Alpha")
+    assert body["truncated"] is False
+
+
+def test_browse_directory_include_hidden(tmp_path: Path) -> None:
+    root = tmp_path / "browse-root"
+    root.mkdir()
+    (root / ".hidden").mkdir()
+    (root / "shown").mkdir()
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/api/system/browse-directory",
+            json={"path": str(root), "includeHidden": True},
+        )
+    assert r.status_code == 200
+    assert [e["name"] for e in r.json()["entries"]] == [".hidden", "shown"]
+
+
+def test_browse_directory_defaults_to_home() -> None:
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/browse-directory", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["path"] == str(Path.home().resolve())
+
+
+def test_browse_directory_root_has_no_parent() -> None:
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/browse-directory", json={"path": "/"})
+    assert r.status_code == 200
+    assert r.json()["parent"] is None
+
+
+def test_browse_directory_rejects_missing_path(tmp_path: Path) -> None:
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/api/system/browse-directory", json={"path": str(tmp_path / "nope")},
+        )
+    assert r.status_code == 400
+    assert r.json()["error"] == "PATH_NOT_FOUND"
+
+
+def test_browse_directory_truncates_huge_listings(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "browse-root"
+    root.mkdir()
+    for i in range(5):
+        (root / f"dir{i}").mkdir()
+    monkeypatch.setattr("app.api.system._BROWSE_MAX_ENTRIES", 3)
+    with TestClient(create_app()) as client:
+        r = client.post("/api/system/browse-directory", json={"path": str(root)})
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["entries"]) == 3
+    assert body["truncated"] is True
+
+
 def test_ui_capabilities_local_default() -> None:
     with TestClient(create_app()) as client:
         r = client.get("/api/system/ui-capabilities")

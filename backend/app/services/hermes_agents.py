@@ -1159,6 +1159,18 @@ def is_managed(agent_id: str, *, storage: StorageBackend) -> bool:
 _GATEWAY_INSTALL_STDIN = "y\ny\n"
 _GATEWAY_STATUS_POLL_ATTEMPTS = 4
 _GATEWAY_STATUS_POLL_INTERVAL_SEC = 1.5
+# A graceful restart drains in-flight turns first, so it is minutes-scale even
+# on a healthy host — way past the generic control-plane ``_CLI_TIMEOUT_SEC``.
+_GATEWAY_RESTART_TIMEOUT_SEC = 900.0
+
+GATEWAY_RESTART_IDLE = "idle"
+GATEWAY_RESTART_RUNNING = "restarting"
+GATEWAY_RESTART_OK = "ok"
+GATEWAY_RESTART_FAILED = "failed"
+
+_gateway_restart_lock = threading.Lock()
+_gateway_restart_state: dict[str, tuple[str, str]] = {}
+_gateway_restart_threads: dict[str, threading.Thread] = {}
 
 
 def _read_gateway_status_text(agent_id: str) -> str:
@@ -1241,10 +1253,65 @@ def start_gateway(agent_id: str) -> str:
     return _verify_gateway_running(aid)
 
 
-def restart_gateway(agent_id: str) -> None:
-    """Best-effort ``hermes -p <id> gateway restart`` (errors are ignored)."""
+def restart_gateway(agent_id: str) -> str:
+    """Restart the gateway for one profile and verify it came back up.
+
+    SLOW BY DESIGN — ``hermes gateway restart`` first asks the running gateway
+    to drain its in-flight turns (the CLI's own budget is ``agent.
+    restart_after_turn_timeout``, 6h by default) and only then hands over to
+    the service manager; an idle gateway still takes ~30s. Never call this
+    from a request handler — use :func:`restart_gateway_async`.
+    """
     aid = _validate_agent_id(agent_id)
-    _hermes_profile(aid, ["gateway", "restart"])
+    rc, out, err = _hermes_profile(
+        aid, ["gateway", "restart"], timeout=_GATEWAY_RESTART_TIMEOUT_SEC
+    )
+    if rc != 0:
+        msg = (_strip_ansi(err) or _strip_ansi(out)).strip()
+        raise ProfileOpFailed(
+            f"`hermes -p {aid} gateway restart` failed: {msg}",
+            details={"command": f"hermes -p {aid} gateway restart"},
+        )
+    return _verify_gateway_running(aid)
+
+
+def gateway_restart_state(agent_id: str) -> dict[str, str]:
+    """Outcome of the most recent background restart for this profile."""
+    with _gateway_restart_lock:
+        state, message = _gateway_restart_state.get(
+            agent_id, (GATEWAY_RESTART_IDLE, "")
+        )
+    return {"state": state, "message": message}
+
+
+def _set_gateway_restart_state(agent_id: str, state: str, message: str = "") -> None:
+    with _gateway_restart_lock:
+        _gateway_restart_state[agent_id] = (state, message)
+
+
+def restart_gateway_async(agent_id: str) -> dict[str, str]:
+    """Kick :func:`restart_gateway` on a daemon thread; report progress via
+    :func:`gateway_restart_state`. A restart already in flight is not doubled."""
+    aid = _validate_agent_id(agent_id)
+
+    def _worker() -> None:
+        try:
+            message = restart_gateway(aid)
+        except Exception as exc:  # noqa: BLE001 — surfaced to the caller as state
+            logger.warning("hermes_gateway_restart_failed", agent_id=aid, error=str(exc))
+            _set_gateway_restart_state(aid, GATEWAY_RESTART_FAILED, str(exc))
+        else:
+            _set_gateway_restart_state(aid, GATEWAY_RESTART_OK, message)
+
+    with _gateway_restart_lock:
+        running = _gateway_restart_threads.get(aid)
+        if running is not None and running.is_alive():
+            return gateway_restart_state(aid)
+        _gateway_restart_state[aid] = (GATEWAY_RESTART_RUNNING, "")
+        thread = threading.Thread(target=_worker, name=f"hermes-gw-restart-{aid}", daemon=True)
+        _gateway_restart_threads[aid] = thread
+    thread.start()
+    return gateway_restart_state(aid)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1326,7 +1393,13 @@ def read_gateway_cwd(agent_id: str) -> dict[str, str]:
 
 
 def write_gateway_cwd(agent_id: str, *, cwd: str) -> dict[str, str]:
-    """Set ``terminal.cwd`` via the Hermes CLI, then restart the gateway."""
+    """Set ``terminal.cwd`` via the Hermes CLI, then restart the gateway.
+
+    The restart runs in the background — it drains the gateway's in-flight
+    turns and takes tens of seconds at best — so the config write is reported
+    to the caller immediately and the restart is followed through
+    :func:`gateway_restart_state`.
+    """
     aid = _validate_agent_id(agent_id)
     abs_path = str(_existing_directory(cwd, field_name="cwd"))
     rc, out, err = _hermes_profile(aid, ["config", "set", "terminal.cwd", abs_path])
@@ -1335,7 +1408,7 @@ def write_gateway_cwd(agent_id: str, *, cwd: str) -> dict[str, str]:
             f"`hermes config set terminal.cwd` failed: "
             f"{(_strip_ansi(err) or _strip_ansi(out)).strip()}"
         )
-    restart_gateway(aid)
+    restart_gateway_async(aid)
     return read_gateway_cwd(aid)
 
 
@@ -2433,6 +2506,12 @@ __all__ = [
     "is_managed",
     "start_gateway",
     "restart_gateway",
+    "restart_gateway_async",
+    "gateway_restart_state",
+    "GATEWAY_RESTART_IDLE",
+    "GATEWAY_RESTART_RUNNING",
+    "GATEWAY_RESTART_OK",
+    "GATEWAY_RESTART_FAILED",
     "read_gateway_cwd",
     "write_gateway_cwd",
     "read_soul",

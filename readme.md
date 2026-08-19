@@ -101,6 +101,22 @@ Linux / macOS
 curl -fsSL https://clawsomeflow.com/install.sh | bash
 ```
 
+Windows
+```powershell
+# 1) install WSL2 + Ubuntu
+wsl --install -d Ubuntu-24.04
+
+# 2) Inside the Ubuntu shell — enable systemd (once), then restart WSL
+echo -e "[boot]\nsystemd=true" | sudo tee /etc/wsl.conf
+exit
+# back in PowerShell:
+wsl --shutdown
+
+# 3) Inside the Ubuntu shell — same install command as Linux
+curl -fsSL https://clawsomeflow.com/install.sh | bash
+```
+
+
 ### Common Commands
 
 Most of the time you only need these three:

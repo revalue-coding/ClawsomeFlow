@@ -188,6 +188,10 @@ class ModelView(_CamelModel):
 
 class GatewayView(_CamelModel):
     cwd: str = ""
+    # Restarting the gateway drains its in-flight turns, so it runs in the
+    # background: the client polls GET until the state leaves ``restarting``.
+    restart_state: str = svc.GATEWAY_RESTART_IDLE
+    restart_message: str = ""
 
 
 class ModelImportPayload(_CamelModel):
@@ -803,13 +807,18 @@ def put_model(
     return ModelView(default=m["default"], provider=m["provider"], base_url=m["base_url"])
 
 
+def _gateway_view(agent_id: str, cwd: str) -> GatewayView:
+    st = svc.gateway_restart_state(agent_id)
+    return GatewayView(cwd=cwd, restart_state=st["state"], restart_message=st["message"])
+
+
 @router.get("/{agent_id}/settings/gateway", response_model=GatewayView)
 def get_gateway_settings(
     agent_id: Annotated[str, Path()], user: UserDep, storage: StorageDep
 ) -> GatewayView:
     _get_owned(agent_id, user, storage)
     g = svc.read_gateway_cwd(agent_id)
-    return GatewayView(cwd=g["cwd"])
+    return _gateway_view(agent_id, g["cwd"])
 
 
 @router.put("/{agent_id}/settings/gateway", response_model=GatewayView)
@@ -824,7 +833,7 @@ def put_gateway_settings(
         g = svc.write_gateway_cwd(agent_id, cwd=payload.cwd)
     except svc.HermesAgentError as exc:
         raise _map_service_error(exc) from exc
-    return GatewayView(cwd=g["cwd"])
+    return _gateway_view(agent_id, g["cwd"])
 
 
 @router.post("/{agent_id}/settings/model/import", response_model=ModelView)

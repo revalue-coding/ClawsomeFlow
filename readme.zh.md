@@ -104,6 +104,22 @@ Linux/macOS
 curl -fsSL https://clawsomeflow.com/install.sh | bash
 ```
 
+Windows
+```powershell
+# 1) 安装 WSL2 + Ubuntu
+wsl --install -d Ubuntu-24.04
+
+# 2) 进入 Ubuntu Shell —— 启用 systemd（仅首次），然后重启 WSL
+echo -e "[boot]\nsystemd=true" | sudo tee /etc/wsl.conf
+exit
+# 回到 PowerShell 执行：
+wsl --shutdown
+
+# 3) Ubuntu Shell —— 安装命令与 Linux 完全相同
+curl -fsSL https://clawsomeflow.com/install.sh | bash
+```
+
+
 
 ### 常用命令
 

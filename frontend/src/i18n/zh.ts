@@ -92,6 +92,19 @@ const zh = {
       },
     },
   },
+  directoryBrowser: {
+    title: "选择服务器上的目录",
+    hint:
+      "正在浏览 ClawsomeFlow 服务器的文件系统——这也是 Agent 实际执行所在的文件系统。" +
+      "进入目标文件夹后点击「使用此目录」确认。",
+    pathPlaceholder: "/服务器上的绝对路径",
+    go: "跳转",
+    up: "返回上一级",
+    empty: "没有子目录",
+    truncated: "子目录过多，仅显示前 500 个。可在上方输入更深层的路径。",
+    showHidden: "显示隐藏目录",
+    selectCurrent: "使用此目录",
+  },
   nav: {
     groupOrchestration: "任务流",
     groupAgents: "我的团队",
@@ -1446,6 +1459,9 @@ const zh = {
         pickWorkdir: "选择目录",
         save: "保存并重启 Gateway",
         saving: "保存中…",
+        restarting: "Gateway 重启中…（会先等待进行中的对话结束）",
+        restarted: "Gateway 已重启",
+        restartFailed: "Gateway 重启失败：{{message}}",
       },
       mcp: {
         hint: "按 Hermes 官方流程，MCP 配置会写入该 profile 的 mcp_servers 配置块；HTTP/SSE 服务使用 URL 方式，本地服务使用 Local/stdio 命令方式。",

@@ -58,6 +58,17 @@ export async function getNativeDirectoryBlockedMessage(
   await ensureUiCapabilities().catch(() => {});
   const reason = getNativeDirectoryBlockReason();
   if (!reason) return null;
+  // WSL2 exception: "open" is served by explorer.exe on the WINDOWS desktop —
+  // the desktop this browser actually runs on — so it works even though the
+  // client is not colocated in the Linux-desktop sense. A genuinely remote
+  // hostname stays blocked (another machine's browser can't see that desktop).
+  if (
+    action === "open" &&
+    reason !== "remoteHostname" &&
+    cachedCaps?.wslEnvironment
+  ) {
+    return null;
+  }
   return t(nativeDirectoryBlockedMessageKey(action, reason));
 }
 

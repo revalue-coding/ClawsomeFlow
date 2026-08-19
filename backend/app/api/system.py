@@ -16,7 +16,7 @@ from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-from app import paths
+from app import paths, platform_wsl
 from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.config import load_config
@@ -68,6 +68,27 @@ class UiCapabilitiesResponse(_CamelModel):
     native_directory_ui_available: bool
     native_directory_client_colocated: bool
     user_home_dir: str = ""
+    # True inside a WSL2 distro: the frontend then allows "open directory"
+    # (served by explorer.exe on the Windows desktop) even though the client
+    # is not colocated in the Linux-desktop sense.
+    wsl_environment: bool = False
+
+
+class BrowseDirectoryPayload(_CamelModel):
+    path: str | None = None
+    include_hidden: bool = False
+
+
+class BrowseDirectoryEntry(_CamelModel):
+    name: str
+    path: str
+
+
+class BrowseDirectoryResponse(_CamelModel):
+    path: str
+    parent: str | None = None
+    entries: list[BrowseDirectoryEntry] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class ValidateDirectoryPayload(_CamelModel):
@@ -192,6 +213,63 @@ async def open_directory(
             status_code=503,
         ) from exc
     return OpenDirectoryResponse(opened=True, path=str(resolved))
+
+
+# Hard cap on returned subdirectories: keeps a huge dir (node_modules-scale)
+# from flooding the WebUI; the user can type a deeper start path instead.
+_BROWSE_MAX_ENTRIES = 500
+
+
+@router.post("/browse-directory", response_model=BrowseDirectoryResponse)
+def browse_directory(
+    payload: Annotated[BrowseDirectoryPayload, Body()] = BrowseDirectoryPayload(),
+    _user: UserDep = "",
+) -> BrowseDirectoryResponse:
+    """List the subdirectories of a server-side path (WebUI directory browser).
+
+    Platform-neutral fallback for environments where the native picker cannot
+    run (WSL2, SSH-forwarded browsers, headless servers): the frontend walks
+    the server filesystem through this endpoint instead of a native dialog.
+    Directories only — the picker selects a directory, never a file.
+    """
+    raw = (payload.path or "").strip()
+    base = _validate_existing_directory(raw) if raw else Path.home().resolve()
+
+    entries: list[BrowseDirectoryEntry] = []
+    truncated = False
+    try:
+        children = sorted(
+            (c for c in base.iterdir()),
+            key=lambda p: p.name.casefold(),
+        )
+    except OSError as exc:
+        raise ApiError(
+            "PATH_NOT_ACCESSIBLE",
+            f"cannot list directory: {base}",
+            status_code=400,
+            details={"path": str(base)},
+        ) from exc
+    for child in children:
+        name = child.name
+        if not payload.include_hidden and name.startswith("."):
+            continue
+        try:
+            if not child.is_dir():
+                continue
+        except OSError:
+            continue
+        if len(entries) >= _BROWSE_MAX_ENTRIES:
+            truncated = True
+            break
+        entries.append(BrowseDirectoryEntry(name=name, path=str(child)))
+
+    parent = base.parent
+    return BrowseDirectoryResponse(
+        path=str(base),
+        parent=str(parent) if parent != base else None,
+        entries=entries,
+        truncated=truncated,
+    )
 
 
 @router.post("/ensure-git-repo", response_model=EnsureGitRepoResponse)
@@ -414,6 +492,34 @@ def _pick_directory_native(*, title: str, initial_path: str | None) -> str | Non
     return str(Path(selected).expanduser().resolve())
 
 
+def _open_directory_wsl(path: Path) -> bool:
+    """Open *path* in Windows Explorer from inside WSL (via interop).
+
+    ``wslpath -w`` converts the distro path to its ``\\\\wsl.localhost\\...``
+    UNC form, which explorer.exe opens on the WINDOWS desktop — the desktop
+    the user's browser actually runs on. Returns False when interop is
+    unavailable so the caller can fall back to the regular Linux path (WSLg).
+    """
+    explorer = platform_wsl.find_windows_explorer()
+    if explorer is None:
+        return False
+    win_path = platform_wsl.windows_path_for(path)
+    if win_path is None:
+        return False
+    try:
+        subprocess.Popen(
+            [explorer, win_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        logger.debug("wsl explorer.exe launch failed", exc_info=True)
+        return False
+    return True
+
+
 def _open_directory_native(*, path: Path) -> None:
     target = str(path)
     if os.name == "nt":
@@ -422,6 +528,12 @@ def _open_directory_native(*, path: Path) -> None:
             return
         except OSError as exc:
             raise RuntimeError(f"failed to open directory: {exc}") from exc
+
+    # WSL2: open on the Windows desktop via explorer.exe interop. Checked
+    # BEFORE the GUI-display gate — a WSL distro usually has no DISPLAY, yet
+    # opening in Windows Explorer is exactly what the user expects there.
+    if platform_wsl.is_wsl() and _open_directory_wsl(path):
+        return
 
     if not native_directory_ui_available():
         raise RuntimeError("No GUI display found for opening directories.")
@@ -767,7 +879,20 @@ def native_directory_client_colocated(request: Request) -> bool:
 def _ensure_native_directory_client_colocated(request: Request, *, action: Literal["pick", "open"]) -> None:
     if native_directory_client_colocated(request):
         return
+    # WSL2 "open" exception: the Windows browser reaching a WSL-hosted csflow
+    # is never colocated in the Linux-desktop sense, but explorer.exe opens on
+    # the Windows desktop — the one the browser really runs on — so opening is
+    # correct for any client the API guard already admitted.
+    if action == "open" and platform_wsl.is_wsl():
+        return
     code = "DIRECTORY_PICKER_UNAVAILABLE" if action == "pick" else "DIRECTORY_OPEN_UNAVAILABLE"
+    if action == "pick" and platform_wsl.is_wsl():
+        raise ApiError(
+            code,
+            "Native directory picker is unavailable inside WSL. "
+            "Use the WebUI directory browser or paste the absolute path manually.",
+            status_code=409,
+        )
     raise ApiError(
         code,
         "Native directory UI is unavailable from this browser session "
@@ -819,6 +944,7 @@ def ui_capabilities(request: Request, _user: UserDep = "") -> UiCapabilitiesResp
         native_directory_ui_available=native_ui,
         native_directory_client_colocated=native_directory_client_colocated(request),
         user_home_dir=str(Path.home().resolve()),
+        wsl_environment=platform_wsl.is_wsl(),
     )
 
 

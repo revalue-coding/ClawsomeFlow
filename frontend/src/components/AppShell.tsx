@@ -20,6 +20,7 @@ import {
   getUpgradeModalOpen,
   setUpgradeModalOpen,
 } from "@/components/UpdateNotice";
+import { DirectoryBrowserHost } from "@/components/DirectoryBrowserDialog";
 import { ServiceFreezeOverlay } from "@/components/ServiceFreezeOverlay";
 import { Modal, MODAL_ROOT_ID } from "@/components/ui";
 import { DialogProvider } from "@/components/dialog";
@@ -167,6 +168,9 @@ export function AppShell() {
             so nav stays clickable while a modal is open. pointer-events-none so
             it never blocks when empty; each Modal's overlay re-enables events. */}
         <div id={MODAL_ROOT_ID} className="pointer-events-none absolute inset-0 z-40" />
+        {/* WebUI directory browser (fallback picker for WSL / remote clients);
+            portals its Modal into MODAL_ROOT_ID above. */}
+        <DirectoryBrowserHost />
       </main>
       {/* Freeze UI during pre-stop drain / service-down gap (CLI stop/start
           included). Sits under UpgradeModal (z-100) when that path is active. */}

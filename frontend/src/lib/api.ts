@@ -911,6 +911,20 @@ export interface UiCapabilities {
   nativeDirectoryUiAvailable: boolean;
   nativeDirectoryClientColocated: boolean;
   userHomeDir: string;
+  /** True when the backend runs inside a WSL2 distro (Windows host). */
+  wslEnvironment?: boolean;
+}
+
+export interface BrowseDirectoryEntry {
+  name: string;
+  path: string;
+}
+
+export interface BrowseDirectoryResult {
+  path: string;
+  parent: string | null;
+  entries: BrowseDirectoryEntry[];
+  truncated: boolean;
 }
 
 export interface OwnerKindsFast {
@@ -1031,8 +1045,12 @@ export interface HermesModelSetting {
   baseUrl: string;
 }
 
+export type HermesGatewayRestartState = "idle" | "restarting" | "ok" | "failed";
+
 export interface HermesGatewaySetting {
   cwd: string;
+  restartState?: HermesGatewayRestartState;
+  restartMessage?: string;
 }
 
 export interface HermesSecretSetting {
@@ -1899,6 +1917,12 @@ export const api = {
     request<{ path: string | null }>(
       "POST",
       "/api/system/pick-directory",
+      payload ?? {},
+    ),
+  browseDirectory: (payload?: { path?: string; includeHidden?: boolean }) =>
+    request<BrowseDirectoryResult>(
+      "POST",
+      "/api/system/browse-directory",
       payload ?? {},
     ),
   openDirectory: (payload: { path: string }) =>

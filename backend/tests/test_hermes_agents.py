@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -644,6 +646,34 @@ def test_read_gateway_cwd_from_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert svc.read_gateway_cwd("helper") == {"cwd": "/data/projects/foo"}
 
 
+def _await_gateway_restart(agent_id: str, timeout: float = 10.0) -> dict[str, str]:
+    """Block until the background restart thread for *agent_id* settles."""
+    deadline = time.monotonic() + timeout
+    state = svc.gateway_restart_state(agent_id)
+    while state["state"] == svc.GATEWAY_RESTART_RUNNING and time.monotonic() < deadline:
+        time.sleep(0.02)
+        state = svc.gateway_restart_state(agent_id)
+    assert state["state"] != svc.GATEWAY_RESTART_RUNNING, "restart thread did not finish"
+    return state
+
+
+def _gateway_cwd_profile_stub(
+    cfg: Path, workdir: Path, calls: list[list[str]], *, restart: tuple[int, str, str]
+):  # noqa: ANN202
+    def _fake_profile(agent_id: str, args: list[str], **_kw):  # noqa: ANN001
+        calls.append([agent_id, *args])
+        if args == ["config", "set", "terminal.cwd", str(workdir.resolve())]:
+            cfg.write_text(f"terminal:\n  cwd: {workdir.resolve()}\n", encoding="utf-8")
+            return 0, "ok", ""
+        if args == ["gateway", "restart"]:
+            return restart
+        if args == ["gateway", "status"]:
+            return 0, "User gateway service is running", ""
+        return 0, "", ""
+
+    return _fake_profile
+
+
 def test_write_gateway_cwd_sets_config_and_restarts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -655,26 +685,80 @@ def test_write_gateway_cwd_sets_config_and_restarts(
     cfg.write_text("terminal:\n  cwd: /old\n", encoding="utf-8")
 
     calls: list[list[str]] = []
-
-    def _fake_profile(agent_id: str, args: list[str], **_kw):  # noqa: ANN001
-        calls.append([agent_id, *args])
-        if args == ["config", "set", "terminal.cwd", str(workdir.resolve())]:
-            cfg.write_text(
-                f"terminal:\n  cwd: {workdir.resolve()}\n",
-                encoding="utf-8",
-            )
-            return 0, "ok", ""
-        if args == ["gateway", "restart"]:
-            return 1, "", "restart failed"
-        return 0, "", ""
-
-    monkeypatch.setattr(svc, "_hermes_profile", _fake_profile)
+    monkeypatch.setattr(
+        svc,
+        "_hermes_profile",
+        _gateway_cwd_profile_stub(cfg, workdir, calls, restart=(0, "restarted", "")),
+    )
     monkeypatch.setattr(svc, "_config_path", lambda _aid: cfg)
 
     out = svc.write_gateway_cwd("helper", cwd=str(workdir))
     assert out["cwd"] == str(workdir.resolve())
     assert calls[0] == ["helper", "config", "set", "terminal.cwd", str(workdir.resolve())]
-    assert calls[1] == ["helper", "gateway", "restart"]
+
+    state = _await_gateway_restart("helper")
+    assert ["helper", "gateway", "restart"] in calls
+    assert state["state"] == svc.GATEWAY_RESTART_OK
+
+
+def test_write_gateway_cwd_records_failed_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = tmp_path / "workspace"
+    workdir.mkdir()
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("terminal:\n  cwd: /old\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        svc,
+        "_hermes_profile",
+        _gateway_cwd_profile_stub(cfg, workdir, calls, restart=(1, "", "restart failed")),
+    )
+    monkeypatch.setattr(svc, "_config_path", lambda _aid: cfg)
+
+    # The config write succeeded, so the caller is told so — a slow/broken
+    # restart must never be reported as a failed save.
+    out = svc.write_gateway_cwd("helper-fail", cwd=str(workdir))
+    assert out["cwd"] == str(workdir.resolve())
+
+    state = _await_gateway_restart("helper-fail")
+    assert state["state"] == svc.GATEWAY_RESTART_FAILED
+    assert "restart failed" in state["message"]
+
+
+def test_write_gateway_cwd_does_not_block_on_slow_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A graceful ``gateway restart`` drains in-flight turns (minutes, and the
+    Hermes-side budget is hours) — the save must not wait for it."""
+    workdir = tmp_path / "workspace"
+    workdir.mkdir()
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("terminal:\n  cwd: /old\n", encoding="utf-8")
+    release = threading.Event()
+
+    def _fake_profile(agent_id: str, args: list[str], **_kw):  # noqa: ANN001
+        del agent_id
+        if args == ["gateway", "restart"]:
+            release.wait(10.0)
+            return 0, "restarted", ""
+        if args == ["gateway", "status"]:
+            return 0, "User gateway service is running", ""
+        cfg.write_text(f"terminal:\n  cwd: {workdir.resolve()}\n", encoding="utf-8")
+        return 0, "ok", ""
+
+    monkeypatch.setattr(svc, "_hermes_profile", _fake_profile)
+    monkeypatch.setattr(svc, "_config_path", lambda _aid: cfg)
+
+    started = time.monotonic()
+    svc.write_gateway_cwd("helper-slow", cwd=str(workdir))
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert svc.gateway_restart_state("helper-slow")["state"] == svc.GATEWAY_RESTART_RUNNING
+
+    release.set()
+    assert _await_gateway_restart("helper-slow")["state"] == svc.GATEWAY_RESTART_OK
 
 
 def test_write_gateway_cwd_invalid_directory_raises() -> None:
@@ -710,6 +794,25 @@ def test_api_gateway_settings(
     )
     assert r.status_code == 200, r.text
     assert r.json()["cwd"] == str(workdir)
+
+
+def test_api_gateway_settings_expose_restart_state(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = svc.load_config().default_user
+    get_storage().hermes_create(
+        HermesAgent(id="gw3", name="Gateway Agent 3", profile_root="x", created_by_user=owner)
+    )
+    monkeypatch.setattr(svc, "read_gateway_cwd", lambda _aid: {"cwd": "/data/x"})
+    monkeypatch.setattr(
+        svc,
+        "gateway_restart_state",
+        lambda _aid: {"state": svc.GATEWAY_RESTART_FAILED, "message": "boom"},
+    )
+
+    body = client.get("/api/hermes/agents/gw3/settings/gateway").json()
+    assert body["restartState"] == "failed"
+    assert body["restartMessage"] == "boom"
 
 
 def test_api_runtime_status_mode_passthrough(

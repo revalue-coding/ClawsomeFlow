@@ -56,7 +56,7 @@ import {
   setDevMode,
 } from "@/lib/flowRuntime";
 import { branchAfterRepoCheck, ensureRepoAndListBranches } from "@/lib/flowRepoBranch";
-import { alertIfNativeDirectoryBlocked } from "@/lib/remoteClient";
+import { pickDirectoryHybrid } from "@/components/DirectoryBrowserDialog";
 import {
   clearSessionBackedKeys,
   useSessionBackedModalFlag,
@@ -2181,19 +2181,18 @@ export function FlowEditor() {
   }
 
   async function onPickLeaderRepo() {
-    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     snapshotLeaderRepoBeforeEdit();
     setLeaderPickingRepo(true);
     try {
-      const out = await api.pickDirectory({
+      const picked = await pickDirectoryHybrid(t, {
         title: t("flowEditor.taskFields.pickDirTitle"),
         initialPath: leaderRepo || undefined,
       });
-      if (out.path) {
-        setLeaderRepo(out.path);
+      if (picked) {
+        setLeaderRepo(picked);
         setLeaderBranchOptions([]);
         setLeaderBranchEditable(false);
-        commitLeaderRepoCheck(out.path);
+        commitLeaderRepoCheck(picked);
       }
     } catch (e) {
       const msg =
@@ -3771,17 +3770,16 @@ function TaskFormBody({
     .filter((r) => r.rowKey !== row.rowKey && !r.isLeaderSummary && r.id.trim())
     .map((r) => r.id);
   async function onPickRepo() {
-    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     onRepoPathEditStart();
     setPickingRepo(true);
     try {
-      const out = await api.pickDirectory({
+      const picked = await pickDirectoryHybrid(t, {
         title: t("flowEditor.taskFields.pickDirTitle"),
         initialPath: row.ownerRepo || undefined,
       });
-      if (out.path) {
-        patchOwnerRepo(out.path);
-        commitRepoPath(out.path);
+      if (picked) {
+        patchOwnerRepo(picked);
+        commitRepoPath(picked);
       }
     } catch (e) {
       // Backend without a GUI display (the typical headless server case)

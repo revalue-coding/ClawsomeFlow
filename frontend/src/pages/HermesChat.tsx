@@ -56,6 +56,7 @@ import {
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
+import { pickDirectoryHybrid } from "@/components/DirectoryBrowserDialog";
 import { alertIfNativeDirectoryBlocked, ensureUiCapabilities, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
 import { cn } from "@/lib/cn";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
@@ -69,6 +70,8 @@ import {
   type HermesAgentSummary,
   type HermesCronJob,
   type HermesCronDeliveryTarget,
+  type HermesGatewayRestartState,
+  type HermesGatewaySetting,
   type HermesModelSetting,
   type HermesMcpServer,
   type HermesSkillSetting,
@@ -88,6 +91,7 @@ const CREATE_TEAM_SENTINEL = "__create_team__";
 // verify-by-list loop so the popup doesn't close before the agent is gone.
 const CREATE_CANCEL_VERIFY_TIMEOUT_MS = 30 * 1000;
 const CREATE_CANCEL_VERIFY_POLL_MS = 800;
+const GATEWAY_RESTART_POLL_MS = 3000;
 const CHAT_MAX_ATTACHMENTS = 8;
 const CHAT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const HERMES_PENDING_FILES_CACHE = new Map<string, File[]>();
@@ -1918,15 +1922,14 @@ function ChatRoom({ agentId }: { agentId: string }) {
   }, [recovering, agentId, chatScope]);
 
   const pickWorkdir = async () => {
-    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     try {
-      const out = await api.pickDirectory({
+      const picked = await pickDirectoryHybrid(t, {
         title: t("hermes.workdir"),
         initialPath: (workdirEditing ? workdirDraft : workdir) || undefined,
       });
-      if (out.path) {
-        if (workdirEditing) setWorkdirDraft(out.path);
-        else updateWorkdir(out.path);
+      if (picked) {
+        if (workdirEditing) setWorkdirDraft(picked);
+        else updateWorkdir(picked);
       }
     } catch (e) {
       if (workdirEditing) setWorkdirError(errText(e));
@@ -2917,25 +2920,47 @@ function GatewayTab({ agentId }: { agentId: string }) {
   const [picking, setPicking] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [restart, setRestart] = useState<HermesGatewayRestartState>("idle");
+  const [restartMessage, setRestartMessage] = useState("");
+
+  const applyRestartState = useCallback((r: HermesGatewaySetting) => {
+    setRestart(r.restartState ?? "idle");
+    setRestartMessage(r.restartMessage ?? "");
+  }, []);
 
   useEffect(() => {
     api
       .getHermesGateway(agentId)
-      .then((r) => setCwd(r.cwd))
+      .then((r) => {
+        setCwd(r.cwd);
+        applyRestartState(r);
+      })
       .catch((e) => setError(errText(e)))
       .finally(() => setLoading(false));
-  }, [agentId]);
+  }, [agentId, applyRestartState]);
+
+  // The gateway restart drains in-flight turns on the Hermes side, so the
+  // backend runs it in the background and we follow it by polling.
+  useEffect(() => {
+    if (restart !== "restarting") return;
+    const timer = window.setInterval(() => {
+      void api
+        .getHermesGateway(agentId)
+        .then(applyRestartState)
+        .catch(() => undefined);
+    }, GATEWAY_RESTART_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [agentId, applyRestartState, restart]);
 
   const pickWorkdir = async () => {
-    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     setPicking(true);
     try {
-      const out = await api.pickDirectory({
+      const picked = await pickDirectoryHybrid(t, {
         title: t("hermes.settingsModal.gateway.workdirLabel"),
         initialPath: cwd || undefined,
       });
-      if (out.path) {
-        setCwd(out.path);
+      if (picked) {
+        setCwd(picked);
         setSaved(false);
       }
     } catch (e) {
@@ -2954,6 +2979,7 @@ function GatewayTab({ agentId }: { agentId: string }) {
       const r = await api.putHermesGateway(agentId, { cwd: cwd.trim() });
       setCwd(r.cwd);
       setSaved(true);
+      applyRestartState(r);
     } catch (e) {
       setError(errText(e));
     } finally {
@@ -3000,6 +3026,17 @@ function GatewayTab({ agentId }: { agentId: string }) {
         </button>
         {saved && <span className="text-xs text-emerald-600">{t("hermes.settingsModal.saved")}</span>}
       </div>
+      {restart === "restarting" && (
+        <p className="text-xs text-amber-600">{t("hermes.settingsModal.gateway.restarting")}</p>
+      )}
+      {restart === "ok" && (
+        <p className="text-xs text-emerald-600">{t("hermes.settingsModal.gateway.restarted")}</p>
+      )}
+      {restart === "failed" && (
+        <p className="text-xs text-rose-600">
+          {t("hermes.settingsModal.gateway.restartFailed", { message: restartMessage })}
+        </p>
+      )}
     </div>
   );
 }
@@ -3558,14 +3595,13 @@ function CronTab({ agentId }: { agentId: string }) {
   }, [reload]);
 
   const pickCronWorkdir = async () => {
-    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     setPickingWorkdir(true);
     try {
-      const out = await api.pickDirectory({
+      const picked = await pickDirectoryHybrid(t, {
         title: t("hermes.settingsModal.cron.workdir"),
         initialPath: workdir || undefined,
       });
-      if (out.path) setWorkdir(out.path);
+      if (picked) setWorkdir(picked);
     } catch (e) {
       setError(errText(e));
     } finally {
@@ -3628,14 +3664,13 @@ function CronTab({ agentId }: { agentId: string }) {
   };
 
   const pickEditWorkdir = async () => {
-    if (await alertIfNativeDirectoryBlocked(t, "pick")) return;
     setPickingEditWorkdir(true);
     try {
-      const out = await api.pickDirectory({
+      const picked = await pickDirectoryHybrid(t, {
         title: t("hermes.settingsModal.cron.workdir"),
         initialPath: editWorkdir || undefined,
       });
-      if (out.path) setEditWorkdir(out.path);
+      if (picked) setEditWorkdir(picked);
     } catch (e) {
       setError(errText(e));
     } finally {

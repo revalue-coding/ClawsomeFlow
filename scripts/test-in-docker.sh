@@ -12,6 +12,12 @@
 #   scripts/test-in-docker.sh                       # L1 backend suite (default)
 #   scripts/test-in-docker.sh -q backend/tests/test_api_guard.py   # subset (args -> pytest)
 #   SKIP_BUILD=1 scripts/test-in-docker.sh ...      # reuse the existing image
+#   KEEP_IMAGE=1 scripts/test-in-docker.sh ...      # keep the image after the run
+#
+# The test image is ~2GB; by default it is REMOVED once the run finishes so
+# repeated runs never pile up layers in the container store. Pair KEEP_IMAGE=1
+# with SKIP_BUILD=1 when iterating on a test locally, then drop KEEP_IMAGE on the
+# final run to leave the host clean.
 #
 # Env:
 #   CLAWTEAM_SRC   Path to the local ClawTeam checkout (clawteam is not on PyPI).
@@ -64,4 +70,14 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   $DOCKER build -t "$IMAGE" "$CTX"
 fi
 
-$DOCKER run --rm "$IMAGE" "$@"
+status=0
+$DOCKER run --rm "$IMAGE" "$@" || status=$?
+
+if [[ "${KEEP_IMAGE:-0}" != "1" ]]; then
+  $DOCKER rmi -f "$IMAGE" >/dev/null 2>&1 || true
+  # Dangling-only: never touch another project's tagged images on a shared host.
+  $DOCKER image prune -f >/dev/null 2>&1 || true
+  $DOCKER builder prune -f >/dev/null 2>&1 || true
+fi
+
+exit "$status"
