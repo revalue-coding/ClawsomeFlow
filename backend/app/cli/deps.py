@@ -77,12 +77,18 @@ class AgentToolStatus:
 
 
 def _run(cmd: list[str], timeout: float = 5.0) -> str | None:
-    """Run *cmd* and return stripped stdout, or None if it failed."""
+    """Run *cmd* and return stripped stdout, or None if it failed.
+
+    Catches ``OSError``, not just ``FileNotFoundError``: ``execvp`` reports a
+    missing binary as EACCES (not ENOENT) whenever it hit an unreadable
+    directory earlier in ``PATH``. A probe must read that as "unavailable" —
+    raising would abort the whole preflight over an optional tool.
+    """
     try:
         out = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if out.returncode != 0:
         return None
@@ -103,7 +109,7 @@ def _exec(
             timeout=timeout,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     output = (proc.stdout or proc.stderr or "").strip()
     return proc.returncode == 0, output
