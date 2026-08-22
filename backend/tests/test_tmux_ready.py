@@ -132,6 +132,83 @@ async def test_wait_tui_ready_accepts_cursor_model_action_tail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_tui_ready_accepts_cursor_composer_on_non_gpt_model() -> None:
+    """Captured from cursor-agent 2026.08.11 running a Claude model.
+
+    The composer is fully usable here, so keying readiness off a model-family
+    hint would report never-ready for the whole run.
+    """
+    pane = (
+        "\n"
+        "  \u2192 Plan, search, build anything\n"
+        "\n"
+        "\n"
+        "  Claude Opus 5 1M Thinking                                 Run Everything\n"
+        "  /home/user/project \u00b7 master\n"
+        "\n"
+    )
+
+    async def capture(_target: str) -> str:
+        return pane
+
+    result = await tmux_ready.wait_tui_ready(
+        "team:cursor",
+        trust_platform="cursor",
+        timeout_sec=1.0,
+        poll_interval=0.01,
+        capture=capture,
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "composer_ready"
+
+
+@pytest.mark.asyncio
+async def test_wait_tui_ready_fails_fast_when_cursor_has_no_chat_to_resume() -> None:
+    """``agent --continue`` on a recreated worktree parks on this screen."""
+
+    async def capture(_target: str) -> str:
+        return "No previous chats found.\n" + "\n" * 20
+
+    result = await tmux_ready.wait_tui_ready(
+        "team:cursor",
+        trust_platform="cursor",
+        timeout_sec=5.0,
+        poll_interval=0.01,
+        capture=capture,
+    )
+
+    assert result.ok is False
+    assert result.reason_code == "fatal_signal"
+
+
+@pytest.mark.asyncio
+async def test_wait_tui_ready_prefers_composer_over_stale_fatal_scrollback() -> None:
+    """A reached composer wins over a resume error still in the scrollback."""
+    pane = (
+        "No previous chats found.\n"
+        + "\n" * 25
+        + "  \u2192 Plan, search, build anything\n"
+        "  Claude Opus 5 1M Thinking                                 Run Everything\n"
+        "  /home/user/project \u00b7 master\n"
+    )
+
+    async def capture(_target: str) -> str:
+        return pane
+
+    result = await tmux_ready.wait_tui_ready(
+        "team:cursor",
+        trust_platform="cursor",
+        timeout_sec=1.0,
+        poll_interval=0.01,
+        capture=capture,
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "composer_ready"
+
+
+@pytest.mark.asyncio
 async def test_wait_tui_ready_ignores_stale_cursor_trust_text_in_scrollback() -> None:
     pane = (
         "Workspace Trust Required\n"

@@ -104,6 +104,10 @@ _AGENT_PROMPT_PATTERNS = [
 ]
 _AGENT_FATAL_PATTERNS = [
     re.compile(r"No conversation found to continue", re.IGNORECASE),
+    # Cursor Agent's equivalent when ``--continue`` finds no history (e.g. the
+    # worktree was recreated). It stays on this screen instead of falling
+    # through to a composer, so waiting out the full timeout is pure delay.
+    re.compile(r"No previous chats found", re.IGNORECASE),
 ]
 
 _SHELL_PROMPT_PATTERNS = [
@@ -200,24 +204,20 @@ def _looks_like_claude_skip_permissions_prompt(pane_text: str) -> bool:
 
 
 def _looks_like_cursor_composer(pane_text: str) -> bool:
-    """Return True when Cursor Agent has reached its interactive composer."""
+    """Return True when Cursor Agent has reached its interactive composer.
+
+    Both markers belong to the composer's action row and never appear on a
+    startup gate, so they are sufficient on their own. Do NOT additionally
+    require a model-family hint (e.g. ``gpt-``): the model line reflects
+    whatever the user selected, so a Claude-backed Cursor Agent would sit at a
+    perfectly usable composer and still be reported as never-ready.
+    """
     lower = pane_text.lower()
     if not lower.strip():
         return False
-    has_cursor_ready_actions = (
+    return (
         "run everything" in lower
         and "plan, search, build anything" in lower
-    )
-    return (
-        has_cursor_ready_actions
-        and (
-            "cursor agent" in lower
-            or "composer" in lower
-            # Some Cursor Agent builds render only the model line + action row
-            # in the visible tail. This is still the ready composer, not a
-            # startup gate (checked before this predicate).
-            or "gpt-" in lower
-        )
     )
 
 
@@ -411,23 +411,6 @@ async def wait_tui_ready(
         if text.strip():
             last_non_empty_text = text
 
-        for pat in _AGENT_FATAL_PATTERNS:
-            if pat.search(text):
-                tail = text[-200:]
-                logger.warning(
-                    "tmux_tui_ready_fatal_signal",
-                    target=target,
-                    attempts=attempts,
-                    pattern=pat.pattern,
-                    tail=tail,
-                )
-                return TuiReadyResult(
-                    ok=False,
-                    reason_code="fatal_signal",
-                    message="TUI reported a fatal resume/startup error",
-                    pane_tail=tail,
-                )
-
         action = _startup_prompt_action(_pane_active_text(text), trust_platform)
         if action is not None:
             startup_prompt_seen = True
@@ -449,6 +432,25 @@ async def wait_tui_ready(
                 attempts=attempts,
             )
             return TuiReadyResult(ok=True, reason_code="composer_ready")
+
+        # Checked after the composer so a usable prompt always wins over an
+        # error line still sitting in the scrollback above it.
+        for pat in _AGENT_FATAL_PATTERNS:
+            if pat.search(text):
+                tail = text[-200:]
+                logger.warning(
+                    "tmux_tui_ready_fatal_signal",
+                    target=target,
+                    attempts=attempts,
+                    pattern=pat.pattern,
+                    tail=tail,
+                )
+                return TuiReadyResult(
+                    ok=False,
+                    reason_code="fatal_signal",
+                    message="TUI reported a fatal resume/startup error",
+                    pane_tail=tail,
+                )
 
         await asyncio.sleep(poll_interval)
 
