@@ -26,8 +26,11 @@ RUN tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
 
 RUN pip install --no-cache-dir uv
 
-# Real openclaw runtime CLI.
-RUN npm install -g openclaw@2026.6.5
+# Real openclaw runtime CLI. npmmirror first: registry.npmjs.org times out on
+# restricted networks (same reason the Node tarball is host-fetched above).
+RUN npm install -g openclaw@2026.6.5 --registry=https://registry.npmmirror.com \
+    --fetch-retries=3 --fetch-retry-mintimeout=2000 \
+    || npm install -g openclaw@2026.6.5
 
 # Real clawteam protocol CLI, installed from the staged local source checkout
 # (clawteam 0.3.0 is not published to PyPI).
