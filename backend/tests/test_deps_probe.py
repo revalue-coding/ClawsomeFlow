@@ -28,6 +28,10 @@ def path_with_unreadable_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     bad.chmod(0o755)
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root bypasses unreadable PATH entries (Docker test image runs pytest as root)",
+)
 def test_unreadable_path_entry_turns_enoent_into_eacces(
     path_with_unreadable_dir: Path,
 ) -> None:
