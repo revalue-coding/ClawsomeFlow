@@ -8,14 +8,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
 
 # System deps: git (worktree tests), tmux (clawteam spawn), build tools, procps.
+# xz-utils unpacks the Node tarball staged by scripts/test-in-docker.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git tmux curl ca-certificates build-essential procps \
+        git tmux curl ca-certificates build-essential procps xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Node 22 for the real openclaw CLI (public npm package, no auth to install).
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# The linux-x64 tarball is fetched + sha256-verified on the *host* by
+# scripts/test-in-docker.sh (official dist, then npmmirror / Tencent).
+# Doing it outside `docker build` avoids NodeSource apt's 38MB Cloudflare
+# .deb, which times out on restricted networks.
+COPY node.tar.xz /tmp/node.tar.xz
+RUN tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+    && rm -f /tmp/node.tar.xz \
+    && node --version \
+    && npm --version
 
 RUN pip install --no-cache-dir uv
 
