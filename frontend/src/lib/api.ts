@@ -918,6 +918,7 @@ export interface UiCapabilities {
 export interface BrowseDirectoryEntry {
   name: string;
   path: string;
+  kind?: "dir" | "file";
 }
 
 export interface BrowseDirectoryResult {
@@ -1919,7 +1920,11 @@ export const api = {
       "/api/system/pick-directory",
       payload ?? {},
     ),
-  browseDirectory: (payload?: { path?: string; includeHidden?: boolean }) =>
+  browseDirectory: (payload?: {
+    path?: string;
+    includeHidden?: boolean;
+    includeFiles?: boolean;
+  }) =>
     request<BrowseDirectoryResult>(
       "POST",
       "/api/system/browse-directory",

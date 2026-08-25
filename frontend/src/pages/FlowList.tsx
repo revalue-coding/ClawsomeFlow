@@ -42,13 +42,6 @@ export function FlowList() {
     null,
     { isClosed: (value) => value === null || value.trim().length === 0 },
   );
-  const [pendingDelete, setPendingDelete] = useSessionBackedState<FlowSummary | null>(
-    "flow-list:pending-delete",
-    null,
-    { isClosed: (value) => value === null },
-  );
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
   /**
@@ -93,24 +86,6 @@ export function FlowList() {
   useEffect(() => {
     setPage((prev) => Math.min(Math.max(prev, 1), totalPages));
   }, [totalPages]);
-
-  async function confirmDelete() {
-    if (!pendingDelete) return;
-    setDeleting(true);
-    setDeleteError(null);
-    const f = pendingDelete;
-    try {
-      await api.deleteFlow(f.id);
-      setPendingDelete(null);
-      await load();
-    } catch (e) {
-      setDeleteError(
-        e instanceof ApiError ? `${e.code}: ${e.message}` : String(e),
-      );
-    } finally {
-      setDeleting(false);
-    }
-  }
 
   async function triggerRunDirectly(flow: FlowSummary) {
     setBusy(flow.id);
@@ -296,8 +271,8 @@ export function FlowList() {
                     <td className="px-4 py-3 max-w-[220px] align-top">
                       <SilentLink
                         to={`/flows/${f.id}`}
-                        className="font-medium text-ink-900 hover:text-brand-600"
-                        title={f.id}
+                        className="font-medium text-ink-900 hover:text-brand-700 hover:underline"
+                        title={t("common.edit")}
                       >
                         {f.name}
                       </SilentLink>
@@ -333,23 +308,6 @@ export function FlowList() {
                         >
                           <RunIcon className="h-4 w-4" />
                           {inflight ? t("flowList.runningButton") : t("flowList.runButton")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-outline"
-                          onClick={() => navigate(`/flows/${f.id}`)}
-                        >
-                          {t("common.edit")}
-                        </button>
-                        <button
-                          className="btn-danger"
-                          disabled={inflight}
-                          onClick={() => {
-                            setDeleteError(null);
-                            setPendingDelete(f);
-                          }}
-                        >
-                          {t("common.delete")}
                         </button>
                       </div>
                     </td>
@@ -437,46 +395,6 @@ export function FlowList() {
               disabled={!runDialogFlow || !!busy || runDialogLoading}
             >
               {busy ? t("flowList.runDialog.starting") : t("flowList.runDialog.start")}
-            </button>
-          </div>
-        </div>
-      </Modal>
-
-      <Modal
-        open={!!pendingDelete}
-        onClose={() => {
-          if (deleting) return;
-          setPendingDelete(null);
-          setDeleteError(null);
-        }}
-        title={t("flowList.deleteModalTitle")}
-        width="max-w-md"
-      >
-        <div className="space-y-3">
-          <p className="text-sm text-ink-700">
-            {pendingDelete &&
-              t("flowList.deleteModalConfirm", { name: pendingDelete.name })}
-          </p>
-          {deleteError && <ErrorBox>{deleteError}</ErrorBox>}
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              className="btn-outline"
-              onClick={() => {
-                setPendingDelete(null);
-                setDeleteError(null);
-              }}
-              disabled={deleting}
-            >
-              {t("common.cancel")}
-            </button>
-            <button
-              type="button"
-              className="btn-danger"
-              onClick={confirmDelete}
-              disabled={deleting}
-            >
-              {deleting ? t("flowList.deleting") : t("flowList.deleteModalOk")}
             </button>
           </div>
         </div>

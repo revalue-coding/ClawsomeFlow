@@ -56,8 +56,8 @@ import {
 } from "@/lib/chatHistory";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
-import { pickDirectoryHybrid } from "@/components/DirectoryBrowserDialog";
-import { alertIfNativeDirectoryBlocked, ensureUiCapabilities, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
+import { openDirectoryHybrid, pickDirectoryHybrid } from "@/components/DirectoryBrowserDialog";
+import { ensureUiCapabilities, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
 import { cn } from "@/lib/cn";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useStickyScroll } from "@/lib/useStickyScroll";
@@ -1967,14 +1967,30 @@ function ChatRoom({ agentId }: { agentId: string }) {
   };
 
   const openProfile = async () => {
-    if (await alertIfNativeDirectoryBlocked(t, "open")) return;
+    if (!profileRoot) return;
     setOpening(true);
     try {
-      await api.openDirectory({ path: profileRoot });
+      await openDirectoryHybrid(t, {
+        path: profileRoot,
+        title: t("hermes.myProfile"),
+      });
     } catch (e) {
       void alert(t("hermes.openFailed", { message: errText(e) }));
     } finally {
       setOpening(false);
+    }
+  };
+
+  const openWorkdir = async () => {
+    const target = (workdirEditing ? workdirDraft : workdir).trim();
+    if (!target) return;
+    try {
+      await openDirectoryHybrid(t, {
+        path: target,
+        title: t("hermes.workdir"),
+      });
+    } catch (e) {
+      void alert(t("hermes.openWorkdirFailed", { message: errText(e) }));
     }
   };
 
@@ -2471,6 +2487,15 @@ function ChatRoom({ agentId }: { agentId: string }) {
                   </button>
                   <button
                     type="button"
+                    className="btn-outline shrink-0 !px-2 !py-1 text-xs"
+                    onClick={() => void openWorkdir()}
+                    disabled={workdirSaving || !workdirDraft.trim()}
+                    title={t("hermes.openWorkdir")}
+                  >
+                    {t("common.open")}
+                  </button>
+                  <button
+                    type="button"
                     className="btn-primary shrink-0 !px-2 !py-1 text-xs"
                     onClick={() => void saveWorkdir()}
                     disabled={workdirSaving || !workdirDraft.trim()}
@@ -2487,15 +2512,26 @@ function ChatRoom({ agentId }: { agentId: string }) {
                   </button>
                 </>
               ) : (
-                <button
-                  type="button"
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-ink-200 text-ink-500 hover:bg-ink-50 hover:text-ink-800"
-                  title={t("hermes.workdirEdit")}
-                  aria-label={t("hermes.workdirEdit")}
-                  onClick={startEditWorkdir}
-                >
-                  <EditIcon className="h-4 w-4" />
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="btn-outline shrink-0 !px-2 !py-1 text-xs"
+                    onClick={() => void openWorkdir()}
+                    disabled={!workdir.trim()}
+                    title={t("hermes.openWorkdir")}
+                  >
+                    {t("common.open")}
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-ink-200 text-ink-500 hover:bg-ink-50 hover:text-ink-800"
+                    title={t("hermes.workdirEdit")}
+                    aria-label={t("hermes.workdirEdit")}
+                    onClick={startEditWorkdir}
+                  >
+                    <EditIcon className="h-4 w-4" />
+                  </button>
+                </>
               )}
             </div>
             {workdirEditing && workdirError && (
@@ -3012,6 +3048,21 @@ function GatewayTab({ agentId }: { agentId: string }) {
             disabled={busy || picking}
           >
             {t("hermes.settingsModal.gateway.pickWorkdir")}
+          </button>
+          <button
+            type="button"
+            className="btn-outline whitespace-nowrap"
+            onClick={() => {
+              const target = cwd.trim();
+              if (!target) return;
+              void openDirectoryHybrid(t, {
+                path: target,
+                title: t("hermes.settingsModal.gateway.workdirLabel"),
+              }).catch((e) => setError(errText(e)));
+            }}
+            disabled={busy || !cwd.trim()}
+          >
+            {t("common.open")}
           </button>
         </div>
       </label>
@@ -3830,6 +3881,21 @@ function CronTab({ agentId }: { agentId: string }) {
                     >
                       {t("hermes.settingsModal.cron.pickWorkdir")}
                     </button>
+                    <button
+                      type="button"
+                      className="btn-outline whitespace-nowrap"
+                      onClick={() => {
+                        const target = editWorkdir.trim();
+                        if (!target) return;
+                        void openDirectoryHybrid(t, {
+                          path: target,
+                          title: t("hermes.settingsModal.cron.workdir"),
+                        }).catch((e) => setError(errText(e)));
+                      }}
+                      disabled={!editWorkdir.trim()}
+                    >
+                      {t("common.open")}
+                    </button>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -3904,6 +3970,21 @@ function CronTab({ agentId }: { agentId: string }) {
             disabled={pickingWorkdir}
           >
             {t("hermes.settingsModal.cron.pickWorkdir")}
+          </button>
+          <button
+            type="button"
+            className="btn-outline whitespace-nowrap"
+            onClick={() => {
+              const target = workdir.trim();
+              if (!target) return;
+              void openDirectoryHybrid(t, {
+                path: target,
+                title: t("hermes.settingsModal.cron.workdir"),
+              }).catch((e) => setError(errText(e)));
+            }}
+            disabled={!workdir.trim()}
+          >
+            {t("common.open")}
           </button>
         </div>
         <button

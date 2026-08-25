@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-from app import paths, platform_wsl
+from app import index_auth, paths, platform_wsl
 from app.api._auth import current_user
 from app.api.errors import ApiError
 from app.config import load_config
@@ -77,11 +78,13 @@ class UiCapabilitiesResponse(_CamelModel):
 class BrowseDirectoryPayload(_CamelModel):
     path: str | None = None
     include_hidden: bool = False
+    include_files: bool = False
 
 
 class BrowseDirectoryEntry(_CamelModel):
     name: str
     path: str
+    kind: Literal["dir", "file"] = "dir"
 
 
 class BrowseDirectoryResponse(_CamelModel):
@@ -225,23 +228,22 @@ def browse_directory(
     payload: Annotated[BrowseDirectoryPayload, Body()] = BrowseDirectoryPayload(),
     _user: UserDep = "",
 ) -> BrowseDirectoryResponse:
-    """List the subdirectories of a server-side path (WebUI directory browser).
+    """List a server-side path (WebUI directory browser / viewer).
 
-    Platform-neutral fallback for environments where the native picker cannot
-    run (WSL2, SSH-forwarded browsers, headless servers): the frontend walks
-    the server filesystem through this endpoint instead of a native dialog.
-    Directories only — the picker selects a directory, never a file.
+    Platform-neutral fallback for environments where the native picker or
+    file-manager open cannot run (WSL2, SSH-forwarded browsers, headless
+    servers): the frontend walks the server filesystem through this endpoint.
+    The picker (``include_files=false``) returns directories only; the viewer
+    (``include_files=true``) also lists files so SSH sessions can inspect a
+    known folder such as my-profile / my-desktop / a working directory.
     """
     raw = (payload.path or "").strip()
     base = _validate_existing_directory(raw) if raw else Path.home().resolve()
 
-    entries: list[BrowseDirectoryEntry] = []
+    collected: list[BrowseDirectoryEntry] = []
     truncated = False
     try:
-        children = sorted(
-            (c for c in base.iterdir()),
-            key=lambda p: p.name.casefold(),
-        )
+        children = list(base.iterdir())
     except OSError as exc:
         raise ApiError(
             "PATH_NOT_ACCESSIBLE",
@@ -254,14 +256,22 @@ def browse_directory(
         if not payload.include_hidden and name.startswith("."):
             continue
         try:
-            if not child.is_dir():
-                continue
+            is_directory = child.is_dir()
+            is_file = child.is_file() if payload.include_files else False
         except OSError:
             continue
-        if len(entries) >= _BROWSE_MAX_ENTRIES:
-            truncated = True
-            break
-        entries.append(BrowseDirectoryEntry(name=name, path=str(child)))
+        if is_directory:
+            kind: Literal["dir", "file"] = "dir"
+        elif is_file:
+            kind = "file"
+        else:
+            continue
+        collected.append(BrowseDirectoryEntry(name=name, path=str(child), kind=kind))
+    collected.sort(key=lambda e: (0 if e.kind == "dir" else 1, e.name.casefold()))
+    if len(collected) > _BROWSE_MAX_ENTRIES:
+        truncated = True
+        collected = collected[:_BROWSE_MAX_ENTRIES]
+    entries = collected
 
     parent = base.parent
     return BrowseDirectoryResponse(
@@ -1243,7 +1253,11 @@ def _launch_self_upgrade(script_url: str) -> str:
     """
     log_path = paths.logs_dir() / "self-upgrade.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    inner = f"curl -fsSL {script_url} | bash"
+    # The hosted script sits behind basic auth: the fetch needs the pair on the
+    # curl command, and the script itself needs it in the environment for pip.
+    index_env = index_auth.child_env()
+    curl_auth = " ".join(shlex.quote(a) for a in index_auth.curl_auth_args())
+    inner = f"curl -fsSL {curl_auth} {script_url} | bash"
 
     if _use_systemd_run():
         argv = [
@@ -1254,6 +1268,12 @@ def _launch_self_upgrade(script_url: str) -> str:
             "csflow-self-upgrade",
             "--setenv",
             f"HOME={os.path.expanduser('~')}",
+        ]
+        # systemd-run starts from a clean environment, so nothing the service
+        # unit carries reaches the child implicitly.
+        for key, value in index_env.items():
+            argv += ["--setenv", f"{key}={value}"]
+        argv += [
             "bash",
             "-lc",
             f"{{ {inner} ; }} >>{str(log_path)!r} 2>&1",
@@ -1275,7 +1295,7 @@ def _launch_self_upgrade(script_url: str) -> str:
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            env=os.environ.copy(),
+            env={**os.environ, **index_env},
         )
     finally:
         log_handle.close()

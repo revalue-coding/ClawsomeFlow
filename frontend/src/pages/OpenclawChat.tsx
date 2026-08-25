@@ -60,11 +60,12 @@ import {
   AgentManagementHeader,
   AgentViewModeToggle,
 } from "@/components/AgentPageToolbar";
-import { DesktopIcon, EditIcon, LockIcon, PlusIcon, RefreshIcon, SettingsIcon, StoreIcon, TrashIcon } from "@/components/icons";
+import { DesktopIcon, EditIcon, LockIcon, PlusIcon, RefreshIcon, SettingsIcon, TrashIcon } from "@/components/icons";
 import { handleChatTextareaEnterKey } from "@/lib/chatInput";
 import { cn } from "@/lib/cn";
 import { resolveDroppedFolderPath } from "@/lib/chatDropFolder";
-import { alertIfNativeDirectoryBlocked, getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
+import { openDirectoryHybrid } from "@/components/DirectoryBrowserDialog";
+import { getNativeDirectoryBlockedMessage, isRemoteBrowser } from "@/lib/remoteClient";
 import {
   formatChatTime,
   loadChatHistory,
@@ -424,9 +425,6 @@ function AgentQuickActions({
   // Single-flights the "is it safe to cancel yet?" poll so a remount / retry
   // can't stack duplicate loops for the same create.
   const armPollInFlightRef = useRef(false);
-  const [storeComingSoonOpen, setStoreComingSoonOpen] = useSessionBackedModalFlag(
-    "openclaw-chat:quick-actions:store-coming-soon-open",
-  );
 
   // Block leaving the page while an irreversible/in-flight operation runs, so a
   // remove / restore / create-cancellation / import-cancellation can't be
@@ -506,10 +504,6 @@ function AgentQuickActions({
     },
   });
 
-  function openStoreComingSoon() {
-    setStoreComingSoonOpen(true);
-  }
-
   useEffect(() => {
     void loadTeams();
   }, []);
@@ -526,14 +520,11 @@ function AgentQuickActions({
   useEffect(() => {
     const query = new URLSearchParams(location.search);
     const shouldOpenCreate = query.get("createAgent") === "1";
-    const shouldOpenStore = query.get("storeComingSoon") === "1";
     const shouldOpenImport = query.get("importAgent") === "1";
-    if (!shouldOpenCreate && !shouldOpenStore && !shouldOpenImport) return;
+    if (!shouldOpenCreate && !shouldOpenImport) return;
     if (shouldOpenCreate) onOpenCreateModal();
-    if (shouldOpenStore) openStoreComingSoon();
     if (shouldOpenImport) void openImportModal();
     query.delete("createAgent");
-    query.delete("storeComingSoon");
     query.delete("importAgent");
     const nextSearch = query.toString();
     navigate(
@@ -1767,9 +1758,6 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
   const { t } = useTranslation();
   const [items, setItems] = useState<OpenclawPickerAgent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [storeComingSoonOpen, setStoreComingSoonOpen] = useSessionBackedModalFlag(
-    "openclaw-chat:picker:store-coming-soon-open",
-  );
   const [viewMode, setViewMode] = useState<"card" | "list">("card");
   const [editingTeam, setEditingTeam] = useSessionBackedState<{ id: string; name: string } | null>(
     "openclaw-chat:picker:editing-team",
@@ -1916,13 +1904,6 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
                 <SilentLink to="/chat?createAgent=1" className="btn-primary">
                   {t("chat.pickerEmptyActionCreate")}
                 </SilentLink>
-                <button
-                  type="button"
-                  className="btn-outline"
-                  onClick={() => setStoreComingSoonOpen(true)}
-                >
-                  {t("chat.pickerEmptyActionLoadStore")}
-                </button>
               </div>
               <SilentLink to="/chat?importAgent=1" className="btn-outline">
                 {t("assistant.askImport")}
@@ -2166,51 +2147,7 @@ function ChatPicker({ actions }: { actions: OpenclawPickerActions }) {
           </div>
         </div>
       </Modal>
-
-      <StoreComingSoonModal
-        open={storeComingSoonOpen}
-        onClose={() => setStoreComingSoonOpen(false)}
-      />
     </div>
-  );
-}
-
-function StoreComingSoonModal({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const headingFont = {
-    fontFamily:
-      '"Inter","SF Pro Display","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Helvetica Neue",Arial,sans-serif',
-  } as const;
-  return (
-    <Modal open={open} onClose={onClose} title="" width="max-w-md">
-      <div className="relative overflow-hidden rounded-2xl border border-brand-100 bg-gradient-to-br from-indigo-50 via-surface to-fuchsia-50 px-6 py-7">
-        <div className="pointer-events-none absolute -left-10 -top-10 h-28 w-28 rounded-full bg-indigo-300/30 blur-2xl" />
-        <div className="pointer-events-none absolute -bottom-12 -right-12 h-32 w-32 rounded-full bg-fuchsia-300/30 blur-2xl" />
-        <div className="relative space-y-4 text-center">
-          <span className="mx-auto inline-flex h-20 w-20 items-center justify-center rounded-[22px] bg-gradient-to-br from-indigo-500 via-fuchsia-500 to-orange-500 text-white shadow-[0_0_24px_-6px_rgba(217,70,239,0.85)]">
-            <StoreIcon className="h-9 w-9" />
-          </span>
-          <h4 className="text-xl font-semibold tracking-tight text-ink-900" style={headingFont}>
-            {t("store.comingSoon.headline")}
-          </h4>
-          <div className="pt-1">
-            <button
-              type="button"
-              className="inline-flex rounded-full border border-fuchsia-300 bg-gradient-to-r from-indigo-500 via-fuchsia-500 to-orange-500 px-5 py-2 text-sm font-semibold text-white shadow-[0_0_20px_-8px_rgba(217,70,239,0.8)] transition hover:from-indigo-600 hover:to-orange-600"
-              onClick={onClose}
-            >
-              {t("store.comingSoon.action")}
-            </button>
-          </div>
-        </div>
-      </div>
-    </Modal>
   );
 }
 
@@ -2986,12 +2923,14 @@ function ChatRoom({
 
   async function onOpenMyDesktop() {
     if (!agent || openingMyDesktop) return;
-    if (await alertIfNativeDirectoryBlocked(t, "open")) return;
     const targetPath = buildAgentMyDesktopPath(agent.workspacePath);
     setActionError(null);
     setOpeningMyDesktop(true);
     try {
-      await api.openDirectory({ path: targetPath });
+      await openDirectoryHybrid(t, {
+        path: targetPath,
+        title: t("chat.myDesktop.action"),
+      });
     } catch (e) {
       const message = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
       if (typeof window !== "undefined") {

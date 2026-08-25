@@ -152,7 +152,30 @@ def test_browse_directory_lists_subdirectories_only(tmp_path: Path) -> None:
     assert body["parent"] == str(root.resolve().parent)
     assert [e["name"] for e in body["entries"]] == ["Alpha", "beta"]
     assert body["entries"][0]["path"] == str(root.resolve() / "Alpha")
+    assert body["entries"][0]["kind"] == "dir"
     assert body["truncated"] is False
+
+
+def test_browse_directory_include_files(tmp_path: Path) -> None:
+    root = tmp_path / "browse-root"
+    root.mkdir()
+    (root / "beta").mkdir()
+    (root / "Alpha").mkdir()
+    (root / "file.txt").write_text("x")
+    (root / ".hidden").mkdir()
+    (root / ".secret").write_text("y")
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/api/system/browse-directory",
+            json={"path": str(root), "includeFiles": True},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [(e["name"], e["kind"]) for e in body["entries"]] == [
+        ("Alpha", "dir"),
+        ("beta", "dir"),
+        ("file.txt", "file"),
+    ]
 
 
 def test_browse_directory_include_hidden(tmp_path: Path) -> None:

@@ -228,6 +228,15 @@ export function PlusIcon(props: IconProps) {
   );
 }
 
+export function CloseIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M6 6l12 12" />
+      <path d="M18 6 6 18" />
+    </IconBase>
+  );
+}
+
 export function DesktopIcon(props: IconProps) {
   return (
     <IconBase {...props}>

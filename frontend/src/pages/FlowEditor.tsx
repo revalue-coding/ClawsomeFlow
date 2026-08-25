@@ -7,8 +7,9 @@
  *    keeps in sync) a non-deletable summary task whose owner is the
  *    chosen leader.
  *  - Execution pre-specification (optional).
- *  - Tasks: compact one-row-per-task list with Details / Edit / Delete /
- *    Up / Down buttons. A modal opens the full task form for add or edit.
+ *  - Tasks: compact one-row-per-task list. Click the title to edit; a
+ *    top-right × deletes the row; Up / Down reorder. A modal opens the
+ *    full task form for add or edit.
  *
  * Invariants preserved (server-side validators):
  *  - The leader owns exactly one task, and that task is the summary
@@ -39,7 +40,7 @@ import {
 } from "@/lib/api";
 import { Card, CardTitle, ErrorBox, Loading, Modal, StatusPill } from "@/components/ui";
 import { useDialog } from "@/components/dialog";
-import { ChatIcon } from "@/components/icons";
+import { ChatIcon, CloseIcon } from "@/components/icons";
 import { cn } from "@/lib/cn";
 import {
   DAG_HSCROLL_COL_THRESHOLD,
@@ -56,7 +57,7 @@ import {
   setDevMode,
 } from "@/lib/flowRuntime";
 import { branchAfterRepoCheck, ensureRepoAndListBranches } from "@/lib/flowRepoBranch";
-import { pickDirectoryHybrid } from "@/components/DirectoryBrowserDialog";
+import { openDirectoryHybrid, pickDirectoryHybrid } from "@/components/DirectoryBrowserDialog";
 import {
   clearSessionBackedKeys,
   useSessionBackedModalFlag,
@@ -1167,6 +1168,7 @@ export function FlowEditor() {
    *  once per error. */
   const [saveBlockers, setSaveBlockers] = useState<string[] | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [repoIssue, setRepoIssue] = useSessionBackedState<RepoIssue | null>(
     "flow-editor:repo-issue",
     null,
@@ -1875,6 +1877,30 @@ export function FlowEditor() {
     void alert(text);
   }
 
+  async function onDeleteFlow() {
+    if (isNew || !id || deleting || submitting) return;
+    const ok = await confirm(
+      t("flowEditor.deleteFlowConfirm", {
+        name: name.trim() || id,
+      }),
+      { danger: true, okText: t("flowEditor.deleteFlowOk") },
+    );
+    if (!ok) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.deleteFlow(id);
+      clearFlowEditorDraft();
+      navigate("/flows");
+    } catch (e) {
+      const msg =
+        e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+      setError(t("flowEditor.deleteError", { message: msg }));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   async function persistFlow(payload: FlowSavePayload): Promise<PersistFlowResult> {
     if (isNew) {
       return api.createFlow(payload);
@@ -2207,6 +2233,25 @@ export function FlowEditor() {
     }
   }
 
+  async function onOpenLeaderRepo() {
+    const target = leaderRepo.trim();
+    if (!target) return;
+    try {
+      await openDirectoryHybrid(t, {
+        path: target,
+        title: t("flowEditor.leaderRepoLabel"),
+      });
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+          ? e.message
+          : String(e);
+      void alert(t("flowEditor.taskFields.openDirFailed", { message: msg }));
+    }
+  }
+
   // ── render --------------------------------------------------------
 
   return (
@@ -2263,14 +2308,14 @@ export function FlowEditor() {
               clearFlowEditorDraft();
               navigate("/flows");
             }}
-            disabled={submitting}
+            disabled={submitting || deleting}
           >
             {t("common.cancel")}
           </button>
           <button
             className="btn-primary"
             onClick={onSubmit}
-            disabled={submitting}
+            disabled={submitting || deleting}
           >
             {submitting ? t("flowEditor.saving") : t("flowEditor.save")}
           </button>
@@ -2568,6 +2613,14 @@ export function FlowEditor() {
                     >
                       {t("flowEditor.taskFields.pickDirButton")}
                     </button>
+                    <button
+                      type="button"
+                      className="btn-outline whitespace-nowrap"
+                      onClick={() => void onOpenLeaderRepo()}
+                      disabled={!leaderRepo.trim()}
+                    >
+                      {t("flowEditor.taskFields.openDirButton")}
+                    </button>
                   </div>
                 </div>
                 <div>
@@ -2740,9 +2793,6 @@ export function FlowEditor() {
                     canMoveDown={
                       !row.isLeaderSummary && nonSummaryIdx < nonSummaryTotal - 1
                     }
-                    onDetail={() =>
-                      setEditing({ mode: "view", rowKey: row.rowKey })
-                    }
                     onEdit={() =>
                       setEditing({ mode: "edit", rowKey: row.rowKey })
                     }
@@ -2814,6 +2864,19 @@ export function FlowEditor() {
           </div>
         )}
       </Card>
+
+      {!isNew && id && (
+        <div className="border-t border-ink-100 pt-4">
+          <button
+            type="button"
+            className="btn-danger"
+            onClick={() => void onDeleteFlow()}
+            disabled={submitting || deleting}
+          >
+            {deleting ? t("flowEditor.deleting") : t("flowEditor.deleteFlow")}
+          </button>
+        </div>
+      )}
 
       {autoMergeSyncNoticeOpen && (
         <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center">
@@ -2962,7 +3025,6 @@ function TaskListRow({
   summaryMissingDeps,
   canMoveUp,
   canMoveDown,
-  onDetail,
   onEdit,
   onRemove,
   onToggleCheckpoint,
@@ -2978,7 +3040,6 @@ function TaskListRow({
   summaryMissingDeps: boolean;
   canMoveUp: boolean;
   canMoveDown: boolean;
-  onDetail: () => void;
   onEdit: () => void;
   onRemove: () => void;
   onToggleCheckpoint: () => void;
@@ -3007,9 +3068,14 @@ function TaskListRow({
         <div className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain touch-pan-x">
           <div className="w-max pr-1 space-y-1">
             <div className="flex items-center gap-2 flex-nowrap">
-              <span className="text-sm font-medium text-ink-900 whitespace-nowrap">
+              <button
+                type="button"
+                className="text-sm font-medium text-ink-900 whitespace-nowrap text-left hover:text-brand-700 hover:underline"
+                onClick={onEdit}
+                title={t("flowEditor.edit")}
+              >
                 {row.subject.trim() || t("flowEditor.rowUntitled")}
-              </span>
+              </button>
               {isSummary && (
                 <span className="pill-brand shrink-0 whitespace-nowrap">
                   ⭐ {t("flowEditor.summaryTaskBadge")}
@@ -3119,29 +3185,6 @@ function TaskListRow({
                     : t("flowEditor.taskFields.requiresHumanCheckpointEnableAction")}
                 </button>
               )}
-              <button
-                type="button"
-                className="btn-outline shrink-0"
-                onClick={onDetail}
-              >
-                {t("flowEditor.details")}
-              </button>
-              <button
-                type="button"
-                className="btn-outline shrink-0"
-                onClick={onEdit}
-              >
-                {t("flowEditor.edit")}
-              </button>
-              <button
-                type="button"
-                className="btn-danger shrink-0"
-                onClick={onRemove}
-                disabled={isSummary}
-                title={isSummary ? t("flowEditor.summaryTaskLocked") : undefined}
-              >
-                {t("flowEditor.delete")}
-              </button>
             </div>
             <div className="text-xs text-ink-500 whitespace-nowrap">
               <span>
@@ -3185,25 +3228,40 @@ function TaskListRow({
             )}
           </div>
         </div>
-        <div className="shrink-0 flex flex-row items-center gap-0.5 border-l border-ink-200 pl-2">
-          <button
-            type="button"
-            className="btn-ghost px-2"
-            onClick={() => onMove(-1)}
-            disabled={!canMoveUp}
-            title="↑"
-          >
-            ↑
-          </button>
-          <button
-            type="button"
-            className="btn-ghost px-2"
-            onClick={() => onMove(1)}
-            disabled={!canMoveDown}
-            title="↓"
-          >
-            ↓
-          </button>
+        <div className="shrink-0 flex flex-col items-center self-start gap-0.5 border-l border-ink-200 pl-2">
+          {!isSummary ? (
+            <button
+              type="button"
+              className="inline-flex h-6 w-6 items-center justify-center rounded text-ink-400 hover:bg-rose-50 hover:text-rose-600"
+              onClick={onRemove}
+              title={t("flowEditor.delete")}
+              aria-label={t("flowEditor.delete")}
+            >
+              <CloseIcon className="h-3.5 w-3.5" />
+            </button>
+          ) : (
+            <span className="h-6 w-6" aria-hidden />
+          )}
+          <div className="flex flex-row items-center gap-0.5">
+            <button
+              type="button"
+              className="btn-ghost px-2"
+              onClick={() => onMove(-1)}
+              disabled={!canMoveUp}
+              title="↑"
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              className="btn-ghost px-2"
+              onClick={() => onMove(1)}
+              disabled={!canMoveDown}
+              title="↓"
+            >
+              ↓
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -3795,6 +3853,25 @@ function TaskFormBody({
       void alert(t("flowEditor.pickDirFailed", { message: msg }));
     } finally {
       setPickingRepo(false);
+    }
+  }
+
+  async function onOpenRepo() {
+    const target = row.ownerRepo.trim();
+    if (!target) return;
+    try {
+      await openDirectoryHybrid(t, {
+        path: target,
+        title: t("flowEditor.taskFields.claudeRepoPath"),
+      });
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+          ? e.message
+          : String(e);
+      void alert(t("flowEditor.taskFields.openDirFailed", { message: msg }));
     }
   }
 
@@ -4483,6 +4560,14 @@ function TaskFormBody({
                   disabled={pickingRepo || ownerLocked}
                 >
                   {t("flowEditor.taskFields.pickDirButton")}
+                </button>
+                <button
+                  type="button"
+                  className="btn-outline whitespace-nowrap"
+                  onClick={() => void onOpenRepo()}
+                  disabled={!row.ownerRepo.trim()}
+                >
+                  {t("flowEditor.taskFields.openDirButton")}
                 </button>
               </div>
             </div>
