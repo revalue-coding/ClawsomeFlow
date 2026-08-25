@@ -32,7 +32,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -76,6 +76,9 @@ _DEFAULT_NON_OPENCLAW_CLI_TIMEOUT_SEC = float(_REQUEST_TTL_SECONDS)
 _MIN_NON_OPENCLAW_CLI_TIMEOUT_SEC = 1800.0
 _NON_OPENCLAW_CLI_TIMEOUT_ENV = "CSFLOW_NON_OPENCLAW_CLI_TIMEOUT_SECONDS"
 _DECOMPOSE_CANCEL_RESET_TIMEOUT_SEC = 30.0
+# How deep to look for the proposal inside a model-invented envelope.
+_PROPOSAL_ENVELOPE_MAX_DEPTH = 4
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _CURSOR_RESULT_PROCESS_EXIT_GRACE_SEC = 2.0
 
 _INFLIGHT_DISPATCH_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -476,7 +479,11 @@ _DELIVERY_STDOUT = """\
        {{
          "agents": [ /* your agents */ ],
          "tasks":  [ /* your tasks  */ ]
-       }}\
+       }}
+
+3. `agents` and `tasks` must be **top-level arrays** of that one object: no
+   wrapper key, no id-keyed map, and no other JSON object anywhere in your
+   answer (not even an illustrative snippet).\
 """
 
 
@@ -603,41 +610,63 @@ def _canonical_json_payload(value: Any) -> str:
     )
 
 
+def _coerce_proposal_items(raw: Any, field: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        for idx, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise RuntimeError(f"{field}[{idx}] must be an object")
+            items.append(dict(item))
+        return items
+    if isinstance(raw, dict):
+        # Some models answer with an id-keyed map instead of a list.
+        for key, item in raw.items():
+            if not isinstance(item, dict):
+                raise RuntimeError(f"{field}[{key}] must be an object")
+            entry = dict(item)
+            entry.setdefault("id", key)
+            items.append(entry)
+        return items
+    raise RuntimeError(f"non-openclaw proposal missing list field '{field}'")
+
+
 def _coerce_non_openclaw_proposal(
     payload: Any,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not isinstance(payload, dict):
         raise RuntimeError("non-openclaw proposal must be a JSON object")
-    agents_raw = payload.get("agents")
-    tasks_raw = payload.get("tasks")
-    if not isinstance(agents_raw, list):
-        raise RuntimeError("non-openclaw proposal missing list field 'agents'")
-    if not isinstance(tasks_raw, list):
-        raise RuntimeError("non-openclaw proposal missing list field 'tasks'")
-    agents: list[dict[str, Any]] = []
-    tasks: list[dict[str, Any]] = []
-    for idx, item in enumerate(agents_raw):
-        if not isinstance(item, dict):
-            raise RuntimeError(f"agents[{idx}] must be an object")
-        agents.append(dict(item))
-    for idx, item in enumerate(tasks_raw):
-        if not isinstance(item, dict):
-            raise RuntimeError(f"tasks[{idx}] must be an object")
-        tasks.append(dict(item))
-    return agents, tasks
+    return (
+        _coerce_proposal_items(payload.get("agents"), "agents"),
+        _coerce_proposal_items(payload.get("tasks"), "tasks"),
+    )
 
 
-def _extract_json_object_from_text(text: str) -> dict[str, Any]:
+def _looks_like_proposal(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("agents"), (list, dict))
+        and isinstance(value.get("tasks"), (list, dict))
+    )
+
+
+def _iter_json_objects_in_text(text: str) -> Iterator[dict[str, Any]]:
+    """Yield every JSON object decodable from ``text``, most-specific first.
+
+    A one-shot CLI mixes the proposal with prose, reasoning, fenced examples and
+    (for stream transports) status objects, so the FIRST decodable object is
+    frequently not the proposal — the caller filters by shape instead.
+    """
     raw = text.strip()
     if not raw:
-        raise RuntimeError("non-openclaw leader returned empty output")
+        return
 
     try:
         parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return parsed
     except json.JSONDecodeError:
         pass
+    else:
+        if isinstance(parsed, dict):
+            yield parsed
 
     for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw, flags=re.IGNORECASE):
         block = match.group(1).strip()
@@ -648,7 +677,7 @@ def _extract_json_object_from_text(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            return parsed
+            yield parsed
 
     decoder = json.JSONDecoder()
     for match in re.finditer(r"\{", raw):
@@ -657,9 +686,95 @@ def _extract_json_object_from_text(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            return parsed
+            yield parsed
 
+
+def _mentions_proposal_fields(value: str) -> bool:
+    return "{" in value and ("agents" in value or "tasks" in value)
+
+
+def _find_json_object(
+    value: Any,
+    predicate: Callable[[dict[str, Any]], bool],
+    *,
+    depth: int = 0,
+) -> dict[str, Any] | None:
+    """Locate a matching object inside an arbitrary JSON value.
+
+    Handles the envelopes models keep inventing around the requested shape:
+    ``{"proposal": {...}}``, ``{"result": "<json string>"}``, a list of
+    candidates, and so on.
+    """
+    if depth > _PROPOSAL_ENVELOPE_MAX_DEPTH:
+        return None
+    if isinstance(value, dict):
+        if predicate(value):
+            return value
+        children: Any = value.values()
+    elif isinstance(value, list):
+        children = value
+    elif isinstance(value, str) and _mentions_proposal_fields(value):
+        children = _iter_json_objects_in_text(value)
+    else:
+        return None
+    for item in children:
+        found = _find_json_object(item, predicate, depth=depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _extract_proposal_from_text(
+    text: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not text.strip():
+        raise RuntimeError("non-openclaw leader returned empty output")
+    saw_object = False
+    partial: dict[str, Any] | None = None
+    shape_error: str | None = None
+    for candidate in _iter_json_objects_in_text(text):
+        saw_object = True
+        found = _find_json_object(candidate, _looks_like_proposal)
+        if found is not None:
+            try:
+                return _coerce_non_openclaw_proposal(found)
+            except RuntimeError as exc:
+                # A malformed illustrative snippet must not shadow the real
+                # proposal further down the output.
+                shape_error = shape_error or _error_text(exc)
+                continue
+        if partial is None:
+            # Keep the closest miss so the error names the offending field
+            # instead of the generic "no proposal here".
+            partial = _find_json_object(
+                candidate,
+                lambda obj: "agents" in obj or "tasks" in obj,
+            )
+    if shape_error is not None:
+        raise RuntimeError(shape_error)
+    if partial is not None:
+        return _coerce_non_openclaw_proposal(partial)
+    if saw_object:
+        raise RuntimeError(
+            "non-openclaw leader output has JSON but none carrying "
+            "'agents' + 'tasks'",
+        )
     raise RuntimeError("non-openclaw leader output did not contain a JSON object")
+
+
+def _clean_cli_text(text: str) -> str:
+    """Drop terminal colour codes / BOM so JSON survives a decorated CLI."""
+    return _ANSI_ESCAPE_RE.sub("", text or "").replace("\ufeff", "")
+
+
+def _output_preview(text: str, *, limit: int = 300) -> str:
+    """Collapse output to a short, single-line, log-safe excerpt."""
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    head = collapsed[: limit // 2].rstrip()
+    tail = collapsed[-(limit // 2) :].lstrip()
+    return f"{head} … {tail}"
 
 
 def _extract_non_openclaw_proposal(
@@ -667,6 +782,8 @@ def _extract_non_openclaw_proposal(
     stdout_text: str,
     stderr_text: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    stdout_text = _clean_cli_text(stdout_text)
+    stderr_text = _clean_cli_text(stderr_text)
     candidates: list[tuple[str, str]] = []
     if stdout_text.strip():
         candidates.append(("stdout", stdout_text))
@@ -678,15 +795,16 @@ def _extract_non_openclaw_proposal(
     errors: list[str] = []
     for source, text in candidates:
         try:
-            payload = _extract_json_object_from_text(text)
-            return _coerce_non_openclaw_proposal(payload)
+            return _extract_proposal_from_text(text)
         except RuntimeError as exc:
             errors.append(f"{source}: {_error_text(exc)}")
 
     joined = "; ".join(errors) if errors else "no output"
+    preview = _output_preview(stdout_text or stderr_text)
+    suffix = f" | leader output: {preview}" if preview else ""
     raise RuntimeError(
         "non-openclaw leader returned no parseable JSON proposal: "
-        f"{joined[:800]}",
+        f"{joined[:500]}{suffix}",
     )
 
 

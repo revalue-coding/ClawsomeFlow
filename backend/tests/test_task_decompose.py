@@ -1067,6 +1067,63 @@ async def test_start_non_openclaw_marks_failed_on_invalid_proposal_output(
     assert "missing list field 'tasks'" in (row.error_message or "")
 
 
+def _proposal_payload() -> dict[str, Any]:
+    return {
+        "agents": [{"id": "leader", "kind": "cursor", "isLeader": True}],
+        "tasks": [{"id": "summary", "ownerAgentId": "leader", "isLeaderSummary": True}],
+    }
+
+
+def test_extract_proposal_skips_non_proposal_json_preamble() -> None:
+    # A one-shot CLI mixes status/example objects with the answer: the FIRST
+    # decodable object is not necessarily the proposal.
+    text = (
+        '{"type":"system","subtype":"init","session_id":"abc"}\n'
+        "Here is an example agent: {\"id\": \"worker\", \"kind\": \"claude\"}\n"
+        "拆解结果如下：\n"
+        "```json\n" + json.dumps(_proposal_payload()) + "\n```\n"
+        "以上是完整方案。"
+    )
+    agents, tasks = svc._extract_non_openclaw_proposal(stdout_text=text, stderr_text="")
+    assert agents[0]["id"] == "leader"
+    assert tasks[0]["id"] == "summary"
+
+
+def test_extract_proposal_unwraps_envelope_and_json_string() -> None:
+    wrapped = json.dumps({"result": json.dumps({"proposal": _proposal_payload()})})
+    agents, tasks = svc._extract_non_openclaw_proposal(stdout_text=wrapped, stderr_text="")
+    assert agents[0]["id"] == "leader"
+    assert tasks[0]["ownerAgentId"] == "leader"
+
+
+def test_extract_proposal_accepts_id_keyed_maps() -> None:
+    text = json.dumps({
+        "agents": {"leader": {"kind": "cursor", "isLeader": True}},
+        "tasks": {"summary": {"ownerAgentId": "leader", "isLeaderSummary": True}},
+    })
+    agents, tasks = svc._extract_non_openclaw_proposal(stdout_text=text, stderr_text="")
+    assert agents[0]["id"] == "leader"
+    assert tasks[0]["id"] == "summary"
+
+
+def test_extract_proposal_ignores_ansi_colour_codes() -> None:
+    coloured = "\x1b[32m" + json.dumps(_proposal_payload()) + "\x1b[0m"
+    agents, tasks = svc._extract_non_openclaw_proposal(stdout_text=coloured, stderr_text="")
+    assert agents[0]["id"] == "leader"
+    assert tasks[0]["id"] == "summary"
+
+
+def test_extract_proposal_error_includes_output_preview() -> None:
+    with pytest.raises(RuntimeError) as exc:
+        svc._extract_non_openclaw_proposal(
+            stdout_text="I cannot decompose this goal.",
+            stderr_text="",
+        )
+    message = str(exc.value)
+    assert "no parseable JSON proposal" in message
+    assert "I cannot decompose this goal." in message
+
+
 @pytest.mark.asyncio
 async def test_start_non_openclaw_leader_requires_repo(
     fake_openclaw_home: Path,
