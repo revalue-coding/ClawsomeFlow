@@ -84,7 +84,11 @@ type NonOpenclawOwnerKind =
 // no local process, no repo/branch, reached via its own owner-source category.
 type OwnerKind = "openclaw" | "external" | NonOpenclawOwnerKind;
 type OwnerKindDraft = OwnerKind | "";
-type OwnerMode = "existing" | "new" | "external";
+// The editor exposes exactly two owner categories: a locally-run agent
+// (any CLI platform, persistent or ad-hoc) vs an external execution node.
+// Persistence ("临时 vs 持久化") is no longer a user-facing choice — it is
+// derived from the picked platform + agent id (see deriveOwnerIsTemporary).
+type OwnerMode = "local" | "external";
 type ExternalChannelDraft = "" | "human" | "webhook" | "remote_csflow";
 interface ExistingOwnerOption {
   key: string;
@@ -114,9 +118,10 @@ interface TaskRow {
   ownerId: string;
   ownerRepo: string;
   ownerTargetBranch: string;
-  /** True when the owner is a temporary (ad-hoc) agent created inline ("new"
-   *  source), false when it references a persistent/managed agent ("existing"
-   *  source). Drives backend FlowAgent.is_temporary. */
+  /** True when the owner is a temporary (ad-hoc) agent created inline, false
+   *  when it references a persistent/managed agent. Not user-facing: derived
+   *  from the platform + agent id (deriveOwnerIsTemporary). Drives backend
+   *  FlowAgent.is_temporary. */
   ownerIsTemporary: boolean;
   /** External execution node (ownerKind="external") channel configuration. */
   externalChannel: ExternalChannelDraft;
@@ -303,21 +308,18 @@ function blankRow(): TaskRow {
   };
 }
 
-// Owner-kind option sets, split by the two owner-source CATEGORIES the UI now
-// exposes: "持久化Agent" (persistent) vs "临时Agent" (temporary).
+// Owner-kind option sets. These two lists no longer map onto a user-facing
+// choice — the editor shows ONE "本地Agent" category whose platform dropdown is
+// their union (LOCAL_OWNER_KINDS). They survive because the availability probe
+// (`/api/system/owner-kinds/fast`) reports them separately: a kind is offered
+// when it is detected in EITHER list.
 //
 // PERSISTENT_OWNER_KINDS — kinds backed by a real persistent management
-// platform: OpenClaw + Hermes ONLY. Picked from that platform's managed
-// dropdown; in-flow temporary agents are NEVER offered here. Used for BOTH the
-// leader and worker tasks.
+// platform: OpenClaw + Hermes ONLY.
 //
-// NEW_OWNER_KINDS — kinds available as temporary, ad-hoc agents (any
-// non-OpenClaw kind). In the temporary category the agent name is free-typed
-// (create new) OR picked from a dropdown of temporary agents already created in
-// THIS flow (worker tasks only; the leader never reuses an in-flow worker agent
-// and so gets the input alone).
-// Hermes first: it is the default persistent platform (P3) and the first option
-// shown in the persistent kind dropdown.
+// NEW_OWNER_KINDS — kinds usable as temporary, ad-hoc agents (any non-OpenClaw
+// kind), whose agent name is free-typed.
+// Hermes first: it is the default persistent platform (P3).
 const PERSISTENT_OWNER_KINDS: OwnerKind[] = ["hermes", "openclaw"];
 const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = [
   "claude",
@@ -331,6 +333,12 @@ const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = [
   "qoder",
   "codebuddy",
   "hermes",
+];
+/** Platform dropdown of the unified "本地Agent" category. Order is
+ *  product-facing: the two persistent platforms first, then the CLI kinds. */
+const LOCAL_OWNER_KINDS: OwnerKind[] = [
+  ...PERSISTENT_OWNER_KINDS,
+  ...NEW_OWNER_KINDS.filter((kind) => !PERSISTENT_OWNER_KINDS.includes(kind)),
 ];
 
 function isOwnerKind(kind: OwnerKindDraft): kind is OwnerKind {
@@ -383,16 +391,8 @@ function toTempOwnerKind(raw: string): NonOpenclawOwnerKind | null {
     : null;
 }
 
-// Kinds whose agent id must be picked from a managed-agent dropdown (not free
-// text). Only Hermes has a persistent management platform; Claude/Codex/Cursor
-// are temporary/ad-hoc (free-text), like Cursor. KEEP their repo/branch.
-const MANAGED_PICK_KINDS = new Set<OwnerKind>(["hermes"]);
-
-function isManagedPickKind(kind: OwnerKind): boolean {
-  return MANAGED_PICK_KINDS.has(kind);
-}
-
-/** Managed-agent picklist for a kind (Hermes only). */
+/** Registered (persistent) agents of a kind. Hermes is the only non-OpenClaw
+ *  platform with a managed registry; every other CLI kind is ad-hoc only. */
 function pickAgentsForKind(
   kind: OwnerKind,
   hermes: HermesAgentSummary[],
@@ -439,19 +439,32 @@ function tempAgentValue(a: { id: string; repo: string; targetBranch: string }): 
   ].join(TEMP_AGENT_VALUE_SEP);
 }
 
-/** "Existing"-source picklist for a temporary (non-OpenClaw) kind: the
- *  temporary agents the user already created in another task of THIS flow. Each
- *  option carries its repo+targetBranch so that SELECTING it re-uses the exact
- *  same worktree identity (the user-confirmed exception to block independence —
+/** One entry of the "已有 Agent" dropdown attached to the agent-name combobox.
+ *  ``hasBinding`` marks an in-flow definition, which carries a concrete
+ *  repo+targetBranch; a registry entry (a persistent Hermes profile not yet
+ *  used in this flow) has none, so picking it must leave the workspace fields
+ *  alone. */
+interface AgentPickOption {
+  key: string;
+  id: string;
+  repo: string;
+  targetBranch: string;
+  hasBinding: boolean;
+  label: string;
+}
+
+/** Agents of ``kind`` already defined in ANOTHER task of THIS flow. Each option
+ *  carries its repo+targetBranch so that SELECTING it re-uses the exact same
+ *  worktree identity (the user-confirmed exception to block independence —
  *  picking an enumerated definition adopts its repo/branch; free-typing a name
  *  stays independent). Leader-summary rows and the editing row are excluded;
  *  results are deduped by (id, repo, targetBranch). */
-function flowTempAgentsForKind(
+function flowAgentsForKind(
   kind: NonOpenclawOwnerKind,
   rows: TaskRow[],
   excludeRowKey?: string,
-): { id: string; repo: string; targetBranch: string; label: string }[] {
-  const out: { id: string; repo: string; targetBranch: string; label: string }[] = [];
+): AgentPickOption[] {
+  const out: AgentPickOption[] = [];
   const seen = new Set<string>();
   for (const r of rows) {
     if (r.isLeaderSummary) continue;
@@ -465,13 +478,63 @@ function flowTempAgentsForKind(
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
+      key,
       id,
       repo,
       targetBranch,
+      hasBinding: true,
       label: `${id} (${repo || "—"} @ ${targetBranch || "—"})`,
     });
   }
   return out;
+}
+
+/** Full "已有 Agent" picklist for a locally-run, non-OpenClaw platform: the
+ *  registered agents of that platform (Hermes profiles — persistent) plus the
+ *  agents already defined in this flow (which may be ad-hoc). Registry entries
+ *  are appended only when the flow does not already bind that id, so an in-flow
+ *  definition (with its workspace) always wins. */
+function agentPickOptions(
+  kind: NonOpenclawOwnerKind,
+  rows: TaskRow[],
+  hermesOptions: HermesAgentSummary[],
+  opts: { excludeRowKey?: string; includeFlowAgents?: boolean } = {},
+): AgentPickOption[] {
+  const out =
+    opts.includeFlowAgents === false
+      ? []
+      : flowAgentsForKind(kind, rows, opts.excludeRowKey);
+  const known = new Set(out.map((o) => o.id));
+  for (const a of pickAgentsForKind(kind, hermesOptions)) {
+    if (known.has(a.id)) continue;
+    known.add(a.id);
+    out.push({
+      key: `registry${TEMP_AGENT_VALUE_SEP}${a.id}`,
+      id: a.id,
+      repo: "",
+      targetBranch: "",
+      hasBinding: false,
+      label: `${a.name} (${a.id})`,
+    });
+  }
+  return out;
+}
+
+/** Persistence is not a user choice: OpenClaw is always persistent, external
+ *  nodes never own a runtime, a Hermes owner is persistent exactly when its
+ *  name matches a registered profile, and every other CLI platform is ad-hoc.
+ *  Mirrors the same derivation `proposalToRows` applies to AI proposals. */
+function deriveOwnerIsTemporary(
+  kind: OwnerKindDraft,
+  ownerId: string,
+  hermesOptions: HermesAgentSummary[],
+): boolean {
+  if (kind === "openclaw" || kind === "external") return false;
+  if (kind === "hermes") {
+    const id = ownerId.trim();
+    return !id || !hermesOptions.some((a) => a.id === id);
+  }
+  return true;
 }
 
 /** Find an existing in-flow workspace binding for a non-OpenClaw owner id. Used
@@ -628,14 +691,12 @@ function persistentAgentExists(
 }
 
 function ownerIdAfterPlatformChange({
-  sourceMode,
   previousKind,
   nextKind,
   ownerId,
   openclawOptions,
   hermesOptions,
 }: {
-  sourceMode: OwnerMode;
   previousKind: OwnerKindDraft;
   nextKind: OwnerKindDraft;
   ownerId: string;
@@ -646,7 +707,6 @@ function ownerIdAfterPlatformChange({
   if (!normalizedOwnerId) return "";
   if (!isOwnerKind(nextKind)) return "";
   if (!isOwnerKind(previousKind)) return normalizedOwnerId;
-  if (sourceMode !== "existing") return normalizedOwnerId;
   if (previousKind === nextKind) return normalizedOwnerId;
   if (
     !isPersistentOwnerKind(previousKind)
@@ -784,57 +844,65 @@ function mergeOwnerKindAvailability(
   };
 }
 
-function ownerKindAvailableForSource(
+/** A locally-run platform is offered when the probe detected it in EITHER
+ *  bucket — the UI no longer splits persistent from temporary. */
+function ownerKindAvailable(
   kind: OwnerKindDraft,
-  isTemporary: boolean,
   availability: OwnerKindsAvailability,
 ): boolean {
   if (!isOwnerKind(kind)) return false;
   // External execution nodes have no platform dependency — always available.
   if (isExternalKind(kind)) return true;
-  if (isTemporary) {
-    return isNonOpenclawKind(kind) && availability.temporaryKinds.includes(kind);
-  }
-  return isPersistentOwnerKind(kind) && availability.persistentKinds.includes(kind);
+  return (
+    (isPersistentOwnerKind(kind) && availability.persistentKinds.includes(kind))
+    || (isNonOpenclawKind(kind) && availability.temporaryKinds.includes(kind))
+  );
 }
 
-/** Editable combobox for the temporary-agent NAME field. A single input that
- *  both free-types a brand-new temporary agent name AND opens a dropdown of the
- *  temporary agent names already defined in THIS flow (same kind). Picking one
- *  sets only the name — repo/target branch are an independent block (P2) and
- *  stay under their own fields; cross-task binding consistency is reconciled at
- *  保存子任务. */
-function TempAgentCombobox({
+/** Platform dropdown contents of the "本地Agent" category. */
+function localOwnerKindOptions(availability: OwnerKindsAvailability): OwnerKind[] {
+  return LOCAL_OWNER_KINDS.filter((kind) => ownerKindAvailable(kind, availability));
+}
+
+/** Editable combobox for the agent NAME field. A single input that both
+ *  free-types a brand-new ad-hoc agent name AND opens a dropdown of the agents
+ *  already available for that platform — the ones defined in THIS flow plus the
+ *  platform's registered (persistent) agents. Free-typing sets only the name —
+ *  repo/target branch are an independent block (P2) and stay under their own
+ *  fields; cross-task binding consistency is reconciled at 保存子任务. */
+function AgentCombobox({
   value,
   options,
-  selectedValue,
   disabled,
   placeholder,
   onType,
   onPick,
 }: {
   value: string;
-  options: { id: string; repo: string; targetBranch: string; label: string }[];
-  selectedValue: string;
+  options: AgentPickOption[];
   disabled?: boolean;
   placeholder?: string;
   onType: (text: string) => void;
-  onPick: (opt: { id: string; repo: string; targetBranch: string }) => void;
+  onPick: (opt: AgentPickOption) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   const q = value.trim().toLowerCase();
-  // While the text is a committed selection (matches a candidate) show the full
-  // list; once the user types something new, filter to substring matches.
+  // While the text names one of the candidates show the full list; once the
+  // user types something new, filter to substring matches.
+  const isKnownName = useMemo(
+    () => options.some((o) => o.id.toLowerCase() === q),
+    [options, q],
+  );
   const filtered = useMemo(() => {
-    if (!q || selectedValue) return options;
+    if (!q || isKnownName) return options;
     return options.filter(
       (o) =>
         o.id.toLowerCase().includes(q) || o.label.toLowerCase().includes(q),
     );
-  }, [options, q, selectedValue]);
+  }, [options, q, isKnownName]);
 
   useEffect(() => {
     if (!open) return;
@@ -850,7 +918,7 @@ function TempAgentCombobox({
 
   const showDropdown = open && !disabled && filtered.length > 0;
 
-  const pick = (opt: { id: string; repo: string; targetBranch: string }) => {
+  const pick = (opt: AgentPickOption) => {
     onPick(opt);
     setOpen(false);
     setActive(-1);
@@ -916,12 +984,11 @@ function TempAgentCombobox({
           role="listbox"
         >
           {filtered.map((o, i) => {
-            const v = tempAgentValue(o);
-            const isSelected = v === selectedValue;
+            const isSelected = o.id === value.trim();
             const isActive = i === active;
             return (
               <li
-                key={v}
+                key={o.key}
                 role="option"
                 aria-selected={isSelected}
                 className={cn(
@@ -1073,8 +1140,9 @@ export function FlowEditor() {
     draftKey("leaderKind"),
     "",
   );
-  // Leader source: false = existing/persistent agent, true = temporary ad-hoc.
-  // OpenClaw default → existing.
+  // Leader persistence. NOT a user choice (the leader is always a local agent):
+  // derived from the picked platform + agent name, kept in state so a hydrated
+  // Flow keeps its persisted value until the Hermes registry has loaded.
   const [leaderIsTemporary, setLeaderIsTemporary] = useSessionBackedState(
     draftKey("leaderIsTemporary"),
     false,
@@ -1307,6 +1375,18 @@ export function FlowEditor() {
       });
   }, [id, isNew, hydrated]);
 
+  // Re-derive leader persistence whenever the platform, the name, or the Hermes
+  // registry changes. A Hermes leader keeps its persisted value until the
+  // registry has actually loaded, so a slow fetch can never demote a persistent
+  // leader to ad-hoc.
+  useEffect(() => {
+    setLeaderIsTemporary((prev) =>
+      leaderKind === "hermes" && hermesOptions.length === 0
+        ? prev
+        : deriveOwnerIsTemporary(leaderKind, leaderId, hermesOptions),
+    );
+  }, [leaderKind, leaderId, hermesOptions]);
+
   // Keep the summary task in sync with leader fields.
   // Important: when leader fields are in an intermediate state (for example
   // switching kind and leaderId is temporarily empty), preserve the existing
@@ -1442,6 +1522,10 @@ export function FlowEditor() {
     () => mergeOwnerKindAvailability(detectedOwnerKinds, usedOwnerKinds(tasks, leaderKind)),
     [detectedOwnerKinds, tasks, leaderKind],
   );
+  const localOwnerKinds = useMemo(
+    () => localOwnerKindOptions(mergedOwnerKinds),
+    [mergedOwnerKinds],
+  );
 
   function ownerKindLabelText(kind: OwnerKindDraft): string {
     return ownerKindLabel(kind, (key) => t(key));
@@ -1449,11 +1533,10 @@ export function FlowEditor() {
 
   function leaderKindIssueText(
     kind: OwnerKindDraft,
-    temporary: boolean,
     availability: OwnerKindsAvailability,
   ): string | null {
     if (!isOwnerKind(kind)) return t("flowEditor.validation.leaderKindRequired");
-    if (!ownerKindAvailableForSource(kind, temporary, availability)) {
+    if (!ownerKindAvailable(kind, availability)) {
       return t("flowEditor.validation.leaderKindUnavailable", {
         kindLabel: ownerKindLabelText(kind),
       });
@@ -1468,7 +1551,7 @@ export function FlowEditor() {
     if (!isOwnerKind(row.ownerKind)) {
       return t("flowEditor.validation.ownerKindRequired");
     }
-    if (!ownerKindAvailableForSource(row.ownerKind, row.ownerIsTemporary, availability)) {
+    if (!ownerKindAvailable(row.ownerKind, availability)) {
       return t("flowEditor.validation.ownerKindUnavailable", {
         subject: row.subject.trim() || row.id || t("flowEditor.rowUntitled"),
         kindLabel: ownerKindLabelText(row.ownerKind),
@@ -1563,17 +1646,16 @@ export function FlowEditor() {
   }, [tasks]);
 
   const decomposeDisabledReason = useMemo(() => {
-    // The leader Agent NAME (leaderId) is ALWAYS required to run "AI 拆解",
-    // regardless of source — a new/temporary leader and an existing one both
-    // need it. Keep this as the unconditional first guard; never gate it behind
-    // leaderIsTemporary. (For a temporary leader the only thing we relax below
-    // is the managed-picklist *membership* check, not the name requirement.)
+    // The leader Agent NAME (leaderId) is ALWAYS required to run "AI 拆解" —
+    // an ad-hoc leader and a registered one both need it.
     if (!leaderId.trim()) {
       return t("flowEditor.validation.pickLeader");
     }
-    const kindIssue = leaderKindIssueText(leaderKind, leaderIsTemporary, mergedOwnerKinds);
+    const kindIssue = leaderKindIssueText(leaderKind, mergedOwnerKinds);
     if (kindIssue) return kindIssue;
     if (leaderKind === "openclaw") {
+      // OpenClaw is the one platform with no ad-hoc creation: the leader must
+      // reference a registered agent.
       if (openclawOptions.length === 0) {
         return t("flowEditor.decompose.leaderEmpty");
       }
@@ -1581,16 +1663,6 @@ export function FlowEditor() {
         return t("flowEditor.validation.pickLeader");
       }
       return null;
-    }
-    // A temporary (ad-hoc / "new") leader is typed as free text and never
-    // appears in the managed-agent picklist, so only require picklist
-    // membership for existing/persistent leaders.
-    if (!leaderIsTemporary && isOwnerKind(leaderKind) && isManagedPickKind(leaderKind)) {
-      // Managed agent required (no ad-hoc creation), plus a working dir.
-      const opts = pickAgentsForKind(leaderKind, hermesOptions);
-      if (!opts.some((a) => a.id === leaderId.trim())) {
-        return t("flowEditor.validation.pickLeader");
-      }
     }
     if (!leaderRepo.trim()) {
       return t("flowEditor.decompose.leaderRepoRequired");
@@ -1602,12 +1674,10 @@ export function FlowEditor() {
   }, [
     leaderId,
     leaderKind,
-    leaderIsTemporary,
     leaderRepo,
     leaderTargetBranch,
     mergedOwnerKinds,
     openclawOptions,
-    hermesOptions,
     t,
   ]);
 
@@ -1743,12 +1813,8 @@ export function FlowEditor() {
       );
       return; // keep leaderId untouched — select snaps back via controlled value
     }
-    if (isOwnerKind(leaderKind) && isManagedPickKind(leaderKind)) {
-      // Managed kinds (Hermes/Claude/Codex) bind identity via the managed id,
-      // but the working directory (repo/branch) is chosen separately — preserve it.
-      setLeaderId(normalized);
-      return;
-    }
+    // Identity only: the leader's working directory (repo/branch) is a separate
+    // block and is preserved across name changes.
     setLeaderId(normalized);
   }
 
@@ -2053,11 +2119,7 @@ export function FlowEditor() {
     if (!leaderId.trim()) {
       blockers.push(t("flowEditor.validation.pickLeader"));
     }
-    const leaderKindIssue = leaderKindIssueText(
-      leaderKind,
-      leaderIsTemporary,
-      ownerKindsNow,
-    );
+    const leaderKindIssue = leaderKindIssueText(leaderKind, ownerKindsNow);
     if (leaderKindIssue) blockers.push(leaderKindIssue);
     for (const row of tasks) {
       const issue = taskOwnerKindIssueText(row, ownerKindsNow);
@@ -2173,7 +2235,7 @@ export function FlowEditor() {
       detectedNow,
       usedOwnerKinds(tasks, leaderKind),
     );
-    const kindIssue = leaderKindIssueText(leaderKind, leaderIsTemporary, ownerKindsNow);
+    const kindIssue = leaderKindIssueText(leaderKind, ownerKindsNow);
     if (kindIssue) {
       setError(kindIssue);
       return;
@@ -2188,17 +2250,6 @@ export function FlowEditor() {
         return;
       }
     } else {
-      if (
-        !leaderIsTemporary &&
-        isOwnerKind(leaderKind) &&
-        isManagedPickKind(leaderKind) &&
-        !pickAgentsForKind(leaderKind, hermesOptions).some(
-          (a) => a.id === leaderId.trim(),
-        )
-      ) {
-        setError(t("flowEditor.validation.pickLeader"));
-        return;
-      }
       const repoReady = await validateLeaderRepoAndBranchForDecompose();
       if (!repoReady) return;
     }
@@ -2459,31 +2510,9 @@ export function FlowEditor() {
                 {t("flowEditor.aiDecompose")}
               </button>
             </div>
-            <div className="mt-2 grid gap-2 md:grid-cols-3">
-              <div>
-                <label className="label">{t("flowEditor.taskFields.ownerSource")}</label>
-                <select
-                  className="select"
-                  value={leaderIsTemporary ? "new" : "existing"}
-                  onChange={(e) => {
-                    const nextMode = e.target.value as OwnerMode;
-                    // Toggling source keeps repo/branch as-is, but requires the
-                    // user to explicitly re-pick owner kind + id.
-                    if (nextMode === "new") {
-                      setLeaderIsTemporary(true);
-                      setLeaderKind("");
-                      setLeaderId("");
-                    } else {
-                      setLeaderIsTemporary(false);
-                      setLeaderKind("");
-                      setLeaderId("");
-                    }
-                  }}
-                >
-                  <option value="existing">{t("flowEditor.taskFields.ownerSourceExisting")}</option>
-                  <option value="new">{t("flowEditor.taskFields.ownerSourceNew")}</option>
-                </select>
-              </div>
+            {/* The leader always runs locally, so there is no owner-source
+                picker here — only the platform and the agent name. */}
+            <div className="mt-2 grid gap-2 md:grid-cols-2">
               <div>
                 <label className="label">{t("flowEditor.leaderKindLabel")}</label>
                 <select
@@ -2497,9 +2526,7 @@ export function FlowEditor() {
                   }}
                   onChange={(e) => {
                     const nextKind = e.target.value as OwnerKindDraft;
-                    const sourceMode: OwnerMode = leaderIsTemporary ? "new" : "existing";
                     const nextLeaderId = ownerIdAfterPlatformChange({
-                      sourceMode,
                       previousKind: leaderKind,
                       nextKind,
                       ownerId: leaderId,
@@ -2511,9 +2538,7 @@ export function FlowEditor() {
                   }}
                 >
                   <option value="">{t("flowEditor.taskFields.ownerKindPlaceholder")}</option>
-                  {(leaderIsTemporary
-                    ? mergedOwnerKinds.temporaryKinds
-                    : mergedOwnerKinds.persistentKinds).map((k) => (
+                  {localOwnerKinds.map((k) => (
                     <option key={k} value={k}>
                       {ownerKindLabel(k, (key) => t(key))}
                     </option>
@@ -2530,7 +2555,8 @@ export function FlowEditor() {
                     onChange={(e) => tryChangeLeader(e.target.value)}
                     disabled
                   />
-                ) : !leaderIsTemporary && leaderKind === "openclaw" ? (
+                ) : leaderKind === "openclaw" ? (
+                  // OpenClaw has no ad-hoc agents — pick a registered one.
                   <select
                     className="select"
                     value={leaderId}
@@ -2546,38 +2572,22 @@ export function FlowEditor() {
                       </option>
                     ))}
                   </select>
-                ) : !leaderIsTemporary
-                  && isOwnerKind(leaderKind)
-                  && isManagedPickKind(leaderKind) ? (
-                  <>
-                    <select
-                      className="select"
-                      value={leaderId}
-                      onChange={(e) => tryChangeLeader(e.target.value)}
-                    >
-                      <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
-                      {leaderId &&
-                        !pickAgentsForKind(leaderKind, hermesOptions).some(
-                          (a) => a.id === leaderId,
-                        ) && <option value={leaderId}>{leaderId}</option>}
-                      {pickAgentsForKind(leaderKind, hermesOptions).map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name} ({a.id})
-                        </option>
-                      ))}
-                    </select>
-                    {pickAgentsForKind(leaderKind, hermesOptions).length === 0 && (
-                      <div className="text-xs text-ink-500 mt-1">
-                        {t("flowEditor.hermesAgentEmpty")}
-                      </div>
-                    )}
-                  </>
                 ) : (
-                  <input
-                    className="input"
+                  // Free-type a new agent name, or pick a registered one of
+                  // this platform. In-flow worker agents are deliberately NOT
+                  // offered: the leader owns only the summary task.
+                  <AgentCombobox
                     value={leaderId}
+                    options={
+                      isNonOpenclawKind(leaderKind)
+                        ? agentPickOptions(leaderKind, tasks, hermesOptions, {
+                            includeFlowAgents: false,
+                          })
+                        : []
+                    }
                     placeholder={t("flowEditor.taskFields.leaderNewAgentPlaceholder")}
-                    onChange={(e) => setLeaderId(e.target.value)}
+                    onType={(text) => setLeaderId(text)}
+                    onPick={(sel) => tryChangeLeader(sel.id)}
                   />
                 )}
               </div>
@@ -2952,8 +2962,7 @@ export function FlowEditor() {
           devMode={devMode}
           openclawOptions={openclawOptions}
           hermesOptions={hermesOptions}
-          persistentOwnerKinds={mergedOwnerKinds.persistentKinds}
-          temporaryOwnerKinds={mergedOwnerKinds.temporaryKinds}
+          localOwnerKinds={localOwnerKinds}
           openclawIds={openclawIds}
           hermesIds={hermesIds}
           validationMessages={validationMessages}
@@ -3285,8 +3294,7 @@ function TaskEditModal({
   devMode,
   openclawOptions,
   hermesOptions,
-  persistentOwnerKinds,
-  temporaryOwnerKinds,
+  localOwnerKinds,
   openclawIds,
   hermesIds,
   validationMessages,
@@ -3305,8 +3313,7 @@ function TaskEditModal({
   devMode: boolean;
   openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
-  persistentOwnerKinds: OwnerKind[];
-  temporaryOwnerKinds: NonOpenclawOwnerKind[];
+  localOwnerKinds: OwnerKind[];
   openclawIds: Set<string>;
   hermesIds: Set<string>;
   validationMessages: ValidationMessages;
@@ -3350,11 +3357,7 @@ function TaskEditModal({
   const readOnly = mode === "view";
   const isSummary = draft.isLeaderSummary;
   const [ownerMode, setOwnerMode] = useState<OwnerMode>(() =>
-    initialRow.ownerKind === "external"
-      ? "external"
-      : initialRow.ownerKind !== "openclaw" && initialRow.ownerIsTemporary
-      ? "new"
-      : "existing",
+    initialRow.ownerKind === "external" ? "external" : "local",
   );
   const knownAgentIds = useMemo(
     () => collectKnownAgentIds(tasks, initialRow.rowKey),
@@ -3374,7 +3377,24 @@ function TaskEditModal({
       setBranchOptions([]);
       setBranchEditable(false);
     }
-    setDraft((d) => ({ ...d, ...p }));
+    setDraft((d) => {
+      const next = { ...d, ...p };
+      // Persistence is derived, never picked. A Hermes owner keeps its current
+      // value until the registry has loaded so a slow fetch cannot demote a
+      // persistent agent to ad-hoc.
+      const ownerTouched =
+        Object.prototype.hasOwnProperty.call(p, "ownerKind")
+        || Object.prototype.hasOwnProperty.call(p, "ownerId");
+      const registryPending = next.ownerKind === "hermes" && hermesOptions.length === 0;
+      if (ownerTouched && !registryPending) {
+        next.ownerIsTemporary = deriveOwnerIsTemporary(
+          next.ownerKind,
+          next.ownerId,
+          hermesOptions,
+        );
+      }
+      return next;
+    });
   }
 
   function snapshotRepoBeforeEdit(row: Pick<TaskRow, "ownerRepo" | "ownerTargetBranch">) {
@@ -3554,7 +3574,7 @@ function TaskEditModal({
       setSaveError(validationMessages.ownerKindRequired);
       return;
     }
-    if (!ownerKindAvailableForSource(draft.ownerKind, draft.ownerIsTemporary, ownerKindsNow)) {
+    if (!ownerKindAvailable(draft.ownerKind, ownerKindsNow)) {
       setSaveError(
         validationMessages.ownerKindUnavailable({
           subject: draft.subject.trim() || draft.id || t("flowEditor.rowUntitled"),
@@ -3584,9 +3604,9 @@ function TaskEditModal({
       setSaveError(rowIssue.message);
       return;
     }
-    // A brand-new temporary name may not collide with the leader's name (the
+    // A brand-new ad-hoc name may not collide with the leader's name (the
     // leader owns only the summary; a worker can never reuse it).
-    if (ownerMode === "new") {
+    if (draft.ownerIsTemporary) {
       const candidate = draft.ownerId.trim();
       if (candidate && knownAgentIds.has(candidate)) {
         const usedByOtherSubtask = tasks.some(
@@ -3650,8 +3670,7 @@ function TaskEditModal({
         ownerMode={ownerMode}
         openclawOptions={openclawOptions}
         hermesOptions={hermesOptions}
-        persistentOwnerKinds={persistentOwnerKinds}
-        temporaryOwnerKinds={temporaryOwnerKinds}
+        localOwnerKinds={localOwnerKinds}
         branchOptions={branchOptions}
         branchEditable={branchEditable}
         branchLoading={branchLoading}
@@ -3675,7 +3694,6 @@ function TaskEditModal({
             patch({
               ownerKind: "external",
               ownerId: "",
-              ownerIsTemporary: false,
               ownerRepo: "",
               ownerTargetBranch: "",
               externalChannel: draft.externalChannel || "",
@@ -3686,7 +3704,6 @@ function TaskEditModal({
             patch({
               ownerKind: "",
               ownerId: "",
-              ownerIsTemporary: nextMode === "new",
               ownerRepo: snap.repo,
               ownerTargetBranch: snap.branch,
             });
@@ -3727,8 +3744,7 @@ function TaskFormBody({
   ownerMode,
   openclawOptions,
   hermesOptions,
-  persistentOwnerKinds,
-  temporaryOwnerKinds,
+  localOwnerKinds,
   branchOptions,
   branchEditable,
   branchLoading,
@@ -3747,8 +3763,7 @@ function TaskFormBody({
   ownerMode: OwnerMode;
   openclawOptions: OpenclawAgentSummary[];
   hermesOptions: HermesAgentSummary[];
-  persistentOwnerKinds: OwnerKind[];
-  temporaryOwnerKinds: NonOpenclawOwnerKind[];
+  localOwnerKinds: OwnerKind[];
   branchOptions: string[];
   branchEditable: boolean;
   branchLoading: boolean;
@@ -3769,7 +3784,6 @@ function TaskFormBody({
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
   const ownerIsExternal = ownerMode === "external" || isExternalKind(row.ownerKind);
   const ownerShowsRepoFields = !ownerIsOpenclaw && !ownerIsExternal;
-  const ownerIsNew = ownerMode === "new";
   const ownerKindEditable = !ownerLocked;
   const branchHelperText = branchEditable
     ? t("flowEditor.taskBranchCheck.editableHint")
@@ -3988,8 +4002,7 @@ function TaskFormBody({
           disabled={ownerLocked}
           onChange={(e) => onOwnerModeChange(e.target.value as OwnerMode)}
         >
-          <option value="existing">{t("flowEditor.taskFields.ownerSourceExisting")}</option>
-          <option value="new">{t("flowEditor.taskFields.ownerSourceNew")}</option>
+          <option value="local">{t("flowEditor.taskFields.ownerSourceLocal")}</option>
           {/* External execution node — never selectable for the leader summary. */}
           {!isSummary && (
             <option value="external">{t("flowEditor.taskFields.ownerSourceExternal")}</option>
@@ -3999,7 +4012,7 @@ function TaskFormBody({
 
       {/* Owner type (kind). For external source this dropdown enumerates the
           three external channels (人工 / 远程ClawsomeFlow / 通用接口); otherwise
-          it filters persistent platforms or temporary CLI kinds. */}
+          it lists every locally-available agent platform. */}
       <div>
         <label className="label">{t("flowEditor.taskFields.ownerKind")}</label>
         {ownerIsExternal ? (
@@ -4031,7 +4044,6 @@ function TaskFormBody({
             onChange={(e) => {
               const nextKind = e.target.value as OwnerKindDraft;
               const nextOwnerId = ownerIdAfterPlatformChange({
-                sourceMode: ownerMode,
                 previousKind: row.ownerKind,
                 nextKind,
                 ownerId: row.ownerId,
@@ -4046,15 +4058,10 @@ function TaskFormBody({
             }}
           >
             <option value="">{t("flowEditor.taskFields.ownerKindPlaceholder")}</option>
-            {ownerKindSelected
-              && !(
-                ownerIsNew
-                  ? temporaryOwnerKinds.includes(row.ownerKind as NonOpenclawOwnerKind)
-                  : persistentOwnerKinds.includes(row.ownerKind as OwnerKind)
-              ) && (
+            {isOwnerKind(row.ownerKind) && !localOwnerKinds.includes(row.ownerKind) && (
               <option value={row.ownerKind}>{ownerKindLabel(row.ownerKind, (key) => t(key))}</option>
             )}
-            {(ownerIsNew ? temporaryOwnerKinds : persistentOwnerKinds).map((k) => (
+            {localOwnerKinds.map((k) => (
               <option key={k} value={k}>
                 {ownerKindLabel(k, (key) => t(key))}
               </option>
@@ -4063,15 +4070,17 @@ function TaskFormBody({
         )}
       </div>
 
-      {/* Agent identity. Persistent → pick a registered agent of the chosen
-          kind (OpenClaw / Hermes managed dropdown). Temporary → free-type a new
-          agent name AND/OR pick a temporary agent already created in THIS flow
-          (both inputs open at once). External → free-typed node agent name. */}
+      {/* Agent identity. OpenClaw has no ad-hoc agents, so it stays a plain
+          "pick a registered agent" dropdown. Every other local platform gets
+          one combobox that both free-types a brand-new agent name and lists the
+          agents already available for it — those defined elsewhere in THIS flow
+          plus the platform's registered (persistent) ones. External → free-typed
+          node agent name. */}
       <div>
         <label className="label">
-          {ownerIsExternal || ownerIsNew
-            ? t("flowEditor.taskFields.newAgentName")
-            : t("flowEditor.taskFields.existingAgent")}
+          {ownerIsOpenclaw
+            ? t("flowEditor.taskFields.existingAgent")
+            : t("flowEditor.taskFields.newAgentName")}
         </label>
         {ownerIsExternal ? (
           // External node: free-typed node name (the FlowAgent id in the DAG).
@@ -4090,51 +4099,6 @@ function TaskFormBody({
             placeholder={t("flowEditor.taskFields.pickOwnerKindFirst")}
             onChange={(e) => onChange({ ownerId: e.target.value })}
           />
-        ) : ownerIsNew ? (
-          // Temporary: a single editable combobox. Free-TYPE to create a
-          // brand-new temporary agent (name only — repo/branch stay independent,
-          // P2). Or open the dropdown and SELECT a temporary agent already
-          // defined in another task of THIS flow: that adopts its exact id +
-          // repo + target branch (the user-confirmed exception — selecting an
-          // enumerated definition overwrites repo/branch).
-          (() => {
-            const opts = isNonOpenclawKind(row.ownerKind)
-              ? flowTempAgentsForKind(
-                  row.ownerKind,
-                  tasks,
-                  row.rowKey,
-                )
-              : [];
-            const current = row.ownerId.trim()
-              ? tempAgentValue({
-                  id: row.ownerId.trim(),
-                  repo: row.ownerRepo.trim(),
-                  targetBranch: row.ownerTargetBranch.trim(),
-                })
-              : "";
-            const selectValue = opts.some((o) => tempAgentValue(o) === current)
-              ? current
-              : "";
-            return (
-              <TempAgentCombobox
-                value={row.ownerId}
-                options={opts}
-                selectedValue={selectValue}
-                disabled={ownerLocked}
-                placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
-                onType={(text) => onChange({ ownerId: text })}
-                onPick={(sel) => {
-                  onChange({
-                    ownerId: sel.id,
-                    ownerRepo: sel.repo,
-                    ownerTargetBranch: sel.targetBranch,
-                    ownerIsTemporary: true,
-                  });
-                  commitRepoPath(sel.repo);
-                }}
-              />
-            );
-          })()
         ) : ownerIsOpenclaw ? (
           <>
             <select
@@ -4160,64 +4124,48 @@ function TaskFormBody({
             )}
           </>
         ) : (
-          // Persistent non-OpenClaw = Hermes (the only other managed platform):
-          // pick from the registered Hermes profiles.
-          <>
-            <select
-              className="select"
-              value={row.ownerId}
-              disabled={ownerLocked}
-              // SELECTING a Hermes agent that another task of this flow already
-              // uses overwrites this row's repo/branch from that binding (the
-              // user-confirmed exception). Picking one with no in-flow binding
-              // leaves repo/branch as-is.
-              onChange={(e) => {
-                const ownerId = e.target.value;
-                const existing = findFlowOwnerWorkspace(
-                  tasks,
-                  { ownerKind: isOwnerKind(row.ownerKind) ? row.ownerKind : "hermes", ownerId },
-                  row.rowKey,
-                );
-                onChange({
-                  ownerId,
-                  ...(existing
-                    ? {
-                        ownerRepo: existing.repo,
-                        ownerTargetBranch: existing.targetBranch,
-                      }
-                    : {}),
-                });
-                if (existing?.repo) {
-                  commitRepoPath(existing.repo);
-                }
-              }}
-            >
-              <option value="">{t("flowEditor.hermesAgentPlaceholder")}</option>
-              {row.ownerId &&
-                !pickAgentsForKind(
-                  isOwnerKind(row.ownerKind) ? row.ownerKind : "hermes",
-                  hermesOptions,
-                ).some(
-                  (a) => a.id === row.ownerId,
-                ) && <option value={row.ownerId}>{row.ownerId}</option>}
-              {pickAgentsForKind(
-                isOwnerKind(row.ownerKind) ? row.ownerKind : "hermes",
-                hermesOptions,
-              ).map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name} ({a.id})
-                </option>
-              ))}
-            </select>
-            {pickAgentsForKind(
-              isOwnerKind(row.ownerKind) ? row.ownerKind : "hermes",
-              hermesOptions,
-            ).length === 0 && (
-              <div className="text-xs text-ink-500 mt-1">
-                {t("flowEditor.hermesAgentEmpty")}
-              </div>
-            )}
-          </>
+          // Free-TYPE to create a brand-new ad-hoc agent (name only —
+          // repo/branch stay independent, P2). Or open the dropdown and SELECT
+          // an agent already defined in another task of THIS flow: that adopts
+          // its exact id + repo + target branch (the user-confirmed exception —
+          // selecting an enumerated definition overwrites repo/branch). A
+          // registered agent that this flow does not bind yet carries no
+          // workspace, so picking it leaves repo/branch alone.
+          (() => {
+            const opts = isNonOpenclawKind(row.ownerKind)
+              ? agentPickOptions(row.ownerKind, tasks, hermesOptions, {
+                  excludeRowKey: row.rowKey,
+                })
+              : [];
+            return (
+              <AgentCombobox
+                value={row.ownerId}
+                options={opts}
+                disabled={ownerLocked}
+                placeholder={t("flowEditor.taskFields.newAgentNamePlaceholder")}
+                onType={(text) => onChange({ ownerId: text })}
+                onPick={(sel) => {
+                  const binding = sel.hasBinding
+                    ? { repo: sel.repo, targetBranch: sel.targetBranch }
+                    : findFlowOwnerWorkspace(
+                        tasks,
+                        { ownerKind: row.ownerKind, ownerId: sel.id },
+                        row.rowKey,
+                      );
+                  onChange({
+                    ownerId: sel.id,
+                    ...(binding
+                      ? {
+                          ownerRepo: binding.repo,
+                          ownerTargetBranch: binding.targetBranch,
+                        }
+                      : {}),
+                  });
+                  if (binding) commitRepoPath(binding.repo);
+                }}
+              />
+            );
+          })()
         )}
       </div>
 
