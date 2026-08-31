@@ -1014,3 +1014,42 @@ def test_run_upgrade_creates_chat_message_table(
             )
         }
     assert "chatmessagerow" in tables
+
+
+def test_run_upgrade_creates_custom_agent_table(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """Upgrade parity (自定义Agent module): the CustomAgent registry table is
+    created by the idempotent schema step, so an upgrade-only user converges
+    with a fresh deploy — pre-state (old DB without the table) → upgrade →
+    table exists AND is writable (no bespoke migration needed)."""
+    from app.models import CustomAgent
+    from app.storage import get_storage
+
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+
+    report = upgrade.run_upgrade(
+        config=fake_config,
+        target_version="1.0.0",
+        include_openclaw=False,
+        include_user_agent_skill_refresh=False,
+    )
+    assert report.ok is True
+    assert report.schema_ready is True
+
+    store = get_storage(fake_config)
+    saved = store.custom_agent_create(
+        CustomAgent(
+            id="post-upgrade",
+            name="Post Upgrade",
+            spawn_command=["bash", "--norc"],
+            created_by_user="tester",
+        )
+    )
+    assert saved.id == "post-upgrade"
+    fetched = store.custom_agent_get("post-upgrade")
+    assert fetched is not None
+    assert fetched.spawn_command == ["bash", "--norc"]

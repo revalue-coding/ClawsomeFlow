@@ -28,6 +28,7 @@ from app.models import (
     AgentStoreOrder,
     AgentStoreOwnership,
     ChatMessageRow,
+    CustomAgent,
     Flow,
     FlowRun,
     FlowRunSchedule,
@@ -913,6 +914,57 @@ class SqliteStorage:
     def hermes_delete(self, agent_id: str) -> bool:
         with self._session() as s:
             agent = s.get(HermesAgent, agent_id)
+            if agent is None:
+                return False
+            s.delete(agent)
+            s.commit()
+            return True
+
+    # ---- CustomAgents ----
+
+    def custom_agent_create(self, agent: CustomAgent) -> CustomAgent:
+        with self._session() as s:
+            s.add(agent)
+            s.commit()
+            s.refresh(agent)
+            return agent
+
+    def custom_agent_get(self, agent_id: str) -> CustomAgent | None:
+        with self._session() as s:
+            return s.get(CustomAgent, agent_id)
+
+    def custom_agent_list(self, *, owner_user: str | None = None) -> list[CustomAgent]:
+        with self._session() as s:
+            stmt = select(CustomAgent)
+            if owner_user:
+                stmt = stmt.where(CustomAgent.created_by_user == owner_user)
+            stmt = stmt.order_by(CustomAgent.created_at.desc())
+            return list(s.exec(stmt).all())
+
+    def custom_agent_update(self, agent: CustomAgent) -> CustomAgent:
+        with self._session() as s:
+            current = s.get(CustomAgent, agent.id)
+            if current is None:
+                raise KeyError(agent.id)
+            for field in (
+                "name",
+                "description",
+                "spawn_command",
+                "resume_command",
+                "headless_command",
+                "headless_resume_command",
+                "ready_pattern",
+                "chat_workdir",
+            ):
+                setattr(current, field, getattr(agent, field))
+            s.add(current)
+            s.commit()
+            s.refresh(current)
+            return current
+
+    def custom_agent_delete(self, agent_id: str) -> bool:
+        with self._session() as s:
+            agent = s.get(CustomAgent, agent_id)
             if agent is None:
                 return False
             s.delete(agent)

@@ -469,6 +469,15 @@ class FlowAgent(_ApiBase):
     kind: AgentKind
     profile: str | None = None
     command: list[str] | None = None  # only when kind == AgentKind.custom
+    # kind=custom only: id of a registered CustomAgent. When set, the scheduler
+    # re-resolves ``command``/``resume_command`` from the registry at run time;
+    # the inline ``command`` is a save-time snapshot kept for rollback safety
+    # (an older backend that doesn't know this field still runs the snapshot).
+    custom_agent_ref: str | None = None
+    # kind=custom only: native "continue last session" argv used on crash
+    # resume. Empty/None → fall back to ``command`` (re-run from scratch in the
+    # existing worktree).
+    resume_command: list[str] | None = None
     repo: str | None = None  # required for non-OpenClaw; auto for openclaw
     target_branch: str | None = None  # required for non-OpenClaw; default main
     is_leader: bool = False
@@ -542,6 +551,11 @@ class FlowAgent(_ApiBase):
                 raise ValueError(
                     f"agent {self.id!r}: kind=external must NOT set 'command'"
                 )
+            if self.custom_agent_ref or self.resume_command:
+                raise ValueError(
+                    f"agent {self.id!r}: kind=external must NOT set "
+                    "'custom_agent_ref' / 'resume_command'"
+                )
             if self.is_temporary:
                 raise ValueError(
                     f"agent {self.id!r}: kind=external cannot be a temporary agent"
@@ -576,6 +590,14 @@ class FlowAgent(_ApiBase):
         if self.kind == AgentKind.custom and not self.command:
             raise ValueError(
                 f"agent {self.id!r}: kind=custom requires a non-empty 'command'"
+            )
+        # custom_agent_ref / resume_command are custom-only knobs.
+        if self.kind != AgentKind.custom and (
+            self.custom_agent_ref or self.resume_command
+        ):
+            raise ValueError(
+                f"agent {self.id!r}: 'custom_agent_ref' / 'resume_command' are "
+                "only allowed when kind=custom"
             )
         return self
 
@@ -882,6 +904,46 @@ class HermesAgent(_SQLBase, table=True):
     profile_root: str  # = ~/.hermes/profiles/{id}
     created_by_user: str = SQLField(index=True)
     nl_prompt: str = ""
+    created_at: datetime = SQLField(default_factory=_now, nullable=False)
+
+
+class CustomAgent(_SQLBase, table=True):
+    """A user-registered custom CLI agent (我的团队 → 自定义Agent).
+
+    A CustomAgent is a *product-layer registry row*: it names an arbitrary
+    agentic CLI that satisfies the ClawsomeFlow/ClawTeam TUI contract
+    (interactive composer in tmux, accepts pasted multi-line prompt + Enter,
+    can run shell commands, fully auto-approving). The scheduler drives it via
+    the existing ``AgentKind.custom`` + :class:`TmuxLiveSession` path — no new
+    scheduling branch. ``id`` doubles as the :class:`FlowAgent.custom_agent_ref`
+    used when this agent participates in a Flow.
+
+    All ``*_command`` columns store argv lists (shlex-parsed at the API layer).
+    Optional columns use the empty list / empty string as "unset".
+    """
+
+    id: str = SQLField(primary_key=True)  # slug derived from name; [A-Za-z0-9_-]
+    name: str
+    description: str = ""
+    # Interactive TUI spawn argv (must carry its own auto-approve flags; we
+    # never inject permission flags for custom agents).
+    spawn_command: list[str] = SQLField(sa_column=Column(JSON), default_factory=list)
+    # Native "continue last session" argv for crash resume; [] → spawn_command.
+    resume_command: list[str] = SQLField(sa_column=Column(JSON), default_factory=list)
+    # One-shot headless argv (chat + headless fills); "{message}" placeholder,
+    # or the message is appended as the final argument. [] → chat disabled.
+    headless_command: list[str] = SQLField(sa_column=Column(JSON), default_factory=list)
+    # Headless "continue previous headless session" argv; [] → headless_command
+    # (each chat turn independent).
+    headless_resume_command: list[str] = SQLField(
+        sa_column=Column(JSON), default_factory=list
+    )
+    # Stable text (substring or regex) shown by the TUI once its composer is
+    # ready; "" → the generic prompt patterns in scheduler.sessions.tmux_ready.
+    ready_pattern: str = ""
+    # Default cwd for the chat dialog; "" → user home.
+    chat_workdir: str = ""
+    created_by_user: str = SQLField(index=True)
     created_at: datetime = SQLField(default_factory=_now, nullable=False)
 
 

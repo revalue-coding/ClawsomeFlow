@@ -25,6 +25,7 @@ import { useTranslation } from "react-i18next";
 import {
   ApiError,
   AgentKind,
+  CustomAgentSummary,
   DecomposeStatus,
   ExternalChannel,
   FlowAgent,
@@ -82,7 +83,14 @@ type NonOpenclawOwnerKind =
   | "hermes";
 // "external" = external execution node (human / webhook / remote ClawsomeFlow):
 // no local process, no repo/branch, reached via its own owner-source category.
-type OwnerKind = "openclaw" | "external" | NonOpenclawOwnerKind;
+// `custom:{registryId}` = a user-registered custom CLI agent (我的团队 →
+// 自定义Agent). The composite form keeps registry ids from ever colliding with
+// the platform enum; the option label is the user-defined name.
+type CustomOwnerKind = `custom:${string}`;
+/** Locally-run, non-OpenClaw owner kinds: the CLI platform enum plus every
+ *  registered custom agent. They share repo/branch/temporary handling. */
+type LocalAgentKind = NonOpenclawOwnerKind | CustomOwnerKind;
+type OwnerKind = "openclaw" | "external" | LocalAgentKind;
 type OwnerKindDraft = OwnerKind | "";
 // The editor exposes exactly two owner categories: a locally-run agent
 // (any CLI platform, persistent or ad-hoc) vs an external execution node.
@@ -201,6 +209,10 @@ interface ValidationMessages {
   /** Per-task: a persistent Hermes owner no longer exists in the user's Hermes
    *  agent list (deleted elsewhere / pulled from another user). */
   hermesAgentMissing: (subject: string, agentId: string) => string;
+  /** Per-task: the referenced custom agent registry row no longer exists
+   *  (deleted on 我的团队 → 自定义Agent). Compile-time validation would fail
+   *  with ``CUSTOM_AGENT_NOT_FOUND`` — catch it client-side first. */
+  customAgentMissing: (subject: string, agentId: string) => string;
   /** External node: a channel must be picked. */
   externalChannelRequired: (subject: string) => string;
   /** External node webhook channel: endpoint URL required. */
@@ -353,8 +365,40 @@ function isExternalKind(kind: OwnerKindDraft): kind is "external" {
   return kind === "external";
 }
 
-function isNonOpenclawKind(kind: OwnerKindDraft): kind is NonOpenclawOwnerKind {
+function isNonOpenclawKind(kind: OwnerKindDraft): kind is LocalAgentKind {
   return kind !== "" && kind !== "openclaw" && kind !== "external";
+}
+
+// ── custom:{id} owner kinds (我的团队 → 自定义Agent) ──────────────────
+const CUSTOM_KIND_PREFIX = "custom:";
+
+function isCustomKind(kind: OwnerKindDraft): kind is CustomOwnerKind {
+  return kind.startsWith(CUSTOM_KIND_PREFIX);
+}
+
+function customRefOf(kind: CustomOwnerKind): string {
+  return kind.slice(CUSTOM_KIND_PREFIX.length);
+}
+
+function customKindOf(ref: string): CustomOwnerKind {
+  return `${CUSTOM_KIND_PREFIX}${ref}`;
+}
+
+/** Registered custom agent display names keyed by id, refreshed whenever
+ *  `listCustomAgents` resolves. Module-level so the many `ownerKindLabel` call
+ *  sites (task list chips, validation messages, option labels) resolve the
+ *  user-defined name without threading the list through every component.
+ *  Re-render is driven by the `customOptions` state in the editor component,
+ *  which is set in the same place this map is written.
+ *
+ *  A registered agent is ALWAYS selectable — we never probe whether its command
+ *  exists on PATH. Whether the command actually runs is the user's own
+ *  responsibility; a failure surfaces through the ordinary spawn-failure
+ *  channel (`dispatch_failed` → run paused). */
+let CUSTOM_AGENT_NAMES: Record<string, string> = {};
+
+function setCustomAgentRegistry(items: CustomAgentSummary[]): void {
+  CUSTOM_AGENT_NAMES = Object.fromEntries(items.map((a) => [a.id, a.name]));
 }
 
 function needsRepoBranchFields(kind: OwnerKindDraft): boolean {
@@ -460,7 +504,7 @@ interface AgentPickOption {
  *  stays independent). Leader-summary rows and the editing row are excluded;
  *  results are deduped by (id, repo, targetBranch). */
 function flowAgentsForKind(
-  kind: NonOpenclawOwnerKind,
+  kind: LocalAgentKind,
   rows: TaskRow[],
   excludeRowKey?: string,
 ): AgentPickOption[] {
@@ -495,7 +539,7 @@ function flowAgentsForKind(
  *  are appended only when the flow does not already bind that id, so an in-flow
  *  definition (with its workspace) always wins. */
 function agentPickOptions(
-  kind: NonOpenclawOwnerKind,
+  kind: LocalAgentKind,
   rows: TaskRow[],
   hermesOptions: HermesAgentSummary[],
   opts: { excludeRowKey?: string; includeFlowAgents?: boolean } = {},
@@ -704,8 +748,11 @@ function ownerIdAfterPlatformChange({
   hermesOptions: HermesAgentSummary[];
 }): string {
   const normalizedOwnerId = ownerId.trim();
-  if (!normalizedOwnerId) return "";
   if (!isOwnerKind(nextKind)) return "";
+  // A custom agent's FlowAgent id IS its registry ref — auto-filled, never
+  // free-typed (the identity field renders read-only for custom kinds).
+  if (isCustomKind(nextKind)) return customRefOf(nextKind);
+  if (!normalizedOwnerId) return "";
   if (!isOwnerKind(previousKind)) return normalizedOwnerId;
   if (previousKind === nextKind) return normalizedOwnerId;
   if (
@@ -758,6 +805,12 @@ function ownerKindLabel(
   if (kind === "qoder") return t("flowEditor.taskFields.ownerKindQoder");
   if (kind === "codebuddy") return t("flowEditor.taskFields.ownerKindCodebuddy");
   if (kind === "hermes") return t("flowEditor.taskFields.ownerKindHermes");
+  if (isCustomKind(kind)) {
+    // Label = the user-defined registry name (not i18n). Falls back to the
+    // ref slug while the list is loading or after the row was deleted.
+    const ref = customRefOf(kind);
+    return CUSTOM_AGENT_NAMES[ref] ?? ref;
+  }
   if (kind === "external") {
     // Prefer the concrete channel label so the task list reads "人工" etc.
     // rather than the generic "外部执行" source name.
@@ -853,6 +906,10 @@ function ownerKindAvailable(
   if (!isOwnerKind(kind)) return false;
   // External execution nodes have no platform dependency — always available.
   if (isExternalKind(kind)) return true;
+  // Custom agents are registry-backed, not probe-backed: a registered agent is
+  // always offered (the registry existence check in validate() catches rows
+  // deleted after the fact).
+  if (isCustomKind(kind)) return true;
   return (
     (isPersistentOwnerKind(kind) && availability.persistentKinds.includes(kind))
     || (isNonOpenclawKind(kind) && availability.temporaryKinds.includes(kind))
@@ -1224,6 +1281,7 @@ export function FlowEditor() {
   );
   const [openclawOptions, setOpenclawOptions] = useState<OpenclawAgentSummary[]>([]);
   const [hermesOptions, setHermesOptions] = useState<HermesAgentSummary[]>([]);
+  const [customOptions, setCustomOptions] = useState<CustomAgentSummary[]>([]);
   const [detectedOwnerKinds, setDetectedOwnerKinds] = useState<OwnerKindsAvailability>(
     EMPTY_OWNER_KINDS,
   );
@@ -1338,6 +1396,13 @@ export function FlowEditor() {
     api
       .listHermesAgents("fast")
       .then((r) => setHermesOptions(r.items))
+      .catch(() => {});
+    api
+      .listCustomAgents()
+      .then((r) => {
+        setCustomAgentRegistry(r.items);
+        setCustomOptions(r.items);
+      })
       .catch(() => {});
     void refreshOwnerKindsFast({ silent: true });
   }, []);
@@ -1522,9 +1587,14 @@ export function FlowEditor() {
     () => mergeOwnerKindAvailability(detectedOwnerKinds, usedOwnerKinds(tasks, leaderKind)),
     [detectedOwnerKinds, tasks, leaderKind],
   );
+  // Platform dropdown = probe-detected enum kinds + every registered custom
+  // agent (labelled with its user-defined name, always selectable).
   const localOwnerKinds = useMemo(
-    () => localOwnerKindOptions(mergedOwnerKinds),
-    [mergedOwnerKinds],
+    () => [
+      ...localOwnerKindOptions(mergedOwnerKinds),
+      ...customOptions.map((a) => customKindOf(a.id)),
+    ],
+    [mergedOwnerKinds, customOptions],
   );
 
   function ownerKindLabelText(kind: OwnerKindDraft): string {
@@ -1596,6 +1666,8 @@ export function FlowEditor() {
         t("flowEditor.validation.openclawAgentMissing", { subject, agentId }),
       hermesAgentMissing: (subject: string, agentId: string) =>
         t("flowEditor.validation.hermesAgentMissing", { subject, agentId }),
+      customAgentMissing: (subject: string, agentId: string) =>
+        t("flowEditor.validation.customAgentMissing", { subject, agentId }),
       externalChannelRequired: (subject: string) =>
         t("flowEditor.validation.externalChannelRequired", { subject }),
       externalEndpointRequired: (subject: string) =>
@@ -1624,9 +1696,23 @@ export function FlowEditor() {
     () => new Set(hermesOptions.map((a) => a.id)),
     [hermesOptions],
   );
+  // Same loaded-yet guard: only flag a stale custom-agent ref once the
+  // registry list has actually loaded (non-empty).
+  const customIds = useMemo(
+    () => new Set(customOptions.map((a) => a.id)),
+    [customOptions],
+  );
   const issues = useMemo(
-    () => validate(tasks, validationMessages, openclawIds, hermesIds, runInputFields),
-    [tasks, validationMessages, openclawIds, hermesIds, runInputFields],
+    () =>
+      validate(
+        tasks,
+        validationMessages,
+        openclawIds,
+        hermesIds,
+        customIds,
+        runInputFields,
+      ),
+    [tasks, validationMessages, openclawIds, hermesIds, customIds, runInputFields],
   );
   // Auto-dismiss the save-blockers rail as soon as the user starts
   // fixing things — otherwise a stale list lingers until the next
@@ -1653,6 +1739,11 @@ export function FlowEditor() {
     }
     const kindIssue = leaderKindIssueText(leaderKind, mergedOwnerKinds);
     if (kindIssue) return kindIssue;
+    // AI decompose drives a known headless CLI per platform — a user-registered
+    // custom agent is not in the decompose platform list (v1).
+    if (isCustomKind(leaderKind)) {
+      return t("flowEditor.decompose.customLeaderUnsupported");
+    }
     if (leaderKind === "openclaw") {
       // OpenClaw is the one platform with no ad-hoc creation: the leader must
       // reference a registered agent.
@@ -1920,7 +2011,12 @@ export function FlowEditor() {
       cleanupTeamOnFinish: true,
       spec: setDevMode(
         setEasyMode(
-          rowsToSpec(enforceOpenclawAutoMergeAll(tasks), runInputFields, baseVariables),
+          rowsToSpec(
+            enforceOpenclawAutoMergeAll(tasks),
+            runInputFields,
+            baseVariables,
+            customOptions,
+          ),
           easyMode,
         ),
         devMode,
@@ -2572,6 +2668,9 @@ export function FlowEditor() {
                       </option>
                     ))}
                   </select>
+                ) : isCustomKind(leaderKind) ? (
+                  // Custom agent id = the registry ref, fixed on platform pick.
+                  <input className="input" value={leaderId} readOnly disabled />
                 ) : (
                   // Free-type a new agent name, or pick a registered one of
                   // this platform. In-flow worker agents are deliberately NOT
@@ -2965,6 +3064,7 @@ export function FlowEditor() {
           localOwnerKinds={localOwnerKinds}
           openclawIds={openclawIds}
           hermesIds={hermesIds}
+          customIds={customIds}
           validationMessages={validationMessages}
           leaderKind={leaderKind}
           leaderId={leaderId.trim()}
@@ -3297,6 +3397,7 @@ function TaskEditModal({
   localOwnerKinds,
   openclawIds,
   hermesIds,
+  customIds,
   validationMessages,
   leaderKind,
   leaderId,
@@ -3316,6 +3417,7 @@ function TaskEditModal({
   localOwnerKinds: OwnerKind[];
   openclawIds: Set<string>;
   hermesIds: Set<string>;
+  customIds: Set<string>;
   validationMessages: ValidationMessages;
   leaderKind: OwnerKindDraft;
   /** Currently-selected leader id. Excluded from sub-task agent picker
@@ -3596,6 +3698,7 @@ function TaskEditModal({
       validationMessages,
       openclawIds,
       hermesIds,
+      customIds,
       runInputFields,
     ).find(
       (i) => i.rowKey === draft.rowKey,
@@ -3782,6 +3885,7 @@ function TaskFormBody({
   const ownerLocked = readOnly || isSummary;
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
+  const ownerIsCustom = isCustomKind(row.ownerKind);
   const ownerIsExternal = ownerMode === "external" || isExternalKind(row.ownerKind);
   const ownerShowsRepoFields = !ownerIsOpenclaw && !ownerIsExternal;
   const ownerKindEditable = !ownerLocked;
@@ -4078,7 +4182,7 @@ function TaskFormBody({
           node agent name. */}
       <div>
         <label className="label">
-          {ownerIsOpenclaw
+          {ownerIsOpenclaw || ownerIsCustom
             ? t("flowEditor.taskFields.existingAgent")
             : t("flowEditor.taskFields.newAgentName")}
         </label>
@@ -4099,6 +4203,11 @@ function TaskFormBody({
             placeholder={t("flowEditor.taskFields.pickOwnerKindFirst")}
             onChange={(e) => onChange({ ownerId: e.target.value })}
           />
+        ) : ownerIsCustom ? (
+          // A custom agent's FlowAgent id IS the registry ref — fixed on
+          // platform pick, never free-typed (the label already shows the
+          // user-defined name).
+          <input className="input" value={row.ownerId} readOnly disabled />
         ) : ownerIsOpenclaw ? (
           <>
             <select
@@ -5244,6 +5353,7 @@ function validate(
   messages: ValidationMessages,
   openclawIds: Set<string>,
   hermesIds: Set<string>,
+  customIds: Set<string>,
   runInputFields: string[] = [],
 ): { rowKey?: string; message: string }[] {
   const issues: { rowKey?: string; message: string }[] = [];
@@ -5278,6 +5388,7 @@ function validate(
   // otherwise the first render would mark every reference broken.
   const checkOpenclawExistence = openclawIds.size > 0;
   const checkHermesExistence = hermesIds.size > 0;
+  const checkCustomExistence = customIds.size > 0;
 
   for (const r of rows) {
     if (!r.id.trim()) {
@@ -5406,6 +5517,22 @@ function validate(
       issues.push({
         rowKey: r.rowKey,
         message: messages.hermesAgentMissing(subjectLabel, r.ownerId.trim()),
+      });
+    } else if (
+      // Custom owner must reference a live registry row (same loaded-yet
+      // guard as the OpenClaw/Hermes checks above). Only EXISTENCE is checked:
+      // whether the registered command actually runs is the user's own
+      // responsibility, so there is no availability gate anywhere.
+      isCustomKind(r.ownerKind) &&
+      checkCustomExistence &&
+      !customIds.has(customRefOf(r.ownerKind))
+    ) {
+      issues.push({
+        rowKey: r.rowKey,
+        message: messages.customAgentMissing(
+          subjectLabel,
+          customRefOf(r.ownerKind),
+        ),
       });
     }
     if (r.ownerId.trim() && ID_PATTERN.test(r.ownerId.trim())) {
@@ -5744,7 +5871,9 @@ function rowsToSpec(
   rows: TaskRow[],
   runInputFields: string[] = [],
   baseVariables: Record<string, string> = {},
+  customOptions: CustomAgentSummary[] = [],
 ): FlowSpec {
+  const customById = new Map(customOptions.map((a) => [a.id, a]));
   const byKey = new Map<string, FlowAgent>();
   for (const r of rows) {
     const k = r.ownerId.trim();
@@ -5814,6 +5943,30 @@ function rowsToSpec(
                   : null,
             },
           }
+        : isCustomKind(r.ownerKind)
+        ? (() => {
+            // Dual write (reference + snapshot): customAgentRef points at the
+            // registry row (the backend re-resolves argv from it at run time)
+            // while command/resumeCommand carry the save-time argv snapshot so
+            // an older backend — which ignores customAgentRef — still runs the
+            // spec via the pre-existing inline kind=custom path.
+            const ref = customRefOf(r.ownerKind);
+            const reg = customById.get(ref);
+            return {
+              id: r.ownerId.trim(),
+              kind: "custom" as AgentKind,
+              isLeader,
+              customAgentRef: ref,
+              command: reg ? [...reg.spawnArgv] : [],
+              resumeCommand:
+                reg && reg.resumeArgv.length > 0 ? [...reg.resumeArgv] : null,
+              repo: r.ownerRepo.trim(),
+              targetBranch: r.ownerTargetBranch.trim(),
+              // Custom agents reuse the temporary (ad-hoc) validation path —
+              // persistent platforms stay OpenClaw/Hermes only.
+              isTemporary: true,
+            } satisfies FlowAgent;
+          })()
         : {
             id: r.ownerId.trim(),
             kind: r.ownerKind as AgentKind,
@@ -5993,7 +6146,12 @@ function DecomposeModal({
         const r = await api.startDecompose({
           goal: normalizedGoal,
           leaderAgentId: normalizedLeaderId,
-          leaderKind: isOwnerKind(leaderKind) ? leaderKind : undefined,
+          // Custom composite kinds never reach here (decomposeDisabledReason
+          // blocks the modal), but narrow the type for the API payload anyway.
+          leaderKind:
+            isOwnerKind(leaderKind) && !isCustomKind(leaderKind)
+              ? leaderKind
+              : undefined,
           leaderRepo: isNonOpenclawKind(leaderKind) ? normalizedLeaderRepo : null,
           leaderTargetBranch: isNonOpenclawKind(leaderKind)
             ? normalizedLeaderTargetBranch
@@ -6519,7 +6677,14 @@ function specToRows(spec: FlowSpec): TaskRow[] {
   for (const a of spec.agents) byId.set(a.id, a);
   return spec.tasks.map((tk) => {
     const a = byId.get(tk.ownerAgentId);
-    const ownerKind: OwnerKind = toOwnerKind(a?.kind);
+    // kind=custom maps to the composite `custom:{ref}` owner kind. A legacy
+    // inline custom agent (no ref — never UI-authored) falls back to using its
+    // own agent id as the ref; validate() will flag it as unregistered so the
+    // user re-picks a registered custom agent.
+    const ownerKind: OwnerKind =
+      a?.kind === "custom"
+        ? customKindOf((a.customAgentRef ?? "").trim() || a.id)
+        : toOwnerKind(a?.kind);
     return {
       rowKey: newRowKey(),
       id: tk.id,

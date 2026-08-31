@@ -492,6 +492,16 @@ class RunController:
             for t in spec.tasks
         }
         self._agents: dict[str, FlowAgent] = {a.id: a for a in spec.agents}
+        # Refresh kind=custom argv from the CustomAgent registry (single
+        # resolution point — every construction path funnels through here:
+        # start_run / resume_run / complaint controllers). Registry preferred,
+        # save-time snapshot fallback; never raises. The returned rows also
+        # carry chat/headless/ready-pattern extras for the session factory.
+        from app.services.custom_agents import resolve_spec_custom_agents
+
+        self._custom_agent_rows = resolve_spec_custom_agents(
+            spec, storage=self.storage
+        )
         self._leader_id = next(a.id for a in spec.agents if a.is_leader)
         self._leader_summary_task_id = next(
             (t.id for t in spec.tasks if t.is_leader_summary),
@@ -4051,8 +4061,16 @@ class RunController:
                 storage=self.storage,
                 package_provider=self._compose_external_package,
             )
+        ready_extra_pattern = None
+        if agent.kind == AgentKind.custom:
+            row = self._custom_agent_rows.get(agent.id)
+            if row is not None and (row.ready_pattern or "").strip():
+                from app.services.custom_agents import compile_ready_pattern
+
+                ready_extra_pattern = compile_ready_pattern(row.ready_pattern)
         return TmuxLiveSession(
             agent=agent, team_name=self.team_name, run_id=self.run.id,
+            ready_extra_pattern=ready_extra_pattern,
         )
 
     async def _compose_external_package(self, task_id: str) -> dict[str, Any]:
@@ -4369,7 +4387,8 @@ class RunController:
         * Cursor → stream-json capture (must NOT ``communicate()`` — process
           often stays alive after the ``result`` event; same as AI decompose)
         * Hermes / every other TUI kind → :func:`_non_openclaw_dispatch_argv`
-        * custom → ``agent.command + [prompt]``
+        * custom → registry ``headless_command`` (``{message}`` substituted)
+          when the agent references one, else ``agent.command + [prompt]``
         """
         from app.services.task_decompose import (
             _non_openclaw_dispatch_argv,
@@ -4389,10 +4408,17 @@ class RunController:
                 "--session-id", session_id, "--message", prompt,
             ]
         elif leader.kind == AgentKind.custom:
-            if not leader.command:
+            if not leader.command and not (leader.custom_agent_ref or "").strip():
                 raise RuntimeError("custom leader has empty command")
             cwd, _ = await self._hermes_dispatch_cwd(leader)
-            argv = list(leader.command) + [prompt]
+            # Registry headless template preferred (purpose-built one-shot
+            # argv, ``{message}`` substituted); legacy ``command + [prompt]``
+            # fallback for inline custom agents.
+            from app.services.custom_agents import headless_argv_for_flow_agent
+
+            argv = headless_argv_for_flow_agent(
+                leader, prompt, storage=self.storage
+            )
         else:
             # Hermes + every TUI platform (claude/codex/gemini/cursor/…).
             cwd, _ = await self._hermes_dispatch_cwd(leader)

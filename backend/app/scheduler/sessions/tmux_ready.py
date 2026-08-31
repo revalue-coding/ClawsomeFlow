@@ -265,7 +265,12 @@ def _active_tail_looks_like_any_startup_prompt(pane_text: str) -> bool:
     )
 
 
-def _is_composer_ready(pane_text: str, *, trust_platform: str | None) -> bool:
+def _is_composer_ready(
+    pane_text: str,
+    *,
+    trust_platform: str | None,
+    extra_patterns: Sequence[re.Pattern[str]] | None = None,
+) -> bool:
     """True when the agent TUI shows a real composer prompt, not a startup gate."""
     active = _pane_active_text(pane_text)
     if _startup_prompt_action(active, trust_platform) is not None:
@@ -274,6 +279,10 @@ def _is_composer_ready(pane_text: str, *, trust_platform: str | None) -> bool:
     if trust_platform is None and _active_tail_looks_like_any_startup_prompt(pane_text):
         return False
     if trust_platform == "cursor" and _looks_like_cursor_composer(active):
+        return True
+    # Caller-supplied readiness markers (e.g. a registered custom agent's
+    # ready_pattern) are honoured alongside the generic prompt patterns.
+    if extra_patterns and any(pat.search(pane_text) for pat in extra_patterns):
         return True
     return any(pat.search(pane_text) for pat in _AGENT_PROMPT_PATTERNS)
 
@@ -395,8 +404,14 @@ async def wait_tui_ready(
     poll_interval: float = 0.25,
     capture: callable | None = None,
     send_keys: callable | None = None,
+    extra_patterns: Sequence[re.Pattern[str]] | None = None,
 ) -> TuiReadyResult:
-    """Wait for a TUI-CLI agent's prompt, handling startup gates when scoped."""
+    """Wait for a TUI-CLI agent's prompt, handling startup gates when scoped.
+
+    ``extra_patterns`` adds caller-supplied composer-ready markers on top of
+    the generic prompt patterns (used for registered custom agents whose TUI
+    shows none of the built-in markers).
+    """
     cap = capture or tmux_capture_pane
     deadline = asyncio.get_event_loop().time() + timeout_sec
     last_text = ""
@@ -424,7 +439,9 @@ async def wait_tui_ready(
             await _send_trust_action(target, action, send_keys=send_keys)
             continue
 
-        if _is_composer_ready(text, trust_platform=trust_platform):
+        if _is_composer_ready(
+            text, trust_platform=trust_platform, extra_patterns=extra_patterns,
+        ):
             logger.debug(
                 "tmux_tui_composer_ready",
                 target=target,

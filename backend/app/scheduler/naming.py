@@ -35,6 +35,15 @@ def hermes_user_chat_session_id(user: str, agent_id: str) -> str:
     return f"hermes-user-chat-{user}-{agent_id}"
 
 
+def custom_agent_user_chat_session_id(user: str, agent_id: str) -> str:
+    """Custom-agent user-direct chat key (turn registry + persisted history).
+
+    Custom-agent chat turns are stateless one-shot subprocesses; this only keys
+    the in-process job registry and the persisted UI transcript.
+    """
+    return f"custom-user-chat-{user}-{agent_id}"
+
+
 def _short(run_id: str) -> str:
     """Return the suffix portion of a Run id usable in resource names.
 
@@ -48,6 +57,7 @@ def _short(run_id: str) -> str:
 
 
 __all__ = [
+    "custom_agent_user_chat_session_id",
     "hermes_user_chat_session_id",
     "openclaw_session_id_for_run",
     "openclaw_user_chat_session_id",

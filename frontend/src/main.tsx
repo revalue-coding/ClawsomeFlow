@@ -14,6 +14,7 @@ import { RunDetail } from "@/pages/RunDetail";
 import { ScheduledFlows } from "@/pages/ScheduledFlows";
 import { OpenclawChat } from "@/pages/OpenclawChat";
 import { HermesChat } from "@/pages/HermesChat";
+import { CustomAgents } from "@/pages/CustomAgents";
 import { OpenclawAgentStore } from "@/pages/OpenclawAgentStore";
 import { Profiles } from "@/pages/Profiles";
 
@@ -45,6 +46,8 @@ const router = createBrowserRouter([
       { path: "chat/:id", element: <OpenclawChat /> },
       { path: "hermes", element: <HermesChat /> },
       { path: "hermes/:id", element: <HermesChat /> },
+      { path: "custom-agents", element: <CustomAgents /> },
+      { path: "custom-agents/:id", element: <CustomAgents /> },
       // Back-compat for older bookmarks
       { path: "agents", element: <Navigate to="/chat" replace /> },
       { path: "agents/:id/chat", element: <OpenclawChat /> },

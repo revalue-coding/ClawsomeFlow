@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import {
+  AssistantIcon,
   DocsIcon,
   ExternalLinkIcon,
   FlowIcon,
@@ -95,6 +96,11 @@ const NAV: NavGroup[] = [
     items: [
       { to: "/chat", labelKey: "nav.chat", icon: <NavAgentIcon platform="openclaw" /> },
       { to: "/hermes", labelKey: "nav.hermes", icon: <NavAgentIcon platform="hermes" /> },
+      {
+        to: "/custom-agents",
+        labelKey: "nav.customAgents",
+        icon: <AssistantIcon className="h-6 w-6 text-brandicon" />,
+      },
     ],
   },
   // ── Settings group temporarily hidden (Profile module).
@@ -433,6 +439,7 @@ const CRUMB_I18N_KEYS: Record<string, string> = {
   runs: "nav.runs",
   "scheduled-flows": "nav.scheduledFlows",
   hermes: "nav.hermes",
+  "custom-agents": "nav.customAgents",
   store: "nav.agentStore",
   profiles: "nav.profiles",
 };

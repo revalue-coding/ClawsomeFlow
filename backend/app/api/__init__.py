@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from app.api import (
     agent_store,
     clawteam_board,
+    custom_agents,
     errors,  # noqa: F401 — registers exception handlers
     external,
     flows,
@@ -37,6 +38,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(agent_store.router, prefix="/api")
     app.include_router(openclaw_agents.router, prefix="/api")
     app.include_router(hermes_agents.router, prefix="/api")
+    app.include_router(custom_agents.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
     app.include_router(external.router, prefix="/api")  # /api/external/*
     app.include_router(profiles.router, prefix="/api")

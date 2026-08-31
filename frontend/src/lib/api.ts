@@ -288,6 +288,12 @@ export interface FlowAgent {
   kind: AgentKind;
   profile?: string | null;
   command?: string[] | null;
+  /** kind=custom only: id of a registered custom agent. The backend re-resolves
+   *  command/resumeCommand from the registry at run time; `command` is a
+   *  save-time snapshot kept for rollback safety. */
+  customAgentRef?: string | null;
+  /** kind=custom only: native "continue last session" argv used on crash resume. */
+  resumeCommand?: string[] | null;
   repo?: string | null;
   targetBranch?: string | null;
   isLeader: boolean;
@@ -1012,6 +1018,46 @@ export const NOTIFY_WEBHOOK_FORMATS = [
   "serverchan",
   "gotify",
 ] as const;
+
+// ── Custom agents (user-registered CLI agents) ─────────────────────────
+export interface CustomAgentSummary {
+  id: string;
+  name: string;
+  description: string;
+  /** All command fields are plain command-line strings (shlex quoting). */
+  spawnCommand: string;
+  resumeCommand: string;
+  headlessCommand: string;
+  headlessResumeCommand: string;
+  readyPattern: string;
+  chatWorkdir: string;
+  /** Parsed argv forms of spawn/resume — the FlowEditor writes these into the
+   *  Flow spec as the `command`/`resumeCommand` save-time snapshot. */
+  spawnArgv: string[];
+  resumeArgv: string[];
+  /** headlessCommand configured (the chat dialog works). There is deliberately
+   *  no binary-availability field: a registered agent is always offered and
+   *  whether its command runs is the user's own responsibility. */
+  chatAvailable: boolean;
+  createdByUser: string;
+  createdAt: string;
+}
+
+export interface CustomAgentUpsertPayload {
+  name?: string;
+  description?: string;
+  spawnCommand?: string;
+  resumeCommand?: string;
+  headlessCommand?: string;
+  headlessResumeCommand?: string;
+  readyPattern?: string;
+  chatWorkdir?: string;
+}
+
+export interface CustomAgentDeleteResult {
+  deleted: boolean;
+  referencedFlows: { id: string; name: string }[];
+}
 
 // ── Hermes agents ───────────────────────────────────────────────────────
 export interface HermesAgentSummary {
@@ -1830,6 +1876,45 @@ export const api = {
     request<void>("POST", `/api/hermes/agents/${id}/reset`),
   stopHermesAgentChat: (id: string) =>
     request<void>("POST", `/api/hermes/agents/${id}/chat/stop`),
+
+  // ── Custom agents (user-registered CLI agents) ───────────────────
+  listCustomAgents: () =>
+    request<{ items: CustomAgentSummary[] }>("GET", "/api/custom-agents"),
+  getCustomAgent: (id: string) =>
+    request<CustomAgentSummary>("GET", `/api/custom-agents/${id}`),
+  createCustomAgent: (payload: CustomAgentUpsertPayload) =>
+    request<CustomAgentSummary>("POST", "/api/custom-agents", payload),
+  patchCustomAgent: (id: string, payload: CustomAgentUpsertPayload) =>
+    request<CustomAgentSummary>("PATCH", `/api/custom-agents/${id}`, payload),
+  deleteCustomAgent: (id: string) =>
+    request<CustomAgentDeleteResult>("DELETE", `/api/custom-agents/${id}`),
+  chatWithCustomAgent: (
+    id: string,
+    body: { message: string; workdir?: string },
+    init?: RequestInit,
+  ) =>
+    fetch(`/api/custom-agents/${id}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      ...init,
+    }),
+  getCustomAgentChatHistory: (id: string) =>
+    request<{ messages: ChatHistoryMessage[] }>(
+      "GET",
+      `/api/custom-agents/${id}/chat-history`,
+    ),
+  getCustomAgentChatStatus: (id: string) =>
+    request<ChatStatus>(
+      "GET",
+      `/api/custom-agents/${id}/chat/status`,
+      undefined,
+      { cache: "no-store" },
+    ),
+  stopCustomAgentChat: (id: string) =>
+    request<void>("POST", `/api/custom-agents/${id}/chat/stop`),
+  resetCustomAgentChat: (id: string) =>
+    request<void>("POST", `/api/custom-agents/${id}/reset`),
 
   // Agent Store
   loginAgentStore: (payload: { email: string; password: string }) =>

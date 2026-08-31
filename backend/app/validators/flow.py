@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.models import AgentKind, ExternalChannel, FlowSpec
+from app.models import AgentKind, ExternalChannel, FlowAgent, FlowSpec
 
 if TYPE_CHECKING:  # avoid circular import; storage layer pulls models
     from app.storage import StorageBackend
@@ -32,6 +32,7 @@ ERROR_MISSING_LEADER_SUMMARY = "MISSING_LEADER_SUMMARY"
 ERROR_OPENCLAW_AGENT_NOT_FOUND = "OPENCLAW_AGENT_NOT_FOUND"
 ERROR_OPENCLAW_AGENT_UNREGISTERED = "OPENCLAW_AGENT_UNREGISTERED"
 ERROR_HERMES_AGENT_NOT_FOUND = "HERMES_AGENT_NOT_FOUND"
+ERROR_CUSTOM_AGENT_NOT_FOUND = "CUSTOM_AGENT_NOT_FOUND"
 ERROR_MISSING_AGENT_REPO = "MISSING_AGENT_REPO"
 ERROR_INVALID_REPO = "INVALID_REPO"
 ERROR_INVALID_TARGET_BRANCH = "INVALID_TARGET_BRANCH"
@@ -342,6 +343,7 @@ def validate_flow_against_db(spec: FlowSpec, storage: StorageBackend) -> None:
                     "in the management module first.",
                     {"agent_id": a.id},
                 )
+            _validate_custom_agent_ref(a, storage)
             if not a.repo:
                 raise FlowValidationError(
                     ERROR_MISSING_AGENT_REPO,
@@ -410,6 +412,44 @@ def validate_flow_against_db(spec: FlowSpec, storage: StorageBackend) -> None:
     # earlier would misreport a missing/invalid repo as INVALID_TARGET_BRANCH
     # (the branch lookup returns False for a repo that doesn't exist).
     _validate_leader_target_branch_exists(spec)
+
+
+def validate_custom_agent_refs(spec: FlowSpec, storage: StorageBackend) -> None:
+    """Existence check for every ``kind=custom`` agent carrying a registry ref.
+
+    Shared by :func:`validate_flow_against_db` (flow save/import) and the run
+    trigger (fail fast BEFORE a run row is created when the registry row was
+    deleted since the Flow was saved).
+
+    Only the ROW's existence is checked. Whether its command actually runs is
+    the user's own responsibility (no PATH probe — see the note in
+    ``services.custom_agents``): a command that can't start fails through the
+    ordinary spawn-failure channel (``dispatch_failed`` → run paused).
+
+    The scheduler-side resolver (``resolve_spec_custom_agents``) deliberately
+    falls back to the spec's command snapshot instead of raising, so
+    already-running/paused runs stay drivable after a registry row disappears.
+    """
+    for a in spec.agents:
+        _validate_custom_agent_ref(a, storage)
+
+
+def _validate_custom_agent_ref(a: FlowAgent, storage: StorageBackend) -> None:
+    """The single existence check behind both call sites. No-op unless *a* is a
+    ``kind=custom`` agent carrying a registry reference."""
+    if a.kind != AgentKind.custom:
+        return
+    ref = (a.custom_agent_ref or "").strip()
+    if not ref:
+        return
+    if storage.custom_agent_get(ref) is None:
+        raise FlowValidationError(
+            ERROR_CUSTOM_AGENT_NOT_FOUND,
+            f"agent {a.id!r}: custom agent {ref!r} is not registered in "
+            "ClawsomeFlow (it may have been deleted) — register it in the "
+            "自定义Agent module or re-pick the task owner",
+            {"agent_id": a.id, "custom_agent_ref": ref},
+        )
 
 
 def _validate_non_openclaw_target_branches_nonempty(spec: FlowSpec) -> None:

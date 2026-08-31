@@ -122,6 +122,7 @@ const zh = {
     clawsomeAssistant: "ClawsomeFlow助手",
     chat: "OpenClaw Agent",
     hermes: "Hermes Agent",
+    customAgents: "自定义 Agent",
     profiles: "Profile",
     groupResources: "资源",
     agentStore: "Agent Store",
@@ -439,6 +440,7 @@ const zh = {
       descriptionRequired: "「{{subject}}」的详细说明不能为空。",
       openclawAgentMissing: "「{{subject}}」选择的 OpenClaw 智能体「{{agentId}}」不存在，请重新选择。",
       hermesAgentMissing: "「{{subject}}」选择的 Hermes 智能体「{{agentId}}」不存在，请重新选择。",
+      customAgentMissing: "「{{subject}}」引用的自定义Agent「{{agentId}}」已不在注册表中，请重新选择 Owner 类型。",
       externalChannelRequired: "「{{subject}}」：请为外部执行选择 Owner 类型（人工 / 远程ClawsomeFlow / 通用接口）。",
       externalEndpointRequired: "「{{subject}}」：通用接口需要填写派发端点 URL。",
       externalRemoteFieldsRequired: "「{{subject}}」：远程ClawsomeFlow 请粘贴「远端 Flow调用信息」并填写可达的远端地址（保存该节点时自动解析注册）。",
@@ -604,6 +606,7 @@ const zh = {
       leaderEmpty: "请创建至少一个 OpenClaw leader 候选。",
       leaderMustBeOpenclaw: "AI 拆解仅支持 OpenClaw 类型的 leader。",
       leaderRepoRequired: "非 OpenClaw leader 发起 AI 拆解前，需填写 workspace repo 路径。",
+      customLeaderUnsupported: "自定义Agent 作为 leader 时暂不支持 AI 拆解，请选择内置平台的 leader。",
       submit: "开始拆解",
       submitting: "拆解中…",
       polling: "leader 正在思考…（已等待 {{seconds}} 秒）",
@@ -1303,6 +1306,68 @@ const zh = {
         placeholder: "在这里填写 AGENTS.md 用户自定义区内容…",
         readonlyHint: "当前为只读模式，点击“编辑”后可修改。",
       },
+    },
+  },
+  customAgents: {
+    title: "自定义 Agent",
+    pageNote:
+      "注册任意符合 ClawsomeFlow/ClawTeam 接口契约的 Agent CLI。注册后的 Agent 会以你定义的名称出现在 Flow 编辑器的任务 owner 选项中,并各自拥有一个简单的聊天对话框(需配置无头单次命令)。",
+    add: "添加自定义 Agent",
+    addTitle: "添加自定义 Agent",
+    editTitle: "编辑自定义 Agent",
+    chat: "聊天",
+    badgeChatReady: "可聊天",
+    badgeChatNotConfigured: "未配置聊天",
+    emptyTitle: "还没有自定义 Agent",
+    emptyHint: "点击「添加自定义 Agent」注册一个满足接口契约的 CLI Agent。",
+    deleteConfirm:
+      "确定删除自定义 Agent「{{name}}」?引用它的 Flow 在重新选择任务 owner 前将无法通过校验。",
+    deleteReferencedWarn:
+      "已删除。注意:以下 Flow 仍引用该 Agent,运行时会校验失败,请尽快编辑:{{flows}}",
+    chatError: "聊天失败:{{message}}",
+    resetConfirm:
+      "开始新会话?聊天记录会保留并插入分隔线;下一条消息不再续接之前的无头会话。",
+    chatNotConfiguredTitle: "该 Agent 未配置聊天",
+    chatNotConfiguredHint:
+      "请在自定义 Agent 页面编辑该 Agent,填写「无头单次命令」——一次性执行并把回复打印到 stdout 的命令({message} 为消息占位符)。不影响 Flow 执行。",
+    chatEmptyTitle: "开始聊天",
+    chatEmptyHint: "每轮对话会执行一次 {{name}} 的无头命令,并把其 stdout 作为回复展示。",
+    chatDisabledPlaceholder: "聊天已禁用——请先配置无头单次命令",
+    contract: {
+      title: "CLI 行为契约(你的 Agent 必须全部满足)",
+      item1:
+        "命令在 PATH 中(或为绝对路径),启动后进入交互式终端界面,支持粘贴多行文本后回车提交(ClawsomeFlow 通过 tmux 粘贴注入任务)。",
+      item2:
+        "具备自主执行 shell 命令的能力:任务中需要执行 git,并按派发提示词的要求通过 `clawteam inbox send \"task <id> done: …\"`(或 `FAILED: …`)上报完成情况。",
+      item3:
+        "全自动权限运行:请在启动命令里自带旗标(如 `mycli --yolo`)——系统不会为自定义 Agent 注入任何权限旗标。",
+      item4: "启动时不弹出无法自动关闭的信任/登录框;请在注册前完成登录。",
+      item5: "每轮回复后不退出(保持常驻),以便后续任务继续注入。",
+    },
+    form: {
+      name: "Agent 名称",
+      nameHelp: "展示名,同时生成 Agent id(slug);会作为任务 owner 选项显示在 Flow 编辑器中。",
+      namePlaceholder: "我的 Agent",
+      nameRequired: "请填写 Agent 名称",
+      spawnCommand: "交互启动命令",
+      spawnCommandHelp:
+        "在终端启动交互 TUI 的完整命令——必须自带全自动权限旗标(如 `mycli --yolo`),系统不会注入任何旗标。",
+      spawnRequired: "请填写交互启动命令",
+      resumeCommand: "恢复命令",
+      resumeCommandHelp:
+        "在同一目录续接上次会话(如 `mycli --continue`)。不填则崩溃后用启动命令重启——任务会在原 worktree 里重跑,结果仍正确,只是丢失对话上下文。",
+      headlessCommand: "无头单次命令",
+      headlessCommandHelp:
+        "一次性执行并把回复打印到 stdout,{message} 为消息占位符(如 `mycli -p \"{message}\"`);无占位符则把消息追加为最后一个参数。不填则该 Agent 的聊天页禁用,Flow 执行不受影响。",
+      headlessResumeCommand: "无头续聊命令",
+      headlessResumeCommandHelp: "无头续接上一次无头会话。不填则每条聊天消息相互独立(无上下文)。",
+      readyPattern: "TUI 就绪标志",
+      readyPatternHelp:
+        "CLI 启动完成后界面上稳定出现的一段文字(子串或正则),用于判断「可以派活了」。不填则使用内置通用 prompt 特征(❯、行首 > 等);若你的 CLI 界面不含这些特征会导致 spawn 超时,填了就稳。",
+      readyPatternPlaceholder: "例如:Type your message",
+      chatWorkdir: "聊天工作目录",
+      chatWorkdirHelp: "聊天对话的工作目录,默认为用户主目录。",
+      description: "描述",
     },
   },
   hermes: {

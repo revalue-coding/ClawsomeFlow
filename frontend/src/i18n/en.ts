@@ -120,6 +120,7 @@ const en = {
     clawsomeAssistant: "ClawsomeFlow Assistant",
     chat: "OpenClaw Agent",
     hermes: "Hermes Agent",
+    customAgents: "Custom Agent",
     profiles: "Profile",
     groupResources: "Resources",
     agentStore: "Agent Store",
@@ -444,6 +445,7 @@ const en = {
       descriptionRequired: "Description for \"{{subject}}\" cannot be empty.",
       openclawAgentMissing: "\"{{subject}}\" references OpenClaw agent \"{{agentId}}\" which no longer exists — pick another.",
       hermesAgentMissing: "\"{{subject}}\" references Hermes agent \"{{agentId}}\" which no longer exists — pick another.",
+      customAgentMissing: "\"{{subject}}\" references custom agent \"{{agentId}}\" which is no longer registered — pick another owner kind.",
       externalChannelRequired: "\"{{subject}}\": pick an owner kind for external execution (Human / Remote ClawsomeFlow / Generic interface).",
       externalEndpointRequired: "\"{{subject}}\": the generic interface requires an endpoint URL.",
       externalRemoteFieldsRequired: "\"{{subject}}\": Remote ClawsomeFlow — paste the \"Remote Flow call info\" and fill in a reachable remote base URL (registered automatically when you save the node).",
@@ -618,6 +620,8 @@ const en = {
         "AI decompose is only available when the leader kind is OpenClaw.",
       leaderRepoRequired:
         "Before AI decompose with a non-OpenClaw leader, provide its workspace repo path.",
+      customLeaderUnsupported:
+        "AI decompose is not available for a custom-agent leader — pick a built-in platform leader.",
       submit: "Decompose",
       submitting: "Decomposing…",
       polling: "Leader is thinking… ({{seconds}}s elapsed)",
@@ -1326,6 +1330,73 @@ const en = {
         placeholder: "Write user custom rules for AGENTS.md section here…",
         readonlyHint: "Read-only by default. Click Edit to modify.",
       },
+    },
+  },
+  customAgents: {
+    title: "Custom Agents",
+    pageNote:
+      "Register any agentic CLI that satisfies the ClawsomeFlow/ClawTeam interface contract. " +
+      "Registered agents appear by their name as task-owner options in the Flow editor, and each " +
+      "gets a simple chat dialog (requires a headless one-shot command).",
+    add: "Add Custom Agent",
+    addTitle: "Add Custom Agent",
+    editTitle: "Edit Custom Agent",
+    chat: "Chat",
+    badgeChatReady: "Chat ready",
+    badgeChatNotConfigured: "Chat not configured",
+    emptyTitle: "No custom agents yet",
+    emptyHint: "Click \"Add Custom Agent\" to register a CLI agent that satisfies the interface contract.",
+    deleteConfirm:
+      "Delete custom agent \"{{name}}\"? Flows that reference it will fail validation until you re-pick the task owner.",
+    deleteReferencedWarn:
+      "Deleted. Note: the following Flows still reference this agent and will fail validation at run time — please edit them: {{flows}}",
+    chatError: "Chat failed: {{message}}",
+    resetConfirm:
+      "Start a new session? The transcript is kept and a divider is inserted; the next message will not continue the previous headless session.",
+    chatNotConfiguredTitle: "Chat is not configured for this agent",
+    chatNotConfiguredHint:
+      "Edit this agent on the Custom Agents page and fill in the \"headless one-shot command\" — a command that executes once and prints the reply to stdout ({message} is the message placeholder). Flow execution is not affected.",
+    chatEmptyTitle: "Start chatting",
+    chatEmptyHint: "Each turn runs {{name}}'s headless command once and shows its stdout as the reply.",
+    chatDisabledPlaceholder: "Chat disabled — configure the headless one-shot command first",
+    contract: {
+      title: "CLI behaviour contract (your agent must satisfy all of these)",
+      item1:
+        "The command is on PATH (or an absolute path) and starts an interactive terminal UI that accepts a pasted multi-line prompt followed by Enter to submit (ClawsomeFlow injects tasks via tmux paste).",
+      item2:
+        "It can autonomously run shell commands: during a task it must run git and report completion via `clawteam inbox send \"task <id> done: …\"` (or `FAILED: …`), as instructed in the dispatch prompt.",
+      item3:
+        "It runs fully auto-approved: include your own bypass flags (e.g. `mycli --yolo`) in the launch command — ClawsomeFlow never injects permission flags for custom agents.",
+      item4:
+        "Startup must not block on trust/login dialogs that cannot be auto-dismissed; complete any login before registering.",
+      item5:
+        "It stays alive after each reply (does not exit at end of turn) so follow-up dispatches can be injected.",
+    },
+    form: {
+      name: "Agent name",
+      nameHelp: "Display name; also generates the agent id (slug). Shown as a task-owner option in the Flow editor.",
+      namePlaceholder: "My Agent",
+      nameRequired: "Please fill in the agent name",
+      spawnCommand: "Interactive launch command",
+      spawnCommandHelp:
+        "Full command that starts the interactive TUI in a terminal — MUST carry its own full-auto permission flags (e.g. `mycli --yolo`); the system injects nothing.",
+      spawnRequired: "Please fill in the interactive launch command",
+      resumeCommand: "Resume command",
+      resumeCommandHelp:
+        "Continues the last session in the same directory (e.g. `mycli --continue`). If empty, a crashed agent is relaunched with the launch command — the task re-runs in the same worktree (results stay correct; conversation context is lost).",
+      headlessCommand: "Headless one-shot command",
+      headlessCommandHelp:
+        "Executes once and prints the reply to stdout; {message} is the message placeholder (e.g. `mycli -p \"{message}\"`) — without the placeholder the message is appended as the last argument. If empty, this agent's chat page is disabled (Flow execution unaffected).",
+      headlessResumeCommand: "Headless continue command",
+      headlessResumeCommandHelp:
+        "Continues the previous headless session for the next chat turn. If empty, every chat message is independent (no context).",
+      readyPattern: "TUI ready marker",
+      readyPatternHelp:
+        "A stable piece of text (substring or regex) the CLI shows once it is ready for input — used to decide \"ready to dispatch\". If empty, built-in generic prompt markers (❯, a leading > …) are used; if your CLI shows none of them the spawn will time out, so filling this makes it reliable.",
+      readyPatternPlaceholder: "e.g. Type your message",
+      chatWorkdir: "Chat working directory",
+      chatWorkdirHelp: "Working directory for chat turns; defaults to your home directory.",
+      description: "Description",
     },
   },
   hermes: {

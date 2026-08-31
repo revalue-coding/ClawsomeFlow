@@ -22,6 +22,7 @@ pass it (otherwise ClawTeam recreates the worktree, dropping all work).
 from __future__ import annotations
 
 import asyncio
+import re
 
 from app.integrations.clawteam_cli import (
     ClawTeamCli,
@@ -172,6 +173,12 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
 # Kinds where ClawsomeFlow carries the permission flag itself and must tell
 # ClawTeam NOT to inject one (strategy B above). Passed as
 # ``skip_permissions=False`` to spawn_fresh/spawn_resume.
+#
+# ``custom`` is deliberately included: the user's registered command must carry
+# its own auto-approve flags. ClawTeam injects flags by BASENAME, so a custom
+# command whose binary happens to be named ``claude``/``gemini``/… would
+# otherwise get an unexpected (possibly duplicate/conflicting) flag injected —
+# self-control keeps custom-agent behaviour fully deterministic.
 _SELF_PERMISSION_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.gemini,
     AgentKind.qwen,
@@ -181,6 +188,7 @@ _SELF_PERMISSION_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.nanobot,
     AgentKind.qoder,
     AgentKind.codebuddy,
+    AgentKind.custom,
 })
 
 class UnsupportedAgentKind(Exception):
@@ -198,6 +206,7 @@ class TmuxLiveSession(WorkerSession):
         run_id: str,
         cli: ClawTeamCli | None = None,
         ready_timeout_sec: float = _DEFAULT_READY_TIMEOUT_SEC,
+        ready_extra_pattern: re.Pattern[str] | None = None,
     ) -> None:
         super().__init__(agent=agent, team_name=team_name, run_id=run_id)
         if agent.kind not in _KIND_TO_CMD and agent.kind != AgentKind.custom:
@@ -209,14 +218,20 @@ class TmuxLiveSession(WorkerSession):
                 f"agent {agent.id!r}: kind=custom requires explicit 'command'"
             )
         self._cli = cli or get_clawteam_cli()
+        # Extra composer-ready marker (registered custom agents whose TUI shows
+        # none of the generic prompt patterns in tmux_ready).
+        self._ready_extra_pattern = ready_extra_pattern
         if agent.kind == AgentKind.hermes:
             self._ready_timeout = _HERMES_READY_TIMEOUT_SEC
         else:
             self._ready_timeout = ready_timeout_sec
         if agent.kind == AgentKind.custom:
-            # For custom, fresh==resume==agent.command (caller knows the binary).
+            # Custom: fresh = the registered/inline command; resume = the
+            # registered native continue argv when present, else re-run the
+            # fresh command in the existing worktree (conversation context is
+            # lost but on-disk work is kept — the task re-runs from scratch).
             self._spawn_cmd = list(agent.command or [])
-            self._resume_cmd = list(agent.command or [])
+            self._resume_cmd = list(agent.resume_command or agent.command or [])
         else:
             # Copy the shared template lists — we may append per-agent flags
             # below and must never mutate the module-level _KIND_TO_CMD entries.
@@ -322,6 +337,9 @@ class TmuxLiveSession(WorkerSession):
                 spawn_command=self._spawn_cmd,
             ),
             timeout_sec=self._ready_timeout,
+            extra_patterns=(
+                [self._ready_extra_pattern] if self._ready_extra_pattern else None
+            ),
         )
         if not result.ok:
             await self._cleanup_zombie_runtime()
@@ -416,6 +434,9 @@ class TmuxLiveSession(WorkerSession):
                 spawn_command=self._spawn_cmd,
             ),
             timeout_sec=self._ready_timeout,
+            extra_patterns=(
+                [self._ready_extra_pattern] if self._ready_extra_pattern else None
+            ),
         )
         if result.ok:
             return

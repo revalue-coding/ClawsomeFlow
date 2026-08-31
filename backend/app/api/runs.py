@@ -109,6 +109,7 @@ from app.services.dev_pr import run_pr_command as _run_pr_command
 from app.services.run_notify import NOTIFIED_MARKER_KEY
 from app.services.run_report import extract_leader_report
 from app.storage import StorageBackend, get_storage
+from app.validators import validate_custom_agent_refs
 from app.worktree.lookup import WorktreeLookup, get_worktree_lookup
 
 router = APIRouter(tags=["runs"])
@@ -995,6 +996,13 @@ async def trigger_run(
     # skipped; the complaint phase runs for every manual run regardless of mode
     # (see scheduler/finalize.py). Human checkpoints are unaffected.
 
+    # kind=custom agents referencing the registry: fail fast with a clear
+    # error BEFORE creating the run row — the registry row may have been
+    # deleted (or its binary uninstalled) since the Flow was saved. Raises
+    # FlowValidationError → global handler → canonical 400 JSON.
+    parsed_spec = FlowSpec.model_validate(flow.spec)
+    validate_custom_agent_refs(parsed_spec, storage)
+
     # Pre-generate the Run id so we can derive team_name **before** insert
     # (storage.run_update is intentionally narrow — it only refreshes the
     # mutable scheduler fields, never team_name).
@@ -1025,7 +1033,7 @@ async def trigger_run(
     if runtime_prompt is None:
         runtime_prompt = _runtime_prompt_from_inputs(payload.inputs or {})
     spec = _inject_runtime_prompt_into_spec(
-        spec=FlowSpec.model_validate(flow.spec),
+        spec=parsed_spec,
         runtime_prompt=runtime_prompt,
     )
     flow_description = (

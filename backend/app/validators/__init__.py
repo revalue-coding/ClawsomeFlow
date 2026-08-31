@@ -10,12 +10,14 @@ Public API:
 
 from app.validators.flow import (
     FlowValidationError,
+    validate_custom_agent_refs,
     validate_flow_against_db,
     validate_flow_spec,
 )
 
 __all__ = [
     "FlowValidationError",
+    "validate_custom_agent_refs",
     "validate_flow_against_db",
     "validate_flow_spec",
 ]
