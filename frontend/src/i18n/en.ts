@@ -129,6 +129,7 @@ const en = {
   shell: {
     brandTagline: "ClawsomeFlow",
     sidebarTopLabel: "Console",
+    brandHype: "Make your Multi-agent Workflow Clawsome !",
     sidebarBottomLine: "Current mode: local",
     backendOnline: "v{{version}}",
     backendOffline: "Offline",
@@ -286,7 +287,7 @@ const en = {
     description: "Overall goal",
     descriptionPlaceholder: "Describe the overall goal, acceptance criteria, etc. of this flow.",
     leader: "Leader",
-    leaderKindLabel: "Leader kind",
+    leaderKindLabel: "Leader platform",
     leaderAgentLabel: "Agent name",
     leaderRepoLabel: "Working directory",
     leaderTargetBranchLabel: "Target branch",
@@ -469,15 +470,15 @@ const en = {
       outputSummaryPlaceholder: "e.g. must include source / row count processed / output file path / key quality metric / failure notes",
       outputSummaryPlaceholderSummary: "Tell the leader how to report back to you (e.g. Markdown in English; lead with a one-paragraph TL;DR, then itemised details)",
       summaryDescriptionHint: "This description is embedded into the leader's dispatch prompt under \"## Task\".",
-      ownerSource: "Owner source *",
+      ownerSource: "Node executor *",
       ownerSourceLocal: "Local agent",
       ownerSourceExternal: "External execution",
       existingAgent: "Existing agent *",
       existingAgentPlaceholder: "— pick an existing agent —",
       existingAgentEmpty: "No available agent. Create one first.",
-      ownerKind: "Owner kind *",
-      ownerKindPlaceholder: "— pick an owner kind —",
-      pickOwnerKindFirst: "Pick owner kind first",
+      ownerKind: "Executor platform *",
+      ownerKindPlaceholder: "— pick an executor platform —",
+      pickOwnerKindFirst: "Pick an executor platform first",
       ownerKindClaude: "Claude Code",
       ownerKindCodex: "Codex",
       ownerKindCursor: "Cursor",
@@ -1334,10 +1335,7 @@ const en = {
   },
   customAgents: {
     title: "Custom Agents",
-    pageNote:
-      "Register any agentic CLI that satisfies the ClawsomeFlow/ClawTeam interface contract. " +
-      "Registered agents appear by their name as task-owner options in the Flow editor, and each " +
-      "gets a simple chat dialog (requires a headless one-shot command).",
+    pageNote: "Register any agentic CLI that satisfies the ClawsomeFlow interface contract.",
     add: "Add Custom Agent",
     addTitle: "Add Custom Agent",
     editTitle: "Edit Custom Agent",
@@ -1352,44 +1350,38 @@ const en = {
       "Deleted. Note: the following Flows still reference this agent and will fail validation at run time — please edit them: {{flows}}",
     chatError: "Chat failed: {{message}}",
     resetConfirm:
-      "Start a new session? The transcript is kept and a divider is inserted; the next message will not continue the previous headless session.",
+      "Start a new session? The transcript is kept and a divider is inserted; the next message will not continue the previous conversation.",
     chatNotConfiguredTitle: "Chat is not configured for this agent",
     chatNotConfiguredHint:
-      "Edit this agent on the Custom Agents page and fill in the \"headless one-shot command\" — a command that executes once and prints the reply to stdout ({message} is the message placeholder). Flow execution is not affected.",
+      "Edit this agent on the Custom Agents page and fill in the \"one-shot reply command\" — a command that runs once without opening a UI and prints the reply ({message} is the message placeholder). Flow execution is not affected.",
     chatEmptyTitle: "Start chatting",
-    chatEmptyHint: "Each turn runs {{name}}'s headless command once and shows its stdout as the reply.",
-    chatDisabledPlaceholder: "Chat disabled — configure the headless one-shot command first",
+    chatEmptyHint: "Each turn runs {{name}}'s one-shot reply command once and shows its output as the reply.",
+    chatDisabledPlaceholder: "Chat disabled — configure the one-shot reply command first",
     contract: {
-      title: "CLI behaviour contract (your agent must satisfy all of these)",
+      title: "CLI behaviour contract",
       item1:
-        "The command is on PATH (or an absolute path) and starts an interactive terminal UI that accepts a pasted multi-line prompt followed by Enter to submit (ClawsomeFlow injects tasks via tmux paste).",
+        "Starts an interactive terminal UI and accepts a pasted multi-line prompt followed by Enter to submit",
       item2:
-        "It can autonomously run shell commands: during a task it must run git and report completion via `clawteam inbox send \"task <id> done: …\"` (or `FAILED: …`), as instructed in the dispatch prompt.",
+        "Can autonomously run shell commands: during tasks the agent may need to run git and other commands",
       item3:
-        "It runs fully auto-approved: include your own bypass flags (e.g. `mycli --yolo`) in the launch command — ClawsomeFlow never injects permission flags for custom agents.",
-      item4:
-        "Startup must not block on trust/login dialogs that cannot be auto-dismissed; complete any login before registering.",
-      item5:
-        "It stays alive after each reply (does not exit at end of turn) so follow-up dispatches can be injected.",
+        "Stays alive after each reply (does not exit) so follow-up tasks can be injected",
     },
     form: {
       name: "Agent name",
-      nameHelp: "Display name; also generates the agent id (slug). Shown as a task-owner option in the Flow editor.",
       namePlaceholder: "My Agent",
       nameRequired: "Please fill in the agent name",
       spawnCommand: "Interactive launch command",
-      spawnCommandHelp:
-        "Full command that starts the interactive TUI in a terminal — MUST carry its own full-auto permission flags (e.g. `mycli --yolo`); the system injects nothing.",
+      spawnCommandHelp: "Full command that starts the interactive TUI in a terminal.",
       spawnRequired: "Please fill in the interactive launch command",
       resumeCommand: "Resume command",
       resumeCommandHelp:
         "Continues the last session in the same directory (e.g. `mycli --continue`). If empty, a crashed agent is relaunched with the launch command — the task re-runs in the same worktree (results stay correct; conversation context is lost).",
-      headlessCommand: "Headless one-shot command",
+      headlessCommand: "One-shot reply command",
       headlessCommandHelp:
-        "Executes once and prints the reply to stdout; {message} is the message placeholder (e.g. `mycli -p \"{message}\"`) — without the placeholder the message is appended as the last argument. If empty, this agent's chat page is disabled (Flow execution unaffected).",
-      headlessResumeCommand: "Headless continue command",
+        "Runs once without opening a UI and prints the reply; {message} is the message placeholder (e.g. `mycli -p \"{message}\"`) — without the placeholder the message is appended as the last argument. If empty, this agent's chat page is disabled (Flow execution unaffected).",
+      headlessResumeCommand: "Continue reply command",
       headlessResumeCommandHelp:
-        "Continues the previous headless session for the next chat turn. If empty, every chat message is independent (no context).",
+        "Continues the previous conversation on the next chat turn. If empty, every chat message is independent (no context).",
       readyPattern: "TUI ready marker",
       readyPatternHelp:
         "A stable piece of text (substring or regex) the CLI shows once it is ready for input — used to decide \"ready to dispatch\". If empty, built-in generic prompt markers (❯, a leading > …) are used; if your CLI shows none of them the spawn will time out, so filling this makes it reliable.",

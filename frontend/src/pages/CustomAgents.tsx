@@ -166,15 +166,12 @@ function AgentFormModal({
             <li>{t("customAgents.contract.item1")}</li>
             <li>{t("customAgents.contract.item2")}</li>
             <li>{t("customAgents.contract.item3")}</li>
-            <li>{t("customAgents.contract.item4")}</li>
-            <li>{t("customAgents.contract.item5")}</li>
           </ul>
         </div>
 
         <FieldRow
           label={t("customAgents.form.name")}
           required
-          help={t("customAgents.form.nameHelp")}
         >
           <input
             className={cn(INPUT_CLS, "font-sans")}
