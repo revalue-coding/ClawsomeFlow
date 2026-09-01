@@ -441,7 +441,7 @@ const zh = {
       descriptionRequired: "「{{subject}}」的详细说明不能为空。",
       openclawAgentMissing: "「{{subject}}」选择的 OpenClaw 智能体「{{agentId}}」不存在，请重新选择。",
       hermesAgentMissing: "「{{subject}}」选择的 Hermes 智能体「{{agentId}}」不存在，请重新选择。",
-      customAgentMissing: "「{{subject}}」引用的自定义Agent「{{agentId}}」已不在注册表中，请重新选择 Owner 类型。",
+      customAgentMissing: "「{{subject}}」引用的自定义Agent「{{agentId}}」已不在注册表中，请重新选择执行者所属平台。",
       externalChannelRequired: "「{{subject}}」：请为外部执行选择 Owner 类型（人工 / 远程ClawsomeFlow / 通用接口）。",
       externalEndpointRequired: "「{{subject}}」：通用接口需要填写派发端点 URL。",
       externalRemoteFieldsRequired: "「{{subject}}」：远程ClawsomeFlow 请粘贴「远端 Flow调用信息」并填写可达的远端地址（保存该节点时自动解析注册）。",

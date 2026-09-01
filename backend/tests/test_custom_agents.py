@@ -297,6 +297,47 @@ class TestSpecResolution:
         spec = _spec_with_custom_agent("my-agent", command=["bash"])
         validate_custom_agent_refs(spec, get_storage())  # no exception
 
+    def test_one_ref_backs_many_ad_hoc_agent_names(self) -> None:
+        # A registered custom agent is a PLATFORM: the editor lets the user
+        # coin any number of ad-hoc agent names on it (same as claude/codex),
+        # so several FlowAgents share one ref while keeping distinct ids —
+        # and therefore distinct ClawTeam members/worktrees.
+        self._make_row()
+        spec = FlowSpec(
+            agents=[
+                FlowAgent(
+                    id="lead", kind=AgentKind.claude, repo="/tmp/r", is_leader=True
+                ),
+                *(
+                    FlowAgent(
+                        id=name,
+                        kind=AgentKind.custom,
+                        custom_agent_ref="my-agent",
+                        command=["stale", "snapshot"],
+                        repo="/tmp/r",
+                        is_temporary=True,
+                    )
+                    for name in ("writer", "reviewer")
+                ),
+            ],
+            tasks=[
+                FlowTask(id="t0", owner_agent_id="writer", subject="w"),
+                FlowTask(id="t1", owner_agent_id="reviewer", subject="r"),
+                FlowTask(
+                    id="t2", owner_agent_id="lead", subject="s",
+                    depends_on=["t0", "t1"], is_leader_summary=True,
+                ),
+            ],
+        )
+        validate_custom_agent_refs(spec, get_storage())  # no exception
+        rows = svc.resolve_spec_custom_agents(spec, storage=get_storage())
+        assert set(rows) == {"writer", "reviewer"}
+        for agent in spec.agents:
+            if agent.kind != AgentKind.custom:
+                continue
+            assert agent.command == ["bash", "--norc", "-i"]
+            assert agent.resume_command == ["bash", "--norc", "--continue"]
+
 
 # ──────────────────────────────────────────────────────────────────────
 # TmuxLiveSession custom branch

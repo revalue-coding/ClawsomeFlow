@@ -749,9 +749,6 @@ function ownerIdAfterPlatformChange({
 }): string {
   const normalizedOwnerId = ownerId.trim();
   if (!isOwnerKind(nextKind)) return "";
-  // A custom agent's FlowAgent id IS its registry ref — auto-filled, never
-  // free-typed (the identity field renders read-only for custom kinds).
-  if (isCustomKind(nextKind)) return customRefOf(nextKind);
   if (!normalizedOwnerId) return "";
   if (!isOwnerKind(previousKind)) return normalizedOwnerId;
   if (previousKind === nextKind) return normalizedOwnerId;
@@ -2668,9 +2665,6 @@ export function FlowEditor() {
                       </option>
                     ))}
                   </select>
-                ) : isCustomKind(leaderKind) ? (
-                  // Custom agent id = the registry ref, fixed on platform pick.
-                  <input className="input" value={leaderId} readOnly disabled />
                 ) : (
                   // Free-type a new agent name, or pick a registered one of
                   // this platform. In-flow worker agents are deliberately NOT
@@ -3885,7 +3879,6 @@ function TaskFormBody({
   const ownerLocked = readOnly || isSummary;
   const ownerKindSelected = isOwnerKind(row.ownerKind);
   const ownerIsOpenclaw = isOpenclawKind(row.ownerKind);
-  const ownerIsCustom = isCustomKind(row.ownerKind);
   const ownerIsExternal = ownerMode === "external" || isExternalKind(row.ownerKind);
   const ownerShowsRepoFields = !ownerIsOpenclaw && !ownerIsExternal;
   const ownerKindEditable = !ownerLocked;
@@ -4182,7 +4175,7 @@ function TaskFormBody({
           node agent name. */}
       <div>
         <label className="label">
-          {ownerIsOpenclaw || ownerIsCustom
+          {ownerIsOpenclaw
             ? t("flowEditor.taskFields.existingAgent")
             : t("flowEditor.taskFields.newAgentName")}
         </label>
@@ -4203,11 +4196,6 @@ function TaskFormBody({
             placeholder={t("flowEditor.taskFields.pickOwnerKindFirst")}
             onChange={(e) => onChange({ ownerId: e.target.value })}
           />
-        ) : ownerIsCustom ? (
-          // A custom agent's FlowAgent id IS the registry ref — fixed on
-          // platform pick, never free-typed (the label already shows the
-          // user-defined name).
-          <input className="input" value={row.ownerId} readOnly disabled />
         ) : ownerIsOpenclaw ? (
           <>
             <select

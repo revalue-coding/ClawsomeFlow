@@ -446,7 +446,7 @@ const en = {
       descriptionRequired: "Description for \"{{subject}}\" cannot be empty.",
       openclawAgentMissing: "\"{{subject}}\" references OpenClaw agent \"{{agentId}}\" which no longer exists — pick another.",
       hermesAgentMissing: "\"{{subject}}\" references Hermes agent \"{{agentId}}\" which no longer exists — pick another.",
-      customAgentMissing: "\"{{subject}}\" references custom agent \"{{agentId}}\" which is no longer registered — pick another owner kind.",
+      customAgentMissing: "\"{{subject}}\" references custom agent \"{{agentId}}\" which is no longer registered — pick another executor platform.",
       externalChannelRequired: "\"{{subject}}\": pick an owner kind for external execution (Human / Remote ClawsomeFlow / Generic interface).",
       externalEndpointRequired: "\"{{subject}}\": the generic interface requires an endpoint URL.",
       externalRemoteFieldsRequired: "\"{{subject}}\": Remote ClawsomeFlow — paste the \"Remote Flow call info\" and fill in a reachable remote base URL (registered automatically when you save the node).",
