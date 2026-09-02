@@ -187,6 +187,10 @@ def test_open_directory_native_uses_wsl_branch_before_gui_check(
 
 def test_open_directory_native_unchanged_outside_wsl(monkeypatch, tmp_path: Path) -> None:
     # Zero-impact guard: plain Linux without a display keeps the legacy error.
+    # Pin sys.platform to "linux" so the assertion holds regardless of the host
+    # the suite runs on — on macOS runners native_directory_ui_available() would
+    # otherwise short-circuit to True (darwin has no DISPLAY yet a GUI).
+    monkeypatch.setattr(system.sys, "platform", "linux")
     monkeypatch.setattr(system.platform_wsl, "is_wsl", lambda: False)
     monkeypatch.setattr(system.os, "name", "posix")
     monkeypatch.delenv("DISPLAY", raising=False)
