@@ -2385,7 +2385,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
           <div
             ref={scrollRef}
             onScroll={handleScroll}
-            className="min-h-[280px] flex-1 space-y-4 overflow-auto bg-ink-50/40 px-5 py-4"
+            className="min-h-0 flex-1 space-y-4 overflow-auto bg-ink-50/40 px-5 py-4"
           >
             {displayMessages.map((m, i, list) => (
               <Fragment key={m.id ?? m.cid ?? i}>
@@ -2446,7 +2446,7 @@ function ChatRoom({ agentId }: { agentId: string }) {
             e.preventDefault();
             if (!sending && !resetting && !uploadingAttachments) void send();
           }}
-          className="space-y-2 border-t border-ink-100 p-3"
+          className="shrink-0 space-y-2 border-t border-ink-100 p-3"
         >
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-xs text-ink-500">
