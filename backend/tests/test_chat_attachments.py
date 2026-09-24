@@ -27,16 +27,30 @@ def test_store_upload_bytes_writes_under_controlled_directory(tmp_path: Path) ->
     assert target.read_bytes() == b"# spec"
 
 
-def test_store_upload_bytes_rejects_disallowed_type(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("filename", "mime_type"),
+    [
+        ("report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        ("legacy.xls", "application/vnd.ms-excel"),
+        ("slides.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        ("tool.exe", "application/x-msdownload"),
+        ("noext", ""),
+    ],
+)
+def test_store_upload_bytes_accepts_any_file_type(
+    tmp_path: Path, filename: str, mime_type: str
+) -> None:
     root = tmp_path / "workspace"
     root.mkdir(parents=True, exist_ok=True)
-    with pytest.raises(ValueError, match="file type is not allowed"):
-        svc.store_upload_bytes(
-            base_dir=root,
-            raw_filename="script.exe",
-            mime_type="application/octet-stream",
-            content=b"x",
-        )
+    item = svc.store_upload_bytes(
+        base_dir=root,
+        raw_filename=filename,
+        mime_type=mime_type,
+        content=b"x",
+    )
+    assert item.name == filename
+    assert item.mime_type == mime_type
+    assert Path(item.absolute_path).read_bytes() == b"x"
 
 
 def test_resolve_existing_attachment_rejects_path_escape(tmp_path: Path) -> None:

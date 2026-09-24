@@ -2,7 +2,7 @@
 
 This module keeps all file-upload constraints in one place for OpenClaw/Hermes:
 
-* bounded upload size/count
+* bounded upload size/count (any file type is accepted)
 * filename sanitisation and path-traversal protection
 * controlled storage under ``.csflow-chat-uploads/``
 * path-injection prompt construction
@@ -23,72 +23,6 @@ _DEFAULT_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024
 _DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES = 30 * 1024 * 1024
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-_ALLOWED_SUFFIXES = {
-    ".txt",
-    ".md",
-    ".markdown",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".ini",
-    ".cfg",
-    ".conf",
-    ".csv",
-    ".tsv",
-    ".log",
-    ".py",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".c",
-    ".cc",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".java",
-    ".go",
-    ".rs",
-    ".sh",
-    ".bash",
-    ".zsh",
-    ".sql",
-    ".xml",
-    ".html",
-    ".css",
-    ".pdf",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".webp",
-    ".bmp",
-    ".svg",
-    ".mp3",
-    ".wav",
-    ".ogg",
-    ".mp4",
-    ".mov",
-    ".zip",
-    ".gz",
-    ".tgz",
-    ".tar",
-}
-_ALLOWED_MIME_PREFIXES = ("text/", "image/", "audio/", "video/")
-_ALLOWED_MIME_EXACT = {
-    "application/pdf",
-    "application/json",
-    "application/xml",
-    "application/yaml",
-    "application/x-yaml",
-    "application/zip",
-    "application/x-gzip",
-    "application/gzip",
-    "application/x-tar",
-    "application/octet-stream",
-}
 
 def _int_env(name: str, default: int, *, minimum: int = 1) -> int:
     raw = os.getenv(name, "").strip()
@@ -144,25 +78,6 @@ def sanitize_filename(raw_name: str) -> str:
     return f"{safe_stem}{safe_suffix}"
 
 
-def _is_allowed_mime(mime_type: str) -> bool:
-    if not mime_type:
-        return True
-    if mime_type in _ALLOWED_MIME_EXACT:
-        return True
-    return any(mime_type.startswith(prefix) for prefix in _ALLOWED_MIME_PREFIXES)
-
-
-def _is_allowed_suffix(filename: str) -> bool:
-    return Path(filename).suffix.lower() in _ALLOWED_SUFFIXES
-
-
-def validate_name_and_type(*, filename: str, mime_type: str) -> None:
-    if not _is_allowed_suffix(filename):
-        raise ValueError("file type is not allowed")
-    if not _is_allowed_mime(mime_type):
-        raise ValueError("mime type is not allowed")
-
-
 def upload_root_for(base_dir: Path, *, create: bool) -> Path:
     root = base_dir.expanduser().resolve(strict=False)
     if not root.exists() or not root.is_dir():
@@ -196,7 +111,6 @@ def store_upload_bytes(
         raise ValueError("uploaded file exceeds size limit")
     safe_name = sanitize_filename(raw_filename)
     normal_mime = _normalise_mime(mime_type)
-    validate_name_and_type(filename=safe_name, mime_type=normal_mime)
 
     root = base_dir.expanduser().resolve(strict=False)
     uploads = upload_root_for(root, create=True).resolve(strict=False)
@@ -235,7 +149,6 @@ def resolve_existing_attachment(
         raise ValueError("attachment path is required")
     safe_name = sanitize_filename(name or Path(absolute_path).name)
     normal_mime = _normalise_mime(mime_type)
-    validate_name_and_type(filename=safe_name, mime_type=normal_mime)
 
     root = base_dir.expanduser().resolve(strict=False)
     uploads = upload_root_for(root, create=False).resolve(strict=False)
@@ -302,5 +215,4 @@ __all__ = [
     "store_upload_bytes",
     "upload_root_for",
     "validate_batch_limits",
-    "validate_name_and_type",
 ]
