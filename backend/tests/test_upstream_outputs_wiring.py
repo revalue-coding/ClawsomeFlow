@@ -443,6 +443,150 @@ async def test_upstream_same_owner_multiple_deps_keep_per_task_strict_match(fake
     }
 
 
+def _single_dep_spec(*, extra_a_task: bool = False) -> FlowSpec:
+    tasks = [FlowTask(id="t-a", owner_agent_id="a", subject="A", description="")]
+    if extra_a_task:
+        tasks.append(FlowTask(id="t-a0", owner_agent_id="a", subject="A0", description=""))
+    tasks += [
+        FlowTask(id="t-b", owner_agent_id="b", subject="B", description=""),
+        FlowTask(id="t-d", owner_agent_id="d", subject="D", description="",
+                 depends_on=["t-a"]),
+        FlowTask(id="ts", owner_agent_id="leader", subject="S", description="",
+                 depends_on=["t-d"], is_leader_summary=True),
+    ]
+    return FlowSpec(
+        agents=[_agent("a"), _agent("b"), _agent("d"), _agent("leader", leader=True)],
+        tasks=tasks,
+    )
+
+
+def _controller(run, spec, fake_lookup, inbox, **kwargs) -> RunController:
+    async def inbox_provider():
+        return list(inbox)
+
+    return RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=lambda: _empty(),
+        leader_inbox_provider=inbox_provider,
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_upstream_mislabelled_header_attributed_to_single_owned_task(
+    fake_lookup,
+) -> None:
+    """A wrong id in the ``task <id> done:`` header (e.g. a fragment of the
+    agent's own output file name) must not drop the upstream output."""
+    spec = _single_dep_spec()
+    run = _persist_run(spec)
+    rc = _controller(run, spec, fake_lookup, [
+        {"from_agent": "a", "content": "task software-rootcause done: see rca.md"},
+    ])
+    await rc._ensure_session_idle(rc._agents["a"])
+    ctx = await rc._compose_dispatch_context(rc._agents["d"], rc._tasks["t-d"].task)
+    assert ctx.upstream_outputs[0].summary == (
+        "[task t-a] task software-rootcause done: see rca.md"
+    )
+
+
+@pytest.mark.asyncio
+async def test_upstream_header_naming_another_agents_task_is_reattributed(
+    fake_lookup,
+) -> None:
+    spec = _single_dep_spec()
+    run = _persist_run(spec)
+    rc = _controller(run, spec, fake_lookup, [
+        {"from_agent": "a", "content": "task t-b done: A output"},
+    ])
+    await rc._ensure_session_idle(rc._agents["a"])
+    ctx = await rc._compose_dispatch_context(rc._agents["d"], rc._tasks["t-d"].task)
+    assert ctx.upstream_outputs[0].summary == "[task t-a] task t-b done: A output"
+
+
+@pytest.mark.asyncio
+async def test_upstream_header_with_clawteam_task_id_is_accepted(fake_lookup) -> None:
+    from app.scheduler.compiler import CompileResult
+
+    spec = _single_dep_spec(extra_a_task=True)
+    run = _persist_run(spec)
+    flow_to_ct = {t.id: f"ct{i:06d}" for i, t in enumerate(spec.tasks)}
+    rc = _controller(
+        run, spec, fake_lookup,
+        [{"from_agent": "a", "content": f"task {flow_to_ct['t-a']} done: A output"}],
+        compile_result=CompileResult(
+            team_name=run.team_name,
+            leader_agent_id="leader",
+            flow_to_clawteam=flow_to_ct,
+            clawteam_to_flow={v: k for k, v in flow_to_ct.items()},
+            member_count=len(spec.agents),
+        ),
+    )
+    await rc._ensure_session_idle(rc._agents["a"])
+    ctx = await rc._compose_dispatch_context(rc._agents["d"], rc._tasks["t-d"].task)
+    assert ctx.upstream_outputs[0].summary is not None
+    assert ctx.upstream_outputs[0].summary.startswith("[task t-a] ")
+
+
+@pytest.mark.asyncio
+async def test_upstream_mislabelled_header_multi_task_owner_uses_in_flight_task(
+    fake_lookup,
+) -> None:
+    """Owner has several tasks: a mislabelled report goes to the task last
+    dispatched to it, and stays there after the agent moves on."""
+    spec = _single_dep_spec(extra_a_task=True)
+    run = _persist_run(spec)
+    rc = _controller(run, spec, fake_lookup, [
+        {"from_agent": "a", "content": "task rootcause done: A output"},
+    ])
+    sess = await rc._ensure_session_idle(rc._agents["a"])
+    sess.last_dispatched_task_id = "t-a"
+    sess.last_dispatched_at = None
+
+    ctx = await rc._compose_dispatch_context(rc._agents["d"], rc._tasks["t-d"].task)
+    assert ctx.upstream_outputs[0].summary == "[task t-a] task rootcause done: A output"
+
+    sess.last_dispatched_task_id = "t-a0"
+    ctx = await rc._compose_dispatch_context(rc._agents["d"], rc._tasks["t-d"].task)
+    assert ctx.upstream_outputs[0].summary == "[task t-a] task rootcause done: A output"
+
+
+@pytest.mark.asyncio
+async def test_upstream_mislabelled_header_multi_task_owner_without_dispatch_is_dropped(
+    fake_lookup,
+) -> None:
+    spec = _single_dep_spec(extra_a_task=True)
+    run = _persist_run(spec)
+    rc = _controller(run, spec, fake_lookup, [
+        {"from_agent": "a", "content": "task rootcause done: A output"},
+    ])
+    await rc._ensure_session_idle(rc._agents["a"])
+    ctx = await rc._compose_dispatch_context(rc._agents["d"], rc._tasks["t-d"].task)
+    assert ctx.upstream_outputs[0].summary is None
+
+
+@pytest.mark.asyncio
+async def test_upstream_mislabelled_header_older_than_dispatch_is_dropped(
+    fake_lookup,
+) -> None:
+    spec = _single_dep_spec(extra_a_task=True)
+    run = _persist_run(spec)
+    rc = _controller(run, spec, fake_lookup, [{
+        "from_agent": "a",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "content": "task rootcause done: A0 output",
+    }])
+    sess = await rc._ensure_session_idle(rc._agents["a"])
+    sess.last_dispatched_task_id = "t-a"
+    sess.last_dispatched_at = 1_900_000_000.0
+    ctx = await rc._compose_dispatch_context(rc._agents["d"], rc._tasks["t-d"].task)
+    assert ctx.upstream_outputs[0].summary is None
+
+
 @pytest.mark.asyncio
 async def test_leader_summary_task_does_not_get_upstream_block(fake_lookup) -> None:
     """Leader summary task gets ``worker_reports`` instead — never

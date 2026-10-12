@@ -4615,6 +4615,52 @@ async def test_checkpoint_blocks_dispatch_until_all_items_approved(fake_lookup) 
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_summary_survives_mislabelled_done_header(fake_lookup) -> None:
+    """The owner typed a file-name fragment instead of the task id in its
+    ``task <id> done:`` header; the checkpoint must still show the output."""
+    spec = _make_checkpoint_spec()
+    run = _persist_flow_and_run(spec)
+
+    snapshots = [
+        TaskSnapshot(task_id="t1", owner_agent_id="alice", status="completed",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="t2", owner_agent_id="bob", status="pending",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+        TaskSnapshot(task_id="ts", owner_agent_id="leader", status="blocked",
+                     locked_by_agent=None, metadata={}, dispatched_at_epoch=None),
+    ]
+
+    async def snap_provider() -> list[TaskSnapshot]:
+        return list(snapshots)
+
+    async def inbox_provider() -> list[dict[str, str]]:
+        return [{
+            "from_agent": "alice",
+            "content": "task software-rootcause done: report at /tmp/rca.md",
+        }]
+
+    rc = RunController(
+        run=run,
+        spec=spec,
+        flow_description="demo",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=snap_provider,
+        leader_inbox_provider=inbox_provider,
+    )
+
+    await rc.tick()
+    assert run.status == RunStatus.awaiting_user_checkpoint
+    cp = rc.checkpoint_snapshot()
+    assert cp is not None
+    assert cp["items"][0]["summary"] == (
+        "[task t1] task software-rootcause done: report at /tmp/rca.md"
+    )
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_rerun_dispatches_feedback_prompt_and_marks_in_progress(
     fake_lookup,
 ) -> None:

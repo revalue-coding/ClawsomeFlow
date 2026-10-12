@@ -578,6 +578,11 @@ class RunController:
         self._task_outputs: dict[str, list[dict[str, Any]]] = {}
         self._worker_report_history: list[dict[str, Any]] = []
         self._seen_worker_report_keys: set[tuple[str | None, str, str]] = set()
+        # (from_agent, timestamp, text) → task id a completion report whose
+        # header names a task the sender does not own was attributed to (None =
+        # unattributable). Pinned at first sight: the in-flight fallback reads
+        # session state, which moves on once the agent gets its next task.
+        self._mislabelled_report_tasks: dict[tuple[str, str, str], str | None] = {}
         self._last_dispatch_failures: dict[str, dict[str, Any]] = {}
         self._dispatch_checkpoint: _DispatchCheckpoint | None = None
         self._checkpoint_lock = asyncio.Lock()
@@ -2902,8 +2907,10 @@ class RunController:
         for entry in raw:
             if isinstance(entry, dict):
                 text = str(entry.get("content") or entry.get("body") or "")
+                from_agent = str(entry.get("from_agent") or entry.get("from") or "?")
+                timestamp = str(entry.get("timestamp") or entry.get("ts") or "") or None
                 out.append(WorkerReport(
-                    from_agent=str(entry.get("from_agent") or entry.get("from") or "?"),
+                    from_agent=from_agent,
                     summary=text,
                     task_id=self._extract_task_ref(
                         payload_task_id=(
@@ -2913,8 +2920,10 @@ class RunController:
                             or entry.get("lastTask")
                         ),
                         text=text,
+                        from_agent=from_agent,
+                        timestamp=timestamp,
                     ),
-                    timestamp=str(entry.get("timestamp") or entry.get("ts") or "") or None,
+                    timestamp=timestamp,
                 ))
                 continue
             # Plain string: best-effort parse "task <id> done: ..." prefix.
@@ -2926,15 +2935,99 @@ class RunController:
         return out
 
     def _extract_task_ref(
-        self, *, payload_task_id: Any, text: str,
+        self,
+        *,
+        payload_task_id: Any,
+        text: str,
+        from_agent: str = "?",
+        timestamp: str | None = None,
     ) -> str | None:
-        raw = str(payload_task_id or "").strip()
-        if raw:
-            return raw
+        """Resolve which task an inbox message reports on.
+
+        Ids are taken from the payload field, then the ``task <id> done:``
+        header. When the sender is one of this run's agents, an id only counts
+        if it names one of the sender's own tasks (the ClawTeam id the worker
+        uses for ``task update`` is accepted as an alias). A completion header
+        whose id names none of them — the agent typed a file-name fragment or
+        another node's id — is attributed by
+        :meth:`_attribute_mislabelled_report` instead of being dropped, so the
+        output still reaches checkpoints and downstream dispatches.
+        """
+        payload_raw = str(payload_task_id or "").strip()
         m = _TASK_PREFIX_RE.match(text or "")
-        if not m:
+        header_raw = m.group(1) if m else ""
+        first_raw = payload_raw or header_raw or None
+        own = {
+            tid for tid, book in self._tasks.items()
+            if book.task.owner_agent_id == from_agent
+        }
+        if not own:
+            return first_raw
+        for raw in (payload_raw, header_raw):
+            canonical = self._canonical_task_id(raw)
+            if canonical in own:
+                return canonical
+        if not header_raw:
+            return first_raw
+        attributed = self._attribute_mislabelled_report(
+            from_agent=from_agent,
+            reported_task_id=header_raw,
+            timestamp=timestamp,
+            text=text,
+        )
+        return attributed or first_raw
+
+    def _canonical_task_id(self, raw: str) -> str | None:
+        if not raw:
             return None
-        return m.group(1)
+        if raw in self._tasks:
+            return raw
+        if self.compile_result is not None:
+            return self.compile_result.clawteam_to_flow.get(raw)
+        return None
+
+    def _attribute_mislabelled_report(
+        self,
+        *,
+        from_agent: str,
+        reported_task_id: str,
+        timestamp: str | None,
+        text: str,
+    ) -> str | None:
+        """Pick the sender's task for a completion header with a foreign id.
+
+        Unambiguous when the sender owns a single reporting task; otherwise
+        the task last dispatched to the sender's session, provided the
+        message does not predate that dispatch.
+        """
+        key = (from_agent, timestamp or "", (text or "").strip())
+        if key in self._mislabelled_report_tasks:
+            return self._mislabelled_report_tasks[key]
+        candidates = [
+            tid for tid, book in self._tasks.items()
+            if book.task.owner_agent_id == from_agent
+            and not book.task.is_leader_summary
+        ]
+        attributed: str | None = None
+        if len(candidates) == 1:
+            attributed = candidates[0]
+        else:
+            sess = self._sessions.get(from_agent)
+            in_flight = sess.last_dispatched_task_id if sess is not None else None
+            if in_flight in candidates:
+                sent_at = self._parse_iso_timestamp_to_epoch(timestamp)
+                dispatched_at = sess.last_dispatched_at if sess is not None else None
+                if sent_at is None or dispatched_at is None or sent_at >= dispatched_at:
+                    attributed = in_flight
+        self._mislabelled_report_tasks[key] = attributed
+        logger.warning(
+            "worker_report_task_id_mismatch",
+            run_id=self.run.id,
+            from_agent=from_agent,
+            reported_task_id=reported_task_id,
+            attributed_task_id=attributed,
+        )
+        return attributed
 
     def _record_worker_reports(self, reports: list[WorkerReport]) -> None:
         """Persist in-memory worker output history for terminal snapshots."""
