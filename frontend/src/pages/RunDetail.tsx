@@ -841,6 +841,7 @@ export function RunDetail() {
     );
     return hit?.kind === "external";
   }, [pauseFailureReport, run?.specSnapshot]);
+  const pauseFailureIsTimeout = pauseFailureReport?.signal === "timeout";
   const rerunTargetItem = useMemo(
     () =>
       rerunModalTaskId
@@ -983,13 +984,26 @@ export function RunDetail() {
             )}
             {run.pause?.reason === "failure" && pauseFailureReport ? (
               <div className="mt-2 space-y-2">
+                {pauseFailureIsTimeout ? (
+                  <p>{t("runDetail.pauseTimeoutHint")}</p>
+                ) : null}
                 <div className="text-xs font-medium text-ink-700">
-                  {t("runDetail.pauseFailureInboxLabel")}
+                  {pauseFailureIsTimeout
+                    ? t("runDetail.pauseTimeoutInboxLabel")
+                    : t("runDetail.pauseFailureInboxLabel")}
                 </div>
-                <div className="rounded-md border border-rose-200 bg-rose-50/50 px-3 py-2 space-y-2">
+                <div
+                  className={
+                    pauseFailureIsTimeout
+                      ? "rounded-md border border-amber-200 bg-amber-50/50 px-3 py-2 space-y-2"
+                      : "rounded-md border border-rose-200 bg-rose-50/50 px-3 py-2 space-y-2"
+                  }
+                >
                   <div className="text-sm text-ink-900">
                     <span className="text-xs font-medium text-ink-600">
-                      {t("runDetail.pauseFailureNodeLabel")}
+                      {pauseFailureIsTimeout
+                        ? t("runDetail.pauseTimeoutNodeLabel")
+                        : t("runDetail.pauseFailureNodeLabel")}
                       {": "}
                     </span>
                     <span className="font-medium">
@@ -1007,7 +1021,6 @@ export function RunDetail() {
                     {pauseFailureReport.signal &&
                     (pauseFailureReport.signal === "leader_inbox_failed" ||
                       pauseFailureReport.signal === "worker_reported" ||
-                      pauseFailureReport.signal === "timeout" ||
                       pauseFailureReport.signal === "dispatch_failed") ? (
                       <span className="ml-2 text-xs text-ink-500">
                         (
@@ -1051,7 +1064,9 @@ export function RunDetail() {
                     return (
                       <div className="space-y-1">
                         <div className="text-xs font-medium text-ink-600">
-                          {t("runDetail.pauseFailureMessageLabel")}
+                          {pauseFailureIsTimeout
+                            ? t("runDetail.pauseTimeoutMessageLabel")
+                            : t("runDetail.pauseFailureMessageLabel")}
                         </div>
                         <pre className="text-xs text-ink-800 whitespace-pre-wrap break-words font-mono">
                           {msg}

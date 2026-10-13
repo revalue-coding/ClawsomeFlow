@@ -814,6 +814,11 @@ const zh = {
       dispatch_failed: "派发失败",
     },
     pauseFailureSyntheticTimeout: "节点超时{{detail}}",
+    pauseTimeoutHint:
+      "该节点未在设定的超时时间内完成，执行流已暂停。点击“继续执行”将重新派发该节点，或“终止执行流”丢弃本次执行。",
+    pauseTimeoutInboxLabel: "节点超时",
+    pauseTimeoutNodeLabel: "超时节点",
+    pauseTimeoutMessageLabel: "超时说明",
     pauseFailureSyntheticFailed: "FAILED: {{taskId}}{{detail}}",
     pauseFailureSyntheticDispatchFailed: "派发到该节点失败{{detail}}",
     pauseExternalFailureHint: "修复问题后点击「继续执行」，该节点将会重新执行",

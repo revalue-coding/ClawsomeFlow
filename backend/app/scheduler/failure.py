@@ -68,6 +68,12 @@ class FailureRecord:
     #: triggered it). Empty for local failures. Recorded on the ``task_failed``
     #: event so a rebuilt controller can skip an already-handled receipt.
     external_nonce: str = ""
+    #: Timeout signal only: how long the task had been out vs. its effective
+    #: limit, and whether an external executor (human / webhook / remote) owned
+    #: it — i.e. we were *waiting* rather than *running*.
+    elapsed_seconds: int | None = None
+    limit_seconds: int | None = None
+    owner_is_external: bool = False
 
     def as_log(self) -> dict[str, Any]:
         return {
@@ -166,11 +172,19 @@ def detect_failures(
             else:
                 effective_timeout = max(configured_timeout, _MIN_TASK_TIMEOUT_SECONDS)
             if elapsed > effective_timeout:
-                out.append(_record(
-                    snap, FailureReason.timeout,
-                    "elapsed="
-                    f"{int(elapsed)}s > limit={effective_timeout}s "
-                    f"(configured={configured_timeout}s, min={_MIN_TASK_TIMEOUT_SECONDS}s)",
+                bounds = (
+                    f"(configured={configured_timeout}s)"
+                    if owner_is_external
+                    else f"(configured={configured_timeout}s, min={_MIN_TASK_TIMEOUT_SECONDS}s)"
+                )
+                out.append(FailureRecord(
+                    task_id=snap.task_id,
+                    agent_id=snap.locked_by_agent or snap.owner_agent_id,
+                    reason=FailureReason.timeout,
+                    detail=f"elapsed={int(elapsed)}s > limit={effective_timeout}s {bounds}",
+                    elapsed_seconds=int(elapsed),
+                    limit_seconds=effective_timeout,
+                    owner_is_external=owner_is_external,
                 ))
                 continue
 
@@ -297,6 +311,28 @@ def failed_inbox_message_for_pause(
             return f"FAILED: {rec.task_id}: {detail}"
         return f"FAILED: {rec.task_id}"
     if rec.reason == FailureReason.timeout:
+        if rec.elapsed_seconds is not None and rec.limit_seconds is not None:
+            elapsed = _format_duration(rec.elapsed_seconds, resolved)
+            limit = _format_duration(rec.limit_seconds, resolved)
+            if resolved == "zh":
+                if rec.owner_is_external:
+                    return (
+                        f"任务 {rec.task_id} 等待超时：已等待 {elapsed}，"
+                        f"超过设定的超时时间 {limit}，仍未收到处理结果"
+                    )
+                return (
+                    f"任务 {rec.task_id} 执行超时：已执行 {elapsed}，"
+                    f"超过超时时间 {limit}，仍未完成"
+                )
+            if rec.owner_is_external:
+                return (
+                    f"task {rec.task_id} timed out waiting: no result after {elapsed} "
+                    f"(timeout {limit})"
+                )
+            return (
+                f"task {rec.task_id} timed out: still unfinished after {elapsed} "
+                f"(timeout {limit})"
+            )
         detail = (rec.detail or "").strip()
         if resolved == "zh":
             return (
@@ -308,6 +344,15 @@ def failed_inbox_message_for_pause(
             + (f": {detail}" if detail else "")
         )
     return ""
+
+
+def _format_duration(seconds: int, lang: str) -> str:
+    seconds = max(int(seconds), 0)
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    names = ("小时", "分钟", "秒") if lang == "zh" else ("h", "min", "s")
+    parts = [f"{n} {u}" for n, u in zip((hours, minutes, secs), names, strict=True) if n]
+    return " ".join(parts) if parts else f"0 {names[2]}"
 
 
 def format_pause_failure_detail(
@@ -324,6 +369,12 @@ def format_pause_failure_detail(
     labels = _FAILURE_SIGNAL_LABEL.get(resolved) or _FAILURE_SIGNAL_LABEL["en"]
     reason_label = labels.get(signal) or (signal or ("失败" if resolved == "zh" else "failed"))
     body = (detail or "").strip()
+    if signal == FailureReason.timeout.value:
+        if resolved == "zh":
+            text = f"任务「{title}」超时"
+            return (f"{text}：{body}" if body else text)[:1000]
+        text = f'Task "{title}" timed out'
+        return (f"{text}: {body}" if body else text)[:1000]
     if resolved == "zh":
         text = f"任务「{title}」失败（{reason_label}）"
         if body:

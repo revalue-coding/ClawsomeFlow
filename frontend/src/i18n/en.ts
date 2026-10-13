@@ -829,6 +829,11 @@ const en = {
       dispatch_failed: "dispatch failed",
     },
     pauseFailureSyntheticTimeout: "Node timed out{{detail}}",
+    pauseTimeoutHint:
+      "This node did not finish within its timeout, so the run was paused. Continue to dispatch the node again, or terminate to discard the run.",
+    pauseTimeoutInboxLabel: "Node timeout",
+    pauseTimeoutNodeLabel: "Timed-out node",
+    pauseTimeoutMessageLabel: "Timeout details",
     pauseFailureSyntheticFailed: "FAILED: {{taskId}}{{detail}}",
     pauseFailureSyntheticDispatchFailed:
       "Handing work to this node failed{{detail}}",

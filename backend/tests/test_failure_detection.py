@@ -75,6 +75,52 @@ def test_timeout_detected() -> None:
     assert len(failures) == 1
     assert failures[0].reason == F.FailureReason.timeout
     assert "min=14400s" in failures[0].detail
+    assert failures[0].elapsed_seconds == 14500
+    assert failures[0].limit_seconds == 14400
+    assert failures[0].owner_is_external is False
+
+
+def test_external_timeout_omits_local_floor_and_reads_as_waiting() -> None:
+    """An external (human) node honours its own small timeout; the pause text
+    must describe a wait that ran out, not quote the 4h floor that never
+    applied to it."""
+    from app.models import ExternalChannel, ExternalNodeConfig
+
+    ext_agent = FlowAgent(
+        id="ext", kind=AgentKind.external,
+        external=ExternalNodeConfig(channel=ExternalChannel.human),
+        is_leader=False,
+    )
+    failures = F.detect_failures(
+        team_name="hyflow-x",
+        flow_tasks={"t1": _ftask(owner="ext", timeout=1800)},
+        snapshots=[_snap(owner="ext", dispatched=0.0)],
+        leader_agent_id="leader",
+        agents={"ext": ext_agent},
+        now=1801.0,
+    )
+    assert len(failures) == 1
+    rec = failures[0]
+    assert rec.detail == "elapsed=1801s > limit=1800s (configured=1800s)"
+    assert rec.owner_is_external is True
+    zh = F.failed_inbox_message_for_pause(rec, lang="zh")
+    assert zh == (
+        "任务 t1 等待超时：已等待 30 分钟 1 秒，超过设定的超时时间 30 分钟，仍未收到处理结果"
+    )
+    assert "失败" not in zh
+    en = F.failed_inbox_message_for_pause(rec, lang="en")
+    assert en == "task t1 timed out waiting: no result after 30 min 1 s (timeout 30 min)"
+
+
+def test_local_timeout_pause_message_reads_as_running_over_limit() -> None:
+    rec = F.FailureRecord(
+        task_id="t1", agent_id="alice", reason=F.FailureReason.timeout,
+        detail="elapsed=14500s > limit=14400s",
+        elapsed_seconds=14500, limit_seconds=14400,
+    )
+    assert F.failed_inbox_message_for_pause(rec, lang="zh") == (
+        "任务 t1 执行超时：已执行 4 小时 1 分钟 40 秒，超过超时时间 4 小时，仍未完成"
+    )
 
 
 def test_timeout_not_triggered_within_limit() -> None:
@@ -239,4 +285,10 @@ def test_format_pause_failure_detail_follows_ui_language() -> None:
         signal="timeout", detail="elapsed=1", lang="en",
     )
     assert "Survey destinations" in en
-    assert "timeout" in en
+    assert "timed out" in en
+    assert "failed" not in en
+    zh_timeout = F.format_pause_failure_detail(
+        task_id="real-flight-validation", subject="实机试飞验证",
+        signal="timeout", detail="elapsed=1800s", lang="zh",
+    )
+    assert zh_timeout == "任务「实机试飞验证」超时：elapsed=1800s"
