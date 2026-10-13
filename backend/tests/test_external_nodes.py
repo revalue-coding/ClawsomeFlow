@@ -127,6 +127,33 @@ def test_task_timeout_zero_allowed() -> None:
         FlowTask(id="t1", owner_agent_id="a", subject="s", timeout_seconds=-1)
 
 
+def test_human_node_tasks_never_time_out() -> None:
+    """A spec carrying a timeout on a human node's task (task decompose emits
+    1800s) loads with 0; webhook nodes and local agents keep theirs."""
+    spec = FlowSpec.model_validate({
+        "agents": [
+            {"id": "pilot", "kind": "external", "external": {"channel": "human"}},
+            {
+                "id": "hook", "kind": "external",
+                "external": {"channel": "webhook", "endpointUrl": "https://example.com/hook"},
+            },
+            {"id": "dev", "kind": "claude", "repo": "/tmp/r"},
+            {"id": "leader", "kind": "claude", "repo": "/tmp/r", "isLeader": True},
+        ],
+        "tasks": [
+            {"id": "fly", "ownerAgentId": "pilot", "subject": "s", "timeoutSeconds": 1800},
+            {"id": "call", "ownerAgentId": "hook", "subject": "s", "timeoutSeconds": 600},
+            {"id": "code", "ownerAgentId": "dev", "subject": "s", "timeoutSeconds": 1800},
+            {
+                "id": "sum", "ownerAgentId": "leader", "subject": "s",
+                "dependsOn": ["fly", "call", "code"], "isLeaderSummary": True,
+            },
+        ],
+    })
+    timeouts = {t.id: t.timeout_seconds for t in spec.tasks}
+    assert timeouts == {"fly": 0, "call": 600, "code": 1800, "sum": 14400}
+
+
 # ── validators ──────────────────────────────────────────────────────────
 
 

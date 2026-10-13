@@ -5994,7 +5994,7 @@ function rowsToSpec(
         : !!r.submitPr,
     dependsOn: r.dependsOn,
     isLeaderSummary: r.isLeaderSummary,
-    timeoutSeconds: r.timeoutSeconds || DEFAULT_TIMEOUT_SECONDS,
+    timeoutSeconds: r.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
   }));
 
   // Seed variables from the Flow's persisted spec so keys owned by OTHER

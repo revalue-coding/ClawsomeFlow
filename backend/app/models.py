@@ -724,6 +724,22 @@ class FlowSpec(_ApiBase):
     tasks: list[FlowTask]
     variables: dict[str, str] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _human_tasks_never_time_out(self) -> FlowSpec:
+        # A person works on their own schedule, and the editor offers no
+        # timeout field — a value here only ever comes from a generated
+        # default (task decompose emits 1800s), so it is forced to 0.
+        human_ids = {
+            a.id for a in self.agents
+            if a.kind == AgentKind.external
+            and a.external is not None
+            and a.external.channel == ExternalChannel.human
+        }
+        for task in self.tasks:
+            if task.owner_agent_id in human_ids:
+                task.timeout_seconds = 0
+        return self
+
 
 class PendingMerge(_ApiBase):
     """Per-agent merge waiting for user review (manual mode)."""

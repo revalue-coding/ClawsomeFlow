@@ -356,7 +356,7 @@ Produce one JSON object with two arrays:
 - `tasks`: each item has `id`, `ownerAgentId`, `subject` (<=80 chars),
   `description` (1-3 sentences), `outputSummaryRequirement` (REQUIRED — see below),
   `dependsOn` (array of task ids), `isLeaderSummary` (boolean), optional
-  `timeoutSeconds` (default 1800).
+  `timeoutSeconds` (default 1800; a human node's task is always 0 = no timeout).
 
 ### `outputSummaryRequirement` — REQUIRED for EVERY task
 
