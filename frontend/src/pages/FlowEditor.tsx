@@ -1209,8 +1209,13 @@ export function FlowEditor() {
   const [leaderBranchOptions, setLeaderBranchOptions] = useState<string[]>([]);
   const [leaderBranchEditable, setLeaderBranchEditable] = useState(false);
   const [leaderBranchLoading, setLeaderBranchLoading] = useState(false);
-  /** Repo path last committed for validation (blur / pick / select), not every keystroke. */
-  const [leaderRepoToCheck, setLeaderRepoToCheck] = useState("");
+  /** Repo path last committed for validation (blur / pick / select), not every keystroke.
+   *  Seed from the restored repo: this state is not session-backed, so a remount
+   *  would otherwise start at "" and the branch effect below would treat re-entry
+   *  as "no repo" and wipe the saved leader target branch. */
+  const [leaderRepoToCheck, setLeaderRepoToCheck] = useState(() =>
+    isOpenclawKind(leaderKind) ? "" : leaderRepo.trim(),
+  );
   const leaderRepoCheckSeededRef = useRef(false);
   /** Repo + branch before the current edit (focus / select / pick); restored on check failure. */
   const leaderRepoBeforeEditRef = useRef({ repo: "", branch: "" });
@@ -1522,7 +1527,12 @@ export function FlowEditor() {
     if (!repo) {
       setLeaderBranchOptions([]);
       setLeaderBranchEditable(false);
-      setLeaderTargetBranch((prev) => (prev ? "" : prev));
+      // Only drop the branch when the repo field itself is empty. An uncommitted
+      // check (leaderRepoToCheck still "") on remount must not wipe a branch
+      // restored from the saved Flow or session draft — same rule as the task modal.
+      if (!leaderRepo.trim()) {
+        setLeaderTargetBranch((prev) => (prev ? "" : prev));
+      }
       return;
     }
     let cancelled = false;
