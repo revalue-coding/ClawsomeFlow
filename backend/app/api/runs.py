@@ -1928,7 +1928,8 @@ async def get_checkpoint_item_diff(
     if not committed_patch.strip():
         try:
             merged = await cli.run_merged_agent_patch(
-                team=run.team_name, agent=agent_id, repo=repo, include_patch=True,
+                team=run.team_name, agent=agent_id, repo=repo,
+                target_branch=base_branch or None, include_patch=True,
             )
         except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
             logger.warning(
@@ -2141,7 +2142,8 @@ async def get_run_diff(
         repo = _resolve_agent_repo_for_run(run=run, agent_id=agent.id, storage=storage)
         try:
             result = await cli.run_merged_agent_patch(
-                team=run.team_name, agent=agent.id, repo=repo, include_patch=False,
+                team=run.team_name, agent=agent.id, repo=repo,
+                target_branch=agent.target_branch, include_patch=False,
             )
         except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
             logger.warning(
@@ -2209,7 +2211,8 @@ async def get_run_agent_diff(
     cli = get_clawteam_cli()
     try:
         result = await cli.run_merged_agent_patch(
-            team=run.team_name, agent=agent.id, repo=repo, include_patch=True,
+            team=run.team_name, agent=agent.id, repo=repo,
+            target_branch=agent.target_branch, include_patch=True,
         )
     except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
         logger.warning(
@@ -2295,7 +2298,8 @@ async def revert_run_agent_merge(
     cli = get_clawteam_cli()
     try:
         result = await cli.revert_agent_merges(
-            team=run.team_name, agent=agent.id, repo=repo, target_branch=target,
+            team=run.team_name, agent=agent.id, repo=repo,
+            target_branch=agent.target_branch,
         )
     except Exception as exc:  # pragma: no cover - defensive git/subprocess guard
         logger.warning(

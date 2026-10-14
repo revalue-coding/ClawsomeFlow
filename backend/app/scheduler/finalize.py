@@ -1138,6 +1138,7 @@ async def compute_failed_auto_merge_agent_ids(
                 team=run.team_name,
                 agent=agent_id,
                 repo=repo,
+                target_branch=agent.target_branch,
                 include_patch=False,
             )
         except Exception as exc:

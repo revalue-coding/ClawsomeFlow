@@ -35,6 +35,7 @@ from app import logging_setup
 from app.concurrency import LockManager, get_lock_manager
 from app.config import Config, load_config
 from app.integrations.git_repo import delete_clawteam_agent_branch
+from app.models import DEFAULT_TARGET_BRANCH
 from app.repo_merge_lock import async_main_repo_file_lock
 from app.user_context import get_request_user
 
@@ -185,6 +186,66 @@ def _match_agent_merge_shas(log_out: str, branch: str) -> list[str]:
         if sha and token.search(subject):
             matched.append(sha)
     return matched
+
+
+async def _local_branch_exists(repo_root: str, branch: str, env: dict[str, str]) -> bool:
+    if not branch:
+        return False
+    code, _, _ = await _run_in_cwd(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=repo_root, env=env,
+    )
+    return code == 0
+
+
+async def _resolve_merge_target(
+    repo_root: str, requested: str | None, env: dict[str, str],
+) -> str:
+    """Baseline branch an agent's run merges landed on.
+
+    ``requested`` (the agent's ``target_branch``) wins when it exists locally.
+    Without one (OpenClaw: ClawTeam forks from the workspace HEAD) the current
+    HEAD branch is used unless it is an agent worktree branch. Falls back to
+    ``main``/``master``; ``""`` when nothing resolves.
+    """
+    req = (requested or "").strip()
+    if req and await _local_branch_exists(repo_root, req, env):
+        return req
+    if not req:
+        code, out, _ = await _run_in_cwd(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=repo_root, env=env,
+        )
+        head = (out or "").strip() if code == 0 else ""
+        if head and not head.startswith("clawteam/"):
+            return head
+    for candidate in (DEFAULT_TARGET_BRANCH, "master"):
+        if await _local_branch_exists(repo_root, candidate, env):
+            return candidate
+    return ""
+
+
+async def _agent_merge_shas_on_target(
+    repo_root: str, branch: str, target: str, env: dict[str, str],
+) -> list[str]:
+    """Merges of *branch* INTO *target* (chronological), read from *target*'s
+    first-parent chain only.
+
+    Restricting to the first-parent chain excludes merge commits whose subject
+    names *branch* but that never landed on the baseline: a reverse sync
+    (``Merge branch 'main' into clawteam/…`` inside the worktree), a merge into
+    some other branch, or one only reachable from remote/other refs.
+    """
+    if not target:
+        return []
+    code, out, _ = await _run_in_cwd(
+        [
+            "git", "log", "--merges", "--first-parent", "--format=%H%x1f%s",
+            f"refs/heads/{target}", "--",
+        ],
+        cwd=repo_root, env=env,
+    )
+    return _match_agent_merge_shas(out, branch) if code == 0 else []
 
 
 def _expand_repo(path: str) -> str:
@@ -880,10 +941,11 @@ class ClawTeamCli:
         team: str,
         agent: str,
         repo: str | None,
+        target_branch: str | None = None,
         include_patch: bool = True,
         max_bytes: int = 400_000,
     ) -> dict[str, Any] | None:
-        """Reconstruct what *this run's* ``agent`` branch actually merged into a
+        """Reconstruct what *this run's* ``agent`` branch actually merged into its
         baseline branch, read from the baseline repo's **history** (not a worktree).
 
         Powers the post-run "Run diff" module: unlike :meth:`workspace_agent_patch`
@@ -897,17 +959,21 @@ class ClawTeamCli:
         per run). Every csflow merge — the scheduler's :meth:`workspace_merge` and
         the agent self-merge tool (``csflow-locked-merge.py``) — is a
         ``git merge --no-ff <branch> -m "…<branch>…"``, so the branch name is
-        embedded in the merge-commit subject. We select only merge commits whose
-        subject references *this exact* branch (token-boundary match, so
-        ``…/worker`` never matches ``…/worker2``); other runs' merges (different
-        team) and unrelated later commits never match. For each matched merge ``M``
+        embedded in the merge-commit subject. We select only merge commits on the
+        baseline's **first-parent chain** (``target_branch``, resolved by
+        :func:`_resolve_merge_target`) whose subject references *this exact*
+        branch (token-boundary match, so ``…/worker`` never matches
+        ``…/worker2``); other runs' merges (different team), unrelated later
+        commits, and same-named merges that never landed on the baseline (e.g. a
+        reverse ``Merge branch 'main' into <branch>`` sync inside the worktree)
+        never match. For each matched merge ``M``
         the introduced content is ``git diff M^1 M`` (first parent = the baseline
         tip immediately before this merge, already including whatever else had
         landed), which isolates only this agent's contribution regardless of
         concurrent/subsequent baseline activity.
 
         **No checkout, no lock.** Every git call here is read-only and addresses
-        commits by SHA (``log --all --merges``, ``diff <sha>^1 <sha>``,
+        commits by SHA (``log --merges --first-parent``, ``diff <sha>^1 <sha>``,
         ``rev-list --count``) — none touch HEAD or the working tree, so the branch
         is never switched and the repo merge lock is unnecessary (same read-only
         posture as :meth:`workspace_agent_patch`).
@@ -927,14 +993,8 @@ class ClawTeamCli:
         branch = f"clawteam/{team}/{agent}"
         env = self._env()
 
-        # Enumerate merge commits across all refs, then keep only those whose
-        # subject references this run's exact branch (see _match_agent_merge_shas).
-        log_code, log_out, _ = await _run_in_cwd(
-            ["git", "log", "--all", "--merges", "--format=%H%x1f%s"],
-            cwd=repo_root,
-            env=env,
-        )
-        matched = _match_agent_merge_shas(log_out, branch) if log_code == 0 else []
+        target = await _resolve_merge_target(repo_root, target_branch, env)
+        matched = await _agent_merge_shas_on_target(repo_root, branch, target, env)
 
         commit_count = 0
         files: set[str] = set()
@@ -1005,7 +1065,7 @@ class ClawTeamCli:
         team: str,
         agent: str,
         repo: str | None,
-        target_branch: str = "main",
+        target_branch: str | None = None,
     ) -> dict[str, Any]:
         """Revert (undo) this run's ``agent`` merges on ``target_branch`` via
         ``git revert -m 1`` — the "撤销合入" action, available any time after the
@@ -1037,38 +1097,26 @@ class ClawTeamCli:
         if not repo_root or not (Path(repo_root) / ".git").exists():
             result["message"] = f"repo not found or not a git repo: {repo_root!r}"
             return result
-        target = (target_branch or "").strip() or "main"
-        result["target_branch"] = target
         branch = f"clawteam/{team}/{agent}"
         env = self._git_subprocess_env()
+        target = await _resolve_merge_target(repo_root, target_branch, env)
+        if not target:
+            result["message"] = (
+                f"baseline branch {target_branch!r} not found in {repo_root!r}"
+            )
+            return result
+        result["target_branch"] = target
 
         async with self._locks.lock(
             f"clawteam_main_repo:{repo_root}",
             timeout=CLAWTEAM_MAIN_REPO_LOCK_TIMEOUT_SECONDS,
         ):
             async with async_main_repo_file_lock(repo_root):
-                # Same merge enumeration as :meth:`run_merged_agent_patch` (--all),
-                # then keep only merges already on ``target``'s history so we
-                # revert exactly what Run-diff attributes to this run/agent.
-                log_code, log_out, log_err = await _run_in_cwd(
-                    ["git", "log", "--all", "--merges", "--format=%H%x1f%s"],
-                    cwd=repo_root, env=env,
+                # Same enumeration as :meth:`run_merged_agent_patch`, so we revert
+                # exactly what Run-diff attributes to this run/agent.
+                matched = await _agent_merge_shas_on_target(
+                    repo_root, branch, target, env,
                 )
-                if log_code != 0:
-                    result["message"] = (
-                        f"cannot read merge history: {(log_err or '').strip()[:300]}"
-                    )
-                    return result
-                matched = _match_agent_merge_shas(log_out, branch)
-                on_target: list[str] = []
-                for sha in matched:
-                    anc_code, _, _ = await _run_in_cwd(
-                        ["git", "merge-base", "--is-ancestor", sha, target],
-                        cwd=repo_root, env=env,
-                    )
-                    if anc_code == 0:
-                        on_target.append(sha)
-                matched = on_target
                 # Keep only merges that brought real file changes (skip empty).
                 effective: list[str] = []
                 for sha in matched:
