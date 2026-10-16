@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -326,6 +327,31 @@ async def tmux_capture_pane(target: str, *, history_lines: int = 60) -> str:
     return out.decode("utf-8", errors="replace")
 
 
+async def tmux_idle_seconds(target: str) -> int | None:
+    """Seconds since *target*'s window last produced output, or None if unknown.
+
+    ``#{window_activity}`` is updated on every output regardless of the
+    ``monitor-activity`` option, so a TUI that animates while working stays
+    near 0 while one parked on a static menu keeps growing.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "display-message", "-p", "-t", target, "#{window_activity}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError:
+        return None
+    out, _err = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    try:
+        last = int(out.decode("utf-8", errors="replace").strip())
+    except ValueError:
+        return None
+    return max(int(time.time()) - last, 0)
+
+
 async def tmux_send_keys(
     target: str,
     keys: str,
@@ -550,6 +576,7 @@ __all__ = [
     "TuiReadyResult",
     "resolve_trust_platform",
     "tmux_capture_pane",
+    "tmux_idle_seconds",
     "tmux_send_keys",
     "wait_shell_ready",
     "wait_tui_ready",

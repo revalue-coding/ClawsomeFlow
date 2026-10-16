@@ -23,6 +23,8 @@ import {
   RunDiffAgent,
   RunPrGroup,
   RunTaskTerminal,
+  RunTaskTerminalPane,
+  RunTerminalKey,
   api,
 } from "@/lib/api";
 import {
@@ -677,17 +679,7 @@ export function RunDetail() {
         owners.map(async (owner) => {
           try {
             const pane = await api.getRunTerminalPane(id, owner, 120);
-            setTerminalItems((prev) =>
-              prev.map((item) =>
-                item.ownerAgentId === owner
-                  ? {
-                      ...item,
-                      paneText: pane.paneText,
-                      available: pane.available,
-                    }
-                  : item,
-              ),
-            );
+            setTerminalItems((prev) => mergeTerminalPane(prev, pane));
           } catch {
             /* per-owner pane fetch failure leaves pane empty */
           } finally {
@@ -704,6 +696,12 @@ export function RunDetail() {
         setTerminalPanesLoading(false);
       }
     }
+  }, [id]);
+
+  const sendTerminalKey = useCallback(async (owner: string, key: RunTerminalKey) => {
+    if (!id) return;
+    const pane = await api.sendRunTerminalKey(id, owner, key);
+    setTerminalItems((prev) => mergeTerminalPane(prev, pane));
   }, [id]);
 
   useEffect(() => {
@@ -1605,6 +1603,7 @@ export function RunDetail() {
             error={terminalError}
             selectedTaskId={selectedTerminalTaskId}
             onSelectTaskId={setSelectedTerminalTaskId}
+            onSendKey={sendTerminalKey}
           />
         )}
       </Card>
@@ -1771,6 +1770,147 @@ function TerminalPaneOutput({ text }: { text: string }) {
   );
 }
 
+/** An executing task whose pane printed nothing for this long is flagged as
+ *  possibly parked on an option menu (working TUIs animate, so idle stays ~0). */
+const TERMINAL_STALL_SECONDS = 180;
+
+function isTerminalStalled(item: RunTaskTerminal | undefined): boolean {
+  return Boolean(
+    item?.executing
+      && item.idleSeconds != null
+      && item.idleSeconds >= TERMINAL_STALL_SECONDS,
+  );
+}
+
+/** Fold a fresh owner pane into every task row that shares that owner.
+ *  ``executing`` stays per task, so it is left to the list refresh. */
+function mergeTerminalPane(
+  items: RunTaskTerminal[],
+  pane: RunTaskTerminalPane,
+): RunTaskTerminal[] {
+  return items.map((item) =>
+    item.ownerAgentId === pane.ownerAgentId
+      ? {
+          ...item,
+          paneText: pane.paneText,
+          available: pane.available,
+          idleSeconds: pane.idleSeconds,
+          inputAllowed: pane.inputAllowed,
+        }
+      : item,
+  );
+}
+
+function TerminalKeyBar({
+  stalled,
+  onSend,
+}: {
+  stalled: boolean;
+  onSend: (key: RunTerminalKey) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const [sending, setSending] = useState<RunTerminalKey | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const open = stalled || expanded;
+
+  async function press(key: RunTerminalKey) {
+    if (sending) return;
+    setSending(key);
+    setError(null);
+    try {
+      await onSend(key);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setSending(null);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="flex shrink-0 justify-end border-t border-[#2a3558] px-3 py-1.5">
+        <button
+          type="button"
+          className="rounded px-2 py-0.5 text-[11px] text-[#7f93c4] hover:bg-[#1a2a52] hover:text-[#c9d6ff]"
+          onClick={() => setExpanded(true)}
+        >
+          {t("runDetail.terminal.keysOpen")}
+        </button>
+      </div>
+    );
+  }
+
+  const keyBtn =
+    "inline-flex h-7 min-w-[2rem] items-center justify-center rounded-md border px-2 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50";
+  const arrowBtn = `${keyBtn} border-[#3a4a78] bg-[#16234a] text-[#dce8ff] hover:border-[#5b74b8] hover:bg-[#1d2f60]`;
+  const confirmBtn = stalled
+    ? `${keyBtn} gap-1 border-amber-400/70 bg-amber-400/20 font-medium text-amber-50 hover:bg-amber-400/30`
+    : `${keyBtn} gap-1 border-[#4f79de] bg-[#203a7a] font-medium text-[#e8eeff] hover:bg-[#28478f]`;
+
+  return (
+    <div
+      className={
+        stalled
+          ? "shrink-0 border-t border-amber-400/40 bg-amber-400/[0.06] px-3 py-2"
+          : "shrink-0 border-t border-[#2a3558] px-3 py-2"
+      }
+    >
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 text-[11px] leading-snug text-[#9ab0df]">
+          {t("runDetail.terminal.keysHelp")}
+        </span>
+        <button
+          type="button"
+          className={arrowBtn}
+          disabled={sending !== null}
+          title={t("runDetail.terminal.keyUp")}
+          aria-label={t("runDetail.terminal.keyUp")}
+          onClick={() => void press("up")}
+        >
+          ↑
+        </button>
+        <button
+          type="button"
+          className={arrowBtn}
+          disabled={sending !== null}
+          title={t("runDetail.terminal.keyDown")}
+          aria-label={t("runDetail.terminal.keyDown")}
+          onClick={() => void press("down")}
+        >
+          ↓
+        </button>
+        <button
+          type="button"
+          className={confirmBtn}
+          disabled={sending !== null}
+          title={t("runDetail.terminal.keyEnterHint")}
+          onClick={() => void press("enter")}
+        >
+          <span aria-hidden>⏎</span>
+          {t("runDetail.terminal.keyEnter")}
+        </button>
+        {!stalled ? (
+          <button
+            type="button"
+            className="rounded px-1.5 text-[11px] text-[#7f93c4] hover:text-[#c9d6ff]"
+            title={t("runDetail.terminal.keysClose")}
+            aria-label={t("runDetail.terminal.keysClose")}
+            onClick={() => setExpanded(false)}
+          >
+            ✕
+          </button>
+        ) : null}
+      </div>
+      {error ? (
+        <div className="mt-1 text-[11px] text-rose-300">
+          {t("runDetail.terminal.keySendFailed", { error })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function RunTerminalBoard({
   listTasks,
   items,
@@ -1779,6 +1919,7 @@ function RunTerminalBoard({
   error,
   selectedTaskId,
   onSelectTaskId,
+  onSendKey,
 }: {
   listTasks: TerminalListTask[];
   items: RunTaskTerminal[];
@@ -1787,6 +1928,7 @@ function RunTerminalBoard({
   error: string | null;
   selectedTaskId: string | null;
   onSelectTaskId: (taskId: string) => void;
+  onSendKey: (ownerAgentId: string, key: RunTerminalKey) => Promise<void>;
 }) {
   const { t } = useTranslation();
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -1837,6 +1979,7 @@ function RunTerminalBoard({
               {orderedTasks.map((task) => {
                 const isSelected = selected?.taskId === task.taskId;
                 const ownerLoaded = loadedOwnerSet.has(task.ownerAgentId);
+                const stalled = isTerminalStalled(itemByTaskId.get(task.taskId));
                 return (
                   <button
                     key={`terminal-task-${task.taskId}`}
@@ -1845,21 +1988,33 @@ function RunTerminalBoard({
                     className={
                       !ownerLoaded
                         ? "w-full cursor-not-allowed text-left rounded-md border border-[#2a3558] bg-[#111c39]/70 px-3 py-2 opacity-70"
-                        : isSelected
-                          ? "w-full text-left rounded-md border border-[#4f79de] bg-[#15264f] px-3 py-2"
-                          : "w-full text-left rounded-md border border-[#2a3558] bg-[#111c39] px-3 py-2"
+                        : stalled
+                          ? `w-full text-left rounded-md border border-amber-400/70 px-3 py-2 ${isSelected ? "bg-amber-400/15" : "bg-amber-400/[0.07]"}`
+                          : isSelected
+                            ? "w-full text-left rounded-md border border-[#4f79de] bg-[#15264f] px-3 py-2"
+                            : "w-full text-left rounded-md border border-[#2a3558] bg-[#111c39] px-3 py-2"
                     }
                     onClick={() => {
                       if (!ownerLoaded) return;
                       onSelectTaskId(task.taskId);
                     }}
                   >
-                    <div className="truncate text-sm text-[#e8eeff]">
-                      {task.subject || "—"}
+                    <div className="flex items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate text-sm text-[#e8eeff]">
+                        {task.subject || "—"}
+                      </span>
+                      {stalled ? (
+                        <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-400" />
+                      ) : null}
                     </div>
                     <div className="mt-1 text-[11px] text-[#9ab0df] font-mono">
                       {task.taskId} · {task.ownerAgentId}
                     </div>
+                    {stalled ? (
+                      <div className="mt-1 text-[11px] text-amber-200">
+                        {t("runDetail.terminal.stallBadge")}
+                      </div>
+                    ) : null}
                   </button>
                 );
               })}
@@ -1883,6 +2038,12 @@ function RunTerminalBoard({
                   : item?.available
                     ? (item.paneText || t("runDetail.terminal.unavailable"))
                     : t("runDetail.terminal.unavailable");
+                const stalled = isTerminalStalled(item);
+                const cardBorder = stalled
+                  ? "border-amber-400/80 ring-1 ring-amber-400/40"
+                  : isSelected
+                    ? "border-[#4f79de] ring-1 ring-[#4f79de]/40"
+                    : "border-[#2a3558]";
                 return (
                   <div
                     key={`terminal-card-${task.taskId}`}
@@ -1890,11 +2051,7 @@ function RunTerminalBoard({
                       if (node) cardRefs.current.set(task.taskId, node);
                       else cardRefs.current.delete(task.taskId);
                     }}
-                    className={
-                      isSelected
-                        ? "flex min-h-0 flex-col overflow-hidden rounded-md border border-[#4f79de] bg-[#111c39] ring-1 ring-[#4f79de]/40"
-                        : "flex min-h-0 flex-col overflow-hidden rounded-md border border-[#2a3558] bg-[#111c39]"
-                    }
+                    className={`flex min-h-0 flex-col overflow-hidden rounded-md border bg-[#111c39] ${cardBorder}`}
                   >
                     <div className="shrink-0 border-b border-[#2a3558] px-3 py-2">
                       <div className="truncate text-sm text-[#e8eeff]">
@@ -1904,6 +2061,16 @@ function RunTerminalBoard({
                         {item?.workDir || "—"}
                       </div>
                     </div>
+                    {stalled && item ? (
+                      <div className="flex shrink-0 items-start gap-2 border-b border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-100">
+                        <span className="mt-[5px] h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-400" />
+                        <span>
+                          {t("runDetail.terminal.stallHint", {
+                            minutes: Math.floor((item.idleSeconds ?? 0) / 60),
+                          })}
+                        </span>
+                      </div>
+                    ) : null}
                     {paneLoading ? (
                       <div className="flex h-44 items-center justify-center px-3 py-3 text-xs text-[#9ab0df]">
                         {paneText}
@@ -1911,6 +2078,12 @@ function RunTerminalBoard({
                     ) : (
                       <TerminalPaneOutput text={paneText} />
                     )}
+                    {!paneLoading && item?.inputAllowed ? (
+                      <TerminalKeyBar
+                        stalled={stalled}
+                        onSend={(key) => onSendKey(task.ownerAgentId, key)}
+                      />
+                    ) : null}
                   </div>
                 );
               })}

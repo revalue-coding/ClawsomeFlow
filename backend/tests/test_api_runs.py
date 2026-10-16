@@ -972,6 +972,211 @@ def test_get_run_terminal_pane_404_for_unknown_owner(app_client: TestClient) -> 
     assert r.status_code == 404
 
 
+class _LiveScheduler:
+    """Stands in for get_scheduler(): one live controller with *executing* tasks."""
+
+    def __init__(self, executing: set[str] | None) -> None:
+        self._executing = executing
+
+    def get_controller(self, run_id: str):
+        if self._executing is None:
+            return None
+        executing = self._executing
+
+        class _Ctrl:
+            def executing_task_ids(self) -> set[str]:
+                return set(executing)
+
+        return _Ctrl()
+
+
+def _patch_terminal_tmux(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    executing: set[str] | None,
+    idle: int | None = 420,
+) -> list[tuple[str, str]]:
+    sent: list[tuple[str, str]] = []
+
+    async def fake_capture(target: str, *, history_lines: int = 60) -> str:
+        if target.endswith(":leader"):
+            return ""
+        return f"menu after {len(sent)} keys"
+
+    async def fake_idle(target: str) -> int | None:
+        return idle
+
+    async def fake_send(target: str, keys: str, *, literal: bool = False) -> None:
+        assert literal is False
+        sent.append((target, keys))
+
+    monkeypatch.setattr("app.api.runs.tmux_capture_pane", fake_capture)
+    monkeypatch.setattr("app.api.runs.tmux_idle_seconds", fake_idle)
+    monkeypatch.setattr("app.api.runs.tmux_send_keys", fake_send)
+    monkeypatch.setattr("app.api.runs.get_scheduler", lambda: _LiveScheduler(executing))
+    monkeypatch.setattr("app.api.runs._TERMINAL_KEY_SETTLE_SEC", 0)
+    return sent
+
+
+def test_list_run_terminals_reports_idle_and_executing_for_stall_hint(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+    _patch_terminal_tmux(monkeypatch, executing={"t1"}, idle=420)
+
+    r = app_client.get(f"/api/runs/{run.id}/terminals")
+    assert r.status_code == 200
+    by_task = {item["taskId"]: item for item in r.json()["items"]}
+    assert by_task["t1"]["idleSeconds"] == 420
+    assert by_task["t1"]["executing"] is True
+    assert by_task["t1"]["inputAllowed"] is True
+    # Empty pane: nothing to measure, nothing to type into.
+    assert by_task["ts"]["idleSeconds"] is None
+    assert by_task["ts"]["executing"] is False
+    assert by_task["ts"]["inputAllowed"] is False
+
+
+def test_terminal_input_closed_without_live_controller(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+    sent = _patch_terminal_tmux(monkeypatch, executing=None)
+
+    pane = app_client.get(f"/api/runs/{run.id}/terminals/panes/alice").json()
+    assert pane["inputAllowed"] is False
+    assert pane["executing"] is False
+
+    r = app_client.post(
+        f"/api/runs/{run.id}/terminals/panes/alice/keys", json={"key": "down"},
+    )
+    assert r.status_code == 409
+    assert r.json()["error"] == "TERMINAL_INPUT_NOT_ALLOWED"
+    assert sent == []
+
+
+def test_terminal_input_closed_when_owner_is_not_executing(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle composer: Up recalls the last dispatch prompt, Enter would resend it."""
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+    sent = _patch_terminal_tmux(monkeypatch, executing=set())
+
+    item = next(
+        i for i in app_client.get(f"/api/runs/{run.id}/terminals").json()["items"]
+        if i["taskId"] == "t1"
+    )
+    assert item["available"] is True
+    assert item["executing"] is False
+    assert item["inputAllowed"] is False
+    r = app_client.post(
+        f"/api/runs/{run.id}/terminals/panes/alice/keys", json={"key": "up"},
+    )
+    assert r.status_code == 409
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [RunStatus.paused, RunStatus.awaiting_user_review, RunStatus.completed],
+)
+def test_terminal_input_rejected_outside_live_run_states(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    status: RunStatus,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx", status=status)
+    sent = _patch_terminal_tmux(monkeypatch, executing={"t1"})
+
+    r = app_client.post(
+        f"/api/runs/{run.id}/terminals/panes/alice/keys", json={"key": "enter"},
+    )
+    assert r.status_code == 409
+    assert sent == []
+
+
+def test_send_terminal_key_maps_to_tmux_and_returns_fresh_pane(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+    sent = _patch_terminal_tmux(monkeypatch, executing={"t1"})
+
+    for key in ("up", "down", "enter"):
+        r = app_client.post(
+            f"/api/runs/{run.id}/terminals/panes/alice/keys", json={"key": key},
+        )
+        assert r.status_code == 200, r.text
+    assert sent == [
+        ("clawteam-csflow-termx:alice", "Up"),
+        ("clawteam-csflow-termx:alice", "Down"),
+        ("clawteam-csflow-termx:alice", "Enter"),
+    ]
+    body = r.json()
+    assert body["ownerAgentId"] == "alice"
+    assert body["paneText"] == "menu after 3 keys"
+    assert body["inputAllowed"] is True
+
+    events = get_storage().event_list(run_id=run.id)
+    keys = [e.payload for e in events if e.type == "terminal_key_sent"]
+    assert keys == [{"key": "up"}, {"key": "down"}, {"key": "enter"}]
+    assert {e.agent_id for e in events if e.type == "terminal_key_sent"} == {"alice"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"key": "C-c"}, {"key": "esc"}, {"key": "rm -rf /"}, {"text": "hello"}, {}],
+)
+def test_send_terminal_key_rejects_anything_but_up_down_enter(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict,
+) -> None:
+    flow = _make_flow()
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+    sent = _patch_terminal_tmux(monkeypatch, executing={"t1"})
+
+    r = app_client.post(f"/api/runs/{run.id}/terminals/panes/alice/keys", json=payload)
+    assert r.status_code == 422
+    assert sent == []
+
+
+def test_send_terminal_key_404_for_unknown_owner_and_403_for_other_user(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = _make_flow(owner="alice")
+    run = _make_run(flow_id=flow.id, team_name="csflow-termx")
+    other = _make_run(flow_id=flow.id, user="bob")
+    sent = _patch_terminal_tmux(monkeypatch, executing={"t1"})
+
+    r = app_client.post(f"/api/runs/{run.id}/terminals/panes/nobody/keys", json={"key": "up"})
+    assert r.status_code == 404
+    r = app_client.post(f"/api/runs/{other.id}/terminals/panes/alice/keys", json={"key": "up"})
+    assert r.status_code == 403
+    assert sent == []
+
+
+def test_terminal_pane_fields_never_allow_input_for_external_nodes() -> None:
+    from app.api.runs import _PaneSnapshot, _terminal_pane_fields, _TerminalLiveState
+
+    fields = _terminal_pane_fields(
+        task_ids={"t-human"},
+        owner_kind=AgentKind.external.value,
+        snapshot=_PaneSnapshot(text="something", idle_seconds=999),
+        live_state=_TerminalLiveState(live=True, executing_task_ids=frozenset({"t-human"})),
+    )
+    assert fields["executing"] is True
+    assert fields["input_allowed"] is False
+
+
 def test_get_run_404_and_403(app_client: TestClient) -> None:
     flow = _make_flow(owner="alice")
     other = _make_run(flow_id=flow.id, user="bob")

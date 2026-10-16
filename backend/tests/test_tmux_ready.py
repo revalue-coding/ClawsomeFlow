@@ -357,6 +357,38 @@ async def test_wait_tui_ready_dismisses_claude_skip_permissions_prompt() -> None
     ]
 
 
+@pytest.mark.asyncio
+async def test_tmux_idle_seconds_reads_window_activity(monkeypatch) -> None:
+    import time as _time
+
+    class _Proc:
+        def __init__(self, out: bytes, rc: int) -> None:
+            self._out, self.returncode = out, rc
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return self._out, b""
+
+    replies = iter([
+        _Proc(f"{int(_time.time()) - 300}\n".encode(), 0),
+        _Proc(b"", 1),  # no such window
+        _Proc(b"garbage", 0),
+    ])
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_exec(*argv, **_kw):
+        calls.append(argv)
+        return next(replies)
+
+    monkeypatch.setattr(tmux_ready.asyncio, "create_subprocess_exec", fake_exec)
+    idle = await tmux_ready.tmux_idle_seconds("team:alice")
+    assert idle is not None and 299 <= idle <= 302
+    assert calls[0] == (
+        "tmux", "display-message", "-p", "-t", "team:alice", "#{window_activity}",
+    )
+    assert await tmux_ready.tmux_idle_seconds("team:gone") is None
+    assert await tmux_ready.tmux_idle_seconds("team:odd") is None
+
+
 _CLAUDE_TRUST_HEAD = (
     " Accessing workspace:\n"
     " /home/u/.clawteam/workspaces/t/alice\n"
