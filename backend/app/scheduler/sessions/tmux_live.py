@@ -4,8 +4,10 @@ Spawn:
     clawteam spawn tmux <cli> --workspace --repo <Flow.repo> --no-keepalive
 
 Dispatch (live):
-    clawteam runtime inject <team> <agent> --summary "<message>"
-    (uses tmux paste-buffer + Enter inside ClawTeam)
+    tmux load-buffer + ``paste-buffer -p`` (bracketed paste) + Enter — see
+    :mod:`app.scheduler.sessions.tmux_paste`. Not ``clawteam runtime inject``:
+    its unbracketed paste turns every newline into an Enter, so TUIs submit
+    the dispatch line by line and the trailing ``## Task`` block gets lost.
 
 Resume re-spawn (after crash):
     clawteam spawn tmux <cli + native --continue/--resume flags>
@@ -25,8 +27,10 @@ import asyncio
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 
+from app import logging_setup
 from app.config import load_config
 from app.integrations.claude_trust import ensure_claude_folder_trusted
 from app.integrations.clawteam_cli import (
@@ -39,6 +43,7 @@ from app.integrations.gemini_policy import ensure_gemini_policy, gemini_policy_a
 from app.logging_setup import get_logger
 from app.models import AgentKind, FlowAgent
 from app.scheduler.sessions.base import WorkerSession
+from app.scheduler.sessions.tmux_paste import tmux_paste_and_submit
 from app.scheduler.sessions.tmux_ready import (
     resolve_trust_platform,
     tmux_capture_pane,
@@ -64,8 +69,8 @@ _HERMES_READY_TIMEOUT_SEC = 90.0
 #       availability tip). Nobody answers the menu, the composer never appears,
 #       and `wait_tui_ready` times out → session_prewarm_failed.
 #
-#  3.   disable_paste_burst=true. ClawTeam dispatches by pasting the prompt into
-#       the pane (`tmux paste-buffer`) then sending a bare Enter (`send-keys
+#  3.   disable_paste_burst=true. Dispatch pastes the prompt into the pane
+#       (bracketed `tmux paste-buffer -p`) then sends a bare Enter (`send-keys
 #       Enter`). With codex's default paste-burst heuristic ON, that trailing
 #       `\r` is treated as part of the just-pasted burst (a literal newline) and
 #       NOT as submit — so the prompt sits unsent in the composer and re-dispatch
@@ -224,7 +229,7 @@ class UnsupportedAgentKind(Exception):
 
 
 class TmuxLiveSession(WorkerSession):
-    """Persistent tmux + native CLI session, dispatched via runtime inject."""
+    """Persistent tmux + native CLI session, dispatched via bracketed tmux paste."""
 
     def __init__(
         self,
@@ -409,12 +414,24 @@ class TmuxLiveSession(WorkerSession):
             )
 
     async def _do_dispatch(self, *, message: str, task_id: str) -> None:
-        await self._cli.runtime_inject(
-            team=self.team_name,
-            agent=self.agent.id,
-            summary=message,
-            source="csflow-scheduler",
-            channel="task-dispatch",
+        target = self.tmux_target
+        try:
+            await tmux_paste_and_submit(
+                target,
+                message,
+                buffer_name=f"csflow-dispatch-{self.agent.id}-{secrets.token_hex(4)}",
+            )
+        except CliInvocationError as exc:
+            logging_setup.runtime_inject(
+                target=target,
+                summary_len=len(message),
+                success=False,
+                exit_code=exc.exit_code,
+                error_msg=exc.stderr.strip(),
+            )
+            raise
+        logging_setup.runtime_inject(
+            target=target, summary_len=len(message), success=True, exit_code=0,
         )
 
     async def _do_resume(self) -> None:

@@ -7,7 +7,7 @@ Why this exists:
   (claude shows ``╭❯>``, modern codex shows a ``>_ OpenAI Codex`` banner and a
   ``›`` composer, Cursor Agent often shows ``agent>`` / ``>``, bash shows
   ``$``).
-* If we ``runtime inject`` (paste-buffer + Enter) before the prompt is up,
+* If we paste the dispatch (paste-buffer + Enter) before the prompt is up,
   the dispatch text is dropped on the floor — the CLI is still in startup.
 * For OpenClaw we ``tmux send-keys`` into a bare bash; we still need to
   wait for the bash ``$`` prompt before sending the next command.
