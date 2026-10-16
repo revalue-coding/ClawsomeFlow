@@ -67,9 +67,10 @@ def test_kind_to_cmd_spawn_and_resume() -> None:
         ["gemini", "--approval-mode", "yolo"],
         ["gemini", "--approval-mode", "yolo", "--resume", "latest"],
     )
+    qwen_no_ask = ["--exclude-tools", "ask_user_question,enter_plan_mode,exit_plan_mode"]
     assert _KIND_TO_CMD[AgentKind.qwen] == (
-        ["qwen", "--approval-mode", "yolo", "--chat-recording"],
-        ["qwen", "--approval-mode", "yolo", "--chat-recording", "--continue"],
+        ["qwen", "--approval-mode", "yolo", *qwen_no_ask, "--chat-recording"],
+        ["qwen", "--approval-mode", "yolo", *qwen_no_ask, "--chat-recording", "--continue"],
     )
     assert _KIND_TO_CMD[AgentKind.kimi] == (
         ["kimi", "--yolo"],
@@ -88,14 +89,21 @@ def test_kind_to_cmd_spawn_and_resume() -> None:
         ["nanobot", "agent"],
         ["nanobot", "agent"],
     )
-    # qoder/codebuddy are Claude-style (note qoder's underscore mode value).
+    # qoder/codebuddy are Claude-style (note qoder's underscore mode value and
+    # its one-value-per-flag --disallowed-tools).
+    qoder_no_ask = [
+        "--disallowed-tools", "AskUserQuestion",
+        "--disallowed-tools", "EnterPlanMode",
+        "--disallowed-tools", "ExitPlanMode",
+    ]
     assert _KIND_TO_CMD[AgentKind.qoder] == (
-        ["qodercli", "--permission-mode", "bypass_permissions"],
-        ["qodercli", "--permission-mode", "bypass_permissions", "--continue"],
+        ["qodercli", "--permission-mode", "bypass_permissions", *qoder_no_ask],
+        ["qodercli", "--permission-mode", "bypass_permissions", *qoder_no_ask, "--continue"],
     )
+    cb_no_ask = ["--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode"]
     assert _KIND_TO_CMD[AgentKind.codebuddy] == (
-        ["codebuddy", "--permission-mode", "bypassPermissions"],
-        ["codebuddy", "--permission-mode", "bypassPermissions", "--continue"],
+        ["codebuddy", "--permission-mode", "bypassPermissions", *cb_no_ask],
+        ["codebuddy", "--permission-mode", "bypassPermissions", *cb_no_ask, "--continue"],
     )
 
 
@@ -152,14 +160,85 @@ def test_temporary_hermes_resume_drops_continue_to_avoid_cross_session() -> None
     assert s._resume_cmd == ["hermes", "--yolo"]
 
 
-@pytest.mark.parametrize("kind", [k for k in _NEW_KINDS if k != AgentKind.nanobot])
-def test_non_nanobot_session_uses_template_verbatim(kind: AgentKind) -> None:
+@pytest.mark.parametrize(
+    "kind", [k for k in _NEW_KINDS if k not in (AgentKind.nanobot, AgentKind.gemini)]
+)
+def test_session_uses_template_verbatim(kind: AgentKind) -> None:
     agent = FlowAgent(
         id="w1", kind=kind, repo="/tmp", target_branch="main", is_temporary=True
     )
     s = TmuxLiveSession(agent=agent, team_name="csflow-x", run_id="run-1", cli=object())
     assert s._spawn_cmd == list(_KIND_TO_CMD[kind][0])
     assert s._resume_cmd == list(_KIND_TO_CMD[kind][1])
+
+
+def _gemini_session() -> TmuxLiveSession:
+    agent = FlowAgent(
+        id="g1", kind=AgentKind.gemini, repo="/tmp", target_branch="main",
+        is_temporary=True,
+    )
+    return TmuxLiveSession(agent=agent, team_name="csflow-x", run_id="run-1", cli=object())
+
+
+def test_gemini_session_appends_ask_user_deny_policy(tmp_path, monkeypatch) -> None:
+    """``ask_user`` stays interactive even in YOLO; a --policy deny removes it."""
+    from app.integrations.gemini_policy import gemini_policy_path
+
+    monkeypatch.setenv("HOME", str(tmp_path))  # no ~/.gemini/policies
+    s = _gemini_session()
+    policy = ["--policy", str(gemini_policy_path())]
+    assert s._spawn_cmd == [*_KIND_TO_CMD[AgentKind.gemini][0], *policy]
+    assert s._resume_cmd == [*_KIND_TO_CMD[AgentKind.gemini][1], *policy]
+    assert _KIND_TO_CMD[AgentKind.gemini][0] == ["gemini", "--approval-mode", "yolo"]
+
+
+def test_gemini_session_keeps_operator_user_policies(tmp_path, monkeypatch) -> None:
+    """--policy replaces ~/.gemini/policies, so an existing dir is re-passed."""
+    from app.integrations.gemini_policy import gemini_policy_path
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    user_dir = tmp_path / ".gemini" / "policies"
+    user_dir.mkdir(parents=True)
+    s = _gemini_session()
+    assert s._spawn_cmd[-4:] == [
+        "--policy", str(gemini_policy_path()), "--policy", str(user_dir),
+    ]
+
+
+async def test_gemini_policy_file_written_and_refreshed() -> None:
+    from app.integrations.gemini_policy import ensure_gemini_policy, gemini_policy_path
+
+    path = gemini_policy_path()
+    assert not path.exists()
+    await _gemini_session()._ensure_spawn_artifacts("/tmp/wt")
+    content = path.read_text()
+    assert 'toolName = "ask_user"' in content
+    assert 'decision = "deny"' in content
+
+    path.write_text("stale")
+    ensure_gemini_policy()
+    assert path.read_text() == content
+
+
+@pytest.mark.asyncio
+async def test_gemini_spawn_writes_policy_before_spawn(tmp_path) -> None:
+    from app.integrations.gemini_policy import gemini_policy_path
+
+    seen: list[bool] = []
+
+    class _Cli:
+        async def spawn_fresh(self, **_kw) -> None:
+            seen.append(gemini_policy_path().is_file())
+            raise RuntimeError("stop after spawn")
+
+    agent = FlowAgent(
+        id="g1", kind=AgentKind.gemini, repo=str(tmp_path), target_branch="main",
+        is_temporary=True,
+    )
+    s = TmuxLiveSession(agent=agent, team_name="csflow-x", run_id="run-1", cli=_Cli())
+    with pytest.raises(RuntimeError, match="stop after spawn"):
+        await s._do_spawn()
+    assert seen == [True]
 
 
 def test_existing_platforms_still_use_clawteam_injection() -> None:

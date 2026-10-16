@@ -25,6 +25,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 from app import config as cfg_mod
 from app import logging_setup, paths
 from app.concurrency import reset_lock_manager
+from app.integrations import claude_trust
 from app.storage import reset_storage
 
 
@@ -83,6 +84,8 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
     monkeypatch.setenv("CSFLOW_DISABLE_ORPHAN_SWEEP", "1")
     # Don't fork real `openclaw sessions tail/list` progress followers in tests.
     monkeypatch.setenv("CSFLOW_DISABLE_OPENCLAW_CHAT_FOLLOWER", "1")
+    # Claude spawns pre-trust their worktree in ~/.claude.json; keep tests off the real one.
+    monkeypatch.setattr(claude_trust, "claude_config_path", lambda: tmp_path / ".claude.json")
     _reset_all_singletons()
     yield home
     _reset_all_singletons()

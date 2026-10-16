@@ -303,6 +303,9 @@ def _scheduling_context_block(ctx: DispatchContext) -> str:
         "This message is dispatched by the ClawsomeFlow scheduler.\n"
         "**Execute only this task**. Do not self-discover tasks "
         "(for example: `clawteam task list`, `clawteam task next-available`).\n"
+        "**Unattended**: no human watches this terminal. Never ask questions, offer "
+        "choices or wait for confirmation — decide yourself; if only the user can "
+        "decide, report it via **On Failure**.\n"
         "After finishing the checklist, **stay idle and wait** for the next dispatch.\n"
         f"Run ID: `{ctx.run_id}`  ·  Team: `{ctx.team_name}`"
     )

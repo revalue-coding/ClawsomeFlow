@@ -22,13 +22,20 @@ pass it (otherwise ClawTeam recreates the worktree, dropping all work).
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
+from pathlib import Path
 
+from app.config import load_config
+from app.integrations.claude_trust import ensure_claude_folder_trusted
 from app.integrations.clawteam_cli import (
     ClawTeamCli,
     CliInvocationError,
     get_clawteam_cli,
 )
+from app.integrations.clawteam_spawn_config import clawteam_config_path
+from app.integrations.gemini_policy import ensure_gemini_policy, gemini_policy_args
 from app.logging_setup import get_logger
 from app.models import AgentKind, FlowAgent
 from app.scheduler.sessions.base import WorkerSession
@@ -49,7 +56,7 @@ _HERMES_READY_TIMEOUT_SEC = 90.0
 # Per-process `-c` config overrides applied to every codex spawn so the
 # unattended TUI behaves. We override at spawn time rather than editing the
 # user's ~/.codex/config.toml (which lives outside ClawsomeFlow's data home, and
-# which codex may rewrite). The configured model is unchanged. Three fixes:
+# which codex may rewrite). The configured model is unchanged. Four fixes:
 #
 #  1/2. notice.model_migrations / tui.model_availability_nux → empty TOML tables.
 #       Otherwise codex blocks on startup onboarding ("Choose how you'd like
@@ -68,10 +75,31 @@ _HERMES_READY_TIMEOUT_SEC = 90.0
 #       block atomic), so multi-line dispatch prompts are NOT submitted early.
 #       Verified empirically against codex 0.136 (a 2s Enter delay does NOT help;
 #       only disabling paste-burst does).
+#
+#  4.   features.default_mode_request_user_input=false. Pins off the
+#       ``request_user_input`` option menu outside plan mode (default-off but
+#       under development in 0.139). Unknown feature keys are ignored, so this
+#       stays safe once codex renames/removes the flag.
 _CODEX_TUI_OVERRIDES: tuple[str, ...] = (
     "-c", "notice.model_migrations={}",
     "-c", "tui.model_availability_nux={}",
     "-c", "disable_paste_burst=true",
+    "-c", "features.default_mode_request_user_input=false",
+)
+
+
+# Interactive "ask the user" / plan-approval tools. They are NOT permission
+# prompts, so bypassPermissions / yolo leave them on, and the option menu they
+# open stalls an unattended pane until the task timeout. Disabled per CLI with
+# its own flag (gemini: see app.integrations.gemini_policy).
+_CLAUDE_STYLE_ASK_TOOLS: tuple[str, ...] = ("AskUserQuestion", "EnterPlanMode", "ExitPlanMode")
+_CLAUDE_NO_ASK: tuple[str, ...] = ("--disallowedTools", ",".join(_CLAUDE_STYLE_ASK_TOOLS))
+# qodercli's --disallowed-tools accumulates one value per flag (no comma split).
+_QODER_NO_ASK: tuple[str, ...] = tuple(
+    arg for tool in _CLAUDE_STYLE_ASK_TOOLS for arg in ("--disallowed-tools", tool)
+)
+_QWEN_NO_ASK: tuple[str, ...] = (
+    "--exclude-tools", "ask_user_question,enter_plan_mode,exit_plan_mode",
 )
 
 
@@ -119,8 +147,8 @@ _CODEX_TUI_OVERRIDES: tuple[str, ...] = (
 #                     (the default ``cli:direct`` would collide across agents).
 _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
     AgentKind.claude:   (
-        ["claude", "--permission-mode", "bypassPermissions"],
-        ["claude", "--permission-mode", "bypassPermissions", "--continue"],
+        ["claude", "--permission-mode", "bypassPermissions", *_CLAUDE_NO_ASK],
+        ["claude", "--permission-mode", "bypassPermissions", *_CLAUDE_NO_ASK, "--continue"],
     ),
     # codex ``resume --last`` continues the most-recent session; codex filters
     # the picker + ``--last`` selection BY CWD unless ``--all`` is passed (which
@@ -141,8 +169,8 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
         ["gemini", "--approval-mode", "yolo", "--resume", "latest"],
     ),
     AgentKind.qwen:     (
-        ["qwen", "--approval-mode", "yolo", "--chat-recording"],
-        ["qwen", "--approval-mode", "yolo", "--chat-recording", "--continue"],
+        ["qwen", "--approval-mode", "yolo", *_QWEN_NO_ASK, "--chat-recording"],
+        ["qwen", "--approval-mode", "yolo", *_QWEN_NO_ASK, "--chat-recording", "--continue"],
     ),
     AgentKind.kimi:     (["kimi", "--yolo"], ["kimi", "--yolo", "--continue"]),
     AgentKind.opencode: (["opencode"], ["opencode", "--continue"]),
@@ -160,12 +188,12 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
     # it is handled out-of-band by seeding each CLI's global config (trustAll /
     # trustDirectories) in qoder_config / codebuddy_config (init + upgrade).
     AgentKind.qoder:    (
-        ["qodercli", "--permission-mode", "bypass_permissions"],
-        ["qodercli", "--permission-mode", "bypass_permissions", "--continue"],
+        ["qodercli", "--permission-mode", "bypass_permissions", *_QODER_NO_ASK],
+        ["qodercli", "--permission-mode", "bypass_permissions", *_QODER_NO_ASK, "--continue"],
     ),
     AgentKind.codebuddy: (
-        ["codebuddy", "--permission-mode", "bypassPermissions"],
-        ["codebuddy", "--permission-mode", "bypassPermissions", "--continue"],
+        ["codebuddy", "--permission-mode", "bypassPermissions", *_CLAUDE_NO_ASK],
+        ["codebuddy", "--permission-mode", "bypassPermissions", *_CLAUDE_NO_ASK, "--continue"],
     ),
     AgentKind.hermes:   (["hermes", "--yolo"],   ["hermes", "--yolo", "-c"]),
 }
@@ -262,6 +290,10 @@ class TmuxLiveSession(WorkerSession):
                 # worktree: the committed + partial work on disk is kept, only the
                 # conversation restarts. Safer than a cross-session resume.
                 self._resume_cmd = [a for a in self._resume_cmd if a != "-c"]
+            if agent.kind == AgentKind.gemini:
+                policy_args = gemini_policy_args()
+                self._spawn_cmd += policy_args
+                self._resume_cmd += policy_args
             if agent.kind == AgentKind.nanobot:
                 # nanobot keys sessions by ``-s`` (default ``cli:direct``), NOT by
                 # cwd. Inject a stable, per-agent session id so (1) concurrent
@@ -281,6 +313,29 @@ class TmuxLiveSession(WorkerSession):
         or fail outright (opencode rejects ClawTeam's ``--yolo``).
         """
         return self.agent.kind not in _SELF_PERMISSION_KINDS
+
+    def _fresh_worktree_path(self) -> str:
+        """Where ``clawteam spawn --workspace`` will create this agent's worktree.
+
+        Mirrors ClawTeam's ``get_data_dir``: our CLI calls export
+        ``clawteam_data_dir`` as ``CLAWTEAM_DATA_DIR``, else the inherited env,
+        else ClawTeam's own ``data_dir`` config key, else ``~/.clawteam``.
+        """
+        data_dir = load_config().clawteam_data_dir or os.environ.get("CLAWTEAM_DATA_DIR")
+        if not data_dir:
+            try:
+                ct_cfg = json.loads(clawteam_config_path().read_text(encoding="utf-8"))
+                data_dir = ct_cfg.get("data_dir") if isinstance(ct_cfg, dict) else None
+            except (OSError, ValueError):
+                data_dir = None
+        root = Path(data_dir).expanduser() if data_dir else Path.home() / ".clawteam"
+        return str(root / "workspaces" / self.team_name / self.agent.id)
+
+    async def _ensure_spawn_artifacts(self, worktree_path: str) -> None:
+        if self.agent.kind == AgentKind.gemini:
+            ensure_gemini_policy()
+        elif self.agent.kind == AgentKind.claude:
+            await asyncio.to_thread(ensure_claude_folder_trusted, worktree_path)
 
     def _resolve_profile(self) -> str | None:
         """ClawTeam runtime profile to apply at spawn.
@@ -319,6 +374,7 @@ class TmuxLiveSession(WorkerSession):
             raise ValueError(
                 f"agent {self.agent.id!r}: spawn requires 'repo' to be set"
             )
+        await self._ensure_spawn_artifacts(self._fresh_worktree_path())
         await self._cli.spawn_fresh(
             team=self.team_name,
             agent_name=self.agent.id,
@@ -418,6 +474,7 @@ class TmuxLiveSession(WorkerSession):
             raise RuntimeError(
                 f"agent {self.agent.id!r}: cannot resume without recorded worktree"
             )
+        await self._ensure_spawn_artifacts(self.worktree.worktree_path)
         await self._cli.spawn_resume(
             team=self.team_name,
             agent_name=self.agent.id,

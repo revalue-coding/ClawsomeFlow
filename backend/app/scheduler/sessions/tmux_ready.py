@@ -123,10 +123,14 @@ _ACTIVE_PANE_LINES = 25
 
 
 def _pane_active_text(pane_text: str, *, lines: int = _ACTIVE_PANE_LINES) -> str:
-    """Return the bottom *lines* of captured pane output (currently visible area)."""
+    """Return the bottom *lines* of captured pane output (currently visible area).
+
+    Trailing blank rows are dropped first: inline TUIs (Claude) draw at the top
+    of a tall pane, so the raw bottom rows can be all padding.
+    """
     if not pane_text:
         return ""
-    parts = pane_text.splitlines()
+    parts = pane_text.rstrip().splitlines()
     if len(parts) <= lines:
         return pane_text
     return "\n".join(parts[-lines:])
@@ -203,6 +207,23 @@ def _looks_like_claude_skip_permissions_prompt(pane_text: str) -> bool:
     return has_accept_choice and has_permissions_warning
 
 
+def _claude_trust_menu_action(pane_text: str) -> str:
+    """Confirm the trust menu only once its cursor is on the "Yes" option.
+
+    Option order differs by version: older Claude defaults to ``❯ 1. Yes, I
+    trust this folder``, 2.1.27x defaults to ``❯ No, exit`` (Enter there quits
+    Claude).
+    Keys sent right as the dialog first renders can be dropped, so the cursor
+    is moved with a lone Down and re-checked on the next poll — Enter is never
+    sent while "No" is highlighted.
+    """
+    for line in reversed(pane_text.splitlines()):
+        option = line.strip()
+        if option.startswith("❯"):
+            return "enter" if "yes" in option.lower() else "down"
+    return "enter"
+
+
 def _looks_like_cursor_composer(pane_text: str) -> bool:
     """Return True when Cursor Agent has reached its interactive composer.
 
@@ -233,7 +254,7 @@ def _startup_prompt_action(
         if _looks_like_claude_skip_permissions_prompt(pane_text):
             return "down-enter"
         if _looks_like_workspace_trust_prompt(pane_text, "claude"):
-            return "enter"
+            return _claude_trust_menu_action(pane_text)
         return None
 
     if trust_platform == "codex":
@@ -341,6 +362,10 @@ async def _send_trust_action(
         await asyncio.sleep(0.2)
         await send(target, "Enter")
         await asyncio.sleep(0.5)
+        return
+    if action == "down":
+        await send(target, "Down")
+        await asyncio.sleep(0.8)
         return
     if action == "press-a":
         await send(target, "a")
