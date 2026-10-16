@@ -909,6 +909,7 @@ const zh = {
       keysOpen: "手动选择",
       keysHelp: "用 ↑ ↓ 移动终端里的选中项，「确认」相当于按回车",
       keysClose: "收起",
+      keysIdleWarning: "该节点当前没有执行中的任务：在输入框里按 ↑ 可能调出上一条消息，再确认会重新提交",
       keyUp: "上移选中项",
       keyDown: "下移选中项",
       keyEnter: "确认",

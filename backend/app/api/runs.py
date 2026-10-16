@@ -390,8 +390,8 @@ class RunTaskTerminalView(_CamelModel):
     idle_seconds: int | None = None
     # This task is in progress and its owner's session is Busy right now.
     executing: bool = False
-    # Up / Down / Enter may be sent to this pane (live run, local tmux owner
-    # executing a task).
+    # Up / Down / Enter may be sent to this pane (live run, readable pane of a
+    # local tmux owner).
     input_allowed: bool = False
 
 
@@ -1428,21 +1428,19 @@ def _terminal_pane_fields(
 ) -> dict[str, Any]:
     """Pane-derived view fields; ``executing`` is true if any of *task_ids* is.
 
-    Input is only open while a task is executing: on an idle composer, Up
-    recalls the previous dispatch prompt and Enter would re-submit it.
+    Input is open on every readable pane of a live run regardless of task
+    state, so all cards sharing an owner's window behave the same. The WebUI
+    warns on non-executing panes: there Up can recall the previous dispatch
+    prompt and Enter would re-submit it.
     """
     available = bool(snapshot.text.strip())
-    executing = bool(task_ids & live_state.executing_task_ids)
     return {
         "pane_text": snapshot.text,
         "available": available,
         "idle_seconds": snapshot.idle_seconds if available else None,
-        "executing": executing,
+        "executing": bool(task_ids & live_state.executing_task_ids),
         "input_allowed": (
-            available
-            and executing
-            and live_state.live
-            and owner_kind != AgentKind.external.value
+            available and live_state.live and owner_kind != AgentKind.external.value
         ),
     }
 

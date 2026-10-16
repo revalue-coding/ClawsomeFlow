@@ -927,6 +927,7 @@ const en = {
       keysOpen: "Choose manually",
       keysHelp: "↑ ↓ move the highlight in the terminal; Confirm presses Enter",
       keysClose: "Hide",
+      keysIdleWarning: "No task is running on this node: ↑ in its input box may recall the last message, and Confirm would send it again",
       keyUp: "Move highlight up",
       keyDown: "Move highlight down",
       keyEnter: "Confirm",

@@ -1058,11 +1058,11 @@ def test_terminal_input_closed_without_live_controller(
     assert sent == []
 
 
-def test_terminal_input_closed_when_owner_is_not_executing(
+def test_terminal_input_open_on_every_live_pane_regardless_of_task_state(
     app_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Idle composer: Up recalls the last dispatch prompt, Enter would resend it."""
+    """Pending / completed / between-task panes keep the keys (no flicker per task)."""
     flow = _make_flow()
     run = _make_run(flow_id=flow.id, team_name="csflow-termx")
     sent = _patch_terminal_tmux(monkeypatch, executing=set())
@@ -1073,12 +1073,12 @@ def test_terminal_input_closed_when_owner_is_not_executing(
     )
     assert item["available"] is True
     assert item["executing"] is False
-    assert item["inputAllowed"] is False
+    assert item["inputAllowed"] is True
     r = app_client.post(
         f"/api/runs/{run.id}/terminals/panes/alice/keys", json={"key": "up"},
     )
-    assert r.status_code == 409
-    assert sent == []
+    assert r.status_code == 200
+    assert sent == [("clawteam-csflow-termx:alice", "Up")]
 
 
 @pytest.mark.parametrize(

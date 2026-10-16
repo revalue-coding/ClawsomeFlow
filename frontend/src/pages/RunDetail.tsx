@@ -1803,9 +1803,11 @@ function mergeTerminalPane(
 
 function TerminalKeyBar({
   stalled,
+  executing,
   onSend,
 }: {
   stalled: boolean;
+  executing: boolean;
   onSend: (key: RunTerminalKey) => Promise<void>;
 }) {
   const { t } = useTranslation();
@@ -1902,6 +1904,11 @@ function TerminalKeyBar({
           </button>
         ) : null}
       </div>
+      {!executing ? (
+        <div className="mt-1 text-[11px] text-amber-200/80">
+          {t("runDetail.terminal.keysIdleWarning")}
+        </div>
+      ) : null}
       {error ? (
         <div className="mt-1 text-[11px] text-rose-300">
           {t("runDetail.terminal.keySendFailed", { error })}
@@ -2081,6 +2088,7 @@ function RunTerminalBoard({
                     {!paneLoading && item?.inputAllowed ? (
                       <TerminalKeyBar
                         stalled={stalled}
+                        executing={Boolean(item.executing)}
                         onSend={(key) => onSendKey(task.ownerAgentId, key)}
                       />
                     ) : null}
