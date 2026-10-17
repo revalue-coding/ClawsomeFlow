@@ -2,7 +2,10 @@
 name = "clawsomeflow"
 version = "0.2.7"
 description = "Vertical agent workflow orchestration platform on top of ClawTeam and OpenClaw"
-readme = "../readme.md"
+# Supplied by hatch_build.py so the file can live at ../readme.md in the
+# checkout and at readme.md inside the sdist. A static ../readme.md path is
+# rejected by current PyPI sdist checks and by hatchling >= 1.32.
+dynamic = ["readme"]
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
@@ -69,22 +72,24 @@ Repository = "https://github.com/clawsomeflow/clawsomeflow"
 Issues = "https://github.com/clawsomeflow/clawsomeflow/issues"
 
 [build-system]
-# hatchling 1.32.0 starts rejecting readme paths outside the project dir
-# (ours is ../readme.md, shared with the repo root). Pin below it until the
-# readme layout is reworked.
+# hatchling 1.32.0 starts rejecting readme paths outside the project dir.
+# The readme is injected by hatch_build.py; keep the pin until a newer
+# hatchling is verified against that hook.
 requires = ["hatchling<1.32"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata.hooks.custom]
+
+[tool.hatch.build.hooks.custom]
+
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
-# Pull the prebuilt React SPA into app/_static so `app.static.mount_frontend`
-# finds it without an env var. Build the frontend (`cd ../frontend && npm
-# run build`) before `pip install` / `hatch build`.
+# The SPA and agent trees are added by hatch_build.py. It reads the
+# repo-root copies in a checkout and the in-archive copies when the wheel
+# is built from the sdist. Build the frontend (`cd ../frontend && npm run
+# build`) before `pip install` / `hatch build`.
 [tool.hatch.build.targets.wheel.force-include]
-"../frontend/dist" = "app/_static"
-"../openclaw-agent-source" = "clawsomeflow_openclaw_agent_source"
 "clawsomeflow_openclaw_agent_source/__init__.py" = "clawsomeflow_openclaw_agent_source/__init__.py"
-"../clawsomeflow-agent-tools" = "clawsomeflow_agent_tools"
 "clawsomeflow_agent_tools/__init__.py" = "clawsomeflow_agent_tools/__init__.py"
 
 [tool.hatch.build.targets.sdist]
@@ -95,13 +100,15 @@ include = [
     "tests/",
 ]
 
+# Destinations must stay inside the sdist root. `../...` becomes an archive
+# member PyPI rejects (`posixpath.normpath` changes the path).
 [tool.hatch.build.targets.sdist.force-include]
-"../frontend/dist" = "../frontend/dist"
-"../openclaw-agent-source" = "../openclaw-agent-source"
-"../clawsomeflow-agent-tools" = "../clawsomeflow-agent-tools"
-"../readme.md" = "../readme.md"
-"../DEV.md" = "../DEV.md"
-"../API.md" = "../API.md"
+"../frontend/dist" = "frontend/dist"
+"../openclaw-agent-source" = "openclaw-agent-source"
+"../clawsomeflow-agent-tools" = "clawsomeflow-agent-tools"
+"../readme.md" = "readme.md"
+"../DEV.md" = "DEV.md"
+"../API.md" = "API.md"
 
 [tool.ruff]
 line-length = 100
