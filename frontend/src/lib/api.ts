@@ -536,13 +536,24 @@ export interface RunTaskTerminal {
   workDir: string;
   paneText: string;
   available: boolean;
+  /** Seconds since the pane last produced output (null = unknown). */
+  idleSeconds: number | null;
+  /** Owner is executing an in-progress task right now. */
+  executing: boolean;
+  /** Up / Down / Enter may be sent to this pane. */
+  inputAllowed: boolean;
 }
 
 export interface RunTaskTerminalPane {
   ownerAgentId: string;
   paneText: string;
   available: boolean;
+  idleSeconds: number | null;
+  executing: boolean;
+  inputAllowed: boolean;
 }
+
+export type RunTerminalKey = "up" | "down" | "enter";
 
 export interface RunEventView {
   id: number;
@@ -1223,6 +1234,12 @@ export const api = {
       `/api/runs/${id}/terminals/panes/${encodeURIComponent(ownerAgentId)}?${q.toString()}`,
     );
   },
+  sendRunTerminalKey: (id: string, ownerAgentId: string, key: RunTerminalKey) =>
+    request<RunTaskTerminalPane>(
+      "POST",
+      `/api/runs/${id}/terminals/panes/${encodeURIComponent(ownerAgentId)}/keys`,
+      { key },
+    ),
   listRunEvents: (id: string, sinceId?: number, limit = 200) => {
     const q = new URLSearchParams();
     if (sinceId !== undefined) q.set("sinceId", String(sinceId));

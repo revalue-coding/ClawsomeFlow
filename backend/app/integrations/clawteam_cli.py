@@ -2,7 +2,9 @@
 
 Public API:
 * :class:`ClawTeamCli` — wraps every ClawTeam CLI invocation we need
-  (``spawn`` / ``runtime inject`` / ``workspace`` / ``team`` / ``lifecycle``).
+  (``spawn`` / ``workspace`` / ``team`` / ``lifecycle``). Live TUI dispatch
+  is a bracketed tmux paste (:mod:`app.scheduler.sessions.tmux_paste`), not
+  ``clawteam runtime inject``.
 * :func:`get_clawteam_cli` — lazy singleton.
 * :class:`CliInvocationError` — non-zero exit + captured stderr.
 
@@ -353,8 +355,8 @@ class ClawTeamCli:
 
         Defenses ① ② ③ (from the four anti-loop defenses) are hard-enforced here;
         ④ (dispatch context block) is
-        the responsibility of the caller composing the ``runtime_inject``
-        ``summary`` argument (template enforced by :mod:`app.scheduler.prompts`).
+        the responsibility of the caller composing the dispatch message
+        (template enforced by :mod:`app.scheduler.prompts`).
 
         ``skip_permissions`` controls whether ClawTeam injects its per-CLI
         permission-bypass flag (claude → ``--dangerously-skip-permissions``,
@@ -489,39 +491,6 @@ class ClawTeamCli:
             argv=argv, exit_code=exit_code, stdout=stdout, stderr=stderr,
             json_payload=_try_parse_json(stdout),
         )
-
-    # ──────────────────────────────────────────────────────────────────
-    # Runtime inject — dispatch a message to a live tmux session
-    # ──────────────────────────────────────────────────────────────────
-
-    async def runtime_inject(
-        self,
-        *,
-        team: str,
-        agent: str,
-        summary: str,
-        source: str = "csflow-scheduler",
-        channel: str = "task-dispatch",
-        priority: str = "medium",
-    ) -> None:
-        """Wrap ``clawteam runtime inject`` (paste-buffer to live tmux pane)."""
-        argv = [
-            "clawteam", "runtime", "inject", team, agent,
-            "--source", source, "--channel", channel, "--priority", priority,
-            "--summary", summary,
-        ]
-        exit_code, stdout, stderr = await _run(argv, env=self._env())
-        logging_setup.runtime_inject(
-            target=f"{team}:{agent}",
-            summary_len=len(summary),
-            success=(exit_code == 0),
-            exit_code=exit_code,
-            error_msg=stderr.strip() if exit_code != 0 else None,
-        )
-        if exit_code != 0:
-            raise CliInvocationError(
-                argv=argv, exit_code=exit_code, stderr=stderr, stdout=stdout,
-            )
 
     # ──────────────────────────────────────────────────────────────────
     # Team lifecycle

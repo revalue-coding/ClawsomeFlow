@@ -8,6 +8,8 @@ Endpoints:
   ``pendingMerges`` + ``clawteamBoardUrl``)
 * ``GET    /api/runs/{run_id}/terminals``             — tmux pane snapshots
   grouped by Flow tasks
+* ``POST   /api/runs/{run_id}/terminals/panes/{owner}/keys`` — send one
+  Up / Down / Enter to a live pane (manual answer to a stuck option menu)
 * ``GET    /api/runs/{run_id}/checkpoint``            — current manual
   checkpoint snapshot (if any)
 * ``GET    /api/runs/{run_id}/events``                — paginated events
@@ -44,9 +46,10 @@ Cross-references:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path as FsPath
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, File, Form, Path, Query, UploadFile, status
 from fastapi.responses import FileResponse
@@ -103,7 +106,11 @@ from app.scheduler.run_metadata import (
     write_failure_guidance,
     write_pause_state,
 )
-from app.scheduler.sessions.tmux_ready import tmux_capture_pane
+from app.scheduler.sessions.tmux_ready import (
+    tmux_capture_pane,
+    tmux_idle_seconds,
+    tmux_send_keys,
+)
 from app.services import run_schedules as run_schedule_svc
 from app.services.dev_pr import run_pr_command as _run_pr_command
 from app.services.run_notify import NOTIFIED_MARKER_KEY
@@ -379,6 +386,13 @@ class RunTaskTerminalView(_CamelModel):
     work_dir: str = ""
     pane_text: str = ""
     available: bool = False
+    # Seconds since the pane last produced output (None = unknown / no pane).
+    idle_seconds: int | None = None
+    # This task is in progress and its owner's session is Busy right now.
+    executing: bool = False
+    # Up / Down / Enter may be sent to this pane (live run, readable pane of a
+    # local tmux owner).
+    input_allowed: bool = False
 
 
 class RunTaskTerminalListResponse(_CamelModel):
@@ -389,6 +403,16 @@ class RunTaskTerminalPaneView(_CamelModel):
     owner_agent_id: str
     pane_text: str = ""
     available: bool = False
+    idle_seconds: int | None = None
+    # Any of the owner's tasks is executing (see RunTaskTerminalView.executing).
+    executing: bool = False
+    input_allowed: bool = False
+
+
+class RunTerminalKeyRequest(_CamelModel):
+    # Deliberately the whole input surface: enough to answer a stuck option
+    # menu, nothing that could type text or commands into the agent.
+    key: Literal["up", "down", "enter"]
 
 
 class RunListResponse(_CamelModel):
@@ -1338,51 +1362,119 @@ async def _work_dir_by_agent_id(
     return work_dir_by_agent
 
 
+@dataclass(frozen=True)
+class _PaneSnapshot:
+    text: str = ""
+    idle_seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class _TerminalLiveState:
+    """Whether the run's tmux sessions are live, and which tasks are executing."""
+
+    live: bool = False
+    executing_task_ids: frozenset[str] = frozenset()
+
+
+_TERMINAL_TMUX_KEYS: dict[str, str] = {"up": "Up", "down": "Down", "enter": "Enter"}
+# Let the TUI redraw before re-capturing, so the response shows the new selection.
+_TERMINAL_KEY_SETTLE_SEC = 0.35
+
+
+def _terminal_tmux_target(team_name: str, owner_agent_id: str) -> str:
+    return f"clawteam-{team_name}:{owner_agent_id}"
+
+
 async def _capture_owner_panes(
     *,
     team_name: str,
     owners: list[str],
     history_lines: int,
-) -> dict[str, str]:
-    async def _capture(owner_agent_id: str) -> tuple[str, str]:
-        tmux_target = f"clawteam-{team_name}:{owner_agent_id}"
+) -> dict[str, _PaneSnapshot]:
+    async def _capture(owner_agent_id: str) -> tuple[str, _PaneSnapshot]:
+        tmux_target = _terminal_tmux_target(team_name, owner_agent_id)
         try:
-            pane_text = await tmux_capture_pane(tmux_target, history_lines=history_lines)
+            pane_text, idle = await asyncio.gather(
+                tmux_capture_pane(tmux_target, history_lines=history_lines),
+                tmux_idle_seconds(tmux_target),
+            )
         except Exception:
-            pane_text = ""
-        return owner_agent_id, pane_text
+            return owner_agent_id, _PaneSnapshot()
+        return owner_agent_id, _PaneSnapshot(text=pane_text, idle_seconds=idle)
 
     if not owners:
         return {}
     captures = await asyncio.gather(*(_capture(owner) for owner in owners))
-    return {owner: text for owner, text in captures}
+    return dict(captures)
+
+
+def _terminal_live_state(run: FlowRun) -> _TerminalLiveState:
+    if run.status not in _PAUSE_ALLOWED:
+        return _TerminalLiveState()
+    controller = get_scheduler().get_controller(run.id)
+    if controller is None:
+        return _TerminalLiveState()
+    return _TerminalLiveState(
+        live=True, executing_task_ids=frozenset(controller.executing_task_ids()),
+    )
+
+
+def _terminal_pane_fields(
+    *,
+    task_ids: set[str],
+    owner_kind: str | None,
+    snapshot: _PaneSnapshot,
+    live_state: _TerminalLiveState,
+) -> dict[str, Any]:
+    """Pane-derived view fields; ``executing`` is true if any of *task_ids* is.
+
+    Input is open on every readable pane of a live run regardless of task
+    state, so all cards sharing an owner's window behave the same. The WebUI
+    warns on non-executing panes: there Up can recall the previous dispatch
+    prompt and Enter would re-submit it.
+    """
+    available = bool(snapshot.text.strip())
+    return {
+        "pane_text": snapshot.text,
+        "available": available,
+        "idle_seconds": snapshot.idle_seconds if available else None,
+        "executing": bool(task_ids & live_state.executing_task_ids),
+        "input_allowed": (
+            available and live_state.live and owner_kind != AgentKind.external.value
+        ),
+    }
 
 
 async def _build_run_terminal_items(
     *,
     run: FlowRun,
     spec: FlowSpec,
-    capture_map: dict[str, str],
+    capture_map: dict[str, _PaneSnapshot],
 ) -> list[RunTaskTerminalView]:
     lookup = get_worktree_lookup()
     work_dir_by_agent = await _work_dir_by_agent_id(
         lookup=lookup, team_name=run.team_name, spec=spec,
     )
     kind_by_agent = {agent.id: agent.kind.value for agent in spec.agents}
+    live_state = _terminal_live_state(run)
     items: list[RunTaskTerminalView] = []
     for task in spec.tasks:
         owner_agent_id = str(task.owner_agent_id or "").strip()
-        pane_text = capture_map.get(owner_agent_id, "")
+        owner_kind = kind_by_agent.get(owner_agent_id)
         items.append(
             RunTaskTerminalView(
                 task_id=task.id,
                 subject=task.subject,
                 owner_agent_id=owner_agent_id,
-                owner_kind=kind_by_agent.get(owner_agent_id),
-                tmux_target=f"clawteam-{run.team_name}:{owner_agent_id}",
+                owner_kind=owner_kind,
+                tmux_target=_terminal_tmux_target(run.team_name, owner_agent_id),
                 work_dir=work_dir_by_agent.get(owner_agent_id, ""),
-                pane_text=pane_text,
-                available=bool(pane_text.strip()),
+                **_terminal_pane_fields(
+                    task_ids={task.id},
+                    owner_kind=owner_kind,
+                    snapshot=capture_map.get(owner_agent_id, _PaneSnapshot()),
+                    live_state=live_state,
+                ),
             )
         )
     return items
@@ -1449,6 +1541,45 @@ async def get_run_terminal_pane(
     history_lines: Annotated[int, Query(alias="historyLines", ge=20, le=400)] = 120,
 ) -> RunTaskTerminalPaneView:
     run, spec = await _run_terminal_spec(run_id, storage, user)
+    owner = _known_terminal_owner(spec, owner_agent_id, run_id)
+    return await _terminal_pane_view(run=run, spec=spec, owner=owner, history_lines=history_lines)
+
+
+@router.post(
+    "/runs/{run_id}/terminals/panes/{owner_agent_id}/keys",
+    response_model=RunTaskTerminalPaneView,
+)
+async def send_run_terminal_key(
+    run_id: Annotated[str, Path()],
+    owner_agent_id: Annotated[str, Path()],
+    body: RunTerminalKeyRequest,
+    user: UserDep,
+    storage: StorageDep,
+) -> RunTaskTerminalPaneView:
+    """Send one Up / Down / Enter to a live agent pane (manual menu answer)."""
+    run, spec = await _run_terminal_spec(run_id, storage, user)
+    owner = _known_terminal_owner(spec, owner_agent_id, run_id)
+    current = await _terminal_pane_view(run=run, spec=spec, owner=owner, history_lines=20)
+    if not current.input_allowed:
+        raise ApiError(
+            "TERMINAL_INPUT_NOT_ALLOWED",
+            f"terminal of {owner!r} does not accept input in state {_status_str(run.status)}",
+            status_code=409,
+        )
+    await tmux_send_keys(_terminal_tmux_target(run.team_name, owner), _TERMINAL_TMUX_KEYS[body.key])
+    from app.events import publish_run_event
+    publish_run_event(
+        storage,
+        run_id=run.id,
+        event_type="terminal_key_sent",
+        agent_id=owner,
+        payload={"key": body.key},
+    )
+    await asyncio.sleep(_TERMINAL_KEY_SETTLE_SEC)
+    return await _terminal_pane_view(run=run, spec=spec, owner=owner, history_lines=120)
+
+
+def _known_terminal_owner(spec: FlowSpec, owner_agent_id: str, run_id: str) -> str:
     owner = owner_agent_id.strip()
     known_owners = {
         str(task.owner_agent_id or "").strip()
@@ -1461,14 +1592,28 @@ async def get_run_terminal_pane(
             f"terminal owner {owner!r} not found on run {run_id!r}",
             status_code=404,
         )
+    return owner
+
+
+async def _terminal_pane_view(
+    *,
+    run: FlowRun,
+    spec: FlowSpec,
+    owner: str,
+    history_lines: int,
+) -> RunTaskTerminalPaneView:
     capture_map = await _capture_owner_panes(
         team_name=run.team_name, owners=[owner], history_lines=history_lines,
     )
-    pane_text = capture_map.get(owner, "")
+    owner_kind = next((a.kind.value for a in spec.agents if a.id == owner), None)
     return RunTaskTerminalPaneView(
         owner_agent_id=owner,
-        pane_text=pane_text,
-        available=bool(pane_text.strip()),
+        **_terminal_pane_fields(
+            task_ids={t.id for t in spec.tasks if str(t.owner_agent_id or "").strip() == owner},
+            owner_kind=owner_kind,
+            snapshot=capture_map.get(owner, _PaneSnapshot()),
+            live_state=_terminal_live_state(run),
+        ),
     )
 
 

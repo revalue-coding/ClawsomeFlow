@@ -94,6 +94,22 @@ def test_worker_dispatch_starts_with_context_block() -> None:
     assert msg.startswith("## ClawsomeFlow Dispatch Context")
 
 
+def test_dispatch_header_forbids_asking_the_user() -> None:
+    """Workers run unattended in tmux: an option menu would stall the task, so the
+    header forbids asking and routes user-only decisions to the On Failure path."""
+    worker = prompts.build_worker_dispatch(_ctx())
+    leader = prompts.build_leader_dispatch(_ctx(
+        agent=_agent(id="leader", leader=True),
+        task=_task(id="ts", subject="Final", owner="leader", is_summary=True),
+    ))
+    for msg in (worker, leader):
+        header = msg.split("\n\n", 1)[0]
+        assert "no human watches this terminal" in header
+        assert "Never ask questions" in header
+        assert "report it via **On Failure**" in header
+        assert "## On Failure" in msg
+
+
 def test_worker_dispatch_includes_runtime_inputs_not_flow_goal() -> None:
     msg = prompts.build_worker_dispatch(_ctx(flow_inputs={"target_user": "alice"}))
     assert "## Runtime inputs" in msg

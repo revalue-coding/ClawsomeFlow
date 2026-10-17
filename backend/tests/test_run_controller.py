@@ -1421,6 +1421,37 @@ async def test_terminal_check_persists_execution_log_with_required_fields(
     assert session_map["leader"]["session_id"]
 
 
+def test_executing_task_ids_requires_busy_session_on_in_progress_task(fake_lookup) -> None:
+    """Terminal board stall hint: only a Busy session working an in-progress task."""
+    spec = _make_spec()
+    run = _persist_flow_and_run(spec)
+    rc = RunController(
+        run=run, spec=spec, flow_description="d",
+        worktree_lookup=fake_lookup,
+        session_factory=lambda a: _RecordingSession(
+            agent=a, team_name=run.team_name, run_id=run.id,
+        ),
+        snapshot_provider=None,
+    )
+    alice = _RecordingSession(agent=spec.agents[0], team_name=run.team_name, run_id=run.id)
+    leader = _RecordingSession(agent=spec.agents[1], team_name=run.team_name, run_id=run.id)
+    rc._sessions = {"alice": alice, "leader": leader}
+    rc._tasks["t1"].state = _TaskState.in_progress
+    assert rc.executing_task_ids() == set()  # session not Busy yet
+
+    def _make_busy(sess: _RecordingSession) -> None:
+        for state in (SessionState.Spawning, SessionState.Idle, SessionState.Busy):
+            sess._transition_force(state, reason="test")
+
+    _make_busy(alice)
+    assert rc.executing_task_ids() == {"t1"}
+
+    # Busy without an in-progress task is not "executing".
+    _make_busy(leader)
+    rc._tasks["t1"].state = _TaskState.completed
+    assert rc.executing_task_ids() == set()
+
+
 @pytest.mark.asyncio
 async def test_terminal_log_records_non_completed_tasks_when_leader_done(
     fake_lookup,

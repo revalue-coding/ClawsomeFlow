@@ -358,6 +358,100 @@ async def test_wait_tui_ready_dismisses_claude_skip_permissions_prompt() -> None
 
 
 @pytest.mark.asyncio
+async def test_tmux_idle_seconds_reads_window_activity(monkeypatch) -> None:
+    import time as _time
+
+    class _Proc:
+        def __init__(self, out: bytes, rc: int) -> None:
+            self._out, self.returncode = out, rc
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return self._out, b""
+
+    replies = iter([
+        _Proc(f"{int(_time.time()) - 300}\n".encode(), 0),
+        _Proc(b"", 1),  # no such window
+        _Proc(b"garbage", 0),
+    ])
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_exec(*argv, **_kw):
+        calls.append(argv)
+        return next(replies)
+
+    monkeypatch.setattr(tmux_ready.asyncio, "create_subprocess_exec", fake_exec)
+    idle = await tmux_ready.tmux_idle_seconds("team:alice")
+    assert idle is not None and 299 <= idle <= 302
+    assert calls[0] == (
+        "tmux", "display-message", "-p", "-t", "team:alice", "#{window_activity}",
+    )
+    assert await tmux_ready.tmux_idle_seconds("team:gone") is None
+    assert await tmux_ready.tmux_idle_seconds("team:odd") is None
+
+
+_CLAUDE_TRUST_HEAD = (
+    " Accessing workspace:\n"
+    " /home/u/.clawteam/workspaces/t/alice\n"
+    " Quick safety check: Is this a project you created or one you trust?\n"
+    " Claude Code'll be able to read, edit, and execute files here.\n"
+)
+
+
+async def _run_claude_trust(panes: list[str]) -> list[tuple[str, str, bool]]:
+    it = iter(panes)
+    sent: list[tuple[str, str, bool]] = []
+
+    async def capture(_target: str) -> str:
+        return next(it)
+
+    async def send_keys(target: str, keys: str, *, literal: bool = False) -> None:
+        sent.append((target, keys, literal))
+
+    result = await tmux_ready.wait_tui_ready(
+        "team:alice", trust_platform="claude", timeout_sec=5.0,
+        poll_interval=0.01, capture=capture, send_keys=send_keys,
+    )
+    assert result.ok is True
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_claude_trust_dialog_defaulting_to_no_moves_to_yes_first() -> None:
+    """Claude 2.1.27x highlights "No, exit"; Enter there would quit Claude."""
+    no_selected = (
+        _CLAUDE_TRUST_HEAD
+        + " ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel\n"
+    )
+    yes_selected = (
+        _CLAUDE_TRUST_HEAD
+        + "   No, exit\n ❯ Yes, I trust this folder\n Enter to confirm · Esc to cancel\n"
+    )
+    # Inline TUI in a tall pane: the dialog sits at the top above blank rows.
+    # The second frame models a dropped Down (cursor still on "No"): it is
+    # retried, and Enter is only sent once "Yes" is highlighted.
+    padding = "\n" * 40
+    sent = await _run_claude_trust([
+        no_selected + padding, no_selected + padding, yes_selected + padding,
+        "welcome\n╭❯> ",
+    ])
+    assert sent == [
+        ("team:alice", "Down", False),
+        ("team:alice", "Down", False),
+        ("team:alice", "Enter", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_trust_dialog_defaulting_to_yes_confirms_directly() -> None:
+    yes_first = (
+        _CLAUDE_TRUST_HEAD
+        + " ❯ 1. Yes, I trust this folder\n   2. No, exit\n Enter to confirm · Esc to cancel\n"
+    )
+    sent = await _run_claude_trust([yes_first, "welcome\n╭❯> "])
+    assert sent == [("team:alice", "Enter", False)]
+
+
+@pytest.mark.asyncio
 async def test_wait_tui_ready_dismisses_codex_update_prompt() -> None:
     update_pane = (
         "Update available! 0.139.0 -> 0.141.0\n"

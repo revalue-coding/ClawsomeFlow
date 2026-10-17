@@ -7,7 +7,7 @@ Why this exists:
   (claude shows ``╭❯>``, modern codex shows a ``>_ OpenAI Codex`` banner and a
   ``›`` composer, Cursor Agent often shows ``agent>`` / ``>``, bash shows
   ``$``).
-* If we ``runtime inject`` (paste-buffer + Enter) before the prompt is up,
+* If we paste the dispatch (paste-buffer + Enter) before the prompt is up,
   the dispatch text is dropped on the floor — the CLI is still in startup.
 * For OpenClaw we ``tmux send-keys`` into a bare bash; we still need to
   wait for the bash ``$`` prompt before sending the next command.
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,10 +124,14 @@ _ACTIVE_PANE_LINES = 25
 
 
 def _pane_active_text(pane_text: str, *, lines: int = _ACTIVE_PANE_LINES) -> str:
-    """Return the bottom *lines* of captured pane output (currently visible area)."""
+    """Return the bottom *lines* of captured pane output (currently visible area).
+
+    Trailing blank rows are dropped first: inline TUIs (Claude) draw at the top
+    of a tall pane, so the raw bottom rows can be all padding.
+    """
     if not pane_text:
         return ""
-    parts = pane_text.splitlines()
+    parts = pane_text.rstrip().splitlines()
     if len(parts) <= lines:
         return pane_text
     return "\n".join(parts[-lines:])
@@ -203,6 +208,23 @@ def _looks_like_claude_skip_permissions_prompt(pane_text: str) -> bool:
     return has_accept_choice and has_permissions_warning
 
 
+def _claude_trust_menu_action(pane_text: str) -> str:
+    """Confirm the trust menu only once its cursor is on the "Yes" option.
+
+    Option order differs by version: older Claude defaults to ``❯ 1. Yes, I
+    trust this folder``, 2.1.27x defaults to ``❯ No, exit`` (Enter there quits
+    Claude).
+    Keys sent right as the dialog first renders can be dropped, so the cursor
+    is moved with a lone Down and re-checked on the next poll — Enter is never
+    sent while "No" is highlighted.
+    """
+    for line in reversed(pane_text.splitlines()):
+        option = line.strip()
+        if option.startswith("❯"):
+            return "enter" if "yes" in option.lower() else "down"
+    return "enter"
+
+
 def _looks_like_cursor_composer(pane_text: str) -> bool:
     """Return True when Cursor Agent has reached its interactive composer.
 
@@ -233,7 +255,7 @@ def _startup_prompt_action(
         if _looks_like_claude_skip_permissions_prompt(pane_text):
             return "down-enter"
         if _looks_like_workspace_trust_prompt(pane_text, "claude"):
-            return "enter"
+            return _claude_trust_menu_action(pane_text)
         return None
 
     if trust_platform == "codex":
@@ -305,6 +327,31 @@ async def tmux_capture_pane(target: str, *, history_lines: int = 60) -> str:
     return out.decode("utf-8", errors="replace")
 
 
+async def tmux_idle_seconds(target: str) -> int | None:
+    """Seconds since *target*'s window last produced output, or None if unknown.
+
+    ``#{window_activity}`` is updated on every output regardless of the
+    ``monitor-activity`` option, so a TUI that animates while working stays
+    near 0 while one parked on a static menu keeps growing.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "display-message", "-p", "-t", target, "#{window_activity}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError:
+        return None
+    out, _err = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    try:
+        last = int(out.decode("utf-8", errors="replace").strip())
+    except ValueError:
+        return None
+    return max(int(time.time()) - last, 0)
+
+
 async def tmux_send_keys(
     target: str,
     keys: str,
@@ -341,6 +388,10 @@ async def _send_trust_action(
         await asyncio.sleep(0.2)
         await send(target, "Enter")
         await asyncio.sleep(0.5)
+        return
+    if action == "down":
+        await send(target, "Down")
+        await asyncio.sleep(0.8)
         return
     if action == "press-a":
         await send(target, "a")
@@ -525,6 +576,7 @@ __all__ = [
     "TuiReadyResult",
     "resolve_trust_platform",
     "tmux_capture_pane",
+    "tmux_idle_seconds",
     "tmux_send_keys",
     "wait_shell_ready",
     "wait_tui_ready",

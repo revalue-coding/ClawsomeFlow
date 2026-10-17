@@ -663,6 +663,19 @@ class RunController:
     def is_pausing(self) -> bool:
         return self._pause_evt.is_set() and not self._cancel_evt.is_set()
 
+    def executing_task_ids(self) -> set[str]:
+        """In-progress tasks whose owner's tmux session is Busy right now."""
+        busy = {
+            agent_id
+            for agent_id, sess in self._sessions.items()
+            if sess.state == SessionState.Busy
+        }
+        return {
+            task_id
+            for task_id, book in self._tasks.items()
+            if book.state == _TaskState.in_progress and book.task.owner_agent_id in busy
+        }
+
     def _backend_stop_after_failure(
         self,
         *,
