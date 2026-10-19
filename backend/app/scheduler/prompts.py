@@ -632,9 +632,10 @@ def _worker_completion_steps(ctx: DispatchContext) -> str:
             "never substitute a file name, a document title or any other id. "
             "The `<completion-summary>` MUST include "
             "a concise summary of your work and absolute paths of important changed "
-            "docs/files (one line is fine). If task "
+            "docs/files. If task "
             "\"Output summary requirement\" defines a format, apply it after this "
-            "header. **Send this before "
+            "header; break lines by logical section, not one long paragraph. "
+            "**Send this before "
             "marking task completed**.)"
         )
         next_no += 1
@@ -851,7 +852,8 @@ def _leader_completion_steps(ctx: DispatchContext) -> str:
     steps.append(
         f"{next_no}. `clawteam inbox send {team} {ctx.agent.id} "
         f"\"leader final reply: <concise summary + {reply_paths}>\"` "
-        "(required — keep the literal prefix `leader final reply:`.)"
+        "(required — keep the literal prefix `leader final reply:`; "
+        "break lines by logical section, not one long paragraph.)"
     )
     next_no += 1
 
