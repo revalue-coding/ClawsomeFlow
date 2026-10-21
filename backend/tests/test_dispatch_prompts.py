@@ -229,7 +229,10 @@ def test_leader_completion_steps_focus_on_deliverable_without_merge_guidance() -
     assert "ClawsomeFlow can surface it in Run detail" not in msg
     assert "1. In `/tmp/wt/alice`, **produce the final deliverable**:" in msg
     assert "2. `cd /tmp/wt/alice && git add -A && git commit -m 'task ts: leader summary'`." in msg
-    assert "(required — keep the literal prefix `leader final reply:`.)" in msg
+    assert (
+        "(required — keep the literal prefix `leader final reply:`; "
+        "break lines by logical section, not one long paragraph.)"
+    ) in msg
     # No baseline-workspace wording at all for a TUI leader (worker_worktrees empty
     # here, so the only possible source would be the completion steps we fixed).
     assert "in the corresponding baseline workspace" not in msg
@@ -258,7 +261,10 @@ def test_leader_completion_steps_openclaw_has_my_desktop_and_no_baseline_ref() -
     assert "Those paths MUST be inside your worktree" not in msg
     assert "ClawsomeFlow can surface it in Run detail" not in msg
     assert "1. In `/tmp/wt/alice`, **produce the final deliverable**:" in msg
-    assert "(required — keep the literal prefix `leader final reply:`.)" in msg
+    assert (
+        "(required — keep the literal prefix `leader final reply:`; "
+        "break lines by logical section, not one long paragraph.)"
+    ) in msg
     # The harmful "reference baseline workspace paths" wording must be gone.
     assert "in the corresponding baseline workspace" not in msg
 
