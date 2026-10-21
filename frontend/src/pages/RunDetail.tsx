@@ -3883,6 +3883,9 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
   const ordered = [...events].sort((a, b) => a.id - b.id);
   const latest = new Map<string, ExternalTaskItem>();
   const completedNonces = new Set<string>();
+  /** Tasks whose ``task_completed`` landed after their latest dispatch. A
+   *  checkpoint rerun re-dispatches an already-completed task, so an earlier
+   *  completion must not hide the new round's card. */
   const completedTasks = new Set<string>();
   /** Dispatch keys permanently hidden from the external todo card. */
   const suppressedDispatchKeys = new Set<string>();
@@ -3894,6 +3897,7 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
     const payload = (e.payload ?? {}) as Record<string, unknown>;
     if (e.type === "external_task_dispatched") {
       suppressedTaskIds.delete(tid);
+      completedTasks.delete(tid);
       const runtimeRaw = payload.runtimeInputs ?? payload.runtime_inputs;
       const upstreamRaw = payload.upstreamOutputs ?? payload.upstream_outputs;
       latest.set(tid, {
