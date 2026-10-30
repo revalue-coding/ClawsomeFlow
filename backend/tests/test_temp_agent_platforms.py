@@ -1,13 +1,14 @@
-"""Temporary-agent platform support: gemini / kimi / qwen / opencode / nanobot.
+"""Temporary-agent platform support: antigravity / kimi / qwen / opencode / nanobot.
 
-These five CLIs spawn like claude/codex/cursor (temporary, ad-hoc inline Flow
+These CLIs spawn like claude/codex/cursor (temporary, ad-hoc inline Flow
 agents — no persistent management platform), but ClawsomeFlow SELF-CONTROLS their
 permission flags (passes ``skip_permissions=False`` so ClawTeam injects nothing).
 That's required because ClawTeam's ``--yolo`` injection is wrong for current CLI
 versions, verified against the installed binaries:
 
-* gemini  → ``--approval-mode yolo`` (``--yolo`` conflicts with ``--approval-mode``);
-            resume ``--resume latest`` (no ``--continue``).
+* antigravity → ``agy --dangerously-skip-permissions --settings <per-agent>``;
+            resume ``-c`` (Gemini CLI's successor; a persisted ``kind: gemini``
+            loads as antigravity).
 * qwen    → ``--approval-mode yolo --chat-recording`` (recording needed for resume);
             resume ``--continue``.
 * kimi    → ``--yolo``; resume ``--continue`` (kimi-code from ``install.sh``).
@@ -39,7 +40,7 @@ from app.services.task_decompose import (
 # All kinds with a runtime mapping (nanobot included — its mapping is kept ready
 # even though the platform is temporarily not exposed to users).
 _NEW_KINDS = [
-    AgentKind.gemini,
+    AgentKind.antigravity,
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
@@ -51,7 +52,7 @@ _NEW_KINDS = [
 
 # Kinds actually exposed to users (Flow editor + AI decomposer). nanobot excluded.
 _USER_EXPOSED_KINDS = [
-    AgentKind.gemini,
+    AgentKind.antigravity,
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
@@ -63,9 +64,9 @@ _USER_EXPOSED_KINDS = [
 
 def test_kind_to_cmd_spawn_and_resume() -> None:
     """Pin the exact verified spawn/resume commands per platform."""
-    assert _KIND_TO_CMD[AgentKind.gemini] == (
-        ["gemini", "--approval-mode", "yolo"],
-        ["gemini", "--approval-mode", "yolo", "--resume", "latest"],
+    assert _KIND_TO_CMD[AgentKind.antigravity] == (
+        ["agy", "--dangerously-skip-permissions"],
+        ["agy", "--dangerously-skip-permissions", "-c"],
     )
     qwen_no_ask = ["--exclude-tools", "ask_user_question,enter_plan_mode,exit_plan_mode"]
     assert _KIND_TO_CMD[AgentKind.qwen] == (
@@ -161,7 +162,7 @@ def test_temporary_hermes_resume_drops_continue_to_avoid_cross_session() -> None
 
 
 @pytest.mark.parametrize(
-    "kind", [k for k in _NEW_KINDS if k not in (AgentKind.nanobot, AgentKind.gemini)]
+    "kind", [k for k in _NEW_KINDS if k not in (AgentKind.nanobot, AgentKind.antigravity)]
 )
 def test_session_uses_template_verbatim(kind: AgentKind) -> None:
     agent = FlowAgent(
@@ -172,73 +173,135 @@ def test_session_uses_template_verbatim(kind: AgentKind) -> None:
     assert s._resume_cmd == list(_KIND_TO_CMD[kind][1])
 
 
-def _gemini_session() -> TmuxLiveSession:
+# ── Gemini CLI → Antigravity CLI ─────────────────────────────────────
+
+
+def test_gemini_kind_is_retired() -> None:
+    assert "gemini" not in {k.value for k in AgentKind}
+    assert AgentKind("gemini") is AgentKind.antigravity
+    assert AgentKind(" Gemini ") is AgentKind.antigravity
+    with pytest.raises(ValueError):
+        AgentKind("not-a-kind")
+
+
+def test_legacy_gemini_flow_spec_loads_as_antigravity() -> None:
+    """A Flow saved while Gemini CLI was supported keeps loading and runs on agy."""
+    from app.models import FlowSpec
+
+    spec = FlowSpec.model_validate({
+        "agents": [
+            {"id": "lead", "kind": "claude", "repo": "/tmp", "isLeader": True,
+             "isTemporary": True},
+            {"id": "g1", "kind": "gemini", "repo": "/tmp", "isTemporary": True},
+        ],
+        "tasks": [
+            {"id": "t1", "subject": "work", "ownerAgentId": "g1"},
+            {"id": "sum", "subject": "summary", "ownerAgentId": "lead",
+             "dependsOn": ["t1"], "isLeaderSummary": True},
+        ],
+    })
+    g1 = next(a for a in spec.agents if a.id == "g1")
+    assert g1.kind is AgentKind.antigravity
+    dumped = spec.model_dump(mode="json", by_alias=True)
+    assert {a["kind"] for a in dumped["agents"]} == {"claude", "antigravity"}
+    s = TmuxLiveSession(agent=g1, team_name="csflow-x", run_id="run-1", cli=object())
+    assert s._spawn_cmd[0] == "agy"
+
+
+def test_gemini_policy_module_removed() -> None:
+    import importlib.util
+
+    assert importlib.util.find_spec("app.integrations.gemini_policy") is None
+
+
+def _antigravity_session(cli: object = None, repo: str = "/tmp") -> TmuxLiveSession:
     agent = FlowAgent(
-        id="g1", kind=AgentKind.gemini, repo="/tmp", target_branch="main",
+        id="a1", kind=AgentKind.antigravity, repo=repo, target_branch="main",
         is_temporary=True,
     )
-    return TmuxLiveSession(agent=agent, team_name="csflow-x", run_id="run-1", cli=object())
+    return TmuxLiveSession(
+        agent=agent, team_name="csflow-x", run_id="run-1", cli=cli or object(),
+    )
 
 
-def test_gemini_session_appends_ask_user_deny_policy(tmp_path, monkeypatch) -> None:
-    """``ask_user`` stays interactive even in YOLO; a --policy deny removes it."""
-    from app.integrations.gemini_policy import gemini_policy_path
+def test_antigravity_commands_carry_per_agent_session_settings() -> None:
+    from app.integrations.antigravity_session import antigravity_session_settings_path
 
-    monkeypatch.setenv("HOME", str(tmp_path))  # no ~/.gemini/policies
-    s = _gemini_session()
-    policy = ["--policy", str(gemini_policy_path())]
-    assert s._spawn_cmd == [*_KIND_TO_CMD[AgentKind.gemini][0], *policy]
-    assert s._resume_cmd == [*_KIND_TO_CMD[AgentKind.gemini][1], *policy]
-    assert _KIND_TO_CMD[AgentKind.gemini][0] == ["gemini", "--approval-mode", "yolo"]
+    s = _antigravity_session()
+    settings = ["--settings", str(antigravity_session_settings_path("csflow-x", "a1"))]
+    assert s._spawn_cmd == [*_KIND_TO_CMD[AgentKind.antigravity][0], *settings]
+    assert s._resume_cmd == [*_KIND_TO_CMD[AgentKind.antigravity][1], *settings]
+    assert _KIND_TO_CMD[AgentKind.antigravity][0] == ["agy", "--dangerously-skip-permissions"]
 
 
-def test_gemini_session_keeps_operator_user_policies(tmp_path, monkeypatch) -> None:
-    """--policy replaces ~/.gemini/policies, so an existing dir is re-passed."""
-    from app.integrations.gemini_policy import gemini_policy_path
+def test_antigravity_session_settings_content(tmp_path) -> None:
+    import json
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    user_dir = tmp_path / ".gemini" / "policies"
-    user_dir.mkdir(parents=True)
-    s = _gemini_session()
-    assert s._spawn_cmd[-4:] == [
-        "--policy", str(gemini_policy_path()), "--policy", str(user_dir),
-    ]
+    from app.integrations.antigravity_session import write_antigravity_session_settings
 
+    real = tmp_path / "wt-real"
+    real.mkdir()
+    link = tmp_path / "wt-link"
+    link.symlink_to(real)
+    path = tmp_path / "s" / "a1.json"
 
-async def test_gemini_policy_file_written_and_refreshed() -> None:
-    from app.integrations.gemini_policy import ensure_gemini_policy, gemini_policy_path
-
-    path = gemini_policy_path()
-    assert not path.exists()
-    await _gemini_session()._ensure_spawn_artifacts("/tmp/wt")
-    content = path.read_text()
-    assert 'toolName = "ask_user"' in content
-    assert 'decision = "deny"' in content
-
-    path.write_text("stale")
-    ensure_gemini_policy()
-    assert path.read_text() == content
+    write_antigravity_session_settings(path, str(link))
+    assert json.loads(path.read_text()) == {
+        "artifactReviewPolicy": "always-proceed",
+        "trustedWorkspaces": [str(link), str(real)],
+    }
+    write_antigravity_session_settings(path, "/wt/other")
+    assert json.loads(path.read_text())["trustedWorkspaces"] == ["/wt/other"]
 
 
 @pytest.mark.asyncio
-async def test_gemini_spawn_writes_policy_before_spawn(tmp_path) -> None:
-    from app.integrations.gemini_policy import gemini_policy_path
+async def test_antigravity_settings_written_before_spawn_and_resume_and_removed_on_shutdown(
+    tmp_path, monkeypatch,
+) -> None:
+    """agy exits when its --settings file is missing, so it must exist (trusting
+    the right worktree) before every spawn/resume; shutdown removes it."""
+    import json
 
-    seen: list[bool] = []
+    from app.worktree.lookup import WorktreeInfo
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seen: list[dict] = []
 
     class _Cli:
         async def spawn_fresh(self, **_kw) -> None:
-            seen.append(gemini_policy_path().is_file())
+            seen.append(json.loads(s._antigravity_settings_path().read_text()))
             raise RuntimeError("stop after spawn")
 
-    agent = FlowAgent(
-        id="g1", kind=AgentKind.gemini, repo=str(tmp_path), target_branch="main",
-        is_temporary=True,
-    )
-    s = TmuxLiveSession(agent=agent, team_name="csflow-x", run_id="run-1", cli=_Cli())
+        async def spawn_resume(self, **_kw) -> None:
+            seen.append(json.loads(s._antigravity_settings_path().read_text()))
+            raise RuntimeError("stop after resume")
+
+        async def lifecycle_request_shutdown(self, **_kw) -> None:
+            return None
+
+        async def tmux_kill_agent_windows(self, **_kw) -> int:
+            return 0
+
+    s = _antigravity_session(cli=_Cli(), repo=str(tmp_path))
     with pytest.raises(RuntimeError, match="stop after spawn"):
         await s._do_spawn()
-    assert seen == [True]
+    assert seen[0]["trustedWorkspaces"][0] == s._fresh_worktree_path()
+    assert seen[0]["artifactReviewPolicy"] == "always-proceed"
+
+    s.worktree = WorktreeInfo(
+        agent_name="a1", branch_name="b", worktree_path="/wt/existing",
+        repo_root=str(tmp_path), base_branch="main",
+    )
+    with pytest.raises(RuntimeError, match="stop after resume"):
+        await s._spawn_resume_in_existing_worktree(command=s._resume_cmd, phase="resume")
+    assert seen[1]["trustedWorkspaces"] == ["/wt/existing"]
+
+    path = s._antigravity_settings_path()
+    assert path.is_file()
+    await s._do_shutdown()
+    assert not path.exists()
+    assert not path.parent.exists()
+    assert not (tmp_path / ".gemini").exists()  # operator's agy config untouched
 
 
 def test_existing_platforms_still_use_clawteam_injection() -> None:
@@ -269,8 +332,10 @@ def test_nanobot_is_not_user_exposed() -> None:
 
 
 def test_new_platform_headless_dispatch_commands() -> None:
-    assert _non_openclaw_dispatch_argv(kind=AgentKind.gemini, message="m") == [
-        "gemini", "--approval-mode", "yolo", "-p", "m",
+    assert _non_openclaw_dispatch_argv(kind=AgentKind.antigravity, message="m") == [
+        "agy", "--dangerously-skip-permissions",
+        "--settings", '{"artifactReviewPolicy": "always-proceed"}',
+        "--print-timeout", "0s", "-p", "m",
     ]
     assert _non_openclaw_dispatch_argv(kind=AgentKind.qwen, message="m") == [
         "qwen", "--approval-mode", "yolo", "m",

@@ -523,12 +523,13 @@ async def test_resolve_trust_platform_includes_cursor_by_explicit_agent_kind() -
     assert tmux_ready.resolve_trust_platform(agent_kind="claude") == "claude"
     assert tmux_ready.resolve_trust_platform(agent_kind="codex") == "codex"
     assert tmux_ready.resolve_trust_platform(agent_kind="cursor") == "cursor"
-    assert tmux_ready.resolve_trust_platform(agent_kind="gemini") == "gemini"
+    assert tmux_ready.resolve_trust_platform(agent_kind="antigravity") == "antigravity"
     assert tmux_ready.resolve_trust_platform(agent_kind="kimi") is None
     assert tmux_ready.resolve_trust_platform(agent_kind="codebuddy") is None
     assert tmux_ready.resolve_trust_platform(spawn_command=["agent", "--force"]) is None
     assert tmux_ready.resolve_trust_platform(spawn_command=["cursor"]) is None
-    assert tmux_ready.resolve_trust_platform(spawn_command=["gemini", "--yolo"]) == "gemini"
+    assert tmux_ready.resolve_trust_platform(spawn_command=["agy"]) is None
+    assert tmux_ready.resolve_trust_platform(spawn_command=["gemini", "--yolo"]) is None
     assert tmux_ready.resolve_trust_platform(spawn_command=["qodercli"]) is None
 
 
@@ -607,9 +608,26 @@ async def test_wait_tui_ready_succeeds_on_pi_status_footer_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_tui_ready_dismisses_gemini_trust_prompt() -> None:
-    trust_pane = "Please trust folder before continuing\n trust parent folder \n"
-    ready_pane = "loading\ngemini> "
+async def test_wait_tui_ready_dismisses_antigravity_trust_prompt() -> None:
+    # Screens captured from agy 1.4.10 in tmux.
+    trust_pane = (
+        "Accessing workspace:\n"
+        "/home/u/.clawteam/workspaces/t/w1\n"
+        "Do you trust the contents of this project?\n"
+        "Antigravity CLI requires permission to read, edit, and execute files here.\n"
+        "> Yes, I trust this folder\n"
+        "  No, exit\n"
+        "  ↑/↓ Navigate · enter Confirm\n"
+    )
+    ready_pane = (
+        "      ▄▀▀▄        Antigravity CLI 1.4.10\n"
+        "     ▀▀▀▀▀▀       Gemini API key\n"
+        "   ▄▀▀    ▀▀▄     /home/u/.clawteam/workspaces/t/w1\n"
+        "────────────────────────────────────────\n"
+        ">\n"
+        "────────────────────────────────────────\n"
+        "? for shortcuts                       Gemini 3.1 Pro · low\n"
+    )
     panes = iter([trust_pane, ready_pane])
     sent: list[tuple[str, str, bool]] = []
 
@@ -620,8 +638,8 @@ async def test_wait_tui_ready_dismisses_gemini_trust_prompt() -> None:
         sent.append((target, keys, literal))
 
     result = await tmux_ready.wait_tui_ready(
-        "team:gem",
-        trust_platform="gemini",
+        "team:agy",
+        trust_platform="antigravity",
         timeout_sec=2.0,
         poll_interval=0.01,
         capture=capture,
@@ -629,18 +647,43 @@ async def test_wait_tui_ready_dismisses_gemini_trust_prompt() -> None:
     )
 
     assert result.ok is True
-    assert sent == [("team:gem", "Enter", False)]
+    assert sent == [("team:agy", "Enter", False)]
+
+
+def test_antigravity_trust_never_confirms_while_no_is_highlighted() -> None:
+    pane = (
+        "Do you trust the contents of this project?\n"
+        "  Yes, I trust this folder\n"
+        "> No, exit\n"
+    )
+    assert tmux_ready._startup_prompt_action(pane, "antigravity") == "down"
 
 
 @pytest.mark.asyncio
-async def test_gemini_trust_skipped_on_oauth_screen() -> None:
+async def test_wait_tui_ready_fails_fast_when_antigravity_not_signed_in() -> None:
     pane = (
-        "Please visit the following URL to authorize the application:\n"
-        "https://accounts.google.com/o/oauth2/v2/auth?...\n"
-        "Enter the authorization code:\n"
+        " Welcome to the Antigravity CLI. You are currently not signed in.\n"
+        " Select login method:\n"
+        " > 1. Google OAuth\n"
+        "   2. Use a Google Cloud project\n"
+        "   ↑/↓ Navigate · enter Select\n"
     )
-    assert tmux_ready._looks_like_workspace_trust_prompt(pane, "gemini") is False
-    assert tmux_ready._startup_prompt_action(pane, "gemini") is None
+    sent: list[tuple[str, str, bool]] = []
+
+    async def send_keys(target: str, keys: str, *, literal: bool = False) -> None:
+        sent.append((target, keys, literal))
+
+    result = await tmux_ready.wait_tui_ready(
+        "team:agy",
+        trust_platform="antigravity",
+        timeout_sec=5.0,
+        poll_interval=0.01,
+        capture=lambda _t: _async_return(pane),
+        send_keys=send_keys,
+    )
+    assert result.ok is False
+    assert result.reason_code == "fatal_signal"
+    assert sent == []
 
 
 @pytest.mark.asyncio

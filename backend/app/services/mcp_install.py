@@ -64,8 +64,8 @@ def _cursor_path() -> Path:
     return Path.home() / ".cursor" / "mcp.json"
 
 
-def _gemini_path() -> Path:
-    return Path.home() / ".gemini" / "settings.json"
+def _antigravity_path() -> Path:
+    return Path.home() / ".gemini" / "config" / "mcp_config.json"
 
 
 def _codex_path() -> Path:
@@ -83,8 +83,8 @@ _PLATFORMS: dict[str, PlatformSpec] = {
                            "Global ~/.claude.json mcpServers."),
     "cursor": PlatformSpec("cursor", "json_mcp_servers", "cursor", _cursor_path,
                            "Global ~/.cursor/mcp.json mcpServers."),
-    "gemini": PlatformSpec("gemini", "json_mcp_servers", "gemini", _gemini_path,
-                           "Global ~/.gemini/settings.json mcpServers."),
+    "antigravity": PlatformSpec("antigravity", "json_mcp_servers", "agy", _antigravity_path,
+                                "Global ~/.gemini/config/mcp_config.json mcpServers."),
     "codex": PlatformSpec("codex", "codex_toml", "codex", _codex_path,
                           "Global ~/.codex/config.toml (mcp_servers table)."),
     "opencode": PlatformSpec("opencode", "opencode_json", "opencode", opencode_config_path,

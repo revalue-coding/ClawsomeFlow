@@ -360,9 +360,9 @@ class ClawTeamCli:
 
         ``skip_permissions`` controls whether ClawTeam injects its per-CLI
         permission-bypass flag (claude → ``--dangerously-skip-permissions``,
-        gemini/kimi/qwen/opencode → ``--yolo``, …). Callers that carry the exact
-        flag themselves (e.g. gemini needs ``--approval-mode yolo`` which CONFLICTS
-        with ClawTeam's ``--yolo``; opencode rejects ``--yolo`` outright) pass
+        kimi/qwen/opencode → ``--yolo``, …). Callers that carry the exact
+        flag themselves (e.g. qwen needs ``--approval-mode yolo``; opencode
+        rejects ``--yolo`` outright) pass
         ``False`` to take full control via ``command``.
         """
         return await self._spawn(_SpawnArgs(

@@ -641,6 +641,20 @@ def run_upgrade(
         report.repair_warnings.append(f"temp-agent trust config init: {exc}")
         logger.warning("upgrade_temp_agent_trust_failed", error=str(exc))
 
+    # 0e1. Gemini CLI support was replaced by Antigravity CLI; drop the
+    # code-owned ask_user deny policy it used to rewrite before every gemini
+    # spawn so upgraded homes match fresh ones. Idempotent: absent → no-op.
+    try:
+        stale_policy = (
+            paths.clawsomeflow_home_path() / ".system" / "gemini-unattended-policy.toml"
+        )
+        if stale_policy.is_file():
+            stale_policy.unlink()
+            logger.info("upgrade_gemini_policy_removed", path=str(stale_policy))
+    except OSError as exc:  # pragma: no cover - defensive; never block upgrade
+        report.repair_warnings.append(f"gemini policy cleanup: {exc}")
+        logger.warning("upgrade_gemini_policy_cleanup_failed", error=str(exc))
+
     # 0e2. ClawTeam spawn_ready_timeout (``~/.clawteam/config.json``). Stock 30s
     # makes ``_confirm_workspace_trust_if_prompted`` spin the full window when no
     # trust dialog is shown, holding repo locks unnecessarily. Lower to 2s on the

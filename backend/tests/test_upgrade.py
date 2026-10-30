@@ -244,6 +244,28 @@ def test_run_upgrade_seeds_qoder_codebuddy_trust_when_installed(
     assert str(home) in qoder["permissions"]["trustDirectories"]
 
 
+def test_run_upgrade_removes_retired_gemini_policy(
+    tmp_clawsomeflow_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    """Gemini CLI → Antigravity: the stale gemini policy file is dropped, so an
+    upgraded home matches a fresh one; re-running is a no-op."""
+    monkeypatch.setattr(upgrade, "MIGRATIONS", [])
+    _disable_external_calls(monkeypatch)
+    stale = paths.clawsomeflow_home_path() / ".system" / "gemini-unattended-policy.toml"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text('[[rule]]\ntoolName = "ask_user"\n', encoding="utf-8")
+
+    report = upgrade.run_upgrade(config=fake_config, target_version="1.2.3")
+    assert report.ok is True
+    assert not stale.exists()
+
+    report = upgrade.run_upgrade(config=fake_config, target_version="1.2.3")
+    assert report.ok is True
+    assert not stale.exists()
+
+
 def test_run_upgrade_sets_clawteam_spawn_ready_timeout(
     tmp_clawsomeflow_home: Path,
     tmp_path: Path,

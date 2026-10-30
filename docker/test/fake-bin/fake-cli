@@ -2,7 +2,7 @@
 # Generic, auth-free fake agent CLI for the ClawsomeFlow Docker test image.
 #
 # It is symlinked under every login-gated agent name (claude, codex, hermes,
-# gemini, ...). Its only job is to let tests that *shell out* to an agent CLI
+# agy, ...). Its only job is to let tests that *shell out* to an agent CLI
 # close the loop deterministically — without any real account, login, or API
 # key. Real behaviour is exercised by the actual openclaw/clawteam CLIs; the
 # LLM "thinking" step is what gets faked here.

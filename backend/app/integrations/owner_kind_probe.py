@@ -138,7 +138,7 @@ _TEMP_PROBES: tuple[tuple[str, Callable[[], bool]], ...] = (
     ("claude", lambda: probe_binary_installed("claude")),
     ("codex", lambda: probe_binary_installed("codex")),
     ("cursor", lambda: probe_binary_installed("agent", "cursor", extra_paths=_cursor_extra_paths())),
-    ("gemini", lambda: probe_binary_installed("gemini")),
+    ("antigravity", lambda: probe_binary_installed("agy")),
     ("kimi", lambda: probe_binary_installed("kimi")),
     ("qwen", lambda: probe_binary_installed("qwen")),
     ("opencode", lambda: probe_binary_installed("opencode")),

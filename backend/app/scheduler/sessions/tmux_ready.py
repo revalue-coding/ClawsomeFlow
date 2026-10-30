@@ -12,13 +12,14 @@ Why this exists:
 * For OpenClaw we ``tmux send-keys`` into a bare bash; we still need to
   wait for the bash ``$`` prompt before sending the next command.
 
-ClawTeam's spawn path runs ``_confirm_workspace_trust_if_prompted`` **only**
-for **claude**, **codex**, and **gemini** (plus Claude skip-permissions and
-Codex update gate). We keep that scope intact and add one ClawsomeFlow-local
-Cursor special case for its explicit workspace-trust menu, which cannot be
-bypassed by ``--force``/``--approve-mcps`` in interactive TUI mode. All other
-platforms skip startup prompt handling (qoder/codebuddy rely on
-``temp_agent_trust`` seeding instead).
+ClawTeam's spawn path runs ``_confirm_workspace_trust_if_prompted`` for
+**claude** and **codex** (plus Claude skip-permissions and Codex update gate);
+we mirror that scope. ClawsomeFlow-local special cases: Cursor's explicit
+workspace-trust menu (not bypassed by ``--force``/``--approve-mcps`` in
+interactive TUI mode) and Antigravity's folder-trust dialog (normally
+pre-empted by the ``antigravity_session`` ``--settings`` overlay; this is the
+fallback). All other platforms skip startup prompt handling (qoder/codebuddy
+rely on ``temp_agent_trust`` seeding instead).
 
 Public API:
 * :data:`TRUST_HANDLED_PLATFORMS` — platforms with startup-prompt fallback.
@@ -43,14 +44,19 @@ from app.logging_setup import get_logger
 logger = get_logger("scheduler.tmux_ready")
 
 # ClawTeam ``_confirm_workspace_trust_if_prompted`` scope (tmux_backend.py).
-_CLAWTEAM_TRUST_HANDLED_PLATFORMS: frozenset[str] = frozenset({"claude", "codex", "gemini"})
+_CLAWTEAM_TRUST_HANDLED_PLATFORMS: frozenset[str] = frozenset({"claude", "codex"})
 
-# Cursor is deliberately a ClawsomeFlow-local exception, not a ClawTeam behavior
-# change. Only explicit ``AgentKind.cursor`` enables it; a binary named
-# ``agent``/``cursor`` is not inferred as Cursor from argv alone.
+# Cursor / Antigravity are deliberately ClawsomeFlow-local exceptions, not a
+# ClawTeam behavior change. Only the explicit ``AgentKind`` enables them; a
+# binary named ``agent``/``agy`` is not inferred from argv alone.
 _CURSOR_TRUST_PLATFORM = "cursor"
+_ANTIGRAVITY_TRUST_PLATFORM = "antigravity"
+_LOCAL_TRUST_PLATFORMS: frozenset[str] = frozenset({
+    _CURSOR_TRUST_PLATFORM,
+    _ANTIGRAVITY_TRUST_PLATFORM,
+})
 TRUST_HANDLED_PLATFORMS: frozenset[str] = (
-    _CLAWTEAM_TRUST_HANDLED_PLATFORMS | frozenset({_CURSOR_TRUST_PLATFORM})
+    _CLAWTEAM_TRUST_HANDLED_PLATFORMS | _LOCAL_TRUST_PLATFORMS
 )
 
 
@@ -70,8 +76,8 @@ def resolve_trust_platform(
     spawn_command: Sequence[str] | None = None,
 ) -> str | None:
     """Return the trust-handling platform key, or None when ClawTeam skips it."""
-    if agent_kind == _CURSOR_TRUST_PLATFORM:
-        return _CURSOR_TRUST_PLATFORM
+    if agent_kind in _LOCAL_TRUST_PLATFORMS:
+        return agent_kind
     if agent_kind in _CLAWTEAM_TRUST_HANDLED_PLATFORMS:
         return agent_kind
     if spawn_command:
@@ -89,7 +95,6 @@ _AGENT_PROMPT_PATTERNS = [
     re.compile(r"OpenAI Codex \(v"),    # codex (modern banner)
     re.compile(r"^agent>", re.M),       # cursor agent
     re.compile(r"^>\s*$", re.M),        # cursor agent (minimal prompt)
-    re.compile(r"gemini>"),             # gemini
     # pi renders a boxed composer, NOT a ``pi>`` prompt. Match two stable markers
     # (verified against pi v0.80.7): the startup keybind hint (shown by default —
     # quietStartup defaults to false) and the persistent status footer
@@ -101,6 +106,7 @@ _AGENT_PROMPT_PATTERNS = [
     re.compile(r"opencode\s*>"),        # opencode
     re.compile(r"^\? "),                # nanobot
     re.compile(r"⚕"),                   # hermes (medical-staff icon in status line)
+    re.compile(r"Antigravity CLI \d+\.\d+"),  # antigravity banner above its bare ">" composer
     re.compile(r"⏵|❯|⟫|›"),             # generic fancy prompts (› = codex/modern composer)
 ]
 _AGENT_FATAL_PATTERNS = [
@@ -109,6 +115,9 @@ _AGENT_FATAL_PATTERNS = [
     # worktree was recreated). It stays on this screen instead of falling
     # through to a composer, so waiting out the full timeout is pure delay.
     re.compile(r"No previous chats found", re.IGNORECASE),
+    # Antigravity CLI before the operator's one-time Google sign-in: a login
+    # menu nobody in the pane can complete.
+    re.compile(r"Antigravity CLI\. You are currently not signed in", re.IGNORECASE),
 ]
 
 _SHELL_PROMPT_PATTERNS = [
@@ -161,12 +170,10 @@ def _looks_like_workspace_trust_prompt(pane_text: str, platform: str) -> bool:
             and "press enter to continue" in lower
         )
 
-    if platform == "gemini":
-        # OAuth / login gates are not folder-trust dialogs; ClawTeam cannot auto-dismiss
-        # these either — do not spam Enter while waiting for an auth code.
-        if "authorization code" in lower or "oauth2" in lower:
-            return False
-        return "trust folder" in lower or "trust parent folder" in lower
+    if platform == _ANTIGRAVITY_TRUST_PLATFORM:
+        # agy 1.4: "Do you trust the contents of this project?" /
+        # "> Yes, I trust this folder" / "  No, exit".
+        return "trust the contents of this project" in lower and "yes, i trust" in lower
 
     if platform == "cursor":
         return (
@@ -208,19 +215,19 @@ def _looks_like_claude_skip_permissions_prompt(pane_text: str) -> bool:
     return has_accept_choice and has_permissions_warning
 
 
-def _claude_trust_menu_action(pane_text: str) -> str:
-    """Confirm the trust menu only once its cursor is on the "Yes" option.
+def _trust_menu_action(pane_text: str, *, cursor: str = "❯") -> str:
+    """Confirm the trust menu only once its *cursor* is on the "Yes" option.
 
     Option order differs by version: older Claude defaults to ``❯ 1. Yes, I
     trust this folder``, 2.1.27x defaults to ``❯ No, exit`` (Enter there quits
-    Claude).
+    Claude). Antigravity marks the selection with ``>``.
     Keys sent right as the dialog first renders can be dropped, so the cursor
     is moved with a lone Down and re-checked on the next poll — Enter is never
     sent while "No" is highlighted.
     """
     for line in reversed(pane_text.splitlines()):
         option = line.strip()
-        if option.startswith("❯"):
+        if option.startswith(cursor):
             return "enter" if "yes" in option.lower() else "down"
     return "enter"
 
@@ -255,7 +262,7 @@ def _startup_prompt_action(
         if _looks_like_claude_skip_permissions_prompt(pane_text):
             return "down-enter"
         if _looks_like_workspace_trust_prompt(pane_text, "claude"):
-            return _claude_trust_menu_action(pane_text)
+            return _trust_menu_action(pane_text)
         return None
 
     if trust_platform == "codex":
@@ -265,9 +272,9 @@ def _startup_prompt_action(
             return "enter"
         return None
 
-    if trust_platform == "gemini":
-        if _looks_like_workspace_trust_prompt(pane_text, "gemini"):
-            return "enter"
+    if trust_platform == _ANTIGRAVITY_TRUST_PLATFORM:
+        if _looks_like_workspace_trust_prompt(pane_text, _ANTIGRAVITY_TRUST_PLATFORM):
+            return _trust_menu_action(pane_text, cursor=">")
         return None
 
     if trust_platform == "cursor":

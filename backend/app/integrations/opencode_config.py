@@ -1,7 +1,7 @@
 """Idempotent opencode global-config seeding.
 
 opencode (the ``opencode`` TUI CLI) is a *temporary* Flow agent platform. Unlike
-claude/codex/gemini/kimi/qwen, opencode's **interactive** mode has NO permission
+claude/codex/antigravity/kimi/qwen, opencode's **interactive** mode has NO permission
 bypass CLI flag — auto-approval of tool calls is config-only
 (``"permission": "allow"`` in opencode's global config). ClawsomeFlow dispatches
 to the interactive TUI via tmux paste and cannot click an approval dialog, so

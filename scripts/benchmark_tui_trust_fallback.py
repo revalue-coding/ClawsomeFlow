@@ -2,7 +2,7 @@
 """Benchmark wait_tui_ready fallback latency per agent platform.
 
 Simulates ClawTeam missing startup gates (``spawn_ready_timeout=0.01``) for
-claude/codex/gemini, then measures ``wait_tui_ready`` recovery time.
+claude/codex, then measures ``wait_tui_ready`` recovery time.
 
 Usage (from repo root)::
     cd backend && python3 ../scripts/benchmark_tui_trust_fallback.py --runs 20
@@ -54,9 +54,9 @@ _PLATFORM_SPAWN: dict[str, dict] = {
         ],
         "skip_permissions": False,
     },
-    "gemini": {
-        "binary": "gemini",
-        "cmd": ["gemini", "--approval-mode", "yolo"],
+    "antigravity": {
+        "binary": "agy",
+        "cmd": ["agy", "--dangerously-skip-permissions"],
         "skip_permissions": False,
     },
     "kimi": {"binary": "kimi", "cmd": ["kimi", "--yolo"], "skip_permissions": False},

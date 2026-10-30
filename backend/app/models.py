@@ -154,7 +154,8 @@ class AgentKind(str, Enum):
     openclaw = "openclaw"
     kimi = "kimi"
     nanobot = "nanobot"
-    gemini = "gemini"
+    # Google Antigravity CLI (binary ``agy``) — the successor of Gemini CLI.
+    antigravity = "antigravity"
     qwen = "qwen"
     opencode = "opencode"
     pi = "pi"
@@ -168,6 +169,21 @@ class AgentKind(str, Enum):
     # the /api/external receipt endpoint (or the same-origin WebUI for the
     # "human" channel). See ExternalNodeConfig.
     external = "external"
+
+    @classmethod
+    def _missing_(cls, value: object) -> AgentKind | None:
+        # Persisted Flow specs / API callers may still carry a retired kind;
+        # map it onto its successor so they keep loading and running.
+        if isinstance(value, str):
+            successor = _RETIRED_AGENT_KINDS.get(value.strip().lower())
+            if successor is not None:
+                return cls(successor)
+        return None
+
+
+# Retired kind value → successor value. Gemini CLI stopped serving consumer
+# accounts on 2026-06-18 and was replaced by Antigravity CLI.
+_RETIRED_AGENT_KINDS: dict[str, str] = {"gemini": "antigravity"}
 
 
 # Agents that don't have a long-lived TUI session (special-cased in scheduler).

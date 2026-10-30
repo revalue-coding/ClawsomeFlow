@@ -285,6 +285,11 @@ def _to_summary(flow: Flow) -> FlowSummary:
             if not isinstance(a, dict):
                 continue
             k = a.get("kind")
+            if isinstance(k, str) and k:
+                try:
+                    k = AgentKind(k).value  # retired kinds → successor
+                except ValueError:
+                    pass
             if isinstance(k, str) and k and k not in seen:
                 seen.add(k)
                 kinds.append(k)

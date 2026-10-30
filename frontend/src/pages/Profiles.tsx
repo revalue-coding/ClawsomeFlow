@@ -34,7 +34,6 @@ const AGENT_CHOICES = [
   "claude",
   "codex",
   "cursor",
-  "gemini",
   "kimi",
   "nanobot",
   "openclaw",

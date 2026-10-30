@@ -22,11 +22,11 @@ def test_probe_binary_installed_via_login_shell(monkeypatch: pytest.MonkeyPatch)
 
     class _Proc:
         returncode = 0
-        stdout = "/home/user/.local/bin/gemini\n"
+        stdout = "/home/user/.local/bin/agy\n"
 
-    monkeypatch.setattr(probe, "_is_executable", lambda path: str(path).endswith("gemini"))
+    monkeypatch.setattr(probe, "_is_executable", lambda path: str(path).endswith("agy"))
     monkeypatch.setattr(probe.subprocess, "run", lambda *a, **kw: _Proc())
-    assert probe.probe_binary_installed("gemini") is True
+    assert probe.probe_binary_installed("agy") is True
 
 
 def test_detect_persistent_owner_kinds_uses_openclaw_resolver(

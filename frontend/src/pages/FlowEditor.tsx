@@ -73,7 +73,7 @@ type NonOpenclawOwnerKind =
   | "claude"
   | "codex"
   | "cursor"
-  | "gemini"
+  | "antigravity"
   | "kimi"
   | "qwen"
   | "opencode"
@@ -337,7 +337,7 @@ const NEW_OWNER_KINDS: NonOpenclawOwnerKind[] = [
   "claude",
   "codex",
   "cursor",
-  "gemini",
+  "antigravity",
   "kimi",
   "qwen",
   "opencode",
@@ -794,7 +794,7 @@ function ownerKindLabel(
   if (kind === "openclaw") return t("flowEditor.taskFields.ownerKindOpenclaw");
   if (kind === "codex") return t("flowEditor.taskFields.ownerKindCodex");
   if (kind === "cursor") return t("flowEditor.taskFields.ownerKindCursor");
-  if (kind === "gemini") return t("flowEditor.taskFields.ownerKindGemini");
+  if (kind === "antigravity") return t("flowEditor.taskFields.ownerKindAntigravity");
   if (kind === "kimi") return t("flowEditor.taskFields.ownerKindKimi");
   if (kind === "qwen") return t("flowEditor.taskFields.ownerKindQwen");
   if (kind === "opencode") return t("flowEditor.taskFields.ownerKindOpencode");

@@ -11,7 +11,6 @@ upgrade-only users converge with fresh deploys (DEV.md upgrade-parity).
 Measured trust-dialog handling (tmux, fresh worktree, send Enter once):
 * Claude 2.1.x — ~1.3s end-to-end
 * Codex 0.139 — typically ~0.8–1.4s; cold start can exceed 2s (rare)
-* Gemini — varies; ClawTeam trust handling is best-effort
 
 Best-effort: never raises; a failed write must not block deploy/upgrade.
 """

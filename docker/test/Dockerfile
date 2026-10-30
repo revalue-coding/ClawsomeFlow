@@ -42,7 +42,7 @@ RUN uv pip install --system /opt/clawteam
 # ("制造假回复来闭环"). One generic script, symlinked under every platform name.
 COPY fake-bin/fake-cli /usr/local/bin/fake-cli
 RUN chmod +x /usr/local/bin/fake-cli \
-    && for n in claude codex hermes gemini qwen kimi opencode cursor nanobot qoder codebuddy; do \
+    && for n in claude codex hermes agy qwen kimi opencode cursor nanobot qoder codebuddy; do \
          ln -sf /usr/local/bin/fake-cli /usr/local/bin/$n; \
        done
 

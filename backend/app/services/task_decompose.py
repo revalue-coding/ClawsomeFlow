@@ -40,6 +40,9 @@ from typing import Any
 
 from app.config import Config, load_config
 from app.integrations import internal_token as it
+from app.integrations.antigravity_session import (
+    UNATTENDED_SETTINGS as ANTIGRAVITY_UNATTENDED_SETTINGS,
+)
 from app.integrations.git_repo import git_init_repo
 from app.integrations.openclaw_bridge import (
     OpenclawBridge,
@@ -91,7 +94,7 @@ _NON_OPENCLAW_SUPPORTED_KINDS: frozenset[AgentKind] = frozenset({
     AgentKind.claude,
     AgentKind.codex,
     AgentKind.cursor,
-    AgentKind.gemini,
+    AgentKind.antigravity,
     AgentKind.kimi,
     AgentKind.qwen,
     AgentKind.opencode,
@@ -116,7 +119,7 @@ _TEMP_AGENT_PLATFORM_BINARIES: tuple[tuple[AgentKind, str], ...] = (
     (AgentKind.claude, "claude"),
     (AgentKind.codex, "codex"),
     (AgentKind.cursor, "agent"),
-    (AgentKind.gemini, "gemini"),
+    (AgentKind.antigravity, "agy"),
     (AgentKind.kimi, "kimi"),
     (AgentKind.qwen, "qwen"),
     (AgentKind.opencode, "opencode"),
@@ -375,7 +378,7 @@ Invariants (the server rejects violations):
 2. The leader owns no other (non-summary) task.
 3. Task ids and agent ids are unique; `dependsOn` references resolve; the DAG is acyclic.
 4. Owner kinds limited to `openclaw`, `hermes`, a temporary-agent platform
-   advertised as available on this host (`claude`, `codex`, `cursor`, `gemini`,
+   advertised as available on this host (`claude`, `codex`, `cursor`, `antigravity`,
    `kimi`, `qwen`, `opencode`, `qoder`, `codebuddy`), or `external` with
    `external.channel = "human"` (section 3). Only assign temporary platforms
    listed as available on this host; NEVER emit an `external.channel` of
@@ -913,11 +916,18 @@ def _non_openclaw_dispatch_argv(
             "--output-format",
             "stream-json",
         ]
-    # gemini: `-p <prompt>` is the non-interactive one-shot mode. Use the
-    # non-deprecated `--approval-mode yolo` (gemini rejects `--yolo` together with
-    # `--approval-mode`). Run cwd comes from the subprocess working directory.
-    if kind == AgentKind.gemini:
-        return ["gemini", "--approval-mode", "yolo", "-p", message]
+    # antigravity (`agy`): `-p <prompt>` is the headless one-shot mode; without
+    # `--dangerously-skip-permissions` shell commands are soft-denied there.
+    # `--settings` (session-only, never saved) keeps artifact review from
+    # waiting for a human; headless has no folder-trust gate. `--print-timeout
+    # 0s` = wait for the turn — our subprocess timeout tier bounds the run.
+    # Run cwd comes from the subprocess working directory.
+    if kind == AgentKind.antigravity:
+        return [
+            "agy", "--dangerously-skip-permissions",
+            "--settings", json.dumps(ANTIGRAVITY_UNATTENDED_SETTINGS),
+            "--print-timeout", "0s", "-p", message,
+        ]
     # qwen (gemini-cli fork): positional prompt is one-shot (`-p` is deprecated);
     # `--approval-mode yolo` auto-approves.
     if kind == AgentKind.qwen:

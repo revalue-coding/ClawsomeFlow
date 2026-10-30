@@ -32,6 +32,11 @@ from pathlib import Path
 
 from app import logging_setup
 from app.config import load_config
+from app.integrations.antigravity_session import (
+    antigravity_session_settings_path,
+    remove_antigravity_session_settings,
+    write_antigravity_session_settings,
+)
 from app.integrations.claude_trust import ensure_claude_folder_trusted
 from app.integrations.clawteam_cli import (
     ClawTeamCli,
@@ -39,7 +44,6 @@ from app.integrations.clawteam_cli import (
     get_clawteam_cli,
 )
 from app.integrations.clawteam_spawn_config import clawteam_config_path
-from app.integrations.gemini_policy import ensure_gemini_policy, gemini_policy_args
 from app.logging_setup import get_logger
 from app.models import AgentKind, FlowAgent
 from app.scheduler.sessions.base import WorkerSession
@@ -96,7 +100,8 @@ _CODEX_TUI_OVERRIDES: tuple[str, ...] = (
 # Interactive "ask the user" / plan-approval tools. They are NOT permission
 # prompts, so bypassPermissions / yolo leave them on, and the option menu they
 # open stalls an unattended pane until the task timeout. Disabled per CLI with
-# its own flag (gemini: see app.integrations.gemini_policy).
+# its own flag (antigravity has no such tool switch; the dispatch prompt's
+# Unattended clause covers it).
 _CLAUDE_STYLE_ASK_TOOLS: tuple[str, ...] = ("AskUserQuestion", "EnterPlanMode", "ExitPlanMode")
 _CLAUDE_NO_ASK: tuple[str, ...] = ("--disallowedTools", ",".join(_CLAUDE_STYLE_ASK_TOOLS))
 # qodercli's --disallowed-tools accumulates one value per flag (no comma split).
@@ -124,9 +129,14 @@ _QWEN_NO_ASK: tuple[str, ...] = (
 #     the EXACT permission flag ourselves and pass ``--no-skip-permissions`` so
 #     ClawTeam injects nothing. Required because ClawTeam's ``--yolo`` injection
 #     is wrong for current CLI versions (verified against installed binaries):
-#       gemini 0.46 → ``--yolo`` and ``--approval-mode`` HARD-CONFLICT, so we use
-#                     the non-deprecated ``--approval-mode yolo``; resume is
-#                     ``--resume latest`` (gemini has NO ``--continue``).
+#       antigravity → ``agy`` (Gemini CLI's successor; unknown to ClawTeam, so it
+#                     injects nothing anyway). ``--dangerously-skip-permissions``
+#                     auto-approves every tool call; resume ``-c`` continues the
+#                     most recent conversation OF THE WORKSPACE (cwd-scoped, so
+#                     the per-agent worktree isolates it). Folder trust and
+#                     artifact review are not covered by that flag; a per-agent
+#                     ``--settings`` overlay is appended in __init__ (see
+#                     antigravity_session).
 #       qwen 0.18   → gemini fork: ``--approval-mode yolo``; ``--continue`` only
 #                     works when ``--chat-recording`` was set at spawn, so we add
 #                     it to both fresh and resume.
@@ -169,9 +179,9 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
         ["agent", "--force", "--approve-mcps", "--sandbox", "disabled"],
         ["agent", "--force", "--approve-mcps", "--sandbox", "disabled", "--continue"],
     ),
-    AgentKind.gemini:   (
-        ["gemini", "--approval-mode", "yolo"],
-        ["gemini", "--approval-mode", "yolo", "--resume", "latest"],
+    AgentKind.antigravity: (
+        ["agy", "--dangerously-skip-permissions"],
+        ["agy", "--dangerously-skip-permissions", "-c"],
     ),
     AgentKind.qwen:     (
         ["qwen", "--approval-mode", "yolo", *_QWEN_NO_ASK, "--chat-recording"],
@@ -209,11 +219,11 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
 #
 # ``custom`` is deliberately included: the user's registered command must carry
 # its own auto-approve flags. ClawTeam injects flags by BASENAME, so a custom
-# command whose binary happens to be named ``claude``/``gemini``/… would
+# command whose binary happens to be named ``claude``/``kimi``/… would
 # otherwise get an unexpected (possibly duplicate/conflicting) flag injected —
 # self-control keeps custom-agent behaviour fully deterministic.
 _SELF_PERMISSION_KINDS: frozenset[AgentKind] = frozenset({
-    AgentKind.gemini,
+    AgentKind.antigravity,
     AgentKind.qwen,
     AgentKind.kimi,
     AgentKind.opencode,
@@ -295,10 +305,10 @@ class TmuxLiveSession(WorkerSession):
                 # worktree: the committed + partial work on disk is kept, only the
                 # conversation restarts. Safer than a cross-session resume.
                 self._resume_cmd = [a for a in self._resume_cmd if a != "-c"]
-            if agent.kind == AgentKind.gemini:
-                policy_args = gemini_policy_args()
-                self._spawn_cmd += policy_args
-                self._resume_cmd += policy_args
+            if agent.kind == AgentKind.antigravity:
+                settings_args = ["--settings", str(self._antigravity_settings_path())]
+                self._spawn_cmd += settings_args
+                self._resume_cmd += settings_args
             if agent.kind == AgentKind.nanobot:
                 # nanobot keys sessions by ``-s`` (default ``cli:direct``), NOT by
                 # cwd. Inject a stable, per-agent session id so (1) concurrent
@@ -314,7 +324,7 @@ class TmuxLiveSession(WorkerSession):
         """Whether ClawTeam should inject its per-CLI permission-bypass flag.
 
         False for kinds that carry the exact flag themselves (see
-        _SELF_PERMISSION_KINDS) — passing both would duplicate/conflict (gemini)
+        _SELF_PERMISSION_KINDS) — passing both would duplicate/conflict (qwen)
         or fail outright (opencode rejects ClawTeam's ``--yolo``).
         """
         return self.agent.kind not in _SELF_PERMISSION_KINDS
@@ -336,9 +346,16 @@ class TmuxLiveSession(WorkerSession):
         root = Path(data_dir).expanduser() if data_dir else Path.home() / ".clawteam"
         return str(root / "workspaces" / self.team_name / self.agent.id)
 
+    def _antigravity_settings_path(self) -> Path:
+        return antigravity_session_settings_path(self.team_name, self.agent.id)
+
     async def _ensure_spawn_artifacts(self, worktree_path: str) -> None:
-        if self.agent.kind == AgentKind.gemini:
-            ensure_gemini_policy()
+        if self.agent.kind == AgentKind.antigravity:
+            await asyncio.to_thread(
+                write_antigravity_session_settings,
+                self._antigravity_settings_path(),
+                worktree_path,
+            )
         elif self.agent.kind == AgentKind.claude:
             await asyncio.to_thread(ensure_claude_folder_trusted, worktree_path)
 
@@ -550,6 +567,8 @@ class TmuxLiveSession(WorkerSession):
                 agent_id=self.agent.id,
                 window_count=killed,
             )
+        if self.agent.kind == AgentKind.antigravity:
+            remove_antigravity_session_settings(self._antigravity_settings_path())
 
 
 __all__ = ["TmuxLiveSession", "UnsupportedAgentKind"]

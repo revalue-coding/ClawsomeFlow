@@ -745,7 +745,7 @@ function LeaderCell({
         return "bg-amber-50 text-amber-700 border-amber-200";
       case "cursor":
         return "bg-sky-50 text-sky-700 border-sky-200";
-      case "gemini":
+      case "antigravity":
         return "bg-emerald-50 text-emerald-700 border-emerald-200";
       case "kimi":
         return "bg-rose-50 text-rose-700 border-rose-200";

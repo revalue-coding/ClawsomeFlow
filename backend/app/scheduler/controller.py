@@ -302,7 +302,7 @@ _RUNTIME_SOCKET_CLOSED_RE = re.compile(
     re.IGNORECASE,
 )
 _RUNTIME_ERROR_PROMPT_RE = re.compile(
-    r"(?:^|\n)(?:❯|\$|%|#|agent>|codex>|gemini>|kimi>|qwen>|pi>|opencode>|nanobot>)[ \t]*$",
+    r"(?:^|\n)(?:❯|\$|%|#|agent>|codex>|kimi>|qwen>|pi>|opencode>|nanobot>)[ \t]*$",
     re.MULTILINE,
 )
 
@@ -4526,7 +4526,7 @@ class RunController:
                 leader, prompt, storage=self.storage
             )
         else:
-            # Hermes + every TUI platform (claude/codex/gemini/cursor/…).
+            # Hermes + every TUI platform (claude/codex/cursor/antigravity/…).
             cwd, _ = await self._hermes_dispatch_cwd(leader)
             argv = _non_openclaw_dispatch_argv(
                 kind=leader.kind,

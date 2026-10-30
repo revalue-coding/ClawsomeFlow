@@ -19,7 +19,7 @@ once (idempotent, non-destructive), gated on the CLI being installed:
 Tool-call approval is still handled per-spawn via ``--permission-mode`` (these
 settings ONLY cover folder trust). Operator auth is a one-time prerequisite
 (CodeBuddy interactive ``login``; Qoder ``QODER_PERSONAL_ACCESS_TOKEN``) — we do
-not automate it, same as claude/codex/gemini API credentials.
+not automate it, same as claude/codex/antigravity credentials.
 
 Called from ``cli/init.py`` (fresh) and ``upgrade.py::run_upgrade`` (upgrade path)
 so upgrade-only users converge with fresh deploys (DEV.md upgrade-parity).

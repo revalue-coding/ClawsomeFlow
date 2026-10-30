@@ -185,7 +185,7 @@ export type AgentKind =
   | "openclaw"
   | "kimi"
   | "nanobot"
-  | "gemini"
+  | "antigravity"
   | "qwen"
   | "opencode"
   | "pi"

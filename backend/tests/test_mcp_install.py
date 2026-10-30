@@ -12,7 +12,8 @@ from app.services import mcp_install
 
 def test_supported_platforms_includes_core() -> None:
     plats = set(mcp_install.supported_platforms())
-    assert {"hermes", "openclaw", "claude", "codex", "gemini", "cursor", "opencode"} <= plats
+    assert {"hermes", "openclaw", "claude", "codex", "antigravity", "cursor", "opencode"} <= plats
+    assert "gemini" not in plats
 
 
 def test_unknown_platform_raises() -> None:
@@ -83,12 +84,23 @@ def test_json_install_preserves_existing_keys(tmp_path: Path, monkeypatch: pytes
 
 def test_json_install_does_not_clobber_unparseable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    p = tmp_path / ".gemini" / "settings.json"
+    p = tmp_path / ".gemini" / "config" / "mcp_config.json"
     p.parent.mkdir(parents=True)
     p.write_text("{not valid json")
-    res = mcp_install.install("gemini", force=True)
+    res = mcp_install.install("antigravity", force=True)
     assert res.action == "unchanged"
     assert p.read_text() == "{not valid json"
+
+
+def test_antigravity_install_writes_standalone_mcp_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    res = mcp_install.install("antigravity", force=True)
+    assert res.action == "written"
+    data = json.loads((tmp_path / ".gemini" / "config" / "mcp_config.json").read_text())
+    assert data["mcpServers"]["clawsomeflow"] == {"command": "csflow", "args": ["mcp", "serve"]}
+    assert not (tmp_path / ".gemini" / "settings.json").exists()
 
 
 def test_codex_install_append_and_uninstall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -90,7 +90,7 @@ class ProfileSetPayload(_CamelModel):
 
     agent: str | None = Field(
         default=None,
-        description="Default agent CLI name (claude/codex/cursor/gemini/kimi/nanobot/...)",
+        description="Default agent CLI name (claude/codex/cursor/kimi/nanobot/...)",
     )
     description: str | None = None
     command: str | None = Field(
