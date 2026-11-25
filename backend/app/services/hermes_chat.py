@@ -1,6 +1,6 @@
 """Tracked, killable Hermes chat turns with reconnectable elapsed progress.
 
-Wraps a single ``hermes -p <id> chat --yolo -Q [--resume <sid>|-c] -q <msg>``
+Wraps a single ``hermes -p <id> chat --yolo -Q [--resume <sid>] -q <msg>``
 invocation per attempt. Progress exposed to the WebUI is **elapsed time only**;
 the client-side :class:`~frontend PendingReply` bubble handles the 10s+
 "still thinking" hint.
@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 from app.logging_setup import get_logger
 from app.services import hermes_agents as ha
+from app.services import hermes_chat_sessions as chat_sessions
 from app.services import subprocess_registry as _subproc_registry
 from app.services.chat_retry import (
     CHAT_CONNECTION_RETRY_ATTEMPTS,
@@ -189,14 +190,13 @@ def _spawn_hermes(
 ) -> subprocess.Popen[str]:
     exe = ha.hermes_executable()
     assert exe is not None
-    # Prefer an explicit Hermes session id when we have one; otherwise fall back
-    # to ``-c`` (continue most-recent CLI session) for legacy chats that predate
-    # persisted session bindings.
+    # Continue ONLY an explicitly bound Hermes session. Never ``-c``: it picks the
+    # profile's most-recent CLI session, which may be a Flow executor's / cron's
+    # / terminal conversation in the same profile. Without a binding the turn
+    # starts fresh (and binds the new session for the next turn).
     resume_args: list[str] = []
-    if resume_session_id:
+    if resume and resume_session_id:
         resume_args = ["--resume", resume_session_id]
-    elif resume:
-        resume_args = ["-c"]
     argv = [
         exe,
         "-p",
@@ -271,38 +271,42 @@ def _ensure_job_session_id(job: ChatJob) -> None:
 
 
 def _discover_session_id(agent_id: str) -> str | None:
-    """Newest session for this profile = our just-finished turn.
+    """Newest WebUI-chat session for this profile = our just-finished turn.
 
     Safe because :func:`start_chat` supersedes concurrent turns and local mode is
-    single-user, so only our process writes WebUI sessions. Query the new
-    ClawsomeFlow source first, then fall back to historical ``cli`` sessions for
-    upgrade compatibility.
+    single-user, so only our process writes WebUI sessions. Scoped to the WebUI
+    source only: every turn is spawned with ``--source _CHAT_SESSION_SOURCE``, while Flow
+    TUI executors, terminal use and cron all write ``cli`` sessions in the same
+    profile — binding one of those would splice that foreign conversation into
+    the user's chat on every later turn.
     """
-    for source in (_CHAT_SESSION_SOURCE, "cli"):
-        try:
-            rc, out, err = ha._run_hermes(
-                ["-p", agent_id, "sessions", "list", "--source", source, "--limit", "5"]
-            )
-        except ha.HermesAgentError as exc:
-            logger.warning(
-                "hermes_chat_session_list_failed",
-                agent_id=agent_id,
-                source=source,
-                error=str(exc)[:240],
-            )
+    try:
+        rc, out, err = ha._run_hermes(
+            [
+                "-p", agent_id, "sessions", "list",
+                "--source", _CHAT_SESSION_SOURCE, "--limit", "5",
+            ]
+        )
+    except ha.HermesAgentError as exc:
+        logger.warning(
+            "hermes_chat_session_list_failed",
+            agent_id=agent_id,
+            source=_CHAT_SESSION_SOURCE,
+            error=str(exc)[:240],
+        )
+        return None
+    if rc != 0:
+        return None
+    for raw in ha._strip_ansi(out).splitlines():
+        line = raw.strip()
+        if not line:
             continue
-        if rc != 0:
-            continue
-        for raw in ha._strip_ansi(out).splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            low = line.lower()
-            if low.startswith("preview") or set(line) <= set("─-—│| "):
-                continue  # header / separator
-            token = line.split()[-1]  # ID is the last column
-            if "_" in token:  # e.g. 20260617_185542_a98875
-                return token
+        low = line.lower()
+        if low.startswith("preview") or set(line) <= set("─-—│| "):
+            continue  # header / separator
+        token = line.split()[-1]  # ID is the last column
+        if "_" in token:  # e.g. 20260617_185542_a98875
+            return token
     return None
 
 
@@ -677,10 +681,66 @@ def _run_turn_impl(
     )
 
 
+# A Flow dispatch always opens with the anti-loop header
+# ``## <product> Dispatch Context`` (prompts.py). Matched product-agnostically so
+# dispatches written by any past release still count; older releases also
+# wrapped the dispatch in a ClawTeam notification envelope.
+_FLOW_DISPATCH_RE = re.compile(r"(?m)^## \S+ Dispatch Context\b|<clawteam_notification\b")
+
+
+def _session_has_flow_dispatch(export_data: dict[str, Any]) -> bool:
+    for msg in export_data.get("messages") or []:
+        if not isinstance(msg, dict) or (msg.get("role") or "").lower() != "user":
+            continue
+        if _FLOW_DISPATCH_RE.search(_message_text(msg.get("content"))):
+            return True
+    return False
+
+
+def unbind_flow_contaminated_chats() -> list[str]:
+    """Drop WebUI chat bindings whose Hermes session holds a Flow dispatch.
+
+    Releases before the no-``-c`` fix resumed a crashed Flow executor with
+    Hermes ``-c``, which could land in the user's direct-chat session of the
+    same profile; every later chat turn then replayed that stale dispatch. An
+    unbound chat starts a fresh Hermes session on its next turn (the WebUI
+    transcript is untouched). Idempotent: a clean or already-unbound chat is a
+    no-op. Returns the released session keys.
+    """
+    if ha.hermes_executable() is None:
+        return []
+    bindings = chat_sessions.list_bindings()
+    if not bindings:
+        return []
+    # session_key = hermes-user-chat-{user}-{agent_id}; both parts may contain
+    # '-', so try every profile the key ends with (longest first) until one owns
+    # the session.
+    profiles = sorted(ha.list_profile_names_from_fs(), key=len, reverse=True)
+    released: list[str] = []
+    for session_key, sid in bindings.items():
+        for agent_id in (p for p in profiles if session_key.endswith(f"-{p}")):
+            data = _export_session(agent_id, sid)
+            if data is None:
+                continue
+            if _session_has_flow_dispatch(data) and chat_sessions.clear_session_id(
+                session_key, only_if=sid,
+            ):
+                released.append(session_key)
+                logger.warning(
+                    "hermes_chat_flow_contaminated_binding_released",
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    hermes_session_id=sid,
+                )
+            break
+    return released
+
+
 __all__ = [
     "ChatJob",
     "start_chat",
     "kill_chat",
     "get_job",
+    "unbind_flow_contaminated_chats",
     "_NO_TEXT_REPLY_MARKER",
 ]

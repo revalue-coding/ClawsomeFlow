@@ -162,9 +162,10 @@ async def test_tmux_target_naming() -> None:
     assert s.tmux_target == "clawteam-csflow-x:alice"
 
 
-def test_tmux_live_session_registers_hermes_with_continue_flag() -> None:
-    """Hermes must be accepted by TmuxLiveSession with `--yolo` + `-c`
-    in its (spawn, resume) command pair."""
+def test_tmux_live_session_registers_hermes_without_continue_flag() -> None:
+    """Hermes must be accepted by TmuxLiveSession with `--yolo` on both spawn
+    and resume, and resume must NOT carry `-c` (it can cross-resume the user's
+    direct-chat session of the same profile)."""
     from app.scheduler.sessions.tmux_live import TmuxLiveSession
 
     hermes_agent = FlowAgent(
@@ -178,7 +179,7 @@ def test_tmux_live_session_registers_hermes_with_continue_flag() -> None:
     # Hermes binds its managed profile via `-p <agent.id>` on both spawn+resume
     # (profile name == FlowAgent.id).
     assert session._spawn_cmd == ["hermes", "--yolo", "-p", "alice"]
-    assert session._resume_cmd == ["hermes", "--yolo", "-c", "-p", "alice"]
+    assert session._resume_cmd == ["hermes", "--yolo", "-p", "alice"]
 
 
 def test_tmux_live_session_temporary_hermes_skips_profile_binding() -> None:

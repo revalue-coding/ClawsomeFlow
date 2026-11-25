@@ -455,11 +455,11 @@ def test_tmux_live_injects_profile_for_hermes() -> None:
     agent = FlowAgent(id="myh", kind=AgentKind.hermes, repo="/tmp", target_branch="main")
     s = TmuxLiveSession(agent=agent, team_name="csflow-x", run_id="run-1", cli=object())
     assert s._spawn_cmd == ["hermes", "--yolo", "-p", "myh"]
-    assert s._resume_cmd == ["hermes", "--yolo", "-c", "-p", "myh"]
+    assert s._resume_cmd == ["hermes", "--yolo", "-p", "myh"]
     # The shared template must never be mutated.
     assert _KIND_TO_CMD[AgentKind.hermes] == (
         ["hermes", "--yolo"],
-        ["hermes", "--yolo", "-c"],
+        ["hermes", "--yolo"],
     )
 
 

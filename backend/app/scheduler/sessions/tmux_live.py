@@ -210,7 +210,17 @@ _KIND_TO_CMD: dict[AgentKind, tuple[list[str], list[str]]] = {
         ["codebuddy", "--permission-mode", "bypassPermissions", *_CLAUDE_NO_ASK],
         ["codebuddy", "--permission-mode", "bypassPermissions", *_CLAUDE_NO_ASK, "--continue"],
     ),
-    AgentKind.hermes:   (["hermes", "--yolo"],   ["hermes", "--yolo", "-c"]),
+    # hermes: resume deliberately carries NO ``-c``. Hermes ``-c`` is not
+    # worktree-scoped: it picks the most-recent CLI session of the workspace and,
+    # when this worktree has none yet (e.g. the fresh spawn died before its first
+    # turn), falls back to the PROFILE-WIDE most-recent session — which for a
+    # persistent agent is usually the user's WebUI direct-chat session (and it
+    # even cd's into that session's recorded cwd). The dispatch would then be
+    # written into the user's conversation and replayed on every later chat turn.
+    # There is no flag to bind a TUI session id at spawn, so resume starts a fresh
+    # conversation in the reused worktree; every crash path re-dispatches the full
+    # task prompt, so no load-bearing context is lost.
+    AgentKind.hermes:   (["hermes", "--yolo"],   ["hermes", "--yolo"]),
 }
 
 # Kinds where ClawsomeFlow carries the permission flag itself and must tell
@@ -284,27 +294,13 @@ class TmuxLiveSession(WorkerSession):
             if agent.kind == AgentKind.hermes and not agent.is_temporary:
                 # Bind the executor to its managed Hermes profile. The profile
                 # name IS the agent id (== HermesAgent.id). ``-p`` is a global,
-                # position-independent flag, so appending is safe for both the
-                # fresh and ``-c`` (continue) commands. This is the Hermes
-                # equivalent of OpenClaw's session-id binding and is REQUIRED so
-                # the agent's own identity/memory/skills are used — AND it makes
-                # ``-c`` precise: Hermes ``-c`` resumes the most-recent session
-                # OF THE PROFILE (profile+recency scoped, NOT cwd-scoped), so a
-                # per-agent profile isolates it.
+                # position-independent flag. This is REQUIRED so the agent's own
+                # identity/memory/skills are used. It does NOT make a ``-c``
+                # resume safe — the profile is shared with the user's direct chat
+                # (see the hermes entry in _KIND_TO_CMD). A TEMPORARY Hermes agent
+                # has no managed profile and runs against the default profile.
                 self._spawn_cmd += ["-p", agent.id]
                 self._resume_cmd += ["-p", agent.id]
-            elif agent.kind == AgentKind.hermes and agent.is_temporary:
-                # A TEMPORARY Hermes agent has NO managed profile, so it runs
-                # against the shared active/default profile. Because Hermes ``-c``
-                # is profile+recency scoped (unlike claude/codex, which are
-                # cwd-scoped and thus isolated by the per-agent worktree), a bare
-                # ``-c`` here could resume a DIFFERENT temp agent's — or the
-                # operator's own — most-recent session. There is no spawn-time
-                # session-name flag to bind it precisely, so we DROP ``-c`` and
-                # resume with a fresh conversation in the (reused) existing
-                # worktree: the committed + partial work on disk is kept, only the
-                # conversation restarts. Safer than a cross-session resume.
-                self._resume_cmd = [a for a in self._resume_cmd if a != "-c"]
             if agent.kind == AgentKind.antigravity:
                 settings_args = ["--settings", str(self._antigravity_settings_path())]
                 self._spawn_cmd += settings_args

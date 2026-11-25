@@ -16,6 +16,7 @@ from app.services import hermes_chat as chat_svc
 from app.services import hermes_chat_sessions as chat_sessions
 from app.storage import get_storage
 
+_REAL_DISCOVER_SESSION_ID = chat_svc._discover_session_id
 
 @pytest.fixture
 def client() -> TestClient:
@@ -83,10 +84,11 @@ def test_run_turn_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [True]
 
 
-def test_spawn_hermes_legacy_continue_without_saved_session_id(
+def test_spawn_hermes_never_bare_continue_without_saved_session_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pre-persistence chats: resume=True but no session id → bare ``-c``."""
+    """resume=True but no bound session id → a FRESH turn, never bare ``-c``
+    (which could continue a Flow executor's / cron's session of the profile)."""
     seen: dict[str, list[str]] = {}
 
     class _FakePopen:
@@ -111,7 +113,6 @@ def test_spawn_hermes_legacy_continue_without_saved_session_id(
         "chat",
         "--yolo",
         "-Q",
-        "-c",
         "--source",
         "csflow-web",
         "-q",
@@ -158,7 +159,7 @@ def test_spawn_hermes_uses_explicit_resume_session_id(
 def test_run_turn_legacy_continue_discovers_session_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy ``-c`` turn must discover the Hermes session id for next ``--resume``."""
+    """An unbound turn must discover the Hermes session id for next ``--resume``."""
     job = _mk_job("sk-legacy")
     monkeypatch.setattr(chat_svc, "_spawn_hermes", lambda *a, **k: _FakePopen())
     monkeypatch.setattr(chat_svc, "_communicate", lambda proc: (0, "reply", ""))
@@ -171,6 +172,49 @@ def test_run_turn_legacy_continue_discovers_session_id(
 
     assert job.status == "done"
     assert job.hermes_session_id == "20260101_000000_legacy"
+
+
+def test_discover_session_id_only_considers_webui_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery must never fall back to ``cli`` sessions: Flow TUI executors and
+    cron write those in the same profile, and binding one would splice a foreign
+    conversation (e.g. a stale Flow dispatch) into the user's chat."""
+    queried: list[list[str]] = []
+
+    def _fake_run(args, **kwargs):  # noqa: ANN001, ARG001
+        queried.append(list(args))
+        if chat_svc._CHAT_SESSION_SOURCE in args:
+            return 0, "Preview  Last Active  ID\n", ""
+        return 0, "Preview  Last Active  ID\nflow task  1m ago  20260804_145254_b00c18\n", ""
+
+    monkeypatch.setattr(chat_svc.ha, "_run_hermes", _fake_run)
+
+    assert _REAL_DISCOVER_SESSION_ID("assistant") is None
+    assert queried == [
+        [
+            "-p", "assistant", "sessions", "list",
+            "--source", chat_svc._CHAT_SESSION_SOURCE, "--limit", "5",
+        ],
+    ]
+
+
+@pytest.mark.parametrize(
+    "content,expected",
+    [
+        ("## ClawsomeFlow Dispatch Context\nThis message is dispatched by…", True),
+        ("## hyFlow Dispatch Context\nThis message is dispatched by…", True),
+        ('<clawteam_notification version="1"', True),
+        ("why did my chat start with a Dispatch Context block?", False),
+        ("add a repo to my cron job", False),
+    ],
+)
+def test_session_has_flow_dispatch_is_product_agnostic(content: str, expected: bool) -> None:
+    data = {"messages": [{"role": "user", "content": content}]}
+    assert chat_svc._session_has_flow_dispatch(data) is expected
+    # Only user turns count: an assistant quoting the header is not a dispatch.
+    quoted = {"messages": [{"role": "assistant", "content": content}]}
+    assert chat_svc._session_has_flow_dispatch(quoted) is False
 
 
 def test_run_turn_binds_session_id_from_stderr(monkeypatch: pytest.MonkeyPatch) -> None:

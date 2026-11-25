@@ -133,18 +133,21 @@ def test_nanobot_injects_stable_session_id() -> None:
     assert _KIND_TO_CMD[AgentKind.nanobot] == (["nanobot", "agent"], ["nanobot", "agent"])
 
 
-def test_persistent_hermes_resume_binds_profile_for_precise_continue() -> None:
-    """A managed Hermes agent binds -p <id>, isolating -c to its own profile."""
+def test_persistent_hermes_resume_binds_profile_without_continue() -> None:
+    """A managed Hermes agent binds -p <id> but never resumes with -c: the
+    profile is shared with the user's WebUI direct chat, and Hermes -c falls back
+    to the profile-wide most-recent session when the worktree has none — which
+    would write the dispatch into the user's conversation."""
     agent = FlowAgent(
         id="h1", kind=AgentKind.hermes, repo="/tmp", target_branch="main",
         is_temporary=False, profile="h1",
     )
     s = TmuxLiveSession(agent=agent, team_name="csflow-x", run_id="run-1", cli=object())
-    assert s._resume_cmd == ["hermes", "--yolo", "-c", "-p", "h1"]
+    assert s._resume_cmd == ["hermes", "--yolo", "-p", "h1"]
+    assert "-c" not in s._resume_cmd
+    assert "--continue" not in s._resume_cmd
     # Template must not be mutated.
-    assert _KIND_TO_CMD[AgentKind.hermes] == (
-        ["hermes", "--yolo"], ["hermes", "--yolo", "-c"],
-    )
+    assert _KIND_TO_CMD[AgentKind.hermes] == (["hermes", "--yolo"], ["hermes", "--yolo"])
 
 
 def test_temporary_hermes_resume_drops_continue_to_avoid_cross_session() -> None:

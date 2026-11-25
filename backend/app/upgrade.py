@@ -434,6 +434,35 @@ def _enable_external_api_expose_default(_cfg: Config) -> list[str] | None:
     return None
 
 
+def _unbind_flow_contaminated_hermes_chats(cfg: Config) -> list[str] | None:
+    """Repair: release WebUI Hermes chats whose session holds a stale Flow dispatch.
+
+    Issue fixed: older releases resumed a crashed Flow Hermes executor with
+    ``hermes -c``, which (when the worktree had no session yet) fell back to the
+    profile-wide most-recent session — often the user's WebUI direct chat. The
+    dispatch was written into that conversation and replayed on every later chat
+    turn. The binding is dropped so the next turn starts a fresh Hermes session;
+    a session divider marks the boundary in the (kept) WebUI transcript.
+
+    Idempotent: clean / unbound chats are untouched. Best-effort
+    (``critical=False``).
+    """
+    import asyncio
+
+    from app.services import openclaw_chat_history as chat_history
+    from app.services.hermes_chat import unbind_flow_contaminated_chats
+    from app.storage import get_storage
+
+    released = unbind_flow_contaminated_chats()
+    if not released:
+        return None
+    get_storage(cfg)
+    for conversation_key in released:
+        asyncio.run(chat_history.append_divider(conversation_key))
+    logger.info("upgrade_hermes_contaminated_chats_released", chats=released)
+    return None
+
+
 # Register migrations in chronological order. Newer entries come last.
 # Each ``apply`` MUST be idempotent (re-runnable). A migration runs once ever,
 # gated by the applied-migrations ledger (see module docstring).
@@ -466,6 +495,15 @@ MIGRATIONS: list[Migration] = [
         version="0.2.0b3",
         description="default-open /api/external (flip historical expose=False)",
         apply=_enable_external_api_expose_default,
+        critical=False,
+    ),
+    # 0.2.8b1: Flow Hermes resume no longer uses ``-c``; release WebUI chat
+    # bindings that an old ``-c`` resume already polluted with a Flow dispatch.
+    # See _unbind_flow_contaminated_hermes_chats.
+    Migration(
+        version="0.2.8b1",
+        description="release Hermes WebUI chats polluted by a Flow dispatch",
+        apply=_unbind_flow_contaminated_hermes_chats,
         critical=False,
     ),
 ]

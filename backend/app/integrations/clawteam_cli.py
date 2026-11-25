@@ -293,7 +293,7 @@ class _SpawnArgs:
 
     def to_argv(self) -> list[str]:
         # clawteam v0.3.0's `spawn` typer command parses any agent-side flags
-        # (e.g. `claude --continue`, `hermes -c`, `codex resume --last`) as
+        # (e.g. `claude --continue`, `agy -c`, `codex resume --last`) as
         # its own unknown options and fails with "No such option". We place
         # clawteam's own options FIRST and put the agent command after `--`
         # so typer treats every token after the separator as the COMMAND

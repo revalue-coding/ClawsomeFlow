@@ -910,6 +910,72 @@ def test_remove_task_decomposer_skill_registered_in_migrations() -> None:
     assert m.critical is False  # best-effort: never blocks the upgrade
 
 
+# ── 0.2.8b1: release Hermes WebUI chats polluted by a Flow dispatch ───
+
+
+def test_unbind_flow_contaminated_hermes_chats(
+    tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
+) -> None:
+    """Pre-state → migration → expected: a WebUI chat whose bound Hermes session
+    holds a Flow dispatch (written there by an old ``hermes -c`` executor resume)
+    is unbound and gets a session divider; a clean chat keeps its binding.
+    Profile resolution survives '-' in ids (``ai-coder`` vs ``coder``).
+    Idempotent on a second run."""
+    import asyncio
+
+    from app.services import hermes_chat as chat_svc
+    from app.services import hermes_chat_sessions as chat_sessions
+    from app.services import openclaw_chat_history as chat_history
+    from app.storage import get_storage
+
+    get_storage(fake_config)
+    chat_sessions.set_session_id("hermes-user-chat-alice-assistant", "sid_polluted")
+    chat_sessions.set_session_id("hermes-user-chat-alice-ai-coder", "sid_clean")
+    exports = {
+        ("assistant", "sid_polluted"): {"messages": [
+            {"role": "user", "content": "add a repo to my cron job"},
+            {"role": "user", "content": '<clawteam_notification version="1"'},
+        ]},
+        ("ai-coder", "sid_clean"): {"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]},
+    }
+    exported: list[tuple[str, str]] = []
+
+    def _fake_export(agent_id: str, sid: str):
+        exported.append((agent_id, sid))
+        return exports.get((agent_id, sid))
+
+    monkeypatch.setattr(chat_svc.ha, "hermes_executable", lambda: "/usr/bin/hermes")
+    monkeypatch.setattr(
+        chat_svc.ha, "list_profile_names_from_fs", lambda: ["assistant", "coder", "ai-coder"],
+    )
+    monkeypatch.setattr(chat_svc, "_export_session", _fake_export)
+
+    assert upgrade._unbind_flow_contaminated_hermes_chats(fake_config) is None
+
+    assert chat_sessions.list_bindings() == {"hermes-user-chat-alice-ai-coder": "sid_clean"}
+    assert ("coder", "sid_clean") not in exported  # longest profile match wins
+
+    msgs = asyncio.run(chat_history.list_messages("hermes-user-chat-alice-assistant"))
+    assert [m.get("kind") for m in msgs] == ["session_divider"]
+    assert asyncio.run(chat_history.list_messages("hermes-user-chat-alice-ai-coder")) == []
+
+    # Idempotent: nothing left to release, no second divider.
+    assert upgrade._unbind_flow_contaminated_hermes_chats(fake_config) is None
+    msgs = asyncio.run(chat_history.list_messages("hermes-user-chat-alice-assistant"))
+    assert len(msgs) == 1
+
+
+def test_unbind_flow_contaminated_hermes_chats_registered_in_migrations() -> None:
+    by_version = {m.version: m for m in upgrade.MIGRATIONS}
+    assert "0.2.8b1" in by_version
+    m = by_version["0.2.8b1"]
+    assert m.apply is upgrade._unbind_flow_contaminated_hermes_chats
+    assert m.critical is False  # best-effort: never blocks the upgrade
+
+
 def test_run_upgrade_creates_ai_decompose_workdir(
     tmp_clawsomeflow_home: Path, monkeypatch: pytest.MonkeyPatch, fake_config: Config,
 ) -> None:
