@@ -1,6 +1,6 @@
 [project]
 name = "clawsomeflow"
-version = "0.2.7"
+version = "0.2.8"
 description = "Vertical agent workflow orchestration platform on top of ClawTeam and OpenClaw"
 # Supplied by hatch_build.py so the file can live at ../readme.md in the
 # checkout and at readme.md inside the sdist. A static ../readme.md path is
