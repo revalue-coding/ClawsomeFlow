@@ -102,6 +102,7 @@ import json
 import secrets
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
@@ -136,6 +137,11 @@ EXTERNAL_DELEGATE_ACCEPTED_EVENT = "external_delegate_accepted"
 #: it. Keyed by the dispatch nonce, so it is re-derivable after a restart —
 #: which is what makes polling survive pause/resume with no extra state.
 EXTERNAL_TASK_ACCEPTED_EVENT = "external_task_accepted"
+#: What polling a waiting webhook / remote_csflow executor currently shows,
+#: emitted only when it changes. A UI signal, never a failure: an external wait
+#: has no timeout, so this is how the user tells "the remote is legitimately
+#: waiting (e.g. paused)" from "we cannot reach it" before deciding to end it.
+EXTERNAL_TASK_POLL_STATUS_EVENT = "external_task_poll_status"
 
 _TICKET_CONTEXT = "csflow-external"
 #: Public wire-protocol version stamped on every outbound external package.
@@ -153,9 +159,10 @@ DISPATCH_COMMAND_TIMEOUT_SEC = 120.0
 _POLL_TIMEOUT_SEC = 10.0
 EXTERNAL_SCHEDULER_POLL_INTERVAL_SEC = 1.0
 #: Backoff applied when a poll itself fails (network error / non-2xx). Poll
-#: failures are TRANSIENT — never a task failure; the task's own
-#: ``timeout_seconds`` is what eventually ends a truly stuck node.
+#: failures are never a task failure (external waits have no timeout); a streak
+#: lasting :data:`POLL_ERROR_WARN_AFTER_SEC` is surfaced to the user instead.
 _POLL_ERROR_INTERVAL_SEC = 60.0
+POLL_ERROR_WARN_AFTER_SEC = 600.0
 _CALLBACK_ATTEMPTS = 3
 _CALLBACK_RETRY_DELAY_SEC = 5.0
 
@@ -881,6 +888,119 @@ def _poll_request(
     return url, params, headers
 
 
+@dataclass
+class ExternalPollWatch:
+    """What polling one external task has shown so far (kept by the controller).
+
+    Only an in-memory dedupe of :data:`EXTERNAL_TASK_POLL_STATUS_EVENT`: after a
+    restart it is re-seeded from the latest such event of the current nonce.
+    """
+
+    nonce: str = ""
+    remote_status: str = ""
+    error_since: float | None = None
+    last_error: str = ""
+    #: ``(remoteStatus, pollIssue)`` of the last emitted event.
+    reported: tuple[str, str] | None = None
+
+
+def _last_reported_poll_status(
+    storage: StorageBackend, *, run_id: str, task_id: str, nonce: str,
+) -> tuple[str, str] | None:
+    for ev in reversed(_scan_events(storage, run_id)):
+        payload = ev.payload or {}
+        if (
+            ev.type == EXTERNAL_TASK_POLL_STATUS_EVENT
+            and ev.task_id == task_id
+            and payload.get("nonce") == nonce
+        ):
+            return (
+                str(payload.get("remoteStatus") or ""),
+                str(payload.get("pollIssue") or ""),
+            )
+    return None
+
+
+def _observe_poll(
+    watch: ExternalPollWatch | None,
+    *,
+    storage: StorageBackend,
+    run: FlowRun,
+    agent: FlowAgent,
+    task_id: str,
+    nonce: str,
+    remote_status: str | None = None,
+    error: str | None = None,
+    unpollable: bool = False,
+) -> None:
+    """Fold one poll outcome into *watch*; emit a status event when it changes.
+
+    ``pollIssue`` is ``unpollable`` (the executor gave us nothing to poll —
+    waiting can never end by itself) or ``unreachable`` (polls have kept
+    failing for :data:`POLL_ERROR_WARN_AFTER_SEC`); a shorter error streak is
+    ordinary network noise and changes nothing visible.
+    """
+    if watch is None:
+        return
+    if watch.nonce != nonce:
+        watch.nonce = nonce
+        watch.remote_status = ""
+        watch.error_since = None
+        watch.last_error = ""
+        watch.reported = _last_reported_poll_status(
+            storage, run_id=run.id, task_id=task_id, nonce=nonce,
+        )
+    now = time.time()
+    issue = ""
+    if unpollable:
+        issue = "unpollable"
+        watch.last_error = error or ""
+    elif error is not None:
+        if watch.error_since is None:
+            watch.error_since = now
+        watch.last_error = error
+        if now - watch.error_since < POLL_ERROR_WARN_AFTER_SEC:
+            return
+        issue = "unreachable"
+    else:
+        watch.error_since = None
+        watch.last_error = ""
+        if remote_status is not None:
+            watch.remote_status = remote_status
+    state = (watch.remote_status, issue)
+    if state == (watch.reported or ("", "")):
+        return
+    watch.reported = state
+
+    from app.events import publish_run_event
+
+    payload: dict[str, Any] = {
+        "nonce": nonce,
+        "remoteStatus": watch.remote_status,
+        "pollIssue": issue,
+        "pollError": watch.last_error[:300] if issue else "",
+    }
+    if issue == "unreachable" and watch.error_since is not None:
+        payload["pollErrorSince"] = iso_utc(
+            datetime.fromtimestamp(watch.error_since, tz=timezone.utc),
+        )
+    publish_run_event(
+        storage,
+        run_id=run.id,
+        event_type=EXTERNAL_TASK_POLL_STATUS_EVENT,
+        agent_id=agent.id,
+        task_id=task_id,
+        payload=payload,
+    )
+
+
+def _reported_remote_status(body: dict[str, Any]) -> str:
+    """The executor's own word for its state (a peer's ``runStatus``, e.g.
+    ``paused``; else a partner's raw ``status``) — shown, never interpreted."""
+    raw = body.get("runStatus") or body.get("status") or body.get("state") or ""
+    return str(raw).strip()[:64]
+
+
 async def poll_external_task(
     *,
     storage: StorageBackend,
@@ -888,6 +1008,7 @@ async def poll_external_task(
     agent: FlowAgent,
     task_id: str,
     http_allowed: bool = True,
+    watch: ExternalPollWatch | None = None,
 ) -> tuple[str, float]:
     """Ask a waiting executor whether it is done. Returns ``(outcome, interval)``.
 
@@ -897,8 +1018,9 @@ async def poll_external_task(
     wait before the next poll.
 
     Called from the scheduler tick, so it inherits pause's hard-cancel for free.
-    A poll error is transient: back off, never fail the task — a genuinely stuck
-    node is ended by its own ``timeout_seconds``.
+    A poll error is transient: back off, never fail the task. External waits
+    have no timeout, so what the poll shows is reported through *watch* (see
+    :func:`_observe_poll`) and the user decides whether to end the wait.
     """
     disp = latest_dispatch_event(storage, run_id=run.id, task_id=task_id)
     if disp is None:
@@ -942,6 +1064,11 @@ async def poll_external_task(
             run_id=run.id, task_id=task_id, nonce=nonce,
             detail="executor did not provide a pollable status URL",
         )
+        _observe_poll(
+            watch, storage=storage, run=run, agent=agent, task_id=task_id,
+            nonce=nonce, unpollable=True,
+            error="executor did not provide a pollable status URL",
+        )
         return "unavailable", _POLL_ERROR_INTERVAL_SEC
     url, params, headers = target
 
@@ -960,10 +1087,18 @@ async def poll_external_task(
             "external_poll_failed",
             run_id=run.id, task_id=task_id, nonce=nonce, url=url, error=str(exc),
         )
+        _observe_poll(
+            watch, storage=storage, run=run, agent=agent, task_id=task_id,
+            nonce=nonce, error=str(exc) or type(exc).__name__,
+        )
         return "waiting", _POLL_ERROR_INTERVAL_SEC
 
     outcome, summary = classify_result_status(body)
     if outcome == "waiting":
+        _observe_poll(
+            watch, storage=storage, run=run, agent=agent, task_id=task_id,
+            nonce=nonce, remote_status=_reported_remote_status(body),
+        )
         return "waiting", interval
     await _apply_polled_result(
         storage=storage, run=run, task_id=task_id, nonce=nonce,

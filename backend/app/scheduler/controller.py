@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.config import load_config
 from app.flow_modes import (
@@ -145,6 +145,9 @@ from app.storage import StorageBackend, get_storage
 from app.user_context import get_request_user, set_request_user
 from app.worktree.audit import run_post_task_audit
 from app.worktree.lookup import WorktreeInfo, WorktreeLookup, get_worktree_lookup
+
+if TYPE_CHECKING:  # pragma: no cover — typing only
+    from app.services.external_tasks import ExternalPollWatch
 
 logger = get_logger("scheduler.controller")
 
@@ -566,6 +569,9 @@ class RunController:
         # needed to poll is re-derivable from the event stream, so a rebuilt
         # controller just polls one round early.
         self._external_poll_due: dict[str, float] = {}
+        # Per-task dedupe of the ``external_task_poll_status`` events the poll
+        # step emits (re-seeded from the event stream per nonce).
+        self._external_poll_watch: dict[str, ExternalPollWatch] = {}
         # Consecutive ticks whose ``task_list`` came back empty while tasks were
         # still open. ClawTeam is the source of truth for dispatch decisions, so
         # we cannot progress without it — bounded so the run stops with a reason
@@ -2542,7 +2548,7 @@ class RunController:
             # pending, tells the user why, and PAUSES. Re-dispatching it on the
             # next tick instead would repeat the same refusal roughly once a
             # second until the task times out (hours, or never for an external
-            # node with ``timeout_seconds=0``) — and every attempt is an outbound
+            # node, which has no timeout) — and every attempt is an outbound
             # POST to somebody else's service.
             payload = self._dispatch_failure_payload(outcome)
             if first_outcome is not outcome:
@@ -3581,7 +3587,7 @@ class RunController:
         due-map is rebuilt naturally after a restart.
         """
         from app.models import ExternalChannel
-        from app.services.external_tasks import poll_external_task
+        from app.services.external_tasks import ExternalPollWatch, poll_external_task
 
         activity = False
         now = time.time()
@@ -3610,6 +3616,9 @@ class RunController:
                     agent=agent,
                     task_id=snap.task_id,
                     http_allowed=http_allowed,
+                    watch=self._external_poll_watch.setdefault(
+                        snap.task_id, ExternalPollWatch(),
+                    ),
                 )
             except asyncio.CancelledError:
                 raise

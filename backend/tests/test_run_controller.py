@@ -2753,8 +2753,9 @@ async def test_tick_polls_waiting_external_nodes_and_respects_the_interval(
     compile_result = _compile_result_for_spec(spec, team_name=run.team_name)
     calls: list[dict[str, Any]] = []
 
-    async def fake_poll(*, storage, run, agent, task_id, http_allowed):
+    async def fake_poll(*, storage, run, agent, task_id, http_allowed, watch):
         calls.append({"task_id": task_id, "http_allowed": http_allowed})
+        assert watch is rc._external_poll_watch[task_id]
         return "waiting", 1.0
 
     monkeypatch.setattr(

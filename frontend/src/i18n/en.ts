@@ -1084,6 +1084,13 @@ const en = {
       submitting: "Submitting…",
       waitingWebhook: "Dispatched to the external endpoint — polling it for the result.",
       waitingRemote: "Delegated to the remote ClawsomeFlow — polling it for the leader report.",
+      noTimeoutHint: "External nodes never time out — this waits until a result arrives; ending the wait is your call.",
+      remoteStatus: "Remote status",
+      pollUnpollable:
+        "The executor gave no status address to poll (possibly an older remote, or its pairing credential was removed), so the result cannot be fetched automatically. Check with them, then re-dispatch, report failure, or terminate the flow.",
+      pollUnreachable:
+        "The result has been unreachable since {{since}}. The node will not fail on its own — decide whether to keep waiting, re-dispatch, report failure, or terminate the flow.",
+      pollLastError: "Last error: {{error}}",
     },
     checkpoint: {
       title: "Manual checkpoint",

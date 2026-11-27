@@ -77,18 +77,18 @@ def test_timeout_detected() -> None:
     assert "min=14400s" in failures[0].detail
     assert failures[0].elapsed_seconds == 14500
     assert failures[0].limit_seconds == 14400
-    assert failures[0].owner_is_external is False
 
 
-def test_external_timeout_omits_local_floor_and_reads_as_waiting() -> None:
-    """An external (human) node honours its own small timeout; the pause text
-    must describe a wait that ran out, not quote the 4h floor that never
-    applied to it."""
+def test_external_owner_never_times_out() -> None:
+    """An external executor's wait (a person, a paused remote Flow) is ended by
+    the user only — no timeout signal, whatever the task's timeout says."""
     from app.models import ExternalChannel, ExternalNodeConfig
 
     ext_agent = FlowAgent(
         id="ext", kind=AgentKind.external,
-        external=ExternalNodeConfig(channel=ExternalChannel.human),
+        external=ExternalNodeConfig(
+            channel=ExternalChannel.webhook, endpoint_url="https://partner.example/h",
+        ),
         is_leader=False,
     )
     failures = F.detect_failures(
@@ -97,19 +97,9 @@ def test_external_timeout_omits_local_floor_and_reads_as_waiting() -> None:
         snapshots=[_snap(owner="ext", dispatched=0.0)],
         leader_agent_id="leader",
         agents={"ext": ext_agent},
-        now=1801.0,
+        now=30 * 86400.0,
     )
-    assert len(failures) == 1
-    rec = failures[0]
-    assert rec.detail == "elapsed=1801s > limit=1800s (configured=1800s)"
-    assert rec.owner_is_external is True
-    zh = F.failed_inbox_message_for_pause(rec, lang="zh")
-    assert zh == (
-        "任务 t1 等待超时：已等待 30 分钟 1 秒，超过设定的超时时间 30 分钟，仍未收到处理结果"
-    )
-    assert "失败" not in zh
-    en = F.failed_inbox_message_for_pause(rec, lang="en")
-    assert en == "task t1 timed out waiting: no result after 30 min 1 s (timeout 30 min)"
+    assert failures == []
 
 
 def test_local_timeout_pause_message_reads_as_running_over_limit() -> None:

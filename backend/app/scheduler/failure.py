@@ -11,7 +11,9 @@ The active signals:
    by the worker (the dispatch template tells workers to do this when a step
    genuinely can't be completed).
 2. **timeout** — wall-clock since dispatch exceeded effective timeout:
-   ``max(FlowTask.timeout_seconds, 14400)``.
+   ``max(FlowTask.timeout_seconds, 14400)``. Local agents only: an external
+   executor (human / webhook / remote Flow) may legitimately wait forever —
+   e.g. a remote Flow paused by its own user — so only the user ends that wait.
 3. **leader_inbox_failed** — leader received an inbox message starting with
    ``FAILED:`` (a final-resort signal we honour even if the worker forgot to
    set the metadata key).
@@ -69,11 +71,9 @@ class FailureRecord:
     #: event so a rebuilt controller can skip an already-handled receipt.
     external_nonce: str = ""
     #: Timeout signal only: how long the task had been out vs. its effective
-    #: limit, and whether an external executor (human / webhook / remote) owned
-    #: it — i.e. we were *waiting* rather than *running*.
+    #: limit.
     elapsed_seconds: int | None = None
     limit_seconds: int | None = None
-    owner_is_external: bool = False
 
     def as_log(self) -> dict[str, Any]:
         return {
@@ -124,11 +124,9 @@ def detect_failures(
     Signals are evaluated in the order listed in the module docstring; the
     first matching signal "wins" per task (we don't double-count).
 
-    *agents* (owner_agent_id → FlowAgent, optional) refines the timeout
-    signal for **external execution nodes**: their tasks are exempt from the
-    4h floor (an explicit small timeout is honoured as-is) and
-    ``timeout_seconds=0`` disables the timeout entirely (a human executor may
-    legitimately take days).
+    *agents* (owner_agent_id → FlowAgent, optional) exempts tasks owned by
+    **external execution nodes** from the timeout signal entirely, whatever
+    their ``timeout_seconds`` says.
     """
     # Kept in signature for call-site compatibility / future expansion.
     del team_name, leader_agent_id
@@ -157,26 +155,13 @@ def detect_failures(
             and snap.status in ("pending", "in_progress")
         ):
             owner = (agents or {}).get(ftask.owner_agent_id)
-            owner_is_external = (
-                owner is not None and owner.kind == AgentKind.external
-            )
-            if owner_is_external and int(ftask.timeout_seconds) <= 0:
-                # External node with timeout disabled — wait indefinitely.
+            if owner is not None and owner.kind == AgentKind.external:
                 continue
             elapsed = now - snap.dispatched_at_epoch
             configured_timeout = max(int(ftask.timeout_seconds), 1)
-            if owner_is_external:
-                # No 4h floor for external executors: the configured value is
-                # an explicit expectation set by the Flow author.
-                effective_timeout = configured_timeout
-            else:
-                effective_timeout = max(configured_timeout, _MIN_TASK_TIMEOUT_SECONDS)
+            effective_timeout = max(configured_timeout, _MIN_TASK_TIMEOUT_SECONDS)
             if elapsed > effective_timeout:
-                bounds = (
-                    f"(configured={configured_timeout}s)"
-                    if owner_is_external
-                    else f"(configured={configured_timeout}s, min={_MIN_TASK_TIMEOUT_SECONDS}s)"
-                )
+                bounds = f"(configured={configured_timeout}s, min={_MIN_TASK_TIMEOUT_SECONDS}s)"
                 out.append(FailureRecord(
                     task_id=snap.task_id,
                     agent_id=snap.locked_by_agent or snap.owner_agent_id,
@@ -184,7 +169,6 @@ def detect_failures(
                     detail=f"elapsed={int(elapsed)}s > limit={effective_timeout}s {bounds}",
                     elapsed_seconds=int(elapsed),
                     limit_seconds=effective_timeout,
-                    owner_is_external=owner_is_external,
                 ))
                 continue
 
@@ -315,19 +299,9 @@ def failed_inbox_message_for_pause(
             elapsed = _format_duration(rec.elapsed_seconds, resolved)
             limit = _format_duration(rec.limit_seconds, resolved)
             if resolved == "zh":
-                if rec.owner_is_external:
-                    return (
-                        f"任务 {rec.task_id} 等待超时：已等待 {elapsed}，"
-                        f"超过设定的超时时间 {limit}，仍未收到处理结果"
-                    )
                 return (
                     f"任务 {rec.task_id} 执行超时：已执行 {elapsed}，"
                     f"超过超时时间 {limit}，仍未完成"
-                )
-            if rec.owner_is_external:
-                return (
-                    f"task {rec.task_id} timed out waiting: no result after {elapsed} "
-                    f"(timeout {limit})"
                 )
             return (
                 f"task {rec.task_id} timed out: still unfinished after {elapsed} "

@@ -3873,6 +3873,13 @@ type ExternalTaskItem = {
     fromAgent?: string;
     summary?: string;
   }> | null;
+  /** Latest ``external_task_poll_status`` of THIS dispatch (webhook /
+   *  remote only). An external wait never times out, so this is what tells
+   *  the user whether the executor is legitimately waiting or unreachable. */
+  remoteStatus: string;
+  pollIssue: "" | "unpollable" | "unreachable";
+  pollError: string;
+  pollErrorSince: string;
 };
 
 /** Outstanding external-node dispatches: latest dispatch per task, minus
@@ -3891,6 +3898,11 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
   const suppressedDispatchKeys = new Set<string>();
   /** Fallback when ``task_failed`` has no nonce — cleared on re-dispatch. */
   const suppressedTaskIds = new Set<string>();
+  /** Latest poll status per ``taskId:nonce``. */
+  const pollStatus = new Map<
+    string,
+    Pick<ExternalTaskItem, "remoteStatus" | "pollIssue" | "pollError" | "pollErrorSince">
+  >();
   for (const e of ordered) {
     const tid = typeof e.taskId === "string" ? e.taskId : "";
     if (!tid) continue;
@@ -3925,6 +3937,19 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
         upstreamOutputs: Array.isArray(upstreamRaw)
           ? (upstreamRaw as ExternalTaskItem["upstreamOutputs"])
           : null,
+        remoteStatus: "",
+        pollIssue: "",
+        pollError: "",
+        pollErrorSince: "",
+      });
+    } else if (e.type === "external_task_poll_status") {
+      const issue = String(payload.pollIssue ?? "");
+      pollStatus.set(`${tid}:${String(payload.nonce ?? "")}`, {
+        remoteStatus: String(payload.remoteStatus ?? ""),
+        pollIssue:
+          issue === "unpollable" || issue === "unreachable" ? issue : "",
+        pollError: String(payload.pollError ?? ""),
+        pollErrorSince: String(payload.pollErrorSince ?? ""),
       });
     } else if (e.type === "external_task_completed") {
       const nonce = String(payload.nonce ?? "");
@@ -3948,13 +3973,15 @@ function collectExternalTasks(events: RunWsEvent[]): ExternalTaskItem[] {
       completedTasks.add(tid);
     }
   }
-  return [...latest.values()].filter(
-    (it) =>
-      !completedTasks.has(it.taskId)
-      && !completedNonces.has(`${it.taskId}:${it.nonce}`)
-      && !suppressedDispatchKeys.has(`${it.taskId}:${it.nonce}`)
-      && !suppressedTaskIds.has(it.taskId),
-  );
+  return [...latest.values()]
+    .filter(
+      (it) =>
+        !completedTasks.has(it.taskId)
+        && !completedNonces.has(`${it.taskId}:${it.nonce}`)
+        && !suppressedDispatchKeys.has(`${it.taskId}:${it.nonce}`)
+        && !suppressedTaskIds.has(it.taskId),
+    )
+    .map((it) => ({ ...it, ...pollStatus.get(`${it.taskId}:${it.nonce}`) }));
 }
 
 type ExternalAttachmentEntry = {
@@ -4403,6 +4430,32 @@ function ExternalTasksCard({
                   {item.channel === "webhook"
                     ? t("runDetail.external.waitingWebhook")
                     : t("runDetail.external.waitingRemote")}
+                  {" "}
+                  {t("runDetail.external.noTimeoutHint")}
+                </div>
+              )}
+              {!isHuman && item.remoteStatus && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-ink-600">
+                  <span>{t("runDetail.external.remoteStatus")}</span>
+                  <StatusPill status={item.remoteStatus} />
+                </div>
+              )}
+              {!isHuman && item.pollIssue && (
+                <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <div>
+                    {item.pollIssue === "unpollable"
+                      ? t("runDetail.external.pollUnpollable")
+                      : t("runDetail.external.pollUnreachable", {
+                          since: item.pollErrorSince
+                            ? new Date(item.pollErrorSince).toLocaleString()
+                            : "-",
+                        })}
+                  </div>
+                  {item.pollError && (
+                    <div className="mt-1 break-all font-mono text-[11px] text-amber-700">
+                      {t("runDetail.external.pollLastError", { error: item.pollError })}
+                    </div>
+                  )}
                 </div>
               )}
               {isHuman ? (

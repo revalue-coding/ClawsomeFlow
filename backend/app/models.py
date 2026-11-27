@@ -690,8 +690,8 @@ class FlowTask(_ApiBase):
     @field_validator("timeout_seconds")
     @classmethod
     def _timeout_positive(cls, v: int) -> int:
-        # 0 = "no timeout". Only honoured for tasks owned by an external
-        # execution node (a human may take days); for regular agents the
+        # 0 = "no timeout". External-node tasks are always forced to 0
+        # (FlowSpec._external_tasks_never_time_out); for regular agents the
         # scheduler's 4h floor applies regardless (failure.py).
         if v < 0:
             raise ValueError("timeout_seconds must be >= 0 (0 = no timeout)")
@@ -741,18 +741,15 @@ class FlowSpec(_ApiBase):
     variables: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _human_tasks_never_time_out(self) -> FlowSpec:
-        # A person works on their own schedule, and the editor offers no
-        # timeout field — a value here only ever comes from a generated
-        # default (task decompose emits 1800s), so it is forced to 0.
-        human_ids = {
-            a.id for a in self.agents
-            if a.kind == AgentKind.external
-            and a.external is not None
-            and a.external.channel == ExternalChannel.human
-        }
+    def _external_tasks_never_time_out(self) -> FlowSpec:
+        # An external executor's wait is legitimately unbounded: a person, or a
+        # remote Flow that is itself paused / waiting on its own human steps
+        # (nested waits make any fixed parent timer wrong). Only the user ends
+        # such a wait, so the value is forced to 0 — the editor offers no
+        # timeout field, so anything here came from a generated default.
+        external_ids = {a.id for a in self.agents if a.kind == AgentKind.external}
         for task in self.tasks:
-            if task.owner_agent_id in human_ids:
+            if task.owner_agent_id in external_ids:
                 task.timeout_seconds = 0
         return self
 

@@ -1064,6 +1064,13 @@ const zh = {
       submitting: "提交中…",
       waitingWebhook: "已派发到外部端点，正在轮询其执行结果。",
       waitingRemote: "已委托给远端 ClawsomeFlow，正在轮询其 leader 报告。",
+      noTimeoutHint: "外部节点不会超时，会一直等到有结果；是否结束等待由你决定。",
+      remoteStatus: "远端状态",
+      pollUnpollable:
+        "执行方没有提供可查询的状态地址（可能是旧版本远端，或配对凭证已被删除），结果无法自动取回。请与对方确认后，选择重新派发、提交失败，或终止执行流。",
+      pollUnreachable:
+        "自 {{since}} 起一直无法查询到执行结果。节点不会因此自动失败，请判断后选择继续等待、重新派发、提交失败，或终止执行流。",
+      pollLastError: "最近一次错误：{{error}}",
     },
     checkpoint: {
       title: "人工检查点",

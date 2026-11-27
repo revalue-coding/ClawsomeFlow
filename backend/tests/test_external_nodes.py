@@ -127,9 +127,10 @@ def test_task_timeout_zero_allowed() -> None:
         FlowTask(id="t1", owner_agent_id="a", subject="s", timeout_seconds=-1)
 
 
-def test_human_node_tasks_never_time_out() -> None:
-    """A spec carrying a timeout on a human node's task (task decompose emits
-    1800s) loads with 0; webhook nodes and local agents keep theirs."""
+def test_external_node_tasks_never_time_out() -> None:
+    """A spec carrying a timeout on any external node's task (task decompose
+    emits 1800s) loads with 0 — the wait may be legitimately unbounded (a person,
+    a paused remote Flow), so only the user ends it. Local agents keep theirs."""
     spec = FlowSpec.model_validate({
         "agents": [
             {"id": "pilot", "kind": "external", "external": {"channel": "human"}},
@@ -137,21 +138,29 @@ def test_human_node_tasks_never_time_out() -> None:
                 "id": "hook", "kind": "external",
                 "external": {"channel": "webhook", "endpointUrl": "https://example.com/hook"},
             },
+            {
+                "id": "peer", "kind": "external",
+                "external": {
+                    "channel": "remote_csflow", "baseUrl": "http://remote:17017",
+                    "flowId": "flow-1", "pairTokenRef": "m1",
+                },
+            },
             {"id": "dev", "kind": "claude", "repo": "/tmp/r"},
             {"id": "leader", "kind": "claude", "repo": "/tmp/r", "isLeader": True},
         ],
         "tasks": [
             {"id": "fly", "ownerAgentId": "pilot", "subject": "s", "timeoutSeconds": 1800},
             {"id": "call", "ownerAgentId": "hook", "subject": "s", "timeoutSeconds": 600},
+            {"id": "sub", "ownerAgentId": "peer", "subject": "s"},
             {"id": "code", "ownerAgentId": "dev", "subject": "s", "timeoutSeconds": 1800},
             {
                 "id": "sum", "ownerAgentId": "leader", "subject": "s",
-                "dependsOn": ["fly", "call", "code"], "isLeaderSummary": True,
+                "dependsOn": ["fly", "call", "sub", "code"], "isLeaderSummary": True,
             },
         ],
     })
     timeouts = {t.id: t.timeout_seconds for t in spec.tasks}
-    assert timeouts == {"fly": 0, "call": 600, "code": 1800, "sum": 14400}
+    assert timeouts == {"fly": 0, "call": 0, "sub": 0, "code": 1800, "sum": 14400}
 
 
 # ── validators ──────────────────────────────────────────────────────────
@@ -233,31 +242,27 @@ def _snap(task_id: str, dispatched_ago: float, now: float) -> TaskSnapshot:
     )
 
 
-def test_detect_failures_external_no_floor_and_zero_disables() -> None:
+def test_detect_failures_never_times_out_external_owners() -> None:
     now = 1_000_000.0
-    agents = {
-        "ext-node": FlowAgent(
-            id="ext-node", kind=AgentKind.external, external=_human_cfg(),
-        ),
-    }
-    # timeout=0 → never times out, even after "months".
-    tasks = {"t1": FlowTask(id="t1", owner_agent_id="ext-node", subject="s",
-                            timeout_seconds=0)}
-    out = detect_failures(
-        team_name="tm", flow_tasks=tasks,
-        snapshots=[_snap("t1", dispatched_ago=90 * 86400, now=now)],
-        leader_agent_id="leader", now=now, agents=agents,
+    remote = ExternalNodeConfig(
+        channel=ExternalChannel.remote_csflow,
+        base_url="http://remote:17017", flow_id="flow-1", pair_token_ref="m1",
     )
-    assert out == []
-    # Explicit small timeout is honoured (no 4h floor) for external owners.
     tasks2 = {"t1": FlowTask(id="t1", owner_agent_id="ext-node", subject="s",
                              timeout_seconds=600)}
-    out2 = detect_failures(
-        team_name="tm", flow_tasks=tasks2,
-        snapshots=[_snap("t1", dispatched_ago=700, now=now)],
-        leader_agent_id="leader", now=now, agents=agents,
-    )
-    assert [r.task_id for r in out2] == ["t1"]
+    # Even a task that somehow still carries a timeout (the spec validator
+    # forces 0) waits for months on an external owner: a remote Flow paused by
+    # its own user is a legitimate wait, and only the user ends it.
+    for cfg in (_human_cfg(), remote):
+        agents = {
+            "ext-node": FlowAgent(id="ext-node", kind=AgentKind.external, external=cfg),
+        }
+        out = detect_failures(
+            team_name="tm", flow_tasks=tasks2,
+            snapshots=[_snap("t1", dispatched_ago=90 * 86400, now=now)],
+            leader_agent_id="leader", now=now, agents=agents,
+        )
+        assert out == []
     # Same task owned by a regular agent keeps the 4h floor.
     agents_regular = {
         "ext-node": FlowAgent(id="ext-node", kind=AgentKind.claude, repo="/tmp/r"),
@@ -966,6 +971,154 @@ def test_poll_state_is_re_derived_from_events_not_memory(
     assert ext_svc.latest_accepted_event(
         storage, run_id=run.id, task_id="t1", nonce="some-older-attempt",
     ) is None
+
+
+def _poll_status_events(run_id: str) -> list[dict[str, Any]]:
+    return [
+        ev.payload or {}
+        for ev in get_storage().event_list(run_id=run_id, limit=200)
+        if ev.type == ext_svc.EXTERNAL_TASK_POLL_STATUS_EVENT
+    ]
+
+
+def _dispatch_accepted_webhook(
+    monkeypatch: pytest.MonkeyPatch, run: FlowRun, agent: FlowAgent,
+) -> None:
+    async def fake_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "accepted", "poll": {"url": "https://partner.example/j/1"}}
+
+    monkeypatch.setattr(ext_svc, "_post_outbound", fake_post)
+    asyncio.run(ext_svc.dispatch_external_task(
+        storage=get_storage(), run_id=run.id, team_name=run.team_name,
+        agent=agent, task_id="t1", message="sheet",
+        package={"clawteamTaskId": "CT-77", "leaderAgentId": "leader"},
+    ))
+
+
+def test_poll_reports_remote_status_changes_once_per_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote Flow paused by its own user is still "running" to us; its
+    ``runStatus`` is what lets the origin's user see WHY the node waits."""
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = _webhook_agent()
+    _dispatch_accepted_webhook(monkeypatch, run, agent)
+    running = {"status": "running", "runStatus": "running"}
+    paused = {"status": "running", "runStatus": "paused"}
+    _stub_httpx_get(monkeypatch, [running, running, paused, paused, paused])
+
+    async def scenario() -> None:
+        watch = ext_svc.ExternalPollWatch()
+        for _ in range(4):
+            outcome, _ = await ext_svc.poll_external_task(
+                storage=storage, run=run, agent=agent, task_id="t1", watch=watch,
+            )
+            assert outcome == "waiting"
+        # A rebuilt controller (fresh watch) re-seeds from the event stream and
+        # does not repeat the unchanged status.
+        await ext_svc.poll_external_task(
+            storage=storage, run=run, agent=agent, task_id="t1",
+            watch=ext_svc.ExternalPollWatch(),
+        )
+
+    asyncio.run(scenario())
+    events = _poll_status_events(run.id)
+    assert [(e["remoteStatus"], e["pollIssue"]) for e in events] == [
+        ("running", ""), ("paused", ""),
+    ]
+
+
+def test_poll_error_streak_is_surfaced_as_a_warning_never_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External waits have no timeout, so a node we cannot reach must be VISIBLE
+    — after a short grace (network noise) — and must never fail by itself."""
+    import types
+
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = _webhook_agent()
+    _dispatch_accepted_webhook(monkeypatch, run, agent)
+    _stub_httpx_get(monkeypatch, [
+        RuntimeError("connection reset"),
+        RuntimeError("connection reset"),
+        RuntimeError("connection reset"),
+        {"status": "running", "runStatus": "running"},
+    ])
+    clock = [1000.0]
+    monkeypatch.setattr(ext_svc, "time", types.SimpleNamespace(time=lambda: clock[0]))
+
+    async def poll(watch: ext_svc.ExternalPollWatch) -> None:
+        outcome, _ = await ext_svc.poll_external_task(
+            storage=storage, run=run, agent=agent, task_id="t1", watch=watch,
+        )
+        assert outcome == "waiting"
+
+    async def scenario() -> None:
+        watch = ext_svc.ExternalPollWatch()
+        await poll(watch)
+        clock[0] += ext_svc.POLL_ERROR_WARN_AFTER_SEC - 1
+        await poll(watch)
+        assert _poll_status_events(run.id) == []  # grace period: nothing shown
+        clock[0] += 1
+        await poll(watch)
+        events = _poll_status_events(run.id)
+        assert len(events) == 1
+        assert events[0]["pollIssue"] == "unreachable"
+        assert "connection reset" in events[0]["pollError"]
+        assert events[0]["pollErrorSince"].startswith("1970-01-01T00:16:40")
+        await poll(watch)  # recovery clears the warning
+
+    asyncio.run(scenario())
+    events = _poll_status_events(run.id)
+    assert [(e["remoteStatus"], e["pollIssue"]) for e in events] == [
+        ("", "unreachable"), ("running", ""),
+    ]
+    assert not [
+        ev for ev in storage.event_list(run_id=run.id, limit=200)
+        if ev.type == ext_svc.EXTERNAL_TASK_COMPLETED_EVENT
+    ]
+
+
+def test_unpollable_executor_is_surfaced_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing to poll (e.g. the pairing secret was removed) means the wait can
+    never end by itself — the user is told right away, once."""
+    run = _mk_run_for_dispatch()
+    storage = get_storage()
+    agent = FlowAgent(
+        id="ext-node", kind=AgentKind.external,
+        external=ExternalNodeConfig(
+            channel=ExternalChannel.remote_csflow, base_url="http://remote:17017",
+            flow_id="flow-1", pair_token_ref="gone",
+        ),
+    )
+    storage.event_append(RunEvent(
+        run_id=run.id, type=ext_svc.EXTERNAL_TASK_DISPATCHED_EVENT,
+        agent_id="ext-node", task_id="t1", payload={"nonce": "N1"},
+    ))
+    storage.event_append(RunEvent(
+        run_id=run.id, type=ext_svc.EXTERNAL_TASK_ACCEPTED_EVENT,
+        agent_id="ext-node", task_id="t1",
+        payload={"nonce": "N1", "poll": {
+            "auth": "pair_token", "pairTokenRef": "gone",
+            "url": "http://remote:17017/api/external/delegated-runs/r1",
+        }},
+    ))
+
+    async def scenario() -> None:
+        watch = ext_svc.ExternalPollWatch()
+        for _ in range(2):
+            outcome, _ = await ext_svc.poll_external_task(
+                storage=storage, run=run, agent=agent, task_id="t1", watch=watch,
+            )
+            assert outcome == "unavailable"
+
+    asyncio.run(scenario())
+    events = _poll_status_events(run.id)
+    assert [(e["nonce"], e["pollIssue"]) for e in events] == [("N1", "unpollable")]
 
 
 def test_dispatch_remote_csflow_forwards_configured_inputs(
